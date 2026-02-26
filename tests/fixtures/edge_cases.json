@@ -1,0 +1,234 @@
+{
+  "guild": {
+    "id": "111111111111111111",
+    "name": "Test Server",
+    "iconUrl": "media/guild_icon.png"
+  },
+  "channel": {
+    "id": "222222222222222223",
+    "type": 0,
+    "categoryId": "333333333333333333",
+    "category": "Text Channels",
+    "name": "edge-cases",
+    "topic": ""
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2024-06-15T10:30:00+00:00",
+  "messages": [
+    {
+      "id": "900000000000000010",
+      "type": "GuildMemberJoin",
+      "timestamp": "2024-01-10T08:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "400000000000000003",
+        "name": "charlie",
+        "discriminator": "0000",
+        "nickname": "Charlie",
+        "color": null,
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": ""
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000011",
+      "type": "ChannelPinnedMessage",
+      "timestamp": "2024-01-10T09:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": {
+        "messageId": "900000000000000003",
+        "channelId": "222222222222222222",
+        "guildId": "111111111111111111"
+      },
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000012",
+      "type": "RecipientAdd",
+      "timestamp": "2024-01-10T10:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000013",
+      "type": "Default",
+      "timestamp": "2024-01-10T11:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "400000000000000004",
+        "name": "webhook-bot",
+        "discriminator": "0000",
+        "nickname": "",
+        "color": null,
+        "isBot": true,
+        "roles": [],
+        "avatarUrl": "https://cdn.discordapp.com/avatars/webhook.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": {
+        "messageId": "900000000000000099",
+        "channelId": "222222222222222222",
+        "guildId": "111111111111111111"
+      },
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000014",
+      "type": "UserPremiumGuildSubscription",
+      "timestamp": "2024-01-10T12:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "400000000000000002",
+        "name": "bob",
+        "discriminator": "0000",
+        "nickname": "Bob",
+        "color": "#2ECC71",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/bob.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000015",
+      "type": "Default",
+      "timestamp": "2024-01-10T13:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Check out this sticker",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [
+        {
+          "id": "800000000000000001",
+          "name": "wave_sticker",
+          "format": "png",
+          "sourceUrl": "https://cdn.discordapp.com/stickers/800000000000000001.png"
+        }
+      ],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000016",
+      "type": "Default",
+      "timestamp": "2024-01-10T14:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message with expired CDN attachment",
+      "author": {
+        "id": "400000000000000002",
+        "name": "bob",
+        "discriminator": "0000",
+        "nickname": "Bob",
+        "color": "#2ECC71",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/bob.png"
+      },
+      "attachments": [
+        {
+          "id": "600000000000000002",
+          "url": "https://cdn.discordapp.com/attachments/222/600/expired_file.png?ex=abc&is=def&hm=ghi",
+          "fileName": "expired_file.png",
+          "fileSizeBytes": 524288
+        }
+      ],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    }
+  ],
+  "messageCount": 7
+}

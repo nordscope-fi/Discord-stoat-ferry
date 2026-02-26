@@ -1,0 +1,84 @@
+{
+  "guild": {
+    "id": "111111111111111111",
+    "name": "Test Server",
+    "iconUrl": "media/guild_icon.png"
+  },
+  "channel": {
+    "id": "222222222222222224",
+    "type": 0,
+    "categoryId": "333333333333333333",
+    "category": "Text Channels",
+    "name": "rendered-markdown",
+    "topic": ""
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2024-06-15T10:30:00+00:00",
+  "messages": [
+    {
+      "id": "900000000000000020",
+      "type": "Default",
+      "timestamp": "2024-01-20T12:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Hey @Alice, check out #general and the @Member role!",
+      "author": {
+        "id": "400000000000000002",
+        "name": "bob",
+        "discriminator": "0000",
+        "nickname": "Bob",
+        "color": "#2ECC71",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/bob.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [
+        {
+          "id": "400000000000000001",
+          "name": "alice",
+          "discriminator": "0000",
+          "nickname": "Alice"
+        }
+      ],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000021",
+      "type": "Default",
+      "timestamp": "2024-01-20T12:05:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "This message has proper raw syntax <@400000000000000001> and <#222222222222222222>",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    }
+  ],
+  "messageCount": 2
+}

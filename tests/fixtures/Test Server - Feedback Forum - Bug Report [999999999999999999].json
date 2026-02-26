@@ -1,0 +1,94 @@
+{
+  "guild": {
+    "id": "111111111111111111",
+    "name": "Test Server",
+    "iconUrl": "media/guild_icon.png"
+  },
+  "channel": {
+    "id": "999999999999999999",
+    "type": 15,
+    "categoryId": "333333333333333334",
+    "category": "Community",
+    "name": "Bug Report",
+    "topic": ""
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2024-06-15T10:30:00+00:00",
+  "messages": [
+    {
+      "id": "900000000000000040",
+      "type": "ThreadStarterMessage",
+      "timestamp": "2024-03-01T10:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Found a bug in the login page",
+      "author": {
+        "id": "400000000000000003",
+        "name": "charlie",
+        "discriminator": "0000",
+        "nickname": "Charlie",
+        "color": null,
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": ""
+      },
+      "attachments": [
+        {
+          "id": "600000000000000003",
+          "url": "media/attachments/screenshot.png",
+          "fileName": "screenshot.png",
+          "fileSizeBytes": 256000
+        }
+      ],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000041",
+      "type": "Default",
+      "timestamp": "2024-03-01T10:30:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "I can reproduce this. Here's my logs",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [
+        {
+          "emoji": {
+            "id": "",
+            "name": "\ud83d\udc4d",
+            "isAnimated": false,
+            "imageUrl": ""
+          },
+          "count": 2
+        }
+      ],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    }
+  ],
+  "messageCount": 2
+}

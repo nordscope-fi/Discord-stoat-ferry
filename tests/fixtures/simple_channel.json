@@ -1,0 +1,247 @@
+{
+  "guild": {
+    "id": "111111111111111111",
+    "name": "Test Server",
+    "iconUrl": "media/guild_icon.png"
+  },
+  "channel": {
+    "id": "222222222222222222",
+    "type": 0,
+    "categoryId": "333333333333333333",
+    "category": "Text Channels",
+    "name": "general",
+    "topic": "General discussion"
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2024-06-15T10:30:00+00:00",
+  "messages": [
+    {
+      "id": "900000000000000001",
+      "type": "Default",
+      "timestamp": "2024-01-15T12:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Hello everyone!",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "500000000000000001",
+            "name": "Member",
+            "color": "#3498DB",
+            "position": 1
+          }
+        ],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000002",
+      "type": "Reply",
+      "timestamp": "2024-01-15T12:05:00+00:00",
+      "timestampEdited": "2024-01-15T12:06:00+00:00",
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Hey <@400000000000000001>! Welcome to <#222222222222222222>",
+      "author": {
+        "id": "400000000000000002",
+        "name": "bob",
+        "discriminator": "0000",
+        "nickname": "Bob",
+        "color": "#2ECC71",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "500000000000000001",
+            "name": "Member",
+            "color": "#3498DB",
+            "position": 1
+          },
+          {
+            "id": "500000000000000002",
+            "name": "Moderator",
+            "color": "#E74C3C",
+            "position": 2
+          }
+        ],
+        "avatarUrl": "media/avatars/bob.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [
+        {
+          "emoji": {
+            "id": "",
+            "name": "\ud83d\udc4b",
+            "isAnimated": false,
+            "imageUrl": ""
+          },
+          "count": 3
+        }
+      ],
+      "mentions": [
+        {
+          "id": "400000000000000001",
+          "name": "alice",
+          "discriminator": "0000",
+          "nickname": "Alice"
+        }
+      ],
+      "reference": {
+        "messageId": "900000000000000001",
+        "channelId": "222222222222222222",
+        "guildId": "111111111111111111"
+      },
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000003",
+      "type": "Default",
+      "timestamp": "2024-01-15T12:10:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": true,
+      "content": "Important announcement: server rules updated!",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000004",
+      "type": "Default",
+      "timestamp": "2024-01-15T12:15:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Check out this file",
+      "author": {
+        "id": "400000000000000002",
+        "name": "bob",
+        "discriminator": "0000",
+        "nickname": "Bob",
+        "color": "#2ECC71",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/bob.png"
+      },
+      "attachments": [
+        {
+          "id": "600000000000000001",
+          "url": "media/attachments/document.pdf",
+          "fileName": "document.pdf",
+          "fileSizeBytes": 1048576
+        }
+      ],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000005",
+      "type": "Default",
+      "timestamp": "2024-01-15T12:20:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Look at this cool thing",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [
+        {
+          "title": "Cool Website",
+          "url": "https://example.com",
+          "description": "An interesting website",
+          "color": "#7289DA",
+          "author": {
+            "name": "Example Author",
+            "url": "https://example.com/author",
+            "iconUrl": "https://example.com/icon.png"
+          },
+          "fields": [
+            {
+              "name": "Field 1",
+              "value": "Value 1",
+              "isInline": true
+            },
+            {
+              "name": "Field 2",
+              "value": "Value 2",
+              "isInline": false
+            }
+          ],
+          "footer": {
+            "text": "Footer text",
+            "iconUrl": null
+          },
+          "thumbnail": null,
+          "image": null,
+          "timestamp": null
+        }
+      ],
+      "stickers": [],
+      "reactions": [
+        {
+          "emoji": {
+            "id": "700000000000000001",
+            "name": "custom_emoji",
+            "isAnimated": false,
+            "imageUrl": "https://cdn.discordapp.com/emojis/700000000000000001.png"
+          },
+          "count": 1
+        }
+      ],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    }
+  ],
+  "messageCount": 5
+}

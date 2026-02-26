@@ -1,0 +1,104 @@
+{
+  "guild": {
+    "id": "111111111111111111",
+    "name": "Test Server",
+    "iconUrl": "media/guild_icon.png"
+  },
+  "channel": {
+    "id": "888888888888888888",
+    "type": 11,
+    "categoryId": "333333333333333333",
+    "category": "Text Channels",
+    "name": "Cool Thread",
+    "topic": ""
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2024-06-15T10:30:00+00:00",
+  "messages": [
+    {
+      "id": "900000000000000030",
+      "type": "ThreadCreated",
+      "timestamp": "2024-02-01T08:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Cool Thread",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000031",
+      "type": "Default",
+      "timestamp": "2024-02-01T08:01:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "This is the first message in the thread",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/alice.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000032",
+      "type": "Default",
+      "timestamp": "2024-02-01T08:05:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Replying in the thread",
+      "author": {
+        "id": "400000000000000002",
+        "name": "bob",
+        "discriminator": "0000",
+        "nickname": "Bob",
+        "color": "#2ECC71",
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": "media/avatars/bob.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": null,
+      "interaction": null,
+      "poll": null
+    }
+  ],
+  "messageCount": 3
+}
