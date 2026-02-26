@@ -29,25 +29,37 @@
   "hooks": {
     "PreCompact": [
       {
-        "type": "command",
-        "command": "mkdir -p claude_log && echo \"## Session — $(date '+%H:%M') ($(if [ $(date '+%H') -lt 12 ]; then echo morning; elif [ $(date '+%H') -lt 17 ]; then echo afternoon; else echo evening; fi))\" >> claude_log/session-handoff-$(date '+%Y-%m-%d').md"
-      },
-      {
-        "type": "prompt",
-        "prompt": "Context is about to be compacted. IMMEDIATELY write a mini-handoff using the Edit tool to append to claude_log/session-handoff-$(date -u +%Y-%m-%d).md. Include: ### Done, ### Pending, ### Decisions, ### Gotchas sections. Be concise but complete."
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p claude_log && echo \"## Session — $(date '+%H:%M') ($(if [ $(date '+%H') -lt 12 ]; then echo morning; elif [ $(date '+%H') -lt 17 ]; then echo afternoon; else echo evening; fi))\" >> claude_log/session-handoff-$(date '+%Y-%m-%d').md"
+          },
+          {
+            "type": "prompt",
+            "prompt": "Context is about to be compacted. IMMEDIATELY write a mini-handoff using the Edit tool to append to claude_log/session-handoff-$(date -u +%Y-%m-%d).md. Include: ### Done, ### Pending, ### Decisions, ### Gotchas sections. Be concise but complete."
+          }
+        ]
       }
     ],
     "SessionStart": [
       {
-        "type": "command",
-        "command": "cd /Users/petersterkenburg/Documents/GitHub/Discord-stoat-ferry && echo '--- Last 5 commits ---' && git log --oneline -5 2>/dev/null || echo '(no commits yet)' && echo '' && HANDOFF=claude_log/session-handoff-$(date '+%Y-%m-%d').md && if [ -f \"$HANDOFF\" ]; then echo \"--- Today's handoff exists: $HANDOFF ---\" && tail -3 \"$HANDOFF\"; else echo '(no handoff file for today)'; fi"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /Users/petersterkenburg/Documents/GitHub/Discord-stoat-ferry && echo '--- Last 5 commits ---' && git log --oneline -5 2>/dev/null || echo '(no commits yet)' && echo '' && HANDOFF=claude_log/session-handoff-$(date '+%Y-%m-%d').md && if [ -f \"$HANDOFF\" ]; then echo \"--- Today's handoff exists: $HANDOFF ---\" && tail -3 \"$HANDOFF\"; else echo '(no handoff file for today)'; fi"
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
-        "type": "prompt",
-        "prompt": "If you just completed a batch of file edits (not a single exploratory read), remember to run the verification suite before moving on: uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest",
-        "matcher": "Write|Edit"
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "If you just completed a batch of file edits (not a single exploratory read), remember to run the verification suite before moving on: uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest"
+          }
+        ]
       }
     ]
   }
