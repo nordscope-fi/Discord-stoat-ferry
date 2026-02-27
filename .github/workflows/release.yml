@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-windows:
+    name: Build Windows executable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked --extra native --dev
+
+      - name: Build executable
+        run: uv run pyinstaller ferry.spec
+
+      - name: Rename artifact
+        run: mv dist/Ferry.exe dist/Ferry-windows-x86_64.exe
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferry-windows
+          path: dist/Ferry-windows-x86_64.exe
+          retention-days: 1
+
+  build-macos:
+    name: Build macOS executable
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked --extra native --dev
+
+      - name: Build executable
+        run: uv run pyinstaller ferry.spec
+
+      - name: Zip .app bundle
+        run: cd dist && zip -r ../Ferry-macos-arm64.zip Ferry.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferry-macos
+          path: Ferry-macos-arm64.zip
+          retention-days: 1
+
+  release:
+    name: Create release and publish
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ferry-windows
+          path: release-assets/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ferry-macos
+          path: release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/Ferry-windows-x86_64.exe
+            release-assets/Ferry-macos-arm64.zip
+
+      - name: Build Python distributions
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

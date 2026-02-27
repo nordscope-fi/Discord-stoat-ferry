@@ -44,5 +44,6 @@ claude_log/
 # MkDocs build output
 site/
 
-# PyInstaller
+# PyInstaller (keep ferry.spec — our build config)
 *.spec
+!ferry.spec
