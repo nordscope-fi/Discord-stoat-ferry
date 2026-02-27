@@ -7,6 +7,8 @@ from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
+
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import MigrationError
@@ -87,9 +89,12 @@ async def run_migration(
     # Load or create state
     if config.resume:
         state = load_state(config.output_dir)
+        if state.is_dry_run:
+            raise MigrationError("Cannot resume from a dry-run state. Start a fresh migration.")
     else:
         state = MigrationState()
         state.started_at = datetime.now(timezone.utc).isoformat()
+        state.is_dry_run = config.dry_run
 
     # Phase 1: VALIDATE — parse exports inline
     on_event(MigrationEvent(phase="validate", status="started", message="Parsing exports..."))
@@ -119,6 +124,35 @@ async def run_migration(
     # Phases 2-10: run in order, skipping as appropriate
     runnable_phases = PHASE_ORDER[1:-1]  # exclude validate and report
 
+    async with aiohttp.ClientSession() as session:
+        config.session = session
+        await _run_phases(config, state, exports, on_event, runnable_phases, phase_overrides)
+    config.session = None
+
+    # Skip report if migration was cancelled
+    if config.cancel_event and config.cancel_event.is_set():
+        return state
+
+    # Phase 11: REPORT — generate and save inline
+    state.current_phase = "report"
+    on_event(MigrationEvent(phase="report", status="started", message="Generating report..."))
+    generate_report(config, state, exports)
+    state.completed_at = datetime.now(timezone.utc).isoformat()
+    save_state(state, config.output_dir)
+    on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
+
+    return state
+
+
+async def _run_phases(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+    runnable_phases: list[str],
+    phase_overrides: dict[str, PhaseFunction] | None,
+) -> None:
+    """Execute phases 2-10 in order."""
     for phase_name in runnable_phases:
         # Check cancel flag between phases
         if config.cancel_event and config.cancel_event.is_set():
@@ -128,7 +162,7 @@ async def run_migration(
                     phase=phase_name, status="skipped", message="Migration cancelled by user"
                 )
             )
-            return state
+            return
 
         # Check config skip flags
         skip_attr = _SKIPPABLE.get(phase_name)
@@ -181,7 +215,7 @@ async def run_migration(
                     message=f"Cancelled during {phase_name}",
                 )
             )
-            return state
+            return
         except Exception as e:
             state.errors.append({"phase": phase_name, "error": str(e)})
             save_state(state, config.output_dir)
@@ -199,13 +233,3 @@ async def run_migration(
             MigrationEvent(phase=phase_name, status="completed", message=f"Completed {phase_name}")
         )
         save_state(state, config.output_dir)
-
-    # Phase 11: REPORT — generate and save inline
-    state.current_phase = "report"
-    on_event(MigrationEvent(phase="report", status="started", message="Generating report..."))
-    generate_report(config, state, exports)
-    state.completed_at = datetime.now(timezone.utc).isoformat()
-    save_state(state, config.output_dir)
-    on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
-
-    return state

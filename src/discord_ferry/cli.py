@@ -145,6 +145,14 @@ _common_options = [
     click.option("--output-dir", default="./ferry-output", help="Report output directory"),
     click.option("--resume", is_flag=True, help="Resume from state file"),
     click.option("--verbose", "-v", is_flag=True, help="Debug output"),
+    click.option(
+        "--dry-run",
+        is_flag=True,
+        default=False,
+        help="Run all phases without API calls; test locally",
+    ),
+    click.option("--max-channels", default=200, type=int, help="Channel limit (self-hosted)"),
+    click.option("--max-emoji", default=100, type=int, help="Emoji limit (self-hosted)"),
 ]
 
 
@@ -170,6 +178,7 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         token=kwargs["token"],
         server_id=kwargs.get("server_id"),
         server_name=kwargs.get("server_name"),
+        dry_run=kwargs.get("dry_run", False),
         skip_messages=kwargs.get("skip_messages", False),
         skip_emoji=kwargs.get("skip_emoji", False),
         skip_reactions=kwargs.get("skip_reactions", False),
@@ -179,6 +188,8 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         output_dir=Path(kwargs.get("output_dir", "./ferry-output")),
         resume=kwargs.get("resume", False),
         verbose=kwargs.get("verbose", False),
+        max_channels=kwargs.get("max_channels", 200),
+        max_emoji=kwargs.get("max_emoji", 100),
     )
 
 

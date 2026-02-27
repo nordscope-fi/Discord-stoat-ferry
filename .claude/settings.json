@@ -51,16 +51,6 @@
         ]
       }
     ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "If you just completed a batch of file edits (not a single exploratory read), remember to run the verification suite before moving on: uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest"
-          }
-        ]
-      }
-    ]
+    "PostToolUse": []
   }
 }

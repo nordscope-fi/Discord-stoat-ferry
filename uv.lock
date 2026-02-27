@@ -324,16 +324,14 @@ wheels = [
 
 [[package]]
 name = "discord-ferry"
-version = "0.8.1"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "click" },
     { name = "nicegui" },
     { name = "python-dotenv" },
     { name = "rich" },
-    { name = "stoat-py" },
 ]
 
 [package.optional-dependencies]
@@ -351,7 +349,6 @@ native = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiofiles", specifier = ">=23.0" },
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "aioresponses", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "click", specifier = ">=8.0" },
@@ -364,7 +361,6 @@ requires-dist = [
     { name = "pywebview", marker = "extra == 'native'", specifier = ">=5.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "stoat-py", specifier = ">=1.2.1" },
 ]
 provides-extras = ["native", "dev"]
 
@@ -1892,19 +1888,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c4/68/79977123bb7be889ad680d79a40f339082c1978b5cfcf62c2d8d196873ac/starlette-0.52.1.tar.gz", hash = "sha256:834edd1b0a23167694292e94f597773bc3f89f362be6effee198165a35d62933", size = 2653702, upload-time = "2026-01-18T13:34:11.062Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl", hash = "sha256:0029d43eb3d273bc4f83a08720b4912ea4b071087a3b48db01b7c839f7954d74", size = 74272, upload-time = "2026-01-18T13:34:09.188Z" },
-]
-
-[[package]]
-name = "stoat-py"
-version = "1.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "attrs" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c0/7e/4482e46fe22a89ac8d603cc42c531bc6efa743b5a7f1db7f4ef9463dc3ee/stoat_py-1.2.1.tar.gz", hash = "sha256:cc680a58c61f6e39b9cf29b36d1d0ddc8de03511379167bb8d4618514f770d4f", size = 337306, upload-time = "2025-11-26T19:18:49.604Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f7/d9/03b658ddb65f3c7e9f37b340be2beab5d191b39f81c4b773ba7b48583dc6/stoat_py-1.2.1-py3-none-any.whl", hash = "sha256:339a5e4cb8b3ad2fcd590672af5368076aab1298886e57ce5a5db51d989fda95", size = 380212, upload-time = "2025-11-26T19:18:47.991Z" },
 ]
 
 [[package]]

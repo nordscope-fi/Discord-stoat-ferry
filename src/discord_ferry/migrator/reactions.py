@@ -6,10 +6,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-import aiohttp
-
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.migrator.api import api_add_reaction
+from discord_ferry.migrator.api import api_add_reaction, get_session
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -58,10 +56,21 @@ async def run_reactions(
         )
     )
 
+    if config.dry_run:
+        state.reactions_applied = len(state.pending_reactions)
+        on_event(
+            MigrationEvent(
+                phase="reactions",
+                status="completed",
+                message=f"[DRY RUN] {state.reactions_applied} reactions counted",
+            )
+        )
+        return
+
     # Track per-message reaction counts to enforce the 20-per-message Stoat limit.
     per_message_counts: dict[str, int] = {}
 
-    async with aiohttp.ClientSession() as session:
+    async with get_session(config) as session:
         for idx, entry in enumerate(state.pending_reactions, start=1):
             channel_id = str(entry["channel_id"])
             message_id = str(entry["message_id"])

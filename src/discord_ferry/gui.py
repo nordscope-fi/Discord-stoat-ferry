@@ -17,6 +17,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration
 from discord_ferry.errors import MigrationError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
+from discord_ferry.state import load_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
@@ -56,6 +57,16 @@ _STATUS_COLOUR: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
+def _format_bytes(n: int | float) -> str:
+    """Format a byte count as a human-readable string."""
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(value) < 1024:
+            return f"{value:,.1f} {unit}"
+        value /= 1024
+    return f"{value:,.1f} TB"
+
+
 def _format_eta(total_messages: int, rate_limit: float) -> str:
     """Format an ETA string from message count and rate limit."""
     seconds = int(total_messages * rate_limit)
@@ -77,6 +88,13 @@ def _compute_summary(exports: list[DCEExport]) -> dict[str, int | str]:
     """Compute summary counts from a list of exports."""
     total_messages = sum(e.message_count for e in exports)
     total_attachments = sum(sum(len(m.attachments) for m in e.messages) for e in exports)
+    total_attachment_bytes = sum(
+        att.file_size_bytes
+        for e in exports
+        for m in e.messages
+        for att in m.attachments
+        if att.file_size_bytes
+    )
 
     categories: set[str] = set()
     roles: set[str] = set()
@@ -101,6 +119,7 @@ def _compute_summary(exports: list[DCEExport]) -> dict[str, int | str]:
         "roles": len(roles),
         "messages": total_messages,
         "attachments": total_attachments,
+        "attachment_bytes": total_attachment_bytes,
         "custom_emoji": len(emoji_ids),
         "threads": threads,
     }
@@ -158,6 +177,7 @@ def setup_page() -> None:
                 skip_messages_cb = ui.checkbox("Skip messages (structure only)")
                 skip_emoji_cb = ui.checkbox("Skip emoji upload")
                 skip_reactions_cb = ui.checkbox("Skip reactions")
+                dry_run_check = ui.checkbox("Dry run (no API calls)").classes("mt-2")
 
             error_label = ui.label("").classes("text-red-500 text-sm")
 
@@ -178,6 +198,7 @@ def setup_page() -> None:
                 app.storage.user["skip_messages"] = skip_messages_cb.value
                 app.storage.user["skip_emoji"] = skip_emoji_cb.value
                 app.storage.user["skip_reactions"] = skip_reactions_cb.value
+                app.storage.user["dry_run"] = dry_run_check.value
 
                 ui.navigate.to("/validate")
 
@@ -251,6 +272,10 @@ def validate_page() -> None:
                 {"item": "Roles", "count": f"{summary['roles']:,}"},
                 {"item": "Messages", "count": f"{summary['messages']:,}"},
                 {"item": "Attachments", "count": f"{summary['attachments']:,}"},
+                {
+                    "item": "Total attachment size",
+                    "count": _format_bytes(int(summary["attachment_bytes"])),
+                },
                 {"item": "Custom Emoji", "count": f"{summary['custom_emoji']:,}"},
                 {"item": "Threads / Forums", "count": f"{summary['threads']:,}"},
             ]
@@ -299,6 +324,34 @@ def migrate_page() -> None:
         ui.navigate.to("/")
         return
 
+    # Check for a previous migration state — offer resume or fresh start.
+    output_dir = Path("./ferry-output")
+    state_path = output_dir / "state.json"
+    previous_state = None
+    if state_path.exists():
+        with contextlib.suppress(Exception):
+            previous_state = load_state(output_dir)
+
+    if previous_state and not previous_state.is_dry_run:
+        with ui.card().classes("w-full max-w-2xl mx-auto mb-4 bg-amber-50 border-amber-300"):
+            msgs_done = len(previous_state.message_map)
+            phase = previous_state.current_phase or "unknown"
+            ui.label("Previous migration found").classes("text-lg font-bold text-amber-800")
+            ui.label(
+                f"Phase: {phase} | Messages: {msgs_done:,} | Errors: {len(previous_state.errors)}"
+            ).classes("text-amber-700")
+            with ui.row():
+
+                def _set_resume(val: bool) -> None:
+                    storage["resume"] = val
+
+                ui.button("Resume", on_click=lambda: _set_resume(True)).classes(
+                    "bg-amber-600 text-white"
+                )
+                ui.button("Start Fresh", on_click=lambda: _set_resume(False)).classes(
+                    "bg-gray-400 text-white"
+                )
+
     # Build FerryConfig from stored values
     pause_event = asyncio.Event()
     pause_event.set()  # start unpaused
@@ -309,11 +362,13 @@ def migrate_page() -> None:
         stoat_url=storage["stoat_url"],
         token=storage["token"],
         server_id=storage.get("server_id") or None,
+        dry_run=bool(storage.get("dry_run", False)),
         message_rate_limit=float(storage.get("rate_limit", 1.0)),
         skip_messages=bool(storage.get("skip_messages", False)),
         skip_emoji=bool(storage.get("skip_emoji", False)),
         skip_reactions=bool(storage.get("skip_reactions", False)),
-        output_dir=Path("./ferry-output"),
+        output_dir=output_dir,
+        resume=bool(storage.get("resume", False)),
         pause_event=pause_event,
         cancel_event=cancel_event,
     )

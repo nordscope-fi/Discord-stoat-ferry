@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.migrator.emoji import MAX_EMOJI, _extract_emoji_from_content, run_emoji
+from discord_ferry.migrator.emoji import _extract_emoji_from_content, run_emoji
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
@@ -18,6 +18,9 @@ from discord_ferry.parser.models import (
     DCEReaction,
 )
 from discord_ferry.state import MigrationState
+
+# Default emoji limit matching FerryConfig.max_emoji
+MAX_EMOJI_DEFAULT = 100
 
 BASE_URL = "https://api.test"
 TOKEN = "test-token"
@@ -163,14 +166,14 @@ async def test_run_emoji_deduplication(tmp_path: Path) -> None:
 
 
 async def test_run_emoji_limit_warning(tmp_path: Path) -> None:
-    """Emits a warning and truncates when more than MAX_EMOJI are discovered."""
-    # Build MAX_EMOJI + 5 reactions with unique IDs.
+    """Emits a warning and truncates when more than MAX_EMOJI_DEFAULT are discovered."""
+    # Build MAX_EMOJI_DEFAULT + 5 reactions with unique IDs.
     reactions = [
         DCEReaction(emoji=DCEEmoji(id=str(i), name=f"emoji{i}", image_url=f"e{i}.png"), count=1)
-        for i in range(MAX_EMOJI + 5)
+        for i in range(MAX_EMOJI_DEFAULT + 5)
     ]
     # Create dummy files for every emoji.
-    for i in range(MAX_EMOJI + 5):
+    for i in range(MAX_EMOJI_DEFAULT + 5):
         (tmp_path / f"e{i}.png").write_bytes(b"PNG")
 
     msg = _make_message(reactions=reactions)

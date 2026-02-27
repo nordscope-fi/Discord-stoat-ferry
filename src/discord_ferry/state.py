@@ -56,6 +56,9 @@ class MigrationState:
     started_at: str = ""
     completed_at: str = ""
 
+    # Dry-run flag — persisted so resume logic can reject dry-run states
+    is_dry_run: bool = False
+
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
     """Save migration state to state.json using atomic write.
@@ -115,6 +118,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "pins_applied": state.pins_applied,
         "started_at": state.started_at,
         "completed_at": state.completed_at,
+        "is_dry_run": state.is_dry_run,
     }
 
 
@@ -143,6 +147,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             pins_applied=data.get("pins_applied", 0),
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),
+            is_dry_run=data.get("is_dry_run", False),
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e

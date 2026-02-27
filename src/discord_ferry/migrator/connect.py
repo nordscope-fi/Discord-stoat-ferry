@@ -8,6 +8,7 @@ import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.errors import ConnectionError as FerryConnectionError
+from discord_ferry.migrator.api import get_session
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -42,7 +43,18 @@ async def run_connect(
         )
     )
 
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        state.autumn_url = "https://dry-run.invalid"
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="completed",
+                message="[DRY RUN] Skipping API connection",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         # Step 1: Test connectivity and discover Autumn URL
         autumn_url = await _discover_autumn_url(session, config.stoat_url)
         state.autumn_url = autumn_url

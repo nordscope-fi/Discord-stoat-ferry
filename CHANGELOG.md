@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-02-27
+
+### Added
+
+- **Dry-run mode**: `--dry-run` CLI flag and GUI checkbox run all phases without API calls, producing synthetic `dry-*` IDs for validation
+- **Configurable server limits**: `--max-channels` and `--max-emoji` CLI options for self-hosted Stoat instances with custom limits
+- **Permission bootstrap**: Automatically patches server default role with ferry minimum permissions on server creation
+- **GUI resume detection**: Migrate page detects previous `state.json` and offers resume/fresh-start choice
+- **GUI attachment size display**: Validate summary now shows total attachment size in human-readable format
+- **8 new integration tests** in `test_migrator.py` covering dry-run, permission bootstrap, and configurable limits — 278 total passing
+
+### Fixed
+
+- **ChannelPinnedMessage sent as content**: Pin notification messages are now silenced and the referenced message is queued for re-pinning in the pins phase
+- **Failed messages marked as completed**: Removed duplicate `last_completed_message` assignment that caused failed messages to be skipped on resume
+- **Missing periodic state saves**: Messages phase now saves state every 50 messages and after each channel completes
+
+### Changed
+
+- **Shared aiohttp session**: Single engine-managed `ClientSession` replaces per-phase sessions for better connection reuse
+- **Removed `stoat-py` dependency**: Project already uses custom raw aiohttp API layer; the SDK was unused weight
+- **Removed `aiofiles` dependency**: Listed but never imported anywhere in the codebase
+- **Engine refactor**: Extracted `_run_phases` from `run_migration` for readability; fixed silent return-value bugs
+
 ## [0.8.1] — 2026-02-27
 
 ### Fixed

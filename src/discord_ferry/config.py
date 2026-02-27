@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import asyncio
 
+    import aiohttp
+
 
 @dataclass
 class FerryConfig:
@@ -29,7 +31,10 @@ class FerryConfig:
     output_dir: Path = Path("./ferry-output")
     resume: bool = False
     verbose: bool = False
+    max_channels: int = 200
+    max_emoji: int = 100
 
-    # GUI pause/cancel support (not serialized, not used by CLI)
+    # Runtime-only fields (not serialized)
     pause_event: asyncio.Event | None = field(default=None, repr=False)
     cancel_event: asyncio.Event | None = field(default=None, repr=False)
+    session: aiohttp.ClientSession | None = field(default=None, repr=False)

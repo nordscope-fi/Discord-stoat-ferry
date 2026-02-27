@@ -11,11 +11,9 @@ Python 3.10+ migration tool that moves a Discord server (exported via DiscordCha
 
 | Layer | Tool | Notes |
 |-------|------|-------|
-| Stoat API client | `stoat-py` (PyPI: `stoat-py`, import: `stoat`) | v1.2.1+, built-in rate limit handling |
+| Stoat API client | aiohttp (raw HTTP) | Custom API layer in `migrator/api.py` with retry + rate limit handling |
 | GUI | NiceGUI | Local web UI, FastAPI + Vue.js under the hood |
 | CLI | Click + Rich | Rich for progress bars and formatted output |
-| HTTP | aiohttp | Async HTTP for Autumn file uploads |
-| File I/O | aiofiles | Async file operations |
 | Config | python-dotenv | `.env` support |
 | Package manager | **uv** | Primary. All commands use `uv run` prefix |
 | Linting | ruff | Format + lint in one tool |
@@ -113,6 +111,11 @@ When updating MEMORY.md:
 - `[STATE]` -- current facts (test counts, file structures), refresh every ~10 versions
 
 Prune `[STATE]` entries that are >10 versions stale.
+
+## Workflow Discipline
+
+- **Do NOT stop mid-refactor for verification.** When making a batch of related edits across multiple files (e.g., adding an import to 6 files), complete the entire batch first, then run verification once. Hooks and PostToolUse prompts must not interrupt multi-file refactors.
+- Run the verification command (`uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest`) at natural checkpoints: after completing a task, before committing, or when switching to a different area of work.
 
 ## Drift Check
 

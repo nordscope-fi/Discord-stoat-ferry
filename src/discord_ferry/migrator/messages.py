@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
-
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.migrator.api import api_send_message
+from discord_ferry.migrator.api import api_send_message, get_session
 from discord_ferry.parser.transforms import (
     convert_spoilers,
     flatten_embed,
@@ -18,10 +16,13 @@ from discord_ferry.parser.transforms import (
     remap_mentions,
     strip_underline,
 )
+from discord_ferry.state import save_state
 from discord_ferry.uploader.autumn import upload_with_cache
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import aiohttp
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
@@ -74,7 +75,32 @@ async def run_messages(
         )
     )
 
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        for export in sorted_exports:
+            stoat_ch = state.channel_map.get(export.channel.id, f"dry-ch-{export.channel.id}")
+            for msg_obj in export.messages:
+                if msg_obj.type in _SKIP_TYPES:
+                    continue
+                if msg_obj.type == "ChannelPinnedMessage":
+                    if msg_obj.reference and msg_obj.reference.message_id:
+                        ref_id = state.message_map.get(msg_obj.reference.message_id)
+                        if ref_id:
+                            state.pending_pins.append((stoat_ch, ref_id))
+                    continue
+                state.message_map[msg_obj.id] = f"dry-msg-{msg_obj.id}"
+                if msg_obj.is_pinned:
+                    state.pending_pins.append((stoat_ch, f"dry-msg-{msg_obj.id}"))
+        total_msgs = len(state.message_map)
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="completed",
+                message=f"[DRY RUN] Mapped {total_msgs} messages",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         for export in sorted_exports:
             # Skip thread/forum exports when skip_threads is enabled.
             if config.skip_threads and export.is_thread:
@@ -174,8 +200,9 @@ async def run_messages(
                     on_event=on_event,
                 )
 
-                # Periodic progress event.
+                # Periodic progress event and state save.
                 if (idx + 1) % _PROGRESS_EVERY == 0:
+                    save_state(state, config.output_dir)
                     on_event(
                         MigrationEvent(
                             phase="messages",
@@ -192,9 +219,10 @@ async def run_messages(
                 # Rate-limit courtesy delay with pause/cancel support.
                 await _rate_limit_with_pause(config)
 
-            # Channel complete.
+            # Channel complete — save state for crash recovery.
             state.last_completed_channel = export.channel.id
             state.last_completed_message = ""
+            save_state(state, config.output_dir)
 
             on_event(
                 MigrationEvent(
@@ -233,6 +261,24 @@ async def _process_message(
     """Process and send a single message.  Mutates *state* on success."""
     # Step 0: Filter by type.
     if msg.type in _SKIP_TYPES:
+        return
+
+    # ChannelPinnedMessage: mark the referenced message for re-pinning, don't send.
+    if msg.type == "ChannelPinnedMessage":
+        if msg.reference and msg.reference.message_id:
+            ref_stoat_id = state.message_map.get(msg.reference.message_id)
+            if ref_stoat_id:
+                state.pending_pins.append((stoat_channel_id, ref_stoat_id))
+            else:
+                state.warnings.append(
+                    {
+                        "phase": "messages",
+                        "message": (
+                            f"ChannelPinnedMessage {msg.id} references unknown message "
+                            f"{msg.reference.message_id}"
+                        ),
+                    }
+                )
         return
 
     # Forwarded message detection:

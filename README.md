@@ -5,7 +5,7 @@
 > One-click app for Windows and Mac. CLI for Linux.
 > No coding required. Your data stays on your machine.
 
-[screenshot placeholder — validate screen + migrate screen]
+<!-- TODO: Add screenshots of validate + migrate screens before v1.0 release -->
 
 ---
 
@@ -13,9 +13,11 @@
 
 | Platform | Download | Size |
 |----------|----------|------|
-| **Windows** | Ferry.exe (v0.1.0) | ~XX MB |
-| **macOS** | Ferry.dmg (v0.1.0) | ~XX MB |
+| **Windows** | Ferry.exe (v0.9.0) | ~25 MB |
+| **macOS** | Ferry.dmg (v0.9.0) | ~25 MB |
 | **Linux / pip** | `pipx install discord-ferry` | — |
+
+> Download links activate with the first GitHub Release.
 
 ---
 
@@ -29,13 +31,13 @@ Use DiscordChatExporter to save your server locally.
 ### Step 2: Open Ferry and connect to your Stoat instance
 
 Point Ferry at your export folder, enter your Stoat URL and token.
-[screenshot placeholder]
+<!-- TODO: Add screenshot before v1.0 release -->
 
 ### Step 3: Click Migrate
 
 Your messages, channels, roles, emoji and attachments migrate to Stoat.
 Original authors show up via masquerade. Pins are preserved.
-[screenshot placeholder]
+<!-- TODO: Add screenshot before v1.0 release -->
 
 ---
 

@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
 from discord_ferry.errors import MigrationError
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from discord_ferry.config import FerryConfig
+
 MAX_API_RETRIES = 3
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
+
+
+@asynccontextmanager
+async def get_session(config: FerryConfig) -> AsyncIterator[aiohttp.ClientSession]:
+    """Yield the shared session from config, or create a temporary one."""
+    if config.session is not None:
+        yield config.session
+    else:
+        async with aiohttp.ClientSession() as session:
+            yield session
 
 
 def _headers(token: str) -> dict[str, str]:

@@ -6,10 +6,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-import aiohttp
-
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.migrator.api import api_pin_message
+from discord_ferry.migrator.api import api_pin_message, get_session
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -53,7 +51,18 @@ async def run_pins(
         )
     )
 
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        state.pins_applied = len(state.pending_pins)
+        on_event(
+            MigrationEvent(
+                phase="pins",
+                status="completed",
+                message=f"[DRY RUN] {state.pins_applied} pins counted",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         for idx, (channel_id, message_id) in enumerate(state.pending_pins, start=1):
             try:
                 await api_pin_message(

@@ -959,18 +959,54 @@ async def test_thread_created_skipped(tmp_path: Path) -> None:
     assert "tc1" not in state.message_map
 
 
-async def test_channel_pinned_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """ChannelPinnedMessage type is NOT skipped — it falls through to normal handling."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_pin"})
+async def test_channel_pinned_message_adds_to_pending_pins(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """ChannelPinnedMessage marks referenced message for pinning, not sent as content."""
+    # Send a normal message first so the reference target exists in message_map.
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_original"})
 
     state = _make_state()
     config = _make_config(tmp_path)
-    msg = _make_message(id="pinmsg1", content="pinned a message", msg_type="ChannelPinnedMessage")
+    ref = DCEReference(message_id="original1")
+    original_msg = _make_message(id="original1", content="important info")
+    pin_msg = _make_message(
+        id="pinmsg1",
+        content="pinned a message",
+        msg_type="ChannelPinnedMessage",
+        reference=ref,
+        timestamp="2024-01-15T13:00:00+00:00",
+    )
+    export = _make_export(messages=[original_msg, pin_msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    # The original was sent; the pin notification was NOT sent.
+    assert "original1" in state.message_map
+    assert "pinmsg1" not in state.message_map
+    # The referenced message was queued for pinning.
+    assert ("stoat_ch1", "stoat_original") in state.pending_pins
+
+
+async def test_channel_pinned_message_unknown_ref(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """ChannelPinnedMessage with unknown reference logs a warning."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    ref = DCEReference(message_id="nonexistent999")
+    msg = _make_message(
+        id="pinmsg2",
+        content="pinned a message",
+        msg_type="ChannelPinnedMessage",
+        reference=ref,
+    )
     export = _make_export(messages=[msg])
 
     await run_messages(config, state, [export], lambda e: None)
 
-    assert "pinmsg1" in state.message_map
+    assert "pinmsg2" not in state.message_map
+    assert any("nonexistent999" in w["message"] for w in state.warnings)
 
 
 async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:

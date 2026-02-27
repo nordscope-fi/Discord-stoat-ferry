@@ -7,10 +7,8 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-import aiohttp
-
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.migrator.api import api_create_emoji
+from discord_ferry.migrator.api import api_create_emoji, get_session
 from discord_ferry.uploader.autumn import upload_with_cache
 
 if TYPE_CHECKING:
@@ -23,7 +21,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_EMOJI = 100
 _CONTENT_EMOJI_RE = re.compile(r"<(a?):([^:]+):(\d+)>")
 
 # Delay between emoji creations — shares the /servers 5/10s rate bucket.
@@ -96,12 +93,12 @@ async def run_emoji(
 
     # Enforce the 100-emoji server limit with a deterministic sort by ID.
     emoji_list = sorted(discovered.values(), key=lambda e: str(e["id"]))
-    if len(emoji_list) > MAX_EMOJI:
+    if len(emoji_list) > config.max_emoji:
         state.warnings.append(
             {
                 "phase": "emoji",
                 "message": (
-                    f"Found {len(emoji_list)} unique emoji; truncating to {MAX_EMOJI} "
+                    f"Found {len(emoji_list)} unique emoji; truncating to {config.max_emoji} "
                     f"(Stoat server limit)."
                 ),
             }
@@ -111,12 +108,12 @@ async def run_emoji(
                 phase="emoji",
                 status="warning",
                 message=(
-                    f"Found {len(emoji_list)} emoji but Stoat limit is {MAX_EMOJI}; "
-                    f"truncating to first {MAX_EMOJI} by ID."
+                    f"Found {len(emoji_list)} emoji but Stoat limit is {config.max_emoji}; "
+                    f"truncating to first {config.max_emoji} by ID."
                 ),
             )
         )
-        emoji_list = emoji_list[:MAX_EMOJI]
+        emoji_list = emoji_list[: config.max_emoji]
 
     total = len(emoji_list)
     on_event(
@@ -129,7 +126,19 @@ async def run_emoji(
         )
     )
 
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        for emoji_info in emoji_list:
+            state.emoji_map[str(emoji_info["id"])] = f"dry-emoji-{emoji_info['id']}"
+        on_event(
+            MigrationEvent(
+                phase="emoji",
+                status="completed",
+                message=f"[DRY RUN] Mapped {total} emoji",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         for idx, emoji_info in enumerate(emoji_list, start=1):
             discord_id = str(emoji_info["id"])
             name = str(emoji_info["name"])

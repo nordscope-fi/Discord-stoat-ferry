@@ -6,8 +6,6 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import aiohttp
-
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import (
@@ -19,6 +17,7 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_server,
     api_fetch_server,
+    get_session,
 )
 from discord_ferry.uploader.autumn import upload_with_cache
 
@@ -30,7 +29,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_CHANNELS = 200
+# Minimum permissions for the ferry bot to operate:
+# ManageRole(3), ViewChannel(20), ReadMessageHistory(21), SendMessage(22),
+# ManageMessages(23), SendEmbeds(26), UploadFiles(27), Masquerade(28), React(29)
+FERRY_MIN_PERMISSIONS = 1_071_644_680
 
 
 def make_unique_channel_name(name: str, existing_names: set[str]) -> str:
@@ -75,7 +77,18 @@ async def run_server(
     Raises:
         MigrationError: If the existing server cannot be fetched or server creation fails.
     """
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        state.stoat_server_id = f"dry-server-{exports[0].guild.id}" if exports else "dry-server"
+        on_event(
+            MigrationEvent(
+                phase="server",
+                status="completed",
+                message=f"[DRY RUN] Server: {state.stoat_server_id}",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         if config.server_id:
             # Use an existing server — verify it exists.
             await api_fetch_server(session, config.stoat_url, config.token, config.server_id)
@@ -149,6 +162,44 @@ async def run_server(
                             )
                         )
 
+        # Bootstrap minimum permissions on the server's default role.
+        try:
+            await api_edit_server(
+                session,
+                config.stoat_url,
+                config.token,
+                state.stoat_server_id,
+                default_permissions=FERRY_MIN_PERMISSIONS,
+            )
+            on_event(
+                MigrationEvent(
+                    phase="server",
+                    status="progress",
+                    message="Set server permissions for migration",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            state.warnings.append(
+                {
+                    "phase": "server",
+                    "message": (
+                        f"Could not set server permissions: {exc}. "
+                        "Masquerade colours require ManageRole (bit 3). "
+                        "Grant permissions manually if needed."
+                    ),
+                }
+            )
+            on_event(
+                MigrationEvent(
+                    phase="server",
+                    status="warning",
+                    message=(
+                        f"Permission bootstrap failed: {exc}. "
+                        "Grant ManageRole manually for masquerade colours."
+                    ),
+                )
+            )
+
 
 async def run_roles(
     config: FerryConfig,
@@ -183,7 +234,19 @@ async def run_roles(
     # Filter out the @everyone role.
     roles_to_create = [r for r in unique_roles if r.id != guild_id]
 
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        for role in roles_to_create:
+            state.role_map[role.id] = f"dry-role-{role.id}"
+        on_event(
+            MigrationEvent(
+                phase="roles",
+                status="completed",
+                message=f"[DRY RUN] Mapped {len(roles_to_create)} roles",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         for idx, role in enumerate(roles_to_create, start=1):
             result = await api_create_role(
                 session, config.stoat_url, config.token, state.stoat_server_id, role.name
@@ -258,7 +321,19 @@ async def run_categories(
             seen_cat_ids.add(cat_id)
             unique_categories.append((cat_id, cat_name))
 
-    async with aiohttp.ClientSession() as session:
+    if config.dry_run:
+        for discord_cat_id, _cat_name in unique_categories:
+            state.category_map[discord_cat_id] = f"dry-cat-{discord_cat_id}"
+        on_event(
+            MigrationEvent(
+                phase="categories",
+                status="completed",
+                message=f"[DRY RUN] Mapped {len(unique_categories)} categories",
+            )
+        )
+        return
+
+    async with get_session(config) as session:
         for idx, (discord_cat_id, cat_name) in enumerate(unique_categories, start=1):
             result = await api_create_category(
                 session, config.stoat_url, config.token, state.stoat_server_id, cat_name
@@ -343,20 +418,20 @@ async def run_channels(
             (channel, stoat_type, unique_name, channel.category_id, export.is_thread)
         )
 
-    if len(channels_to_create) > MAX_CHANNELS:
-        overflow = len(channels_to_create) - MAX_CHANNELS
+    if len(channels_to_create) > config.max_channels:
+        overflow = len(channels_to_create) - config.max_channels
         # Sort so threads come last, then truncate — preserves main channels.
         channels_to_create.sort(key=lambda t: t[4])  # False (main) before True (thread)
-        dropped = channels_to_create[MAX_CHANNELS:]
-        channels_to_create = channels_to_create[:MAX_CHANNELS]
+        dropped = channels_to_create[config.max_channels :]
+        channels_to_create = channels_to_create[: config.max_channels]
         dropped_names = [entry[2] for entry in dropped]
         on_event(
             MigrationEvent(
                 phase="channels",
                 status="warning",
                 message=(
-                    f"Total channels ({MAX_CHANNELS + overflow}) exceeds Stoat limit "
-                    f"of {MAX_CHANNELS}. Dropped {overflow} channel(s): "
+                    f"Total channels ({config.max_channels + overflow}) exceeds Stoat limit "
+                    f"of {config.max_channels}. Dropped {overflow} channel(s): "
                     f"{', '.join(dropped_names[:10])}"
                     f"{'...' if len(dropped_names) > 10 else ''}"
                 ),
@@ -366,16 +441,28 @@ async def run_channels(
             {
                 "phase": "channels",
                 "message": (
-                    f"Dropped {overflow} channel(s) exceeding {MAX_CHANNELS} limit: "
+                    f"Dropped {overflow} channel(s) exceeding {config.max_channels} limit: "
                     f"{', '.join(dropped_names)}"
                 ),
             }
         )
 
+    if config.dry_run:
+        for channel, _stoat_type, _unique_name, _discord_cat_id, _is_thread in channels_to_create:
+            state.channel_map[channel.id] = f"dry-ch-{channel.id}"
+        on_event(
+            MigrationEvent(
+                phase="channels",
+                status="completed",
+                message=f"[DRY RUN] Mapped {len(channels_to_create)} channels",
+            )
+        )
+        return
+
     # stoat_category_id -> list of stoat_channel_ids (built during creation).
     category_channels: dict[str, list[str]] = {}
 
-    async with aiohttp.ClientSession() as session:
+    async with get_session(config) as session:
         for idx, (channel, stoat_type, unique_name, discord_cat_id, _is_thread) in enumerate(
             channels_to_create, start=1
         ):

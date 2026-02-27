@@ -21,9 +21,8 @@ VERSION = _version_match.group(1) if _version_match else "0.0.0"
 # NiceGUI bundles static assets, Vue.js components, Quasar UI, etc.
 nicegui_datas, nicegui_bins, nicegui_imports = collect_all("nicegui")
 
-# aiohttp and stoat have their own data files
+# aiohttp has its own data files
 aiohttp_datas, aiohttp_bins, aiohttp_imports = collect_all("aiohttp")
-stoat_datas, stoat_bins, stoat_imports = collect_all("stoat")
 
 # pywebview (optional — native desktop window mode)
 try:
@@ -39,12 +38,11 @@ ferry_imports = collect_submodules("discord_ferry")
 # Aggregate
 # ---------------------------------------------------------------------------
 
-all_datas = nicegui_datas + aiohttp_datas + stoat_datas + webview_datas
-all_binaries = nicegui_bins + aiohttp_bins + stoat_bins + webview_bins
+all_datas = nicegui_datas + aiohttp_datas + webview_datas
+all_binaries = nicegui_bins + aiohttp_bins + webview_bins
 all_hiddenimports = (
     nicegui_imports
     + aiohttp_imports
-    + stoat_imports
     + webview_imports
     + uvicorn_imports
     + ferry_imports
@@ -58,7 +56,6 @@ all_hiddenimports = (
         "starlette.middleware.gzip",
         "multipart",
         "dotenv",
-        "aiofiles",
     ]
 )
 
