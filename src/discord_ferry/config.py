@@ -1,7 +1,13 @@
 """Ferry configuration dataclass."""
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import asyncio
 
 
 @dataclass
@@ -23,3 +29,7 @@ class FerryConfig:
     output_dir: Path = Path("./ferry-output")
     resume: bool = False
     verbose: bool = False
+
+    # GUI pause/cancel support (not serialized, not used by CLI)
+    pause_event: asyncio.Event | None = field(default=None, repr=False)
+    cancel_event: asyncio.Event | None = field(default=None, repr=False)

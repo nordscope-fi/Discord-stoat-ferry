@@ -150,8 +150,8 @@ async def run_messages(
                         )
                     )
 
-                # Rate-limit courtesy delay.
-                await asyncio.sleep(config.message_rate_limit)
+                # Rate-limit courtesy delay with pause/cancel support.
+                await _rate_limit_with_pause(config)
 
             # Channel complete.
             state.last_completed_channel = export.channel.id
@@ -309,6 +309,15 @@ async def _process_message(
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+async def _rate_limit_with_pause(config: FerryConfig) -> None:
+    """Sleep for rate limit, respecting pause/cancel flags from the GUI."""
+    if config.cancel_event and config.cancel_event.is_set():
+        raise asyncio.CancelledError("Migration cancelled by user")
+    if config.pause_event:
+        await config.pause_event.wait()  # blocks while event is cleared (paused)
+    await asyncio.sleep(config.message_rate_limit)
 
 
 def _resolve_attachment_path(export_dir: Path, url: str) -> Path | None:

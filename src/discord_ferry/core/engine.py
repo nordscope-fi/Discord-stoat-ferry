@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from typing import Any
@@ -119,6 +120,16 @@ async def run_migration(
     runnable_phases = PHASE_ORDER[1:-1]  # exclude validate and report
 
     for phase_name in runnable_phases:
+        # Check cancel flag between phases
+        if config.cancel_event and config.cancel_event.is_set():
+            save_state(state, config.output_dir)
+            on_event(
+                MigrationEvent(
+                    phase=phase_name, status="skipped", message="Migration cancelled by user"
+                )
+            )
+            return state
+
         # Check config skip flags
         skip_attr = _SKIPPABLE.get(phase_name)
         if skip_attr and getattr(config, skip_attr, False):
@@ -161,6 +172,16 @@ async def run_migration(
 
         try:
             await phase_fn(config, state, exports, on_event)
+        except asyncio.CancelledError:
+            save_state(state, config.output_dir)
+            on_event(
+                MigrationEvent(
+                    phase=phase_name,
+                    status="skipped",
+                    message=f"Cancelled during {phase_name}",
+                )
+            )
+            return state
         except Exception as e:
             state.errors.append({"phase": phase_name, "error": str(e)})
             save_state(state, config.output_dir)
