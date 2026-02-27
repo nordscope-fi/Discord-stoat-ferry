@@ -81,6 +81,9 @@ Before you start, confirm you have all three of these ready:
     | `--skip-reactions` | Do not migrate message reactions |
     | `--rate-limit 2.0` | Set seconds between messages (default `1.0`) |
     | `--server-id EXISTING_ID` | Migrate into an existing Stoat server |
+    | `--dry-run` | Run all phases without making any API calls |
+    | `--max-channels N` | Channel limit (default `200`; raise for self-hosted) |
+    | `--max-emoji N` | Emoji limit (default `100`; raise for self-hosted) |
 
 ---
 
@@ -108,7 +111,7 @@ Ferry checks your export files locally before making any API calls. Nothing is s
 
 === "CLI (Linux / advanced)"
 
-    Run the standalone validate command for a dry run:
+    Run the standalone validate command for a validate-only check:
 
     ```
     ferry validate ./export/
@@ -225,4 +228,4 @@ Slow Ferry down to give the Stoat server more breathing room:
     Add `--rate-limit 2.0` (or higher) to your command.
 
 !!! tip "Need more help?"
-    See the troubleshooting guide (coming soon) for a full list of error messages and fixes.
+    See the [troubleshooting guide](../guides/troubleshooting.md) for a full list of error messages and fixes.

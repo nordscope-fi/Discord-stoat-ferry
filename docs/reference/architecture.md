@@ -33,12 +33,12 @@ instances by calling a callback function passed in at startup.
 @dataclass
 class MigrationEvent:
     phase: str          # e.g. "MESSAGES"
-    status: str         # "started" | "progress" | "completed" | "error"
+    status: str         # "started" | "progress" | "completed" | "error" | "warning" | "skipped"
     message: str        # human-readable description
     current: int        # items processed so far
     total: int          # total items in this phase
     channel_name: str   # active channel (if applicable)
-    detail: str         # extra context for error or warning events
+    detail: dict[str, object] | None = None  # extra context for error or warning events
 ```
 
 The GUI passes a callback that updates NiceGUI UI elements. The CLI passes a callback that prints
@@ -69,31 +69,41 @@ and resumed, a completed phase is skipped entirely.
     Phases cannot be reordered. Each phase depends on ID mappings produced by earlier phases.
     For example, MESSAGES depends on the Discord→Stoat channel map produced by CHANNELS.
 
+!!! tip "Dry-run mode"
+    Pass `--dry-run` to run all phases without making any API calls. The engine produces synthetic
+    IDs for every created resource, allowing you to validate your export and configuration before
+    committing to a live migration.
+
 ---
 
 ## State and Resume
 
-`MigrationState` is a dataclass defined in `state.py`. It holds every ID mapping the engine produces:
+`MigrationState` is a dataclass defined in `state.py`. It holds everything the engine produces and
+needs across phases:
 
-- Discord user ID → Stoat masquerade name/avatar
-- Discord channel ID → Stoat channel ID
-- Discord role ID → Stoat role ID
-- Discord message ID → Stoat message ID (for reactions, pins, and reply threading)
-- Discord emoji ID → Stoat emoji ID
-- Completed phases (set of phase names)
-- Error log (list of structured error dicts)
+- **ID maps** — `role_map`, `channel_map`, `category_map`, `message_map`, `emoji_map` (Discord ID → Stoat ID)
+- **Caches** — `avatar_cache`, `upload_cache` (local path → Autumn CDN URL), `author_names`
+- **Pending** — `pending_pins`, `pending_reactions` (collected during MESSAGES, applied in later phases)
+- **Logs** — `errors`, `warnings` (structured dicts with phase, context, and message)
+- **Server** — `stoat_server_id`, `autumn_url`
+- **Resume tracking** — `current_phase` (string), `last_completed_channel`, `last_completed_message`
+- **Counters** — `attachments_skipped`, `reactions_applied`, `pins_applied`
+- **Timing** — `started_at`, `completed_at`
+- **Flags** — `is_dry_run`
 
 After each phase completes successfully, the engine serialises `MigrationState` to `state.json` in
 the working directory.
 
 ```bash
 # Resume an interrupted migration
-discord-ferry migrate --resume
+ferry migrate --resume
 ```
 
-On resume, the engine deserialises `state.json` and skips any phase whose name is in the completed
-set. Phases that were mid-way through are re-run from the beginning of that phase (messages already
-sent will be deduplicated via the `nonce` field — see [Stoat API Notes](stoat-api-notes.md)).
+On resume, the engine deserialises `state.json` and skips any phase whose index is less than the
+index of `current_phase`. Phases that were mid-way through are re-run from the beginning of that
+phase. The MESSAGES phase uses `last_completed_channel` and `last_completed_message` for
+finer-grained resume; messages already sent are deduplicated via the `nonce` field — see
+[Stoat API Notes](stoat-api-notes.md).
 
 !!! warning "Do not edit state.json manually"
     The state file is an internal implementation detail. Hand-editing it can cause the engine to
@@ -113,6 +123,7 @@ sent will be deduplicated via the `nonce` field — see [Stoat API Notes](stoat-
 | `src/discord_ferry/config.py` | `FerryConfig` dataclass — all user-supplied settings |
 | `src/discord_ferry/errors.py` | Custom exception hierarchy |
 | `src/discord_ferry/transforms.py` | Mention remapping, text sanitisation |
+| `src/discord_ferry/migrator/reporter.py` | Migration report generation |
 | `src/discord_ferry/gui.py` | NiceGUI shell — 3-screen workflow |
 | `src/discord_ferry/cli.py` | Click shell — `migrate` and `validate` commands |
 
@@ -131,7 +142,7 @@ DCE JSON files
       │
       ├── uploader/    Download Discord media → upload to Autumn → return CDN URLs
       │
-      ├── migrator/    Phase implementations — call stoat-py, emit MigrationEvents
+      ├── migrator/    Phase implementations — call migrator/api.py, emit MigrationEvents
       │
       └── state.py     Persist ID mappings after each phase
 ```

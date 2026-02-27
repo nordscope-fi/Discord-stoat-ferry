@@ -106,9 +106,9 @@ matches on these strings:
 | `"RecipientRemove"` | Skip |
 | `"ChannelNameChange"` | Skip |
 | `"ChannelPinnedMessage"` | Import and mark for re-pinning in the PINS phase |
-| `"GuildMemberJoin"` | Skip (configurable — can be imported as a system note) |
+| `"GuildMemberJoin"` | Skip (system noise, no useful content) |
 | `"UserPremiumGuildSubscription"` | Skip (boost notification) |
-| `"ThreadCreated"` | Import as the first message in the corresponding thread channel |
+| `"ThreadCreated"` | Skip (thread header injected by Ferry instead) |
 | `"ThreadStarterMessage"` | Import as the first message in the thread |
 
 Unknown type strings are logged as warnings and the message is skipped.

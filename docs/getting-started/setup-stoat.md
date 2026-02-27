@@ -117,6 +117,9 @@ If you are using an existing server (Option B), create a role with these permiss
 !!! warning "There is no single 'Administrator' permission in Stoat"
     Unlike Discord, Stoat does not have a catch-all Administrator permission. You must grant each permission in the list above individually.
 
+!!! note "Emoji migration on existing servers"
+    If you are migrating to an existing server (not one Ferry creates), you may also need the **ManageCustomisation** permission (bit 4, value 16) to upload custom emoji. This permission is not included in the minimum set above because Ferry can create emoji only on servers it owns outright. If your target server was created by a different account, add ManageCustomisation to the role you assign to the Ferry account.
+
 ---
 
 ## 5. Raising limits on self-hosted instances

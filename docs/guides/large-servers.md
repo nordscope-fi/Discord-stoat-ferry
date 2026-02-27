@@ -77,8 +77,8 @@ Stoat allows a maximum of 200 channels per server by default. Discord servers wi
 
 **Options:**
 
-- **Skip threads** — use `--skip-threads` (CLI) or toggle **Skip threads** in Advanced Options (GUI) to omit all thread and forum content. This keeps you within the channel limit but loses threaded conversations.
-- **Raise the limit** — on a self-hosted instance, increase `server_channels` in your configuration. See [Self-Hosted Stoat Tips](self-hosted-tips.md).
+- **Skip threads** — use `--skip-threads` (CLI) to omit all thread and forum content. This keeps you within the channel limit but loses threaded conversations.
+- **Raise the limit** — on a self-hosted instance, increase `server_channels` in your configuration. See [Self-Hosted Stoat Tips](self-hosted-tips.md). If your self-hosted instance has a raised limit, pass `--max-channels N` to Ferry so it respects the higher ceiling.
 
 !!! tip "Check before you start"
     Run `ferry validate` on your export first. The counts table will show the total channel and thread count so you can decide before migration begins.
@@ -89,7 +89,7 @@ Stoat allows a maximum of 200 channels per server by default. Discord servers wi
 
 Stoat allows a maximum of 100 custom emoji per server by default. Ferry migrates the first 100 and logs a warning for any beyond that.
 
-If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted instance. On the official hosted service, the first 100 emoji will be migrated and the rest skipped.
+If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted instance. On the official hosted service, the first 100 emoji will be migrated and the rest skipped. If your self-hosted instance has a raised limit, pass `--max-emoji N` to Ferry so it respects the higher ceiling.
 
 ---
 

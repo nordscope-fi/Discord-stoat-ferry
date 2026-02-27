@@ -45,6 +45,12 @@ Restart your Stoat instance after editing the file.
 !!! warning "Restart required"
     Configuration changes do not take effect until you restart the Stoat services. Do this before starting the Ferry migration.
 
+!!! tip "Tell Ferry about raised limits"
+    After raising server limits, also pass `--max-channels 500 --max-emoji 200` to `ferry migrate` so Ferry knows to respect the higher ceiling.
+
+!!! tip "Verify with a dry run"
+    After configuring your self-hosted instance, run `ferry migrate` with `--dry-run` to validate structure mapping before committing to a full migration. This exercises all phases without making any API calls.
+
 ---
 
 ## Autumn File Storage

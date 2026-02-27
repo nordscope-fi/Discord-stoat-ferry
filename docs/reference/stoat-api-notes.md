@@ -34,8 +34,9 @@ On a 429 response the body contains:
 { "retry_after": 4200 }
 ```
 
-`stoat-py` handles HTTP-level rate limits automatically. Ferry adds a configurable inter-message delay
-(default 1.0 s) on top of that as a safety margin to avoid sustained bursts.
+Ferry's API client (`migrator/api.py`) handles HTTP-level rate limits automatically. Ferry adds a
+configurable inter-message delay (default 1.0 s) on top of that as a safety margin to avoid
+sustained bursts.
 
 ---
 
@@ -62,20 +63,18 @@ field. The creation flow is always two steps:
 **Step 1 — Create the channel:**
 
 ```python
-channel = await client.http.create_server_channel(
-    server,
-    name="announcements",
-    type=ChannelType.TEXT,
+channel = await api_create_channel(
+    session, config.stoat_url, config.token, server_id,
+    name="general", channel_type="TextChannel",
 )
 ```
 
 **Step 2 — PATCH the server's categories array:**
 
 ```python
-await client.http.edit_category(
-    server,
-    category_id=existing_category_id,
-    channels=[*existing_channel_ids, channel.id],
+await api_edit_category(
+    session, config.stoat_url, config.token, server_id,
+    category_id, channels=[*existing_ids, channel["_id"]],
 )
 ```
 
@@ -192,7 +191,10 @@ Ferry's VALIDATE phase warns when source data is likely to exceed these limits.
 Every message send includes a nonce:
 
 ```python
-await channel.send(content=text, nonce=f"ferry-{discord_message_id}")
+await api_send_message(
+    session, config.stoat_url, config.token, channel_id,
+    content=text, nonce=f"ferry-{discord_msg_id}",
+)
 ```
 
 If the same nonce is submitted twice (e.g. after an interrupted migration resumes), Stoat returns the

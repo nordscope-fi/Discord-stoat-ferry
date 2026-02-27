@@ -84,7 +84,7 @@ This page covers the most common problems encountered during migration, their ca
 |---|---|
 | **Symptom** | Ferry stops or warns that the server has reached its channel limit |
 | **Cause** | The combined count of channels and flattened threads exceeds the Stoat server's per-server channel limit (200 by default) |
-| **Solution** | Choose one of these options: (1) Add `--skip-threads` (CLI) or enable **Skip threads** in Advanced Options (GUI) to omit thread content; (2) If you run a self-hosted instance, raise the `server_channels` limit in `Revolt.overrides.toml` — see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
+| **Solution** | Choose one of these options: (1) Add `--skip-threads` (CLI) to omit thread content; (2) If you run a self-hosted instance, raise the `server_channels` limit in `Revolt.overrides.toml` — see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
 
 ---
 

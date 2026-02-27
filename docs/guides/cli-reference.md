@@ -66,6 +66,9 @@ ferry migrate EXPORT_DIR [OPTIONS]
 | `--upload-delay FLOAT` | | 0.5 | Seconds between Autumn file uploads |
 | `--output-dir TEXT` | | `./ferry-output` | Directory for the migration report and state file |
 | `--resume` | | false | Resume an interrupted migration using the saved state file |
+| `--dry-run` | | false | Run all phases without making API calls; produces synthetic IDs for validation |
+| `--max-channels INT` | | 200 | Channel limit; raise for self-hosted instances with custom limits |
+| `--max-emoji INT` | | 100 | Emoji limit; raise for self-hosted instances with custom limits |
 | `--verbose` / `-v` | | false | Enable debug output (per-message logging) |
 
 !!! warning "Token security"
@@ -135,6 +138,12 @@ ferry migrate ~/exports/my-discord-server/ \
   --skip-messages \
   --skip-emoji \
   --skip-reactions
+```
+
+**Validate the full migration pipeline without making any API calls:**
+
+```bash
+ferry migrate ./export --stoat-url https://api.stoat.chat --token "$TOKEN" --dry-run
 ```
 
 **Resume an interrupted migration:**

@@ -3,7 +3,7 @@
 This guide walks through every screen of the Discord Ferry web interface. Ferry runs a small local web server when you launch it — no data ever leaves your machine.
 
 !!! info "Launching the GUI"
-    Double-click `ferry.exe` (Windows) or `ferry` (macOS/Linux). Your browser will open automatically to `http://localhost:8080`. If it does not, open that URL manually.
+    Double-click `ferry.exe` (Windows) or `ferry` (macOS/Linux). Your browser will open automatically to `http://localhost:8765`. If it does not, open that URL manually.
 
 ---
 
@@ -41,6 +41,7 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Skip messages | Off | Import server structure only (channels, roles, categories). No messages will be sent. |
 | Skip emoji | Off | Do not upload custom emoji. |
 | Skip reactions | Off | Do not add message reactions. |
+| Dry run (no API calls) | Off | Run all migration phases without making any API calls. Useful for validating structure mapping before committing to a full migration. |
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
 
 !!! tip "Running into 429 errors?"
@@ -149,7 +150,7 @@ Click **Pause** to temporarily stop the migration after the current message fini
 
 ### Cancel
 
-Click **Cancel** to stop the migration entirely. Ferry saves its state to disk before stopping. To continue later, re-launch Ferry with the same export folder and enable **Resume** in Advanced Options (or use `--resume` on the CLI).
+Click **Cancel** to stop the migration entirely. Ferry saves its state to disk before stopping. To continue later, re-launch Ferry with the same export folder. On the Migrate screen, Ferry will detect the previous migration state and offer a **Resume** or **Start Fresh** choice (or use `--resume` on the CLI).
 
 !!! warning "Do not close the browser tab during migration"
     Closing the tab while migration is running does not stop Ferry — it continues in the background. However, you will lose visibility into progress. Leave the tab open, or use the CLI if you need a more robust background process.
@@ -162,4 +163,4 @@ When all phases finish, the Completion screen shows a summary card with final st
 
 <!-- screenshot: completion screen with summary card -->
 
-Click **Open Report** to open the migration report in your browser. The report is also saved as an HTML file in the `ferry-output/` folder next to your export.
+Click **Open Report** to open the migration report in your browser. The report is also saved as `migration_report.json` in the `ferry-output/` folder next to your export.

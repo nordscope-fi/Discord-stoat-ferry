@@ -151,7 +151,7 @@ def setup_page() -> None:
 
             stoat_url_input = ui.input(
                 label="Stoat API URL",
-                placeholder="https://api.revolt.chat",
+                placeholder="https://api.stoat.chat",
             ).classes("w-full")
 
             token_input = ui.input(

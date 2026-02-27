@@ -8,7 +8,7 @@ Pick your operating system below to get started.
 
 === "Windows"
 
-    1. Go to the [Discord Ferry releases page](https://github.com/your-org/discord-ferry/releases) on GitHub.
+    1. Go to the [Discord Ferry releases page](https://github.com/psthubhorizon/Discord-stoat-ferry/releases) on GitHub.
     2. Under the latest release, click **Ferry.exe** to download it.
     3. Double-click **Ferry.exe** to run it. Your browser will open automatically.
 
@@ -26,7 +26,7 @@ Pick your operating system below to get started.
 
 === "macOS"
 
-    1. Go to the [Discord Ferry releases page](https://github.com/your-org/discord-ferry/releases) on GitHub.
+    1. Go to the [Discord Ferry releases page](https://github.com/psthubhorizon/Discord-stoat-ferry/releases) on GitHub.
     2. Under the latest release, click **Ferry.dmg** to download it.
     3. Open the downloaded DMG file.
     4. Drag the **Ferry** icon into your **Applications** folder.
@@ -58,9 +58,9 @@ Pick your operating system below to get started.
           ```bash
           sudo dnf install pipx
           ```
-        - macOS with Homebrew (if you prefer this route):
+        - Arch / Manjaro:
           ```bash
-          brew install pipx
+          sudo pacman -S python-pipx
           ```
 
     2.  Install Ferry:
@@ -114,4 +114,4 @@ sudo apt install python3.11
 ```
 
 !!! tip "Still stuck?"
-    Open an issue on the [Discord Ferry GitHub page](https://github.com/your-org/discord-ferry/issues) and include the error message you saw. Someone from the community will help you out.
+    Open an issue on the [Discord Ferry GitHub page](https://github.com/psthubhorizon/Discord-stoat-ferry/issues) and include the error message you saw. Someone from the community will help you out.
