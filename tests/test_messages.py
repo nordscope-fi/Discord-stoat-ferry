@@ -598,7 +598,8 @@ async def test_empty_message_gets_placeholder(tmp_path: Path, mock_aiohttp: aior
 
     state = _make_state()
     config = _make_config(tmp_path)
-    msg = _make_message(id="msg1", content="", msg_type="GuildMemberJoin")
+    # Use a Default type — GuildMemberJoin is now a skip type.
+    msg = _make_message(id="msg1", content="", msg_type="Default")
     export = _make_export(messages=[msg])
 
     await run_messages(config, state, [export], lambda e: None)
@@ -927,3 +928,149 @@ async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> N
 
     # Channel marked as completed.
     assert state.last_completed_channel == "ch1"
+
+
+# ---------------------------------------------------------------------------
+# Bug 2: GuildMemberJoin and ThreadCreated are now skip types
+# ---------------------------------------------------------------------------
+
+
+async def test_guild_member_join_skipped(tmp_path: Path) -> None:
+    """GuildMemberJoin messages are silently dropped (not sent to API)."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(id="join1", content="", msg_type="GuildMemberJoin")
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "join1" not in state.message_map
+
+
+async def test_thread_created_skipped(tmp_path: Path) -> None:
+    """ThreadCreated messages are silently dropped."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(id="tc1", content="", msg_type="ThreadCreated")
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "tc1" not in state.message_map
+
+
+async def test_channel_pinned_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """ChannelPinnedMessage type is NOT skipped — it falls through to normal handling."""
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_pin"})
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(id="pinmsg1", content="pinned a message", msg_type="ChannelPinnedMessage")
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "pinmsg1" in state.message_map
+
+
+async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """ThreadStarterMessage type is NOT skipped — it falls through to normal handling."""
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_starter"})
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(id="starter1", content="thread start", msg_type="ThreadStarterMessage")
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "starter1" in state.message_map
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: Thread header messages
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_header_injected(tmp_path: Path) -> None:
+    """Thread exports get a system header message before regular messages."""
+    sent_contents: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_contents.append(kwargs.get("content", ""))
+        return {"_id": f"stoat_msg_{len(sent_contents)}"}
+
+    state = _make_state(channel_map={"th1": "stoat_th1"})
+    config = _make_config(tmp_path)
+    msg = _make_message(id="msg1", content="hello thread")
+    export = DCEExport(
+        guild=_make_guild(),
+        channel=_make_channel(channel_id="th1", name="cool-thread"),
+        messages=[msg],
+        is_thread=True,
+        parent_channel_name="general",
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    # First message sent should be the header.
+    assert len(sent_contents) >= 2
+    assert "[Thread migrated from #general]" in sent_contents[0]
+
+
+async def test_non_thread_no_header(tmp_path: Path) -> None:
+    """Non-thread exports do NOT get a system header."""
+    sent_contents: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_contents.append(kwargs.get("content", ""))
+        return {"_id": f"stoat_msg_{len(sent_contents)}"}
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(id="msg1", content="hello")
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    # Only 1 message sent (no header).
+    assert len(sent_contents) == 1
+    assert "Thread migrated" not in sent_contents[0]
+
+
+# ---------------------------------------------------------------------------
+# Bug 1: skip_threads in messages phase
+# ---------------------------------------------------------------------------
+
+
+async def test_skip_threads_skips_thread_exports(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """When skip_threads=True, thread exports are not processed in messages phase."""
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+
+    state = _make_state(channel_map={"ch1": "stoat_ch1", "th1": "stoat_th1"})
+    config = _make_config(tmp_path, skip_threads=True)
+
+    msg_main = _make_message(id="main1", content="main channel msg")
+    msg_thread = _make_message(id="thread1", content="thread msg")
+
+    export_main = _make_export(channel_id="ch1", messages=[msg_main])
+    export_thread = DCEExport(
+        guild=_make_guild(),
+        channel=_make_channel(channel_id="th1", name="my-thread"),
+        messages=[msg_thread],
+        is_thread=True,
+        parent_channel_name="general",
+    )
+
+    await run_messages(config, state, [export_main, export_thread], lambda e: None)
+
+    assert "main1" in state.message_map
+    assert "thread1" not in state.message_map

@@ -303,8 +303,8 @@ async def run_channels(
     """
     # Deduplicate exports by channel ID and skip category channels (type 4).
     seen_channel_ids: set[str] = set()
-    # Each entry: (channel, stoat_type, unique_name, discord_category_id)
-    channels_to_create: list[tuple[DCEChannel, str | None, str, str]] = []
+    # Each entry: (channel, stoat_type, unique_name, discord_category_id, is_thread)
+    channels_to_create: list[tuple[DCEChannel, str | None, str, str, bool]] = []
     existing_names: set[str] = set()
 
     for export in exports:
@@ -312,6 +312,10 @@ async def run_channels(
 
         # Skip category channels — handled in Phase 5.
         if channel.type == 4:
+            continue
+
+        # Skip thread/forum exports when skip_threads is enabled.
+        if config.skip_threads and export.is_thread:
             continue
 
         # Skip already-seen channel IDs (deduplicate).
@@ -335,25 +339,44 @@ async def run_channels(
             ch_name = f"{export.parent_channel_name}-{ch_name}"
 
         unique_name = make_unique_channel_name(ch_name, existing_names)
-        channels_to_create.append((channel, stoat_type, unique_name, channel.category_id))
+        channels_to_create.append(
+            (channel, stoat_type, unique_name, channel.category_id, export.is_thread)
+        )
 
     if len(channels_to_create) > MAX_CHANNELS:
+        overflow = len(channels_to_create) - MAX_CHANNELS
+        # Sort so threads come last, then truncate — preserves main channels.
+        channels_to_create.sort(key=lambda t: t[4])  # False (main) before True (thread)
+        dropped = channels_to_create[MAX_CHANNELS:]
+        channels_to_create = channels_to_create[:MAX_CHANNELS]
+        dropped_names = [entry[2] for entry in dropped]
         on_event(
             MigrationEvent(
                 phase="channels",
                 status="warning",
                 message=(
-                    f"Total channels ({len(channels_to_create)}) exceeds Stoat limit "
-                    f"of {MAX_CHANNELS}. Some channels may not be created."
+                    f"Total channels ({MAX_CHANNELS + overflow}) exceeds Stoat limit "
+                    f"of {MAX_CHANNELS}. Dropped {overflow} channel(s): "
+                    f"{', '.join(dropped_names[:10])}"
+                    f"{'...' if len(dropped_names) > 10 else ''}"
                 ),
             )
+        )
+        state.warnings.append(
+            {
+                "phase": "channels",
+                "message": (
+                    f"Dropped {overflow} channel(s) exceeding {MAX_CHANNELS} limit: "
+                    f"{', '.join(dropped_names)}"
+                ),
+            }
         )
 
     # stoat_category_id -> list of stoat_channel_ids (built during creation).
     category_channels: dict[str, list[str]] = {}
 
     async with aiohttp.ClientSession() as session:
-        for idx, (channel, stoat_type, unique_name, discord_cat_id) in enumerate(
+        for idx, (channel, stoat_type, unique_name, discord_cat_id, _is_thread) in enumerate(
             channels_to_create, start=1
         ):
             ch: DCEChannel = channel

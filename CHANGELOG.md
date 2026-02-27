@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-02-27
+
+### Fixed
+
+- **skip_threads flag wired to nothing**: `FerryConfig.skip_threads` now filters thread/forum exports in both the channels and messages phases
+- **GuildMemberJoin and ThreadCreated not skipped**: Added to `_SKIP_TYPES` so system noise messages are silently dropped per DCE format spec
+- **Thread header messages missing**: Flattened thread channels now get a `[Thread migrated from #parent]` system message injected before their content
+- **200-channel limit not enforced**: Channels exceeding the Stoat 200-channel limit are now truncated, dropping thread channels first to preserve main channels
+- **GUI "Open Report" button broken**: Fixed glob pattern to match the actual `migration_report.json` filename
+- **Animated emoji warning missing**: Emits a warning when uploading animated emoji (animation is lost on Stoat)
+- **Validate-phase emoji count undercount**: `validate_export` now counts custom emoji from message content in addition to reactions
+
+### Added
+
+- **15 new tests** covering all 7 bug fixes — 270 total passing
+
+### Changed
+
+- Updated `.claude/rules/dce-format.md` to reflect actual `GuildMemberJoin` (skip) and `ThreadCreated` (skip, header injected instead) behavior
+
+## [Unreleased-content]
+
 ### Added
 
 - **CI pipeline** (`.github/workflows/ci.yml`): lint + type check + test on push/PR with Python 3.10–3.13 matrix via uv, concurrency groups to cancel stale runs

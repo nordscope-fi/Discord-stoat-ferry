@@ -135,6 +135,8 @@ async def run_emoji(
             name = str(emoji_info["name"])
             image_url = str(emoji_info["image_url"])
 
+            is_animated = bool(emoji_info["is_animated"])
+
             # Resume: skip emoji already in the map.
             if discord_id in state.emoji_map:
                 on_event(
@@ -204,6 +206,25 @@ async def run_emoji(
                     autumn_id,
                 )
                 state.emoji_map[discord_id] = result["_id"]
+
+                if is_animated:
+                    state.warnings.append(
+                        {
+                            "phase": "emoji",
+                            "message": (
+                                f"Emoji :{name}: is animated — animation will be lost on Stoat"
+                            ),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="emoji",
+                            status="warning",
+                            message=f"Emoji :{name}: is animated — animation will be lost",
+                            current=idx,
+                            total=total,
+                        )
+                    )
 
                 on_event(
                     MigrationEvent(

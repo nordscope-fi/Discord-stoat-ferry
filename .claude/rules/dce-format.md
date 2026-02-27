@@ -35,9 +35,9 @@ DCE uses string names, NOT numeric IDs:
 | "RecipientRemove" | Skip |
 | "ChannelNameChange" | Skip |
 | "ChannelPinnedMessage" | Import, mark for re-pinning |
-| "GuildMemberJoin" | Import as system note or skip (configurable) |
+| "GuildMemberJoin" | Skip (system noise, no useful content) |
 | "UserPremiumGuildSubscription" | Skip (boost) |
-| "ThreadCreated" | Import as first message in thread channel |
+| "ThreadCreated" | Skip (thread header injected by ferry instead) |
 | "ThreadStarterMessage" | Import as first message in thread |
 
 ## Channel Type Mapping

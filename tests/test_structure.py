@@ -573,3 +573,120 @@ def test_make_unique_channel_name_truncated_collision() -> None:
     result = make_unique_channel_name(long_name, existing)
     assert len(result) <= 64
     assert result == "a" * 62 + "-1"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1: skip_threads in channels phase
+# ---------------------------------------------------------------------------
+
+
+async def test_run_channels_skip_threads(tmp_path: Path) -> None:
+    """CHANNELS phase skips thread exports when config.skip_threads is True."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, skip_threads=True)
+    state = MigrationState(stoat_server_id="srv1")
+
+    exports = [
+        _make_export(channel_id="ch1", channel_name="general", category_id=""),
+        _make_export(
+            channel_id="th1",
+            channel_name="my-thread",
+            is_thread=True,
+            parent_channel_name="general",
+            category_id="",
+        ),
+    ]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "general"},
+        )
+        # Only one POST expected — thread should be skipped.
+        await run_channels(config, state, exports, events.append)
+
+    assert "ch1" in state.channel_map
+    assert "th1" not in state.channel_map
+
+
+async def test_run_channels_skip_threads_false(tmp_path: Path) -> None:
+    """CHANNELS phase includes threads when skip_threads is False (default)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, skip_threads=False)
+    state = MigrationState(stoat_server_id="srv1")
+
+    exports = [
+        _make_export(
+            channel_id="th1",
+            channel_name="my-thread",
+            is_thread=True,
+            parent_channel_name="general",
+            category_id="",
+        ),
+    ]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-th1", "name": "general-my-thread"},
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert "th1" in state.channel_map
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: 200-channel limit truncation
+# ---------------------------------------------------------------------------
+
+
+async def test_run_channels_truncates_at_200(tmp_path: Path) -> None:
+    """CHANNELS phase truncates to 200 channels, dropping threads first."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    # Create 195 main channels + 10 threads = 205 total.
+    exports = []
+    for i in range(195):
+        exports.append(
+            _make_export(
+                channel_id=f"ch{i}",
+                channel_name=f"channel-{i}",
+                category_id="",
+            )
+        )
+    for i in range(10):
+        exports.append(
+            _make_export(
+                channel_id=f"th{i}",
+                channel_name=f"thread-{i}",
+                is_thread=True,
+                parent_channel_name="general",
+                category_id="",
+            )
+        )
+
+    with aioresponses() as m:
+        # Mock 200 channel creation calls.
+        for _ in range(200):
+            m.post(
+                f"{STOAT_URL}/servers/srv1/channels",
+                payload={"_id": f"stoat-ch-{_}", "name": f"ch-{_}"},
+            )
+        await run_channels(config, state, exports, events.append)
+
+    # Exactly 200 channels created.
+    assert len(state.channel_map) == 200
+
+    # All 195 main channels should be preserved.
+    for i in range(195):
+        assert f"ch{i}" in state.channel_map
+
+    # Only 5 of the 10 threads fit.
+    thread_count = sum(1 for k in state.channel_map if k.startswith("th"))
+    assert thread_count == 5
+
+    # Warning emitted.
+    warning_events = [e for e in events if e.status == "warning"]
+    assert any("205" in e.message for e in warning_events)

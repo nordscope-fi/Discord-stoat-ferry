@@ -487,9 +487,9 @@ def migrate_page() -> None:
         completion_card.classes(remove="hidden")
         # Find the report file
         report_dir = config.output_dir
-        candidates = list(report_dir.glob("report*.html"))
-        if candidates:
-            report_path.append(candidates[0])
+        report_file = report_dir / "migration_report.json"
+        if report_file.exists():
+            report_path.append(report_file)
             open_report_btn.enable()
         else:
             open_report_btn.disable()

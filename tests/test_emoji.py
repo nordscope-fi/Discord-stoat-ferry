@@ -360,3 +360,82 @@ async def test_run_emoji_full_happy_path(tmp_path: Path) -> None:
     assert len(state.emoji_map) == 2
     completed = [e for e in events if e.status == "completed"]
     assert completed
+
+
+# ---------------------------------------------------------------------------
+# Bug 6: Animated emoji warning
+# ---------------------------------------------------------------------------
+
+
+async def test_run_emoji_animated_warning(tmp_path: Path) -> None:
+    """Animated emoji triggers a warning event and state.warnings entry."""
+    emoji_file = tmp_path / "spin.gif"
+    emoji_file.write_bytes(b"GIF89a")
+
+    reactions = [
+        DCEReaction(
+            emoji=DCEEmoji(id="555", name="spin", is_animated=True, image_url="spin.gif"),
+            count=1,
+        )
+    ]
+    msg = _make_message(reactions=reactions)
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    events: list[Any] = []
+
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="autumn_id"),
+        ),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "stoat_555"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(config, state, exports, events.append)
+
+    # Emoji should still be created.
+    assert state.emoji_map["555"] == "stoat_555"
+
+    # Warning about animation loss should be emitted.
+    warning_events = [e for e in events if e.status == "warning"]
+    assert any("animated" in e.message.lower() for e in warning_events)
+    assert any("animated" in w["message"].lower() for w in state.warnings)
+
+
+async def test_run_emoji_static_no_animation_warning(tmp_path: Path) -> None:
+    """Static emoji does NOT trigger an animation warning."""
+    emoji_file = tmp_path / "smile.png"
+    emoji_file.write_bytes(b"PNG")
+
+    reactions = [
+        DCEReaction(
+            emoji=DCEEmoji(id="666", name="smile", is_animated=False, image_url="smile.png"),
+            count=1,
+        )
+    ]
+    msg = _make_message(reactions=reactions)
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    events: list[Any] = []
+
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="autumn_id"),
+        ),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "stoat_666"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(config, state, exports, events.append)
+
+    assert state.emoji_map["666"] == "stoat_666"
+    # No animation warnings.
+    assert not any("animated" in w["message"].lower() for w in state.warnings)

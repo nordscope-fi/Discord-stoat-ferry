@@ -21,6 +21,7 @@ from discord_ferry.parser.models import (
 
 logger = logging.getLogger(__name__)
 
+_CONTENT_EMOJI_RE = re.compile(r"<a?:[^:]+:(\d+)>")
 _THREE_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) - (.+?) \[(\d+)\]$")
 _TWO_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) \[(\d+)\]$")
 
@@ -140,11 +141,14 @@ def validate_export(exports: list[DCEExport], export_dir: Path) -> list[dict[str
         if not export.is_thread:
             unique_channel_ids.add(export.channel.id)
 
-        # Collect custom emoji IDs from reactions
+        # Collect custom emoji IDs from reactions and message content
         for msg in export.messages:
             for reaction in msg.reactions:
                 if reaction.emoji.id:
                     custom_emoji_ids.add(reaction.emoji.id)
+            if msg.content:
+                for match in _CONTENT_EMOJI_RE.finditer(msg.content):
+                    custom_emoji_ids.add(match.group(1))
 
         # Check for empty exports
         if len(export.messages) == 0:

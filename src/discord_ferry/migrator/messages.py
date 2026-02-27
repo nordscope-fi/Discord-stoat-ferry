@@ -30,7 +30,14 @@ if TYPE_CHECKING:
 
 # Message types that should be silently skipped without even a warning.
 _SKIP_TYPES = frozenset(
-    {"RecipientAdd", "RecipientRemove", "ChannelNameChange", "UserPremiumGuildSubscription"}
+    {
+        "RecipientAdd",
+        "RecipientRemove",
+        "ChannelNameChange",
+        "UserPremiumGuildSubscription",
+        "GuildMemberJoin",
+        "ThreadCreated",
+    }
 )
 
 # Emit a progress event every this many messages.
@@ -69,6 +76,10 @@ async def run_messages(
 
     async with aiohttp.ClientSession() as session:
         for export in sorted_exports:
+            # Skip thread/forum exports when skip_threads is enabled.
+            if config.skip_threads and export.is_thread:
+                continue
+
             stoat_channel_id = state.channel_map.get(export.channel.id)
             if stoat_channel_id is None:
                 state.warnings.append(
@@ -110,6 +121,34 @@ async def run_messages(
                     channel_name=export.channel.name,
                 )
             )
+
+            # Inject a system header for flattened threads/forum posts.
+            if export.is_thread and export.parent_channel_name:
+                header = f"[Thread migrated from #{export.parent_channel_name}]"
+                try:
+                    await api_send_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        stoat_channel_id,
+                        content=header,
+                        masquerade={"name": "Discord Ferry"},
+                        nonce=f"ferry-header-{export.channel.id}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    state.warnings.append(
+                        {
+                            "phase": "messages",
+                            "message": (f"Thread header for {export.channel.name!r} failed: {exc}"),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="messages",
+                            status="warning",
+                            message=f"Thread header for {export.channel.name!r} failed: {exc}",
+                        )
+                    )
 
             # Sort messages oldest-first (ISO 8601 timestamps sort lexicographically).
             sorted_messages = sorted(export.messages, key=lambda m: m.timestamp)
