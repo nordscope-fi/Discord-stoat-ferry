@@ -36,7 +36,7 @@ Ferry saves its progress after finishing each channel. If the migration is inter
     ```
 
 !!! info "State file location"
-    The state file is saved as `ferry-state.json` in your output directory (default: `./ferry-output/`). Do not delete it until you are satisfied the migration is complete.
+    The state file is saved as `state.json` in your output directory (default: `./ferry-output/`). Do not delete it until you are satisfied the migration is complete.
 
 ---
 

@@ -66,6 +66,20 @@ For migrations with 10+ GB of media, an S3-compatible backend is recommended. Ch
 
 ---
 
+## Ferry GUI Storage Secret
+
+The Ferry GUI uses a storage secret to persist session data (such as your API URL and token between page navigations). By default, a random secret is generated each time Ferry starts.
+
+To persist sessions across restarts, set the `FERRY_STORAGE_SECRET` environment variable:
+
+```bash
+export FERRY_STORAGE_SECRET="your-random-secret-here"
+```
+
+This is optional. If not set, Ferry will work fine but you will need to re-enter your settings if the GUI process restarts.
+
+---
+
 ## Account Age
 
 Stoat may apply stricter rate limits to accounts that were created less than 72 hours ago. Use an established account (your own personal account) rather than a freshly created bot account when running Ferry.

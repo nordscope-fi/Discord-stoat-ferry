@@ -27,10 +27,9 @@ Pick your operating system below to get started.
 === "macOS"
 
     1. Go to the [Discord Ferry releases page](https://github.com/psthubhorizon/Discord-stoat-ferry/releases) on GitHub.
-    2. Under the latest release, click **Ferry.dmg** to download it.
-    3. Open the downloaded DMG file.
-    4. Drag the **Ferry** icon into your **Applications** folder.
-    5. Close the DMG window.
+    2. Under the latest release, click **Ferry-macos-arm64.zip** to download it.
+    3. Unzip the downloaded file.
+    4. Drag the **Ferry.app** icon into your **Applications** folder.
 
     !!! warning "First launch — do NOT double-click"
         The first time you open Ferry, you must right-click (or Control-click) the app icon and select **Open**. If you double-click instead, macOS will refuse to run it.
@@ -46,7 +45,7 @@ Pick your operating system below to get started.
 
 === "Linux"
 
-    Ferry is distributed as a Python package on Linux. You will need a terminal.
+    Ferry is distributed as a Python package on Linux. You will need a terminal and **Python 3.10 or newer**.
 
     1.  Install **pipx** if you do not have it already:
 

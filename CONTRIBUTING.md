@@ -11,7 +11,7 @@ Thank you for your interest in contributing!
 
 ## Development setup
 
-1. Clone the repo: `git clone https://github.com/petersterkenburg/discord-ferry.git`
+1. Clone the repo: `git clone https://github.com/psthubhorizon/Discord-stoat-ferry.git`
 2. Install uv: `pip install uv`
 3. Install dependencies: `uv sync --all-extras`
 4. Run tests: `uv run pytest`
@@ -19,7 +19,8 @@ Thank you for your interest in contributing!
 
 ## Code style
 
-- We use `ruff` for linting and formatting: `uv run ruff check . && uv run ruff format .`
+- We use `ruff` for linting and formatting, and `mypy` for type checking:
+  `uv run ruff check . && uv run ruff format --check . && uv run mypy src/`
 - Type hints on all public functions
 - Docstrings on all public functions (Google style)
 
@@ -27,7 +28,7 @@ Thank you for your interest in contributing!
 
 1. Fork the repo and create a branch from `main`
 2. Make your changes
-3. Run `uv run ruff check . && uv run ruff format . && uv run pytest`
+3. Run `uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest`
 4. Open a PR with a clear description of what and why
 5. Wait for review — we aim to respond within a few days
 

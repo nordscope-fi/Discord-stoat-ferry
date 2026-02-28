@@ -32,7 +32,7 @@ instances by calling a callback function passed in at startup.
 ```python
 @dataclass
 class MigrationEvent:
-    phase: str          # e.g. "MESSAGES"
+    phase: str          # e.g. "messages"
     status: str         # "started" | "progress" | "completed" | "error" | "warning" | "skipped"
     message: str        # human-readable description
     current: int        # items processed so far

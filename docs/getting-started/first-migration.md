@@ -39,7 +39,7 @@ Before you start, confirm you have all three of these ready:
     ferry migrate ./path/to/export/
     ```
 
-    Ferry will prompt for any missing options interactively, or you can pass them all as flags (see Step 2).
+    Required flags (`--stoat-url` and `--token`) must be passed on the command line or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
 
 ---
 

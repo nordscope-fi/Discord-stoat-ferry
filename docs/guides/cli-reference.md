@@ -30,6 +30,12 @@ ferry validate EXPORT_DIR
 - Warnings (for example, missing media files or rendered markdown detected)
 - An estimated migration time at the default 1.0s rate limit
 
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--rate-limit FLOAT` | 1.0 | Seconds per message for ETA calculation |
+
 Use this command to check your export before committing to a full migration.
 
 **Example:**
