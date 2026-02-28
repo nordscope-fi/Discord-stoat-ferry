@@ -31,6 +31,8 @@ If unaddressed instances found: fix them, then restart from Step 1.
 
 ## Step 3: Code Review Gate
 
+**This is the historically skipped step. NEVER skip for >20 lines.**
+
 Check the diff size:
 ```bash
 git diff --stat HEAD
@@ -39,7 +41,7 @@ git diff --stat HEAD
 **If >20 lines of non-docs code changed:** mandatory code review.
 
 Dispatch chain (use first available):
-1. Invoke `superpowers:requesting-code-review`
+1. Invoke `superpowers:requesting-code-review` — this is a **Skill** (instructions to follow), NOT a Task agent. Use the Skill tool, never dispatch via Task tool.
 2. Fallback: `Task(octo:personas:code-reviewer)`
 3. Fallback: `Task(octo:skills:octopus-code-review)`
 
@@ -51,17 +53,23 @@ Fix all **Critical** and **Important** findings. Re-run Step 1 after fixes.
 
 Same >20 line threshold as Step 3.
 
-Categorize the changed files:
-- **Security**: token handling, auth, permissions
-- **Performance**: rate limits, async, caching
-- **API**: Stoat API calls, Autumn uploads
-- **Migration Logic**: parser, transforms, state management
-- **General**: everything else
+Categorize changed files using this table to determine the review focus:
 
-Use `mcp__second-opinion__get_default_opinion` with:
-- personality: `honest`
-- temperature: `0.3`
-- Include the categorized diff and ask for focused review
+| Files changed | Review focus |
+|---|---|
+| `config.py`, `cli.py` args, token handling, `.env` | **Security**: token handling, credential exposure, injection |
+| `migrator/api.py`, rate limit logic, retry logic | **Performance**: rate limiting, async patterns, retry storms |
+| `migrator/` (non-API), `core/engine.py`, `state.py` | **Migration Logic**: state management, phase ordering, edge cases |
+| `parser/`, `transforms.py` | **Parser**: DCE format handling, data integrity, edge cases |
+| `gui.py`, `uploader/` | **General**: bugs, architecture, naming |
+
+Use `mcp__second-opinion__get_mistral_opinion` with:
+- **model**: `mistral-large-latest`
+- **personality**: `honest`
+- **temperature**: `0.3`
+- Include the categorized diff and the matching review focus from the table above
+
+**Edge case**: If Second Opinion MCP is unavailable (connection error, timeout), log that it was skipped and continue — do not block shipping.
 
 Fix **Critical** issues. Re-run Step 1 after fixes.
 

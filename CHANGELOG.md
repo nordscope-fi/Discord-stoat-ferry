@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **`/brief` skill**: 6-phase requirements crystallization for the design pipeline (`.claude/skills/brief/`)
+- **`/critique` skill**: 7-dimension design review adapted for Discord Ferry constraints (`.claude/skills/critique/`)
+- **PostToolUse hook**: Reminds about verification batching during multi-file edits
+- **SessionStart version display**: Shows current project version on session start
+- **Context7 library ID table**: Known IDs for faster documentation lookups
+
+### Changed
+
+- **Ship skill Step 4**: Uses `get_mistral_opinion` with file-category focus instead of `get_default_opinion`
+- **Ship skill Step 3**: Added "historically skipped" warning and Skill-vs-Task clarification
+- **`effortLevel`**: Set to `high` in settings.json
+
 ## [1.1.0] — 2026-02-28
 
 ### Changed

@@ -13,9 +13,22 @@ Before writing any API code that uses these libraries, fetch live documentation 
 - **Click** — CLI decorators, options, arguments, groups
 - **Rich** — Progress bars, live display, console, tables
 
-## How
+## Library ID Lookup Table
 
-Use the `mcp__plugin_context7_context7__resolve-library-id` tool to find the library, then `mcp__plugin_context7_context7__query-docs` to fetch relevant documentation.
+Use known IDs directly with `mcp__plugin_context7_context7__query-docs` to skip the resolve step:
+
+| Library | Context7 ID | When to check |
+|---|---|---|
+| NiceGUI | `/websites/nicegui_io` | Before any UI component work |
+| aiohttp | *resolve at use time* | Before HTTP client changes |
+| Click | *resolve at use time* | Before CLI changes |
+| Rich | *resolve at use time* | Before CLI output changes |
+| pytest | *resolve at use time* | Before test infrastructure changes |
+| stoat.py | *resolve at use time* | Before Stoat API wrapper changes |
+
+For libraries marked "resolve at use time", use `mcp__plugin_context7_context7__resolve-library-id` first, then `mcp__plugin_context7_context7__query-docs`.
+
+For libraries with a known ID, call `mcp__plugin_context7_context7__query-docs` directly with the ID.
 
 ## When
 

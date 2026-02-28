@@ -1,4 +1,5 @@
 {
+  "effortLevel": "high",
   "permissions": {
     "allow": [
       "Bash(uv *)",
@@ -47,10 +48,24 @@
           {
             "type": "command",
             "command": "cd /Users/petersterkenburg/Documents/GitHub/Discord-stoat-ferry && echo '--- Last 5 commits ---' && git log --oneline -5 2>/dev/null || echo '(no commits yet)' && echo '' && HANDOFF=claude_log/session-handoff-$(date '+%Y-%m-%d').md && if [ -f \"$HANDOFF\" ]; then echo \"--- Today's handoff exists: $HANDOFF ---\" && tail -3 \"$HANDOFF\"; else echo '(no handoff file for today)'; fi"
+          },
+          {
+            "type": "command",
+            "command": "cd /Users/petersterkenburg/Documents/GitHub/Discord-stoat-ferry && VERSION=$(python3 -c \"import re; m=re.search(r'__version__\\s*=\\s*\\\"(.+?)\\\"', open('src/discord_ferry/__init__.py').read()); print(m.group(1) if m else 'unknown')\" 2>/dev/null) && echo \"--- Project version: v${VERSION} ---\""
           }
         ]
       }
     ],
-    "PostToolUse": []
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You just edited a file. If you are in the middle of a multi-file batch of edits, complete the entire batch before running verification. Only run `uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest` at natural checkpoints: after completing a task, before committing, or when switching to a different area of work."
+          }
+        ]
+      }
+    ]
   }
 }
