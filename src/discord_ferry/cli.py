@@ -302,11 +302,16 @@ def migrate(**kwargs: Any) -> None:
         sys.exit(130)
 
     tracker.print_summary()
+    if not config.verbose and tracker.warning_count > 0:
+        console.print(
+            f"[dim]{tracker.warning_count} warning(s) suppressed — run with -v to see details[/]"
+        )
 
 
 @main.command()
 @click.argument("export_dir", type=click.Path(exists=True))
-def validate(export_dir: str) -> None:
+@click.option("--rate-limit", default=1.0, type=float, help="Rate for ETA calc (default 1.0s/msg)")
+def validate(export_dir: str, rate_limit: float) -> None:
     """Parse and validate export only, no API calls."""
     export_path = Path(export_dir)
     exports = parse_export_directory(export_path)
@@ -330,8 +335,8 @@ def validate(export_dir: str) -> None:
         console.print()
 
     total_messages = sum(e.message_count for e in exports)
-    eta = _format_eta(total_messages, 1.0)
-    console.print(f"[bold]{total_messages:,}[/] messages at 1.0s/msg = {eta}")
+    eta = _format_eta(total_messages, rate_limit)
+    console.print(f"[bold]{total_messages:,}[/] messages at {rate_limit:.1f}s/msg = {eta}")
 
     has_critical = any(w["type"] == "rendered_markdown" for w in warnings)
     if has_critical:
