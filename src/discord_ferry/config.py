@@ -34,6 +34,13 @@ class FerryConfig:
     max_channels: int = 200
     max_emoji: int = 100
 
+    # Discord credentials (orchestrated mode only — never persisted to disk)
+    discord_token: str | None = field(default=None, repr=False)
+    discord_server_id: str | None = None
+
+    # Skip the export phase (auto-set when export_dir is user-provided in offline mode)
+    skip_export: bool = False
+
     # Runtime-only fields (not serialized)
     pause_event: asyncio.Event | None = field(default=None, repr=False)
     cancel_event: asyncio.Event | None = field(default=None, repr=False)
