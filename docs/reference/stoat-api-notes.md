@@ -106,11 +106,12 @@ bitmask. The authoritative list from `developers.stoat.chat`:
 
 **Ferry bot minimum permission value:**
 
-Bits 3, 20, 21, 22, 23, 26, 27, 28, 29 sum to **1,071,644,680**.
+Bits 3, 4, 20, 21, 22, 23, 26, 27, 28, 29 sum to **1,022,361,624**.
 
 ```python
 FERRY_PERMISSIONS = (
     8           # ManageRole       — masquerade colour
+    | 16          # ManageCustomisation — emoji
     | 1_048_576   # ViewChannel
     | 2_097_152   # ReadMessageHistory
     | 4_194_304   # SendMessage
@@ -120,7 +121,7 @@ FERRY_PERMISSIONS = (
     | 268_435_456 # Masquerade
     | 536_870_912 # React
 )
-# == 1_071_644_680
+# == 1_022_361_624
 ```
 
 ---

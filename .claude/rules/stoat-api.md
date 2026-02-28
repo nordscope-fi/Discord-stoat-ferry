@@ -78,7 +78,7 @@ Always pass `nonce=f"ferry-{discord_msg_id}"` on every message send. This preven
 
 **There is NO single ADMINISTRATOR permission in Stoat.** Grant permissions individually.
 
-Ferry bot minimum permissions = bits 3, 20, 21, 22, 23, 26, 27, 28, 29 = `1,071,644,680`
+Ferry bot minimum permissions = bits 3, 4, 20, 21, 22, 23, 26, 27, 28, 29 = `1,022,361,624`
 
 ## Server & Account Limits
 

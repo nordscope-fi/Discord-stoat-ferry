@@ -217,7 +217,7 @@ async def _run_phases(
             )
             return
         except Exception as e:
-            state.errors.append({"phase": phase_name, "error": str(e)})
+            state.errors.append({"phase": phase_name, "type": "phase_failed", "error": str(e)})
             save_state(state, config.output_dir)
             on_event(
                 MigrationEvent(

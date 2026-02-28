@@ -83,6 +83,7 @@ async def run_pins(
                 state.errors.append(
                     {
                         "phase": "pins",
+                        "type": "pin_failed",
                         "message": (
                             f"Failed to pin message {message_id} in channel {channel_id}: {exc}"
                         ),

@@ -112,6 +112,7 @@ async def run_reactions(
                 state.errors.append(
                     {
                         "phase": "reactions",
+                        "type": "reaction_add_failed",
                         "message": (
                             f"Failed to add reaction {emoji} to message {message_id}: {exc}"
                         ),

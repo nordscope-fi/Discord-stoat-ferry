@@ -31,9 +31,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Minimum permissions for the ferry bot to operate:
-# ManageRole(3), ViewChannel(20), ReadMessageHistory(21), SendMessage(22),
-# ManageMessages(23), SendEmbeds(26), UploadFiles(27), Masquerade(28), React(29)
-FERRY_MIN_PERMISSIONS = 1_071_644_680
+# ManageRole(3), ManageCustomisation(4), ViewChannel(20), ReadMessageHistory(21),
+# SendMessage(22), ManageMessages(23), SendEmbeds(26), UploadFiles(27), Masquerade(28), React(29)
+FERRY_MIN_PERMISSIONS = (
+    8  # ManageRole (3)
+    | 16  # ManageCustomisation (4)
+    | 1_048_576  # ViewChannel (20)
+    | 2_097_152  # ReadMessageHistory (21)
+    | 4_194_304  # SendMessage (22)
+    | 8_388_608  # ManageMessages (23)
+    | 67_108_864  # SendEmbeds (26)
+    | 134_217_728  # UploadFiles (27)
+    | 268_435_456  # Masquerade (28)
+    | 536_870_912  # React (29)
+)  # == 1_022_361_624
 
 
 def make_unique_channel_name(name: str, existing_names: set[str]) -> str:
@@ -153,7 +164,11 @@ async def run_server(
                         )
                     except Exception as exc:  # noqa: BLE001
                         state.warnings.append(
-                            {"phase": "server", "message": f"Icon upload failed: {exc}"}
+                            {
+                                "phase": "server",
+                                "type": "icon_upload_failed",
+                                "message": f"Icon upload failed: {exc}",
+                            }
                         )
                         on_event(
                             MigrationEvent(
@@ -183,6 +198,7 @@ async def run_server(
             state.warnings.append(
                 {
                     "phase": "server",
+                    "type": "permission_bootstrap",
                     "message": (
                         f"Could not set server permissions: {exc}. "
                         "Masquerade colours require ManageRole (bit 3). "
@@ -272,6 +288,7 @@ async def run_roles(
                     state.warnings.append(
                         {
                             "phase": "roles",
+                            "type": "role_colour_failed",
                             "message": f"Failed to set colour for role '{role.name}': {exc}",
                         }
                     )
@@ -306,6 +323,7 @@ async def run_roles(
                 state.warnings.append(
                     {
                         "phase": "roles",
+                        "type": "role_rank_failed",
                         "message": (f"Failed to set rank for role '{role.name}': {exc}"),
                     }
                 )
@@ -477,6 +495,7 @@ async def run_channels(
         state.warnings.append(
             {
                 "phase": "channels",
+                "type": "channel_limit",
                 "message": (
                     f"Dropped {overflow} channel(s) exceeding {config.max_channels} limit: "
                     f"{', '.join(dropped_names)}"
@@ -549,6 +568,7 @@ async def run_channels(
                     state.warnings.append(
                         {
                             "phase": "channels",
+                            "type": "voice_channel_bug",
                             "message": (
                                 f"Voice channel '{unique_name}' failed, retrying as text: {exc}"
                             ),

@@ -114,6 +114,7 @@ async def run_messages(
                 state.warnings.append(
                     {
                         "phase": "messages",
+                        "type": "channel_not_mapped",
                         "message": (
                             f"Channel {export.channel.id} ({export.channel.name!r}) "
                             "not found in channel_map — skipping."
@@ -153,7 +154,10 @@ async def run_messages(
 
             # Inject a system header for flattened threads/forum posts.
             if export.is_thread and export.parent_channel_name:
-                header = f"[Thread migrated from #{export.parent_channel_name}]"
+                if export.channel.type in (15, 16):
+                    header = f"[Forum post migrated from #{export.parent_channel_name}]"
+                else:
+                    header = f"[Thread migrated from #{export.parent_channel_name}]"
                 try:
                     await api_send_message(
                         session,
@@ -168,6 +172,7 @@ async def run_messages(
                     state.warnings.append(
                         {
                             "phase": "messages",
+                            "type": "thread_header_failed",
                             "message": (f"Thread header for {export.channel.name!r} failed: {exc}"),
                         }
                     )
@@ -276,6 +281,7 @@ async def _process_message(
                 state.warnings.append(
                     {
                         "phase": "messages",
+                        "type": "pin_reference_missing",
                         "message": (
                             f"ChannelPinnedMessage {msg.id} references unknown message "
                             f"{msg.reference.message_id}"
@@ -295,6 +301,7 @@ async def _process_message(
         state.warnings.append(
             {
                 "phase": "messages",
+                "type": "forwarded_message",
                 "message": f"Forwarded message {msg.id} skipped (DCE limitation).",
             }
         )
@@ -331,6 +338,7 @@ async def _process_message(
             state.warnings.append(
                 {
                     "phase": "messages",
+                    "type": "sticker_upload_failed",
                     "message": f"Sticker upload failed for msg {msg.id}: {exc}",
                 }
             )
@@ -364,6 +372,7 @@ async def _process_message(
                     state.warnings.append(
                         {
                             "phase": "messages",
+                            "type": "embed_media_failed",
                             "message": f"Embed media upload failed for msg {msg.id}: {exc}",
                         }
                     )
@@ -426,7 +435,13 @@ async def _process_message(
                 )
 
     except Exception as exc:  # noqa: BLE001
-        state.errors.append({"phase": "messages", "message": f"Failed to send msg {msg.id}: {exc}"})
+        state.errors.append(
+            {
+                "phase": "messages",
+                "type": "message_send_failed",
+                "message": f"Failed to send msg {msg.id}: {exc}",
+            }
+        )
         on_event(
             MigrationEvent(
                 phase="messages",
@@ -528,6 +543,7 @@ async def _upload_attachments(
             state.warnings.append(
                 {
                     "phase": "messages",
+                    "type": "missing_media",
                     "message": (
                         f"Attachment {att.id!r} ({att.file_name!r}) not found locally — skipped."
                     ),
@@ -559,6 +575,7 @@ async def _upload_attachments(
             state.warnings.append(
                 {
                     "phase": "messages",
+                    "type": "attachment_upload_failed",
                     "message": f"Attachment {att.file_name!r} upload failed: {exc}",
                 }
             )

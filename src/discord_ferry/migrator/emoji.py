@@ -97,6 +97,7 @@ async def run_emoji(
         state.warnings.append(
             {
                 "phase": "emoji",
+                "type": "emoji_limit",
                 "message": (
                     f"Found {len(emoji_list)} unique emoji; truncating to {config.max_emoji} "
                     f"(Stoat server limit)."
@@ -163,7 +164,11 @@ async def run_emoji(
             if not image_url or image_url.startswith("http"):
                 reason = "no local image path" if not image_url else "URL not downloaded"
                 state.warnings.append(
-                    {"phase": "emoji", "message": f"Skipping emoji :{name}: — {reason}"}
+                    {
+                        "phase": "emoji",
+                        "type": "missing_media",
+                        "message": f"Skipping emoji :{name}: — {reason}",
+                    }
                 )
                 on_event(
                     MigrationEvent(
@@ -181,6 +186,7 @@ async def run_emoji(
                 state.warnings.append(
                     {
                         "phase": "emoji",
+                        "type": "missing_media",
                         "message": f"Skipping emoji :{name}: — file not found: {file_path}",
                     }
                 )
@@ -220,6 +226,7 @@ async def run_emoji(
                     state.warnings.append(
                         {
                             "phase": "emoji",
+                            "type": "animated_emoji",
                             "message": (
                                 f"Emoji :{name}: is animated — animation will be lost on Stoat"
                             ),
@@ -246,7 +253,11 @@ async def run_emoji(
                 )
             except Exception as exc:  # noqa: BLE001
                 state.errors.append(
-                    {"phase": "emoji", "message": f"Failed to create emoji :{name}: — {exc}"}
+                    {
+                        "phase": "emoji",
+                        "type": "emoji_create_failed",
+                        "message": f"Failed to create emoji :{name}: — {exc}",
+                    }
                 )
                 on_event(
                     MigrationEvent(
