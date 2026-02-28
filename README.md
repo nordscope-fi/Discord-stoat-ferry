@@ -5,19 +5,15 @@
 > One-click app for Windows and Mac. CLI for Linux.
 > No coding required. Your data stays on your machine.
 
-<!-- TODO: Add screenshots of validate + migrate screens before v1.0 release -->
-
 ---
 
 ## Download
 
 | Platform | Download | Size |
 |----------|----------|------|
-| **Windows** | Ferry.exe (v0.9.0) | ~25 MB |
-| **macOS** | Ferry.dmg (v0.9.0) | ~25 MB |
+| **Windows** | [Ferry.exe](https://github.com/psthubhorizon/Discord-stoat-ferry/releases/latest/download/Ferry-windows-x86_64.exe) | ~25 MB |
+| **macOS** | [Ferry.zip](https://github.com/psthubhorizon/Discord-stoat-ferry/releases/latest/download/Ferry-macos-arm64.zip) | ~25 MB |
 | **Linux / pip** | `pipx install discord-ferry` | — |
-
-> Download links activate with the first GitHub Release.
 
 ---
 
@@ -31,13 +27,11 @@ Use DiscordChatExporter to save your server locally.
 ### Step 2: Open Ferry and connect to your Stoat instance
 
 Point Ferry at your export folder, enter your Stoat URL and token.
-<!-- TODO: Add screenshot before v1.0 release -->
 
 ### Step 3: Click Migrate
 
 Your messages, channels, roles, emoji and attachments migrate to Stoat.
 Original authors show up via masquerade. Pins are preserved.
-<!-- TODO: Add screenshot before v1.0 release -->
 
 ---
 
@@ -65,11 +59,13 @@ Ferry can **pause and resume** — close it anytime, pick up where you left off.
 | Pinned messages | Supported |
 | Replies | Supported |
 | Reactions | Supported (without per-user attribution) |
-| Threads | Supported (as text channels) |
-| Forum posts | Supported (as text channels) |
-| Voice channels | Partial (created but may not work — Stoat bug) |
-| Stickers | Info only (shown as text placeholder) |
-| Original timestamps | Info only (shown in message text, not metadata) |
+| Embeds (with media) | Supported (thumbnails and images uploaded) |
+| Polls | Supported (rendered as formatted text) |
+| Threads | Supported (converted to text channels) |
+| Forum posts | Supported (grouped into dedicated categories) |
+| Voice channels | Partial (created but may not function — Stoat bug) |
+| Stickers | Image upload with text fallback for Lottie/missing |
+| Original timestamps | Shown in message text, not metadata |
 
 ---
 
@@ -81,6 +77,7 @@ Ferry can **pause and resume** — close it anytime, pick up where you left off.
 - [GUI guide (every screen explained)](docs/guides/gui-walkthrough.md)
 - [CLI reference](docs/guides/cli-reference.md)
 - [Migrating large servers (100k+ messages)](docs/guides/large-servers.md)
+- [Self-hosted tips](docs/guides/self-hosted-tips.md)
 - [Troubleshooting](docs/guides/troubleshooting.md)
 
 ---
