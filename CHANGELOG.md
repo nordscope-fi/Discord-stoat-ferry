@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [0.10.0] — 2026-02-28
+## [1.0.0] — 2026-02-28
+
+First stable release. All 11 migration phases implemented with 298 passing tests.
 
 ### Added
 
@@ -20,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **`skip_threads` GUI checkbox**: Exposed in Advanced Options alongside existing skip toggles
 - **`attachments_uploaded` counter**: Accurate attachment count in state and reports (replaces deduplicated cache length)
 - **GitHub Actions docs workflow**: `docs.yml` builds and deploys MkDocs Material site to GitHub Pages on push to main
+- **SVG project logo** and asset build instructions for platform icons
 - **12 new tests** covering polls, stickers, embeds, forum categories, role rank, permission pre-check — 298 total passing
 
 ### Fixed
@@ -30,13 +33,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **`ConnectionError` shadowing**: Renamed to `StoatConnectionError` to avoid shadowing Python builtin
 - **GUI resume race condition**: Migration start gated behind `asyncio.Event` until user clicks Resume or Start Fresh
 - **Embed/sticker upload errors logged**: Failures now recorded as warnings instead of silently swallowed
-
-## [Unreleased-content]
-
-### Fixed
-
+- **Version mismatch**: `__init__.py` (0.9.0) and `pyproject.toml` (0.10.0) now aligned to 1.0.0
 - **Docs quality pass**: ~30 fixes across all 13 documentation pages — wrong port number, stale stoat-py code examples, missing v0.9.0 flags (--dry-run, --max-channels, --max-emoji), incorrect "Skip threads in GUI" claims, placeholder GitHub URLs, wrong report format, stale resume instructions, inaccurate MigrationEvent/MigrationState descriptions
 - **GUI placeholder URL**: Changed `api.revolt.chat` to `api.stoat.chat` in the Stoat API URL input field
+
+### Changed
+
+- **README**: Download links use GitHub Releases `/latest/` pattern, feature table synced with docs, self-hosted tips link added
+- **Classifier**: Updated from Beta to Production/Stable
 
 ## [0.9.0] — 2026-02-27
 
@@ -81,11 +85,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - Updated `.claude/rules/dce-format.md` to reflect actual `GuildMemberJoin` (skip) and `ThreadCreated` (skip, header injected instead) behavior
-
-## [Unreleased-content]
-
-### Added
-
 - **CI pipeline** (`.github/workflows/ci.yml`): lint + type check + test on push/PR with Python 3.10–3.13 matrix via uv, concurrency groups to cancel stale runs
 - **Release pipeline** (`.github/workflows/release.yml`): tag-triggered PyInstaller builds for Windows (.exe) and macOS (.app), GitHub Release with attached binaries, PyPI publish via OIDC trusted publisher
 - **PyInstaller spec** (`ferry.spec`): NiceGUI asset collection, pywebview native mode support, dynamic version from `__init__.py`, platform-specific icon fallback
