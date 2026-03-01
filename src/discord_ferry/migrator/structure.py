@@ -19,6 +19,8 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_server,
     api_fetch_server,
+    api_set_channel_default_permissions,
+    api_set_channel_role_permissions,
     api_set_role_permissions,
     api_set_server_default_permissions,
     get_session,
@@ -480,6 +482,8 @@ async def run_channels(
     Raises:
         MigrationError: If any API call fails unrecoverably.
     """
+    discord_metadata = load_discord_metadata(config.output_dir)
+
     # Deduplicate exports by channel ID and skip category channels (type 4).
     seen_channel_ids: set[str] = set()
     # Each entry: (channel, stoat_type, unique_name, effective_category_id, is_thread)
@@ -611,6 +615,9 @@ async def run_channels(
             ch: DCEChannel = channel
             description = ch.topic if ch.topic else None
 
+            ch_meta = discord_metadata.channel_metadata.get(ch.id) if discord_metadata else None
+            nsfw = ch_meta.nsfw if ch_meta else False
+
             stoat_channel_id: str
             try:
                 result = await api_create_channel(
@@ -621,6 +628,7 @@ async def run_channels(
                     name=unique_name,
                     channel_type=stoat_type,
                     description=description,
+                    nsfw=nsfw,
                 )
                 stoat_channel_id = result["_id"]
             except MigrationError as exc:
@@ -650,12 +658,57 @@ async def run_channels(
                         name=unique_name,
                         channel_type="Text",
                         description=description,
+                        nsfw=nsfw,
                     )
                     stoat_channel_id = result["_id"]
                 else:
                     raise
 
             state.channel_map[ch.id] = stoat_channel_id
+
+            # Apply channel permission overrides from Discord metadata.
+            if ch_meta and not config.dry_run:
+                if ch_meta.default_override:
+                    try:
+                        await api_set_channel_default_permissions(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            stoat_channel_id,
+                            allow=ch_meta.default_override.allow,
+                            deny=ch_meta.default_override.deny,
+                        )
+                        await asyncio.sleep(config.upload_delay)
+                    except Exception as exc:  # noqa: BLE001
+                        state.warnings.append(
+                            {
+                                "phase": "channels",
+                                "type": "channel_default_perm_failed",
+                                "message": f"Default override for '{unique_name}': {exc}",
+                            }
+                        )
+                for ow in ch_meta.role_overrides:
+                    stoat_role_id = state.role_map.get(ow.discord_role_id)
+                    if stoat_role_id:
+                        try:
+                            await api_set_channel_role_permissions(
+                                session,
+                                config.stoat_url,
+                                config.token,
+                                stoat_channel_id,
+                                stoat_role_id,
+                                allow=ow.allow,
+                                deny=ow.deny,
+                            )
+                            await asyncio.sleep(config.upload_delay)
+                        except Exception as exc:  # noqa: BLE001
+                            state.warnings.append(
+                                {
+                                    "phase": "channels",
+                                    "type": "channel_role_perm_failed",
+                                    "message": f"Role override for '{unique_name}': {exc}",
+                                }
+                            )
 
             # Track which Stoat category this channel belongs to.
             if discord_cat_id and discord_cat_id in state.category_map:

@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.discord.metadata import DiscordMetadata, PermissionPair, save_discord_metadata
+from discord_ferry.discord.metadata import (
+    ChannelMeta,
+    DiscordMetadata,
+    PermissionPair,
+    RoleOverride,
+    save_discord_metadata,
+)
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     make_unique_channel_name,
@@ -528,6 +534,177 @@ async def test_run_channels_voice_fallback_to_text(tmp_path: Path) -> None:
     assert state.channel_map["vc1"] == "stoat-vc1"
     statuses = [e.status for e in events]
     assert "warning" in statuses
+
+
+async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
+    """CHANNELS phase passes nsfw=True from Discord metadata."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "ch1": ChannelMeta(nsfw=True),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [_make_export(channel_id="ch1", channel_name="nsfw-ch", category_id="")]
+
+    created_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "nsfw-ch"},
+            callback=lambda url, **kwargs: created_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(created_bodies) == 1
+    assert created_bodies[0].get("nsfw") is True
+
+
+async def test_run_channels_applies_channel_permission_overrides(tmp_path: Path) -> None:
+    """CHANNELS phase applies role permission overrides via PUT after channel creation."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        role_map={"discord-role1": "stoat-role1"},
+    )
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "ch1": ChannelMeta(
+                nsfw=False,
+                role_overrides=[
+                    RoleOverride(discord_role_id="discord-role1", allow=4_194_304, deny=0)
+                ],
+            ),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [_make_export(channel_id="ch1", channel_name="general", category_id="")]
+
+    perm_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "general"},
+        )
+        m.put(
+            f"{STOAT_URL}/channels/stoat-ch1/permissions/stoat-role1",
+            payload={},
+            callback=lambda url, **kwargs: perm_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(perm_bodies) == 1
+    assert perm_bodies[0] == {"permissions": {"allow": 4_194_304, "deny": 0}}
+
+
+async def test_run_channels_applies_default_override(tmp_path: Path) -> None:
+    """CHANNELS phase applies default permission override via PUT after channel creation."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "ch1": ChannelMeta(
+                nsfw=False,
+                default_override=PermissionPair(allow=2_097_152, deny=4_194_304),
+            ),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [_make_export(channel_id="ch1", channel_name="readonly", category_id="")]
+
+    default_perm_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "readonly"},
+        )
+        m.put(
+            f"{STOAT_URL}/channels/stoat-ch1/permissions/default",
+            payload={},
+            callback=lambda url, **kwargs: default_perm_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(default_perm_bodies) == 1
+    assert default_perm_bodies[0] == {"permissions": {"allow": 2_097_152, "deny": 4_194_304}}
+
+
+async def test_run_channels_override_failure_non_fatal(tmp_path: Path) -> None:
+    """CHANNELS phase logs a warning and does not raise when permission override PUT fails."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        role_map={"discord-role1": "stoat-role1"},
+    )
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "ch1": ChannelMeta(
+                nsfw=False,
+                default_override=PermissionPair(allow=0, deny=4_194_304),
+                role_overrides=[
+                    RoleOverride(discord_role_id="discord-role1", allow=4_194_304, deny=0)
+                ],
+            ),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [_make_export(channel_id="ch1", channel_name="general", category_id="")]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "general"},
+        )
+        # Both PUT calls fail.
+        m.put(f"{STOAT_URL}/channels/stoat-ch1/permissions/default", status=500)
+        m.put(f"{STOAT_URL}/channels/stoat-ch1/permissions/stoat-role1", status=500)
+
+        # Should NOT raise.
+        await run_channels(config, state, exports, events.append)
+
+    assert state.channel_map["ch1"] == "stoat-ch1"
+    default_warnings = [w for w in state.warnings if w.get("type") == "channel_default_perm_failed"]
+    role_warnings = [w for w in state.warnings if w.get("type") == "channel_role_perm_failed"]
+    assert len(default_warnings) == 1
+    assert len(role_warnings) == 1
 
 
 # ---------------------------------------------------------------------------
