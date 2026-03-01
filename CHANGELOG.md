@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove hardcoded local path from `.claude/settings.json` for open-source readiness.
+
 ## [1.2.1] — 2026-03-01
 
 ### Added
