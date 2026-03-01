@@ -327,3 +327,164 @@ async def test_export_skipped_in_offline_mode(tmp_path: Path) -> None:
     await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
     export_events = [e for e in events if e.phase == "export"]
     assert any(e.status == "skipped" for e in export_events)
+
+
+_DISCORD_API = "https://discord.com/api/v10"
+
+_MOCK_ROLES = [
+    {
+        "id": "111111111111111111",  # @everyone role (id == guild_id)
+        "name": "@everyone",
+        "permissions": "1024",
+        "position": 0,
+        "color": 0,
+        "hoist": False,
+        "managed": False,
+    },
+    {
+        "id": "222222222222222222",
+        "name": "Moderator",
+        "permissions": "2048",
+        "position": 1,
+        "color": 0xFF0000,
+        "hoist": True,
+        "managed": False,
+    },
+]
+
+_MOCK_CHANNELS = [
+    {
+        "id": "333333333333333333",
+        "name": "general",
+        "type": 0,
+        "nsfw": False,
+        "permission_overwrites": [],
+    },
+    {
+        "id": "444444444444444444",
+        "name": "nsfw-channel",
+        "type": 0,
+        "nsfw": True,
+        "permission_overwrites": [
+            {"id": "222222222222222222", "type": 0, "allow": "0", "deny": "1024"},
+        ],
+    },
+]
+
+_GUILD_ID = "111111111111111111"
+
+
+async def test_discord_metadata_fetched_when_token_provided(tmp_path: Path) -> None:
+    """When discord_token and discord_server_id are set, metadata is fetched and saved."""
+    from aioresponses import aioresponses
+
+    events: list[MigrationEvent] = []
+    config = _make_config(
+        tmp_path,
+        discord_token="test-discord-token",
+        discord_server_id=_GUILD_ID,
+    )
+
+    with aioresponses() as m:
+        m.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles",
+            payload=_MOCK_ROLES,
+        )
+        m.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels",
+            payload=_MOCK_CHANNELS,
+        )
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    assert (tmp_path / "discord_metadata.json").exists()
+    export_events = [e for e in events if e.phase == "export"]
+    assert any("metadata" in e.message.lower() for e in export_events if e.status == "progress")
+
+
+async def test_discord_metadata_skipped_when_no_token(tmp_path: Path) -> None:
+    """When discord_token is not set, no Discord API calls are made."""
+    from aioresponses import aioresponses
+
+    events: list[MigrationEvent] = []
+    # _make_config defaults have no discord_token
+    config = _make_config(tmp_path)
+
+    with aioresponses() as m:
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+        # Verify no Discord API requests were made
+        assert len(m.requests) == 0
+
+    assert not (tmp_path / "discord_metadata.json").exists()
+    export_events = [e for e in events if e.phase == "export"]
+    assert any("No Discord token" in e.message for e in export_events if e.status == "progress")
+
+
+async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
+    """On resume with existing metadata, no Discord API calls are made."""
+    from aioresponses import aioresponses
+
+    from discord_ferry.discord.metadata import (
+        ChannelMeta,
+        DiscordMetadata,
+        PermissionPair,
+        save_discord_metadata,
+    )
+    from discord_ferry.state import save_state
+
+    # Pre-create state.json (required for resume=True) and metadata file
+    prior_state = MigrationState(started_at="2024-01-01T00:00:00+00:00")
+    save_state(prior_state, tmp_path)
+
+    existing_meta = DiscordMetadata(
+        guild_id=_GUILD_ID,
+        fetched_at="2024-01-01T00:00:00+00:00",
+        server_default_permissions=1024,
+        role_permissions={"222222222222222222": PermissionPair(allow=2048, deny=0)},
+        channel_metadata={"333333333333333333": ChannelMeta(nsfw=False)},
+    )
+    save_discord_metadata(existing_meta, tmp_path)
+
+    events: list[MigrationEvent] = []
+    config = _make_config(
+        tmp_path,
+        discord_token="test-discord-token",
+        discord_server_id=_GUILD_ID,
+        resume=True,
+    )
+
+    with aioresponses() as m:
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+        # No Discord API calls should be made
+        assert len(m.requests) == 0
+
+    export_events = [e for e in events if e.phase == "export"]
+    assert any("cached" in e.message.lower() for e in export_events if e.status == "progress")
+
+
+async def test_discord_metadata_fetch_runs_with_skip_export(tmp_path: Path) -> None:
+    """Discord metadata fetch runs even when skip_export=True."""
+    from aioresponses import aioresponses
+
+    events: list[MigrationEvent] = []
+    config = _make_config(
+        tmp_path,
+        skip_export=True,
+        discord_token="test-discord-token",
+        discord_server_id=_GUILD_ID,
+    )
+
+    with aioresponses() as m:
+        m.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles",
+            payload=_MOCK_ROLES,
+        )
+        m.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels",
+            payload=_MOCK_CHANNELS,
+        )
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    assert (tmp_path / "discord_metadata.json").exists()
+    export_events = [e for e in events if e.phase == "export"]
+    assert any(e.status == "skipped" for e in export_events)
+    assert any("metadata" in e.message.lower() for e in export_events if e.status == "progress")

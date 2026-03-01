@@ -11,6 +11,11 @@ import aiohttp
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
+from discord_ferry.discord import (
+    fetch_and_translate_guild_metadata,
+    load_discord_metadata,
+    save_discord_metadata,
+)
 from discord_ferry.errors import DotNetMissingError, MigrationError
 from discord_ferry.exporter import (
     detect_dotnet,
@@ -123,6 +128,69 @@ async def run_migration(
         on_event(MigrationEvent(phase="export", status="completed", message="Export complete."))
     else:
         on_event(MigrationEvent(phase="export", status="skipped", message="Using existing exports"))
+
+    # Phase 0b: Fetch Discord guild metadata (permissions, NSFW flags)
+    # Independent of skip_export — runs whenever discord_token is available.
+    if config.discord_token and config.discord_server_id:
+        existing_meta = load_discord_metadata(config.output_dir)
+        if existing_meta and config.resume:
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message="Using cached Discord metadata (resume)",
+                )
+            )
+        else:
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message="Fetching Discord guild metadata (permissions, NSFW)...",
+                )
+            )
+            try:
+                async with aiohttp.ClientSession() as discord_session:
+                    meta = await fetch_and_translate_guild_metadata(
+                        discord_session, config.discord_token, config.discord_server_id
+                    )
+                save_discord_metadata(meta, config.output_dir)
+                role_count = len(meta.role_permissions)
+                ch_count = len(meta.channel_metadata)
+                on_event(
+                    MigrationEvent(
+                        phase="export",
+                        status="progress",
+                        message=f"Discord metadata: {role_count} roles, {ch_count} channels",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": "export",
+                        "type": "discord_metadata_fetch_failed",
+                        "message": (
+                            f"Could not fetch Discord metadata: {exc}. "
+                            "Permissions will not be migrated."
+                        ),
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="export",
+                        status="warning",
+                        message=f"Discord metadata fetch failed: {exc}. Permissions skipped.",
+                    )
+                )
+    else:
+        if not config.discord_token:
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message="No Discord token — permissions will not be migrated",
+                )
+            )
 
     # Phase 1: VALIDATE — parse exports inline
     on_event(MigrationEvent(phase="validate", status="started", message="Parsing exports..."))
