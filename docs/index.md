@@ -38,7 +38,9 @@ Ferry can **pause and resume** — close it anytime and pick up where you left o
 |---------|--------|
 | Text channels | Supported |
 | Categories | Supported |
-| Roles (with colours) | Supported |
+| Roles (with colours and permissions) | Supported — Discord permissions translated to Stoat equivalents |
+| Channel permissions | Supported — per-role and @everyone overrides migrated |
+| NSFW channels | Supported — NSFW flag set during channel creation |
 | Messages + author names | Supported (each message shows the original author's name and avatar) |
 | File attachments | Supported |
 | Custom emoji | Supported (up to 100) |
@@ -52,6 +54,8 @@ Ferry can **pause and resume** — close it anytime and pick up where you left o
 | Voice channels | Partial (created but may not function — Stoat bug) |
 | Stickers | Image upload with text fallback for Lottie/missing |
 | Original timestamps | Shown in message text, not metadata |
+| Pre-creation review | Supported — summary and confirmation before anything is created on Stoat |
+| Server blueprints | Supported — export migration structure as reusable JSON templates |
 
 ---
 
