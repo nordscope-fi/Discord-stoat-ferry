@@ -138,6 +138,43 @@ When the export completes, Ferry automatically moves to the Validate screen.
 
 ---
 
+## Review Dialog
+
+Before creating anything on Stoat, Ferry shows a confirmation dialog summarising what will be created.
+
+<!-- screenshot: review dialog showing summary table -->
+
+### What It Shows
+
+The dialog displays a summary table:
+
+| Item | Description |
+|------|-------------|
+| Roles | Number of roles to create (excluding @everyone) |
+| Categories | Number of channel categories |
+| Channels | Number of text and voice channels |
+| Custom emoji | Number of emoji to upload |
+| Messages | Total messages to migrate |
+| Threads | Number of threads/forum posts |
+
+### Warnings
+
+If potential issues are detected, they appear below the summary:
+
+- **No Discord token provided** — permissions and NSFW flags will not be migrated (these require the Discord API)
+- **Channel limit may be exceeded** — combined channel and thread count is close to or over 200
+- **Emoji limit may be exceeded** — more than 100 custom emoji detected
+
+### Actions
+
+- **Proceed** — start creating the server on Stoat
+- **Cancel** — return to the Validate screen without creating anything
+
+!!! info "Why review before creating?"
+    Server creation on Stoat is not easily undone. The review step lets you verify the scope of the migration before any API calls are made. This is especially useful for large servers where mistakes are costly.
+
+---
+
 ## Migrate Screen
 
 The main migration screen. Ferry works through 12 sequential phases.
@@ -152,14 +189,14 @@ The 12 phases are shown in order, with a checkmark as each completes:
 2. **Validate** — confirm export is readable
 3. **Connect** — verify Stoat credentials
 4. **Server** — create or connect to the target server
-5. **Roles** — create all server roles
+5. **Roles** — create all server roles, then apply Discord permissions (translated to Stoat equivalents)
 6. **Categories** — create channel categories
-7. **Channels** — create all channels
+7. **Channels** — create all channels with NSFW flags, then apply per-channel permission overrides
 8. **Emoji** — upload custom emoji
 9. **Messages** — send all messages
 10. **Reactions** — add message reactions
 11. **Pins** — pin messages
-12. **Report** — write summary report
+12. **Report** — write summary report with post-migration checklist
 
 ### Progress Bar
 

@@ -9,7 +9,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has two top-level commands: `migrate` and `validate`.
+Ferry has four top-level commands: `migrate`, `validate`, `build`, and `export-blueprint`.
 
 ---
 
@@ -188,3 +188,75 @@ ferry migrate --export-dir ~/exports/my-discord-server/ \
 
 !!! info "Verbose mode"
     Add `-v` or `--verbose` to any `migrate` command to see a line of output for every message sent. This is useful for diagnosing problems but produces a large amount of output for large servers.
+
+---
+
+## `ferry build`
+
+Create a new Stoat server from a preset template or a custom blueprint file.
+
+```
+ferry build [OPTIONS]
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--template TEXT` | Use a preset template: `gaming`, `community`, or `education` |
+| `--blueprint PATH` | Path to a custom blueprint JSON file |
+| `--stoat-url TEXT` | Stoat API base URL *(required)* |
+| `--token TEXT` | Your Stoat user token *(required)* |
+| `--name TEXT` | Override the server name from the template/blueprint |
+
+You must provide either `--template` or `--blueprint`, but not both.
+
+### Preset Templates
+
+Ferry includes three built-in server templates:
+
+- **gaming** — Admin, Moderator, and Member roles with General, Voice, and Gaming categories
+- **community** — Admin, Moderator, Helper, and Member roles with Welcome, General, and Voice categories
+- **education** — Instructor, TA, and Student roles with Announcements, Coursework, and Discussion categories
+
+Each template includes appropriate role permissions and channel structures.
+
+**Examples:**
+
+```bash
+# Create a gaming server from a preset template
+ferry build --template gaming --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+
+# Create from a custom blueprint with a custom name
+ferry build --blueprint my-server.json --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN" --name "My Server"
+```
+
+---
+
+## `ferry export-blueprint`
+
+Convert a DiscordChatExporter export directory into a reusable server blueprint JSON file. The blueprint captures server structure (roles, categories, channels) but not messages.
+
+```
+ferry export-blueprint [OPTIONS]
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--from PATH` | Path to DCE export directory *(required)* |
+| `--output PATH` | Output path for the blueprint JSON file (default: `blueprint.json`) |
+
+**Example:**
+
+```bash
+# Export a blueprint from an existing DCE export
+ferry export-blueprint --from ~/exports/my-discord-server/ --output my-server-blueprint.json
+
+# Then use it to create a new server
+ferry build --blueprint my-server-blueprint.json --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+```
+
+!!! tip "Blueprints use names, not IDs"
+    Blueprints store role and channel names rather than Discord IDs, making them portable across different Stoat instances.

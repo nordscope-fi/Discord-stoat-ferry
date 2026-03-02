@@ -184,11 +184,28 @@ Ferry checks your export files locally before making any API calls. Nothing is s
 
 ---
 
+## Step 3.5: Review what will be created
+
+Before creating anything on Stoat, Ferry shows a review summary.
+
+=== "GUI (Windows / macOS)"
+
+    A dialog appears showing how many roles, categories, channels, emoji, and messages will be migrated. Review the numbers and any warnings, then click **Proceed** to continue or **Cancel** to go back.
+
+=== "CLI (Linux / advanced)"
+
+    The CLI prints a summary table before proceeding. In orchestrated mode this happens automatically; in offline mode it appears after validation.
+
+!!! info "Permission migration"
+    When you provide a Discord token (1-Click mode), Ferry fetches role permissions and channel overrides directly from the Discord API and translates them to Stoat equivalents. In offline mode (no Discord token), roles are created without permissions — you will need to set them manually on Stoat.
+
+---
+
 ## Step 4: Start the migration
 
 === "GUI (Windows / macOS)"
 
-    1. Click **Start Migration**.
+    1. Click **Proceed** on the review dialog (or **Start Migration** if review was skipped).
     2. The Progress screen appears and shows:
         - Phase indicator — 12 phases, each with a checkmark when complete
         - Progress bar during the message import phase
@@ -244,8 +261,10 @@ Ferry checks your export files locally before making any API calls. Nothing is s
 After a successful migration:
 
 - All channels and categories are created in the same structure as Discord
+- NSFW channels are correctly flagged
+- Channel permission overrides (@everyone and per-role) are applied
 - Forum posts are grouped into dedicated categories named after the parent forum
-- Roles are recreated with colours and rank ordering preserved
+- Roles are recreated with colours, rank ordering, and permissions preserved
 - Messages appear under the original author's name and avatar, so conversations look natural
 - Original timestamps appear at the start of each message: `*[2024-01-15 14:30 UTC]*`
 - Embeds are preserved with uploaded thumbnails and images

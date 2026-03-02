@@ -57,14 +57,14 @@ and resumed, a completed phase is skipped entirely.
 | 1 | **VALIDATE** | Parse all DCE JSON files, verify media was downloaded, detect format issues |
 | 2 | **CONNECT** | Test Stoat API credentials, resolve Autumn upload URL, verify server accessibility (if using `--server-id`) |
 | 3 | **SERVER** | Create a new Stoat server or attach to an existing one |
-| 4 | **ROLES** | Create roles with colours (British spelling), then set rank ordering from Discord position data |
+| 4 | **ROLES** | Create roles with colours (British spelling), set rank ordering from Discord position data, then apply Discord permissions translated to Stoat equivalents (if Discord metadata is available) |
 | 5 | **CATEGORIES** | Create category structure on the server |
-| 6 | **CHANNELS** | Create channels, assign to categories, flatten threads to text channels, group forum threads into dedicated categories |
+| 6 | **CHANNELS** | Create channels with NSFW flags, assign to categories, flatten threads to text channels, group forum threads into dedicated categories, then apply per-channel permission overrides |
 | 7 | **EMOJI** | Download Discord emoji, upload to Autumn, register on Stoat server |
 | 8 | **MESSAGES** | Import messages with masquerade, attachments, embeds (with media), stickers, polls, mention remapping, and reply threading |
 | 9 | **REACTIONS** | Re-apply emoji reactions to migrated messages |
 | 10 | **PINS** | Re-pin messages that were pinned in Discord |
-| 11 | **REPORT** | Write a markdown migration report summarising counts, skips, and errors |
+| 11 | **REPORT** | Write a migration report summarising counts, skips, errors, and a post-migration checklist |
 
 !!! note "Phase ordering"
     Phases cannot be reordered. Each phase depends on ID mappings produced by earlier phases.
@@ -117,6 +117,7 @@ finer-grained resume; messages already sent are deduplicated via the `nonce` fie
 | Path | Purpose |
 |------|---------|
 | `src/discord_ferry/core/` | Engine (`engine.py`) and event system (`events.py`) |
+| `src/discord_ferry/discord/` | Discord REST API client, permission bit translator, and metadata persistence |
 | `src/discord_ferry/exporter/` | DCE binary management and subprocess execution (orchestrated mode) |
 | `src/discord_ferry/parser/` | DCE JSON parsing and data model dataclasses |
 | `src/discord_ferry/uploader/` | Autumn file upload client with caching |
@@ -125,9 +126,12 @@ finer-grained resume; messages already sent are deduplicated via the `nonce` fie
 | `src/discord_ferry/config.py` | `FerryConfig` dataclass — all user-supplied settings |
 | `src/discord_ferry/errors.py` | Custom exception hierarchy |
 | `src/discord_ferry/parser/transforms.py` | Mention/emoji remapping, embed flattening, poll/sticker rendering |
-| `src/discord_ferry/reporter.py` | Migration report generation |
+| `src/discord_ferry/reporter.py` | Migration report generation with post-migration checklist |
+| `src/discord_ferry/review.py` | Pre-creation review summary builder |
+| `src/discord_ferry/blueprint.py` | Server blueprint export/import (JSON) |
+| `src/discord_ferry/templates/` | Preset server templates (gaming, community, education) |
 | `src/discord_ferry/gui.py` | NiceGUI shell — 4-screen workflow (Setup, Export, Validate, Migrate) |
-| `src/discord_ferry/cli.py` | Click shell — `migrate` and `validate` commands |
+| `src/discord_ferry/cli.py` | Click shell — `migrate`, `validate`, `build`, and `export-blueprint` commands |
 
 The `exporter/` module has the following structure:
 
@@ -138,6 +142,22 @@ src/discord_ferry/exporter/
 └── runner.py      # Async subprocess execution and progress parsing
 ```
 
+The `discord/` module handles Discord REST API access for permission migration:
+
+```
+src/discord_ferry/discord/
+├── __init__.py       # fetch_and_translate_guild_metadata() orchestration
+├── client.py         # Async HTTP client for Discord API v10
+├── models.py         # DiscordRole, DiscordChannel, PermissionOverwrite dataclasses
+├── metadata.py       # DiscordMetadata persistence (discord_metadata.json)
+└── permissions.py    # Discord → Stoat permission bit translation
+```
+
+The `discord/` module is only active when a Discord token is available. It fetches guild
+roles and channels from the Discord REST API, translates permission bitfields to Stoat
+equivalents, and persists the results to `discord_metadata.json`. This file is read by
+the ROLES and CHANNELS phases to apply permissions during migration.
+
 ---
 
 ## Data Flow Summary
@@ -145,14 +165,18 @@ src/discord_ferry/exporter/
 ```
 Discord API (orchestrated mode only)
       │
-      ▼
-  exporter/        Download DCE binary → run export → produce DCE JSON files
+      ├── exporter/    Download DCE binary → run export → produce DCE JSON files
+      │
+      └── discord/     Fetch guild roles + channels → translate permissions → save metadata
       │
       ▼
-DCE JSON files
+DCE JSON files + discord_metadata.json
       │
       ▼
   parser/          Parse JSON → typed dataclasses (Channel, Message, Attachment, …)
+      │
+      ▼
+  review.py        Build pre-creation summary → show confirmation dialog/table
       │
       ▼
   engine.py        Orchestrate phases, maintain MigrationState
@@ -160,10 +184,12 @@ DCE JSON files
       ├── uploader/    Download Discord media → upload to Autumn → return CDN URLs
       │
       ├── migrator/    Phase implementations — call migrator/api.py, emit MigrationEvents
+      │                (ROLES and CHANNELS phases read discord_metadata.json for permissions)
       │
       └── state.py     Persist ID mappings after each phase
 ```
 
-The exporter is only active in orchestrated mode; offline mode starts directly at the parser step.
-The parser is pure (no I/O beyond reading files). The uploader is the only component that talks to
-Autumn. The migrator modules are the only components that talk to the Stoat API.
+The exporter and discord modules are only active when a Discord token is provided; offline mode
+starts directly at the parser step and skips permission migration. The parser is pure (no I/O
+beyond reading files). The uploader is the only component that talks to Autumn. The migrator
+modules are the only components that talk to the Stoat API.
