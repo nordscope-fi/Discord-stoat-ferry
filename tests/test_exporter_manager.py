@@ -167,7 +167,7 @@ class TestDownloadDceRetry:
         events = []
         dce_zip = _make_dce_zip()
         release_url = (
-            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/v{DCE_VERSION}"
+            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
         )
 
         with (
@@ -210,7 +210,7 @@ class TestDownloadDceRetry:
 
         events = []
         release_url = (
-            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/v{DCE_VERSION}"
+            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
         )
 
         with (
