@@ -13,7 +13,7 @@
 |----------|----------|------|
 | **Windows** | [Ferry.exe](https://github.com/psthubhorizon/Discord-stoat-ferry/releases/latest/download/Ferry-windows-x86_64.exe) | ~25 MB |
 | **macOS** | [Ferry.zip](https://github.com/psthubhorizon/Discord-stoat-ferry/releases/latest/download/Ferry-macos-arm64.zip) | ~25 MB |
-| **Linux / pip** | `pipx install discord-ferry` | — |
+| **Linux / pip** | `pipx install discord-ferry` | ~2 MB |
 
 ---
 
