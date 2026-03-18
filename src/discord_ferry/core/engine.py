@@ -34,7 +34,7 @@ from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import run_categories, run_channels, run_roles, run_server
 from discord_ferry.parser.dce_parser import parse_export_directory, stream_messages, validate_export
 from discord_ferry.parser.models import DCEExport, DCEMessage
-from discord_ferry.reporter import generate_report
+from discord_ferry.reporter import generate_markdown_report, generate_report
 from discord_ferry.review import build_review_summary
 from discord_ferry.state import FailedMessage, MigrationState, load_state, save_state
 
@@ -320,6 +320,7 @@ async def run_migration(
     on_event(MigrationEvent(phase="report", status="started", message="Generating report..."))
     state.completed_at = datetime.now(timezone.utc).isoformat()
     generate_report(config, state, exports)
+    generate_markdown_report(config, state, exports)
     save_state(state, config.output_dir)
     on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
 

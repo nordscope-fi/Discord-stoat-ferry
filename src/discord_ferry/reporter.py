@@ -223,6 +223,56 @@ def _calculate_duration(started_at: str, completed_at: str) -> float:
         return 0
 
 
+def generate_markdown_report(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+) -> None:
+    """Generate a human-readable markdown migration report.
+
+    Args:
+        config: Ferry configuration, used for output_dir.
+        state: Current migration state with all ID maps and logs.
+        exports: List of parsed DCE exports (unused but kept for signature parity).
+    """
+    lines: list[str] = []
+    lines.append("# Migration Report\n")
+    lines.append(f"**Started:** {state.started_at}")
+    lines.append(f"**Completed:** {state.completed_at}\n")
+
+    lines.append("## Summary\n")
+    lines.append("| Metric | Count |")
+    lines.append("|--------|-------|")
+    lines.append(f"| Channels created | {len(state.channel_map)} |")
+    lines.append(f"| Roles created | {len(state.role_map)} |")
+    lines.append(f"| Emoji created | {len(state.emoji_map)} |")
+    lines.append(f"| Messages imported | {len(state.message_map)} |")
+    lines.append(f"| Messages failed | {len(state.failed_messages)} |")
+    lines.append(f"| Attachments uploaded | {state.attachments_uploaded} |")
+    lines.append(f"| Attachments skipped | {state.attachments_skipped} |")
+    lines.append(f"| Reactions applied | {state.reactions_applied} |")
+    lines.append(f"| Pins restored | {state.pins_applied} |")
+    lines.append("")
+
+    lines.append("## Errors\n")
+    if state.failed_messages:
+        for fm in state.failed_messages:
+            lines.append(f"- Message `{fm.discord_msg_id}`: {fm.error}")
+    else:
+        lines.append("No errors.\n")
+
+    lines.append("\n## Warnings\n")
+    if state.warnings:
+        for w in state.warnings:
+            lines.append(f"- [{w.get('type', 'unknown')}] {w.get('message', '')}")
+    else:
+        lines.append("No warnings.\n")
+
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = config.output_dir / "migration_report.md"
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _write_report(output_dir: Path, report: dict[str, object]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "migration_report.json"

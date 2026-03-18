@@ -10,7 +10,7 @@ from discord_ferry.discord.metadata import (
     save_discord_metadata,
 )
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
-from discord_ferry.reporter import generate_report
+from discord_ferry.reporter import generate_markdown_report, generate_report
 from discord_ferry.state import FailedMessage, MigrationState
 
 
@@ -549,3 +549,70 @@ def test_report_no_validation_when_empty(tmp_path: Path) -> None:
     report = generate_report(config, state, exports)
 
     assert "validation" not in report
+
+
+# ---------------------------------------------------------------------------
+# Markdown migration report (S6)
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_report_file_created(tmp_path: Path) -> None:
+    """generate_markdown_report writes migration_report.md to output_dir."""
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    exports = [_make_export()]
+
+    generate_markdown_report(config, state, exports)
+
+    assert (tmp_path / "migration_report.md").exists()
+
+
+def test_markdown_report_contains_summary(tmp_path: Path) -> None:
+    """Markdown report contains key summary table rows."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        channel_map={"d1": "s1", "d2": "s2"},
+        message_map={"m1": "sm1"},
+    )
+    exports = [_make_export()]
+
+    generate_markdown_report(config, state, exports)
+
+    content = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "Channels created" in content
+    assert "Messages imported" in content
+    assert "| 2 |" in content  # 2 channels
+    assert "| 1 |" in content  # 1 message
+
+
+def test_markdown_report_lists_failed_messages(tmp_path: Path) -> None:
+    """Markdown report lists each failed message ID and error."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        failed_messages=[
+            FailedMessage(discord_msg_id="msg_aaa", stoat_channel_id="ch1", error="Timeout"),
+            FailedMessage(discord_msg_id="msg_bbb", stoat_channel_id="ch2", error="Rate limited"),
+        ],
+    )
+    exports = [_make_export()]
+
+    generate_markdown_report(config, state, exports)
+
+    content = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "msg_aaa" in content
+    assert "msg_bbb" in content
+    assert "Timeout" in content
+    assert "Rate limited" in content
+
+
+def test_markdown_report_empty_state(tmp_path: Path) -> None:
+    """Markdown report handles empty state gracefully with 'No errors.' text."""
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    exports = [_make_export()]
+
+    generate_markdown_report(config, state, exports)
+
+    content = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "No errors." in content
+    assert "No warnings." in content
