@@ -18,6 +18,8 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_server,
     api_fetch_server,
+    api_pin_message,
+    api_send_message,
     api_set_channel_default_permissions,
     api_set_channel_role_permissions,
     api_set_role_permissions,
@@ -618,19 +620,23 @@ async def run_channels(
             (channel, stoat_type, unique_name, effective_cat_id, export.is_thread)
         )
 
-    if len(channels_to_create) > config.max_channels:
-        overflow = len(channels_to_create) - config.max_channels
+    # Reserve channel slots for forum index channels (one per forum category).
+    index_channel_slots = len(forum_categories) if forum_categories else 0
+    effective_max = config.max_channels - index_channel_slots
+
+    if len(channels_to_create) > effective_max:
+        overflow = len(channels_to_create) - effective_max
         # Sort so threads come last, then truncate — preserves main channels.
         channels_to_create.sort(key=lambda t: t[4])  # False (main) before True (thread)
-        dropped = channels_to_create[config.max_channels :]
-        channels_to_create = channels_to_create[: config.max_channels]
+        dropped = channels_to_create[effective_max:]
+        channels_to_create = channels_to_create[:effective_max]
         dropped_names = [entry[2] for entry in dropped]
         on_event(
             MigrationEvent(
                 phase="channels",
                 status="warning",
                 message=(
-                    f"Total channels ({config.max_channels + overflow}) exceeds Stoat limit "
+                    f"Total channels ({effective_max + overflow}) exceeds Stoat limit "
                     f"of {config.max_channels}. Dropped {overflow} channel(s): "
                     f"{', '.join(dropped_names[:10])}"
                     f"{'...' if len(dropped_names) > 10 else ''}"
@@ -678,6 +684,10 @@ async def run_channels(
 
     # stoat_category_id -> list of stoat_channel_ids (built during creation).
     category_channels: dict[str, list[str]] = {}
+    # Build an export lookup so we can retrieve message_count for forum posts.
+    export_by_channel: dict[str, DCEExport] = {exp.channel.id: exp for exp in exports}
+    # forum_cat_key -> list of (stoat_channel_id, unique_name, message_count)
+    forum_channel_info: dict[str, list[tuple[str, str, int]]] = {}
 
     async with get_session(config) as session:
         for idx, (channel, stoat_type, unique_name, discord_cat_id, _is_thread) in enumerate(
@@ -737,6 +747,14 @@ async def run_channels(
 
             state.channel_map[ch.id] = stoat_channel_id
 
+            # Track forum post info for index channel generation.
+            if discord_cat_id.startswith("forum-"):
+                exp = export_by_channel.get(ch.id)
+                msg_count = exp.message_count if exp else 0
+                forum_channel_info.setdefault(discord_cat_id, []).append(
+                    (stoat_channel_id, unique_name, msg_count)
+                )
+
             # Apply channel permission overrides from Discord metadata.
             if ch_meta and not config.dry_run:
                 if ch_meta.default_override:
@@ -795,6 +813,81 @@ async def run_channels(
                     total=len(channels_to_create),
                 )
             )
+
+        # Create forum index channels — one per forum category.
+        for forum_key, forum_name in forum_categories.items():
+            forum_cat_stoat_id = state.category_map.get(forum_key)
+            if not forum_cat_stoat_id:
+                continue
+            try:
+                index_name = truncate_name(f"{forum_name}-index")
+                idx_result = await api_create_channel(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    state.stoat_server_id,
+                    name=index_name,
+                    channel_type="Text",
+                )
+                index_channel_id: str = idx_result["_id"]
+                await asyncio.sleep(config.upload_delay)
+
+                # Build the index message content.
+                posts = forum_channel_info.get(forum_key, [])
+                if posts:
+                    lines = [f"**Forum: {forum_name}**\n"]
+                    for post_ch_id, _post_name, post_count in posts:
+                        lines.append(f"- <#{post_ch_id}> — {post_count} messages")
+                    content = "\n".join(lines)
+                else:
+                    content = "No posts migrated."
+
+                msg_result = await api_send_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    content=content,
+                    masquerade={"name": "Discord Ferry"},
+                )
+                await asyncio.sleep(config.upload_delay)
+
+                index_msg_id: str = msg_result["_id"]
+                await api_pin_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    index_msg_id,
+                )
+                await asyncio.sleep(config.upload_delay)
+
+                # Insert at position 0 so it appears at the top of the category.
+                category_channels.setdefault(forum_cat_stoat_id, []).insert(0, index_channel_id)
+                state.channel_map[f"forum-index-{forum_key}"] = index_channel_id
+
+                on_event(
+                    MigrationEvent(
+                        phase="channels",
+                        status="progress",
+                        message=f"Created forum index for '{forum_name}'",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": "channels",
+                        "type": "forum_index_failed",
+                        "message": (f"Failed to create forum index for '{forum_name}': {exc}"),
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="channels",
+                        status="warning",
+                        message=f"Forum index for '{forum_name}' failed: {exc}",
+                    )
+                )
 
         # Assign channels to categories via a single PATCH.
         # This replaces the categories array set by run_categories(). Safe because
