@@ -114,6 +114,15 @@ def remap_emoji(content: str, emoji_map: dict[str, str]) -> str:
     return _transform_outside_code(content, lambda s: _EMOJI_RE.sub(replace_emoji, s))
 
 
+def _flush_inline_row(row: list[tuple[str, str]], parts: list[str]) -> None:
+    names = " | ".join(f"**{name}**" for name, _ in row)
+    values = " | ".join(value for _, value in row)
+    parts.append(names)
+    if any(v for _, v in row):
+        parts.append(values)
+    row.clear()
+
+
 def flatten_embed(
     embed: dict[str, object],
     export_dir: Path | None = None,
@@ -145,15 +154,31 @@ def flatten_embed(
     if description:
         parts.append(str(description))
 
-    # Fields
+    # Fields — inline fields are grouped into pipe-separated rows (max 3 per row)
     fields = embed.get("fields")
     if isinstance(fields, list):
-        for field in fields:
-            if isinstance(field, dict):
-                fname = field.get("name", "")
-                fvalue = field.get("value", "")
-                if fname or fvalue:
-                    parts.append(f"**{fname}:** {fvalue}")
+        inline_row: list[tuple[str, str]] = []
+        for field_obj in fields:
+            if not isinstance(field_obj, dict):
+                continue
+            fname = str(field_obj.get("name", ""))
+            fvalue = str(field_obj.get("value", ""))
+            if not fname and not fvalue:
+                continue
+            is_inline = bool(field_obj.get("inline", False))
+            if is_inline:
+                inline_row.append((fname, fvalue))
+                if len(inline_row) >= 3:
+                    _flush_inline_row(inline_row, parts)
+            else:
+                if inline_row:
+                    _flush_inline_row(inline_row, parts)
+                if fvalue:
+                    parts.append(f"**{fname}**\n{fvalue}")
+                else:
+                    parts.append(f"**{fname}**")
+        if inline_row:
+            _flush_inline_row(inline_row, parts)
 
     # Footer
     footer = embed.get("footer")

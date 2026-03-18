@@ -227,9 +227,9 @@ def test_flatten_embed_full() -> None:
     assert isinstance(description, str)
     assert "**An Author**" in description
     assert "Main body" in description
-    assert "**Field 1:**" in description
+    assert "**Field 1**" in description
     assert "Value 1" in description
-    assert "**Field 2:**" in description
+    assert "**Field 2**" in description
     assert "Value 2" in description
     assert "_Footer text_" in description
 
@@ -275,8 +275,8 @@ def test_flatten_embed_fields_order() -> None:
     desc = str(result["description"])
     # Author before description before fields before footer
     assert desc.index("**Auth**") < desc.index("Desc")
-    assert desc.index("Desc") < desc.index("**F1:**")
-    assert desc.index("**F1:**") < desc.index("_Foot_")
+    assert desc.index("Desc") < desc.index("**F1**")
+    assert desc.index("**F1**") < desc.index("_Foot_")
 
 
 def test_flatten_embed_with_local_thumbnail(tmp_path: Path) -> None:
@@ -300,6 +300,136 @@ def test_flatten_embed_with_remote_thumbnail() -> None:
     }
     result, media_path = flatten_embed(embed, export_dir=Path("/tmp"))
     assert media_path is None
+
+
+def test_all_inline_fields_in_rows() -> None:
+    """3 inline fields render as a pipe-separated row."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "HP", "value": "100", "inline": True},
+            {"name": "MP", "value": "50", "inline": True},
+            {"name": "ATK", "value": "25", "inline": True},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "**HP** | **MP** | **ATK**" in desc
+    assert "100 | 50 | 25" in desc
+
+
+def test_non_inline_field_own_line() -> None:
+    """Non-inline field renders as bold name on its own line, value below."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "Description", "value": "Long text", "inline": False},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "**Description**\nLong text" in desc
+    assert "|" not in desc
+
+
+def test_mixed_inline_breaks_rows() -> None:
+    """[inline, inline, non-inline, inline, inline] produces 2 rows + 1 block."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "A", "value": "1", "inline": True},
+            {"name": "B", "value": "2", "inline": True},
+            {"name": "C", "value": "3", "inline": False},
+            {"name": "D", "value": "4", "inline": True},
+            {"name": "E", "value": "5", "inline": True},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    # First inline row: A | B
+    assert "**A** | **B**" in desc
+    assert "1 | 2" in desc
+    # Non-inline block
+    assert "**C**\n3" in desc
+    # Second inline row: D | E
+    assert "**D** | **E**" in desc
+    assert "4 | 5" in desc
+
+
+def test_max_three_inline_per_row() -> None:
+    """6 inline fields produce exactly 2 rows of 3."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "A", "value": "1", "inline": True},
+            {"name": "B", "value": "2", "inline": True},
+            {"name": "C", "value": "3", "inline": True},
+            {"name": "D", "value": "4", "inline": True},
+            {"name": "E", "value": "5", "inline": True},
+            {"name": "F", "value": "6", "inline": True},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "**A** | **B** | **C**" in desc
+    assert "1 | 2 | 3" in desc
+    assert "**D** | **E** | **F**" in desc
+    assert "4 | 5 | 6" in desc
+
+
+def test_empty_field_skipped() -> None:
+    """Field with empty name and empty value is skipped entirely."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "", "value": ""},
+            {"name": "Visible", "value": "Yes"},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "**Visible**" in desc
+    # Only one field section in the description
+    assert desc.count("**") == 2  # opening and closing bold for "Visible"
+
+
+def test_field_name_only_no_value() -> None:
+    """Field with name but no value renders name only (no trailing newline)."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "Score", "value": ""},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "**Score**" in desc
+    assert desc.strip() == "**Score**"
+
+
+def test_no_inline_key_defaults_to_block() -> None:
+    """Field without 'inline' key defaults to block (non-inline) rendering."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "Key", "value": "Val"},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "**Key**\nVal" in desc
+    assert "|" not in desc
+
+
+def test_unicode_field_names_preserved() -> None:
+    """Unicode characters in field names and values are preserved."""
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "\u2764\ufe0f Health", "value": "\u2b50 100", "inline": True},
+            {"name": "\u2694\ufe0f Attack", "value": "\u2b50 50", "inline": True},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    assert "\u2764\ufe0f Health" in desc
+    assert "\u2694\ufe0f Attack" in desc
+    assert "\u2b50 100" in desc
+    assert "\u2b50 50" in desc
+    # Should be rendered as inline row
+    assert "**\u2764\ufe0f Health** | **\u2694\ufe0f Attack**" in desc
 
 
 # ---------------------------------------------------------------------------
