@@ -124,6 +124,18 @@ async def test_upload_to_autumn_retries_exhausted(
             await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
 
 
+async def test_upload_to_autumn_413_specific_message(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """HTTP 413 produces error message with file size and limit."""
+    file = tmp_path / "big.png"
+    file.write_bytes(b"x" * 100)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=413, body=b"Payload Too Large")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="File too large"):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+
+
 # ---------------------------------------------------------------------------
 # upload_with_cache
 # ---------------------------------------------------------------------------

@@ -90,6 +90,14 @@ async def upload_to_autumn(
                         await asyncio.sleep(2)
                     continue
 
+                if response.status == 413:
+                    limit = TAG_SIZE_LIMITS.get(tag, 0)
+                    raise AutumnUploadError(
+                        f"File too large: {file_path.name} "
+                        f"({file_path.stat().st_size / 1_048_576:.1f} MB, "
+                        f"limit: {limit / 1_048_576:.1f} MB)"
+                    )
+
                 text = await response.text()
                 raise AutumnUploadError(f"Upload failed with status {response.status}: {text}")
         finally:
