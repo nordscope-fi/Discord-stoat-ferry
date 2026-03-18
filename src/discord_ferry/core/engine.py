@@ -24,6 +24,7 @@ from discord_ferry.exporter import (
     run_dce_export,
     validate_discord_token,
 )
+from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
 from discord_ferry.migrator.emoji import run_emoji
 from discord_ferry.migrator.messages import run_messages
@@ -50,6 +51,7 @@ PHASE_ORDER: list[str] = [
     "categories",  # Phase 5
     "channels",  # Phase 6
     "emoji",  # Phase 7
+    "avatars",  # Phase 7.5
     "messages",  # Phase 8
     "reactions",  # Phase 9
     "pins",  # Phase 10
@@ -60,6 +62,7 @@ PHASE_ORDER: list[str] = [
 _SKIPPABLE: dict[str, str] = {
     "export": "skip_export",
     "emoji": "skip_emoji",
+    "avatars": "skip_avatars",
     "messages": "skip_messages",
     "reactions": "skip_reactions",
 }
@@ -72,6 +75,7 @@ _DEFAULT_PHASES: dict[str, PhaseFunction] = {
     "categories": run_categories,
     "channels": run_channels,
     "emoji": run_emoji,
+    "avatars": run_avatars,
     "messages": run_messages,
     "reactions": run_reactions,
     "pins": run_pins,

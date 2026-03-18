@@ -29,6 +29,7 @@ _NOOP_OVERRIDES: dict[str, PhaseFunction] = {
     "categories": _noop_phase,
     "channels": _noop_phase,
     "emoji": _noop_phase,
+    "avatars": _noop_phase,
     "messages": _noop_phase,
     "reactions": _noop_phase,
     "pins": _noop_phase,
@@ -514,6 +515,32 @@ def test_emoji_phase_before_messages() -> None:
     assert PHASE_ORDER.index("emoji") < PHASE_ORDER.index("messages")
 
 
+def test_avatars_phase_in_phase_order() -> None:
+    """Avatars phase positioned between emoji and messages."""
+    assert "avatars" in PHASE_ORDER
+    assert PHASE_ORDER.index("emoji") < PHASE_ORDER.index("avatars")
+    assert PHASE_ORDER.index("avatars") < PHASE_ORDER.index("messages")
+
+
+async def test_skip_avatars(tmp_path: Path) -> None:
+    """skip_avatars config flag skips the avatars phase."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, skip_avatars=True)
+    await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+    avatar_events = [e for e in events if e.phase == "avatars"]
+    assert any(e.status == "skipped" for e in avatar_events)
+
+
+async def test_avatars_phase_runs_when_not_skipped(tmp_path: Path) -> None:
+    """Avatars phase runs and emits started/completed events."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+    avatar_events = [e for e in events if e.phase == "avatars"]
+    assert any(e.status == "started" for e in avatar_events)
+    assert any(e.status == "completed" for e in avatar_events)
+
+
 def test_phase_order_contains_expected_phases() -> None:
     """Verify all expected phases are present in PHASE_ORDER."""
     expected = {
@@ -525,6 +552,7 @@ def test_phase_order_contains_expected_phases() -> None:
         "categories",
         "channels",
         "emoji",
+        "avatars",
         "messages",
         "reactions",
         "pins",

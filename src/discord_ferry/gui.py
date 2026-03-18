@@ -44,6 +44,7 @@ _PHASE_LABELS: dict[str, str] = {
     "categories": "Categories",
     "channels": "Channels",
     "emoji": "Emoji",
+    "avatars": "Avatars",
     "messages": "Messages",
     "reactions": "Reactions",
     "pins": "Pins",
