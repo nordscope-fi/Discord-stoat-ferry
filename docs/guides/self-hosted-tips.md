@@ -121,3 +121,9 @@ The simplest approach is to use the server owner's token and avoid this list ent
     Voice channel creation may produce text channels instead of voice channels in some Stoat versions. This is a known upstream bug. If voice channel layout matters, check your Stoat version's release notes. You can verify channel types in the Stoat web interface after migration completes.
 
 Voice channels require the Vortex (or LiveKit) service to function. Creating voice channels without this service will create the channel structure but the channels will not be usable for voice.
+
+---
+
+## See Also
+
+- [Timestamp Preservation](timestamps.md) — understanding how message timestamps work after migration, and an advanced workaround for self-hosted instances.
