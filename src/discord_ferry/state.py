@@ -63,6 +63,10 @@ class MigrationState:
     # Export phase tracking (for smart resume)
     export_completed: bool = False
 
+    # Orphan upload tracking: detect Autumn files uploaded but never referenced in a message
+    autumn_uploads: dict[str, str] = field(default_factory=dict)  # autumn_id -> source_id
+    referenced_autumn_ids: set[str] = field(default_factory=set)  # confirmed used
+
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
     """Save migration state to state.json using atomic write.
@@ -125,6 +129,8 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "completed_at": state.completed_at,
         "is_dry_run": state.is_dry_run,
         "export_completed": state.export_completed,
+        "autumn_uploads": state.autumn_uploads,
+        "referenced_autumn_ids": list(state.referenced_autumn_ids),
     }
 
 
@@ -156,6 +162,8 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             completed_at=data.get("completed_at", ""),
             is_dry_run=data.get("is_dry_run", False),
             export_completed=data.get("export_completed", False),
+            autumn_uploads=data.get("autumn_uploads", {}),
+            referenced_autumn_ids=set(data.get("referenced_autumn_ids", [])),
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e
