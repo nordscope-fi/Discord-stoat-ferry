@@ -32,7 +32,7 @@ _PLATFORM_MAP: dict[tuple[str, str], str] = {
 }
 
 _GITHUB_RELEASE_URL = (
-    "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/v{version}"
+    "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{version}"
 )
 
 _MAX_DCE_BYTES = 150 * 1024 * 1024  # 150 MB hard ceiling
