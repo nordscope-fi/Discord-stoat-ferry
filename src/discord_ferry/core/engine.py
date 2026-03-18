@@ -188,8 +188,11 @@ async def run_migration(
             on_event(
                 MigrationEvent(
                     phase="export",
-                    status="progress",
-                    message="No Discord token — permissions will not be migrated",
+                    status="warning",
+                    message=(
+                        "No Discord token — permission overrides will not be migrated. "
+                        "Private channels may become publicly visible on Stoat."
+                    ),
                 )
             )
 

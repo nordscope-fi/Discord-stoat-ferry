@@ -416,7 +416,7 @@ async def test_discord_metadata_skipped_when_no_token(tmp_path: Path) -> None:
 
     assert not (tmp_path / "discord_metadata.json").exists()
     export_events = [e for e in events if e.phase == "export"]
-    assert any("No Discord token" in e.message for e in export_events if e.status == "progress")
+    assert any("No Discord token" in e.message for e in export_events if e.status == "warning")
 
 
 async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
@@ -459,6 +459,78 @@ async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
 
     export_events = [e for e in events if e.phase == "export"]
     assert any("cached" in e.message.lower() for e in export_events if e.status == "progress")
+
+
+async def test_no_discord_token_emits_warning(tmp_path: Path) -> None:
+    """When discord_token is absent, engine emits status='warning' about permissions."""
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
+    events: list[MigrationEvent] = []
+    await run_migration(config, events.append, _NOOP_OVERRIDES)
+
+    warning_events = [
+        e
+        for e in events
+        if e.status == "warning"
+        and "permission" in e.message.lower()
+        and "private" in e.message.lower()
+    ]
+    assert len(warning_events) >= 1, "Expected warning about permissions and private channels"
+
+
+async def test_discord_token_present_no_permission_warning(tmp_path: Path) -> None:
+    """When discord_token IS set, no permission warning emitted."""
+    from aioresponses import aioresponses
+
+    config = _make_config(
+        tmp_path,
+        discord_token="fake-token",
+        discord_server_id="fake-server",
+    )
+    events: list[MigrationEvent] = []
+
+    with aioresponses() as m:
+        m.get(
+            f"{_DISCORD_API}/guilds/fake-server/roles",
+            payload=_MOCK_ROLES,
+        )
+        m.get(
+            f"{_DISCORD_API}/guilds/fake-server/channels",
+            payload=_MOCK_CHANNELS,
+        )
+        await run_migration(config, events.append, _NOOP_OVERRIDES)
+
+    warning_events = [
+        e
+        for e in events
+        if e.status == "warning"
+        and "permission" in e.message.lower()
+        and "private" in e.message.lower()
+    ]
+    assert len(warning_events) == 0, "Should not warn about permissions when token is present"
+
+
+def test_emoji_phase_before_messages() -> None:
+    """Emoji phase must run before messages for content transforms."""
+    assert PHASE_ORDER.index("emoji") < PHASE_ORDER.index("messages")
+
+
+def test_phase_order_contains_expected_phases() -> None:
+    """Verify all expected phases are present in PHASE_ORDER."""
+    expected = {
+        "export",
+        "validate",
+        "connect",
+        "server",
+        "roles",
+        "categories",
+        "channels",
+        "emoji",
+        "messages",
+        "reactions",
+        "pins",
+        "report",
+    }
+    assert expected.issubset(set(PHASE_ORDER))
 
 
 async def test_discord_metadata_fetch_runs_with_skip_export(tmp_path: Path) -> None:
