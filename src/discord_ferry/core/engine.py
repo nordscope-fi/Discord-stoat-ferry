@@ -255,6 +255,7 @@ async def run_migration(
                     "nsfw_channels": summary.nsfw_channel_count,
                     "user_overrides": summary.user_override_count,
                     "warnings": summary.warnings,
+                    "reaction_mode": config.reaction_mode,
                 },
             )
         )

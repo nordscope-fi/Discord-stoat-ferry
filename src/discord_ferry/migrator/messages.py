@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,10 @@ if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEAuthor, DCEExport, DCEMessage, DCEReaction
     from discord_ferry.state import MigrationState
+
+logger = logging.getLogger(__name__)
+
+_VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
 
 # Message types that should be silently skipped without even a warning.
 _SKIP_TYPES = frozenset(
@@ -118,6 +123,19 @@ async def run_messages(
         exports: Parsed DCE export files (one per channel/thread).
         on_event: Callback for progress events.
     """
+    # Validate reaction_mode — fall back to "text" on unrecognised values.
+    if config.reaction_mode not in _VALID_REACTION_MODES:
+        state.warnings.append(
+            {
+                "phase": "messages",
+                "type": "invalid_reaction_mode",
+                "message": (
+                    f"Unknown reaction_mode {config.reaction_mode!r}, falling back to 'text'"
+                ),
+            }
+        )
+        logger.warning("Unknown reaction_mode %r — falling back to 'text'", config.reaction_mode)
+
     # Sort deterministically by Discord channel ID.
     sorted_exports = sorted(exports, key=lambda e: e.channel.id)
 
@@ -459,6 +477,15 @@ async def _process_message(
     if msg.content == "" and not autumn_ids and not stoat_embeds:
         content = f"{format_original_timestamp(msg.timestamp)} [empty message]"
 
+    # Step 6b: Append reaction text if text mode.
+    _effective_mode = (
+        config.reaction_mode if config.reaction_mode in _VALID_REACTION_MODES else "text"
+    )
+    if msg.reactions and _effective_mode == "text":
+        remaining = 2000 - len(content)
+        reaction_text = _build_reaction_text(msg.reactions, remaining)
+        content += reaction_text
+
     # Step 7: Truncate to 2000 characters.
     if len(content) > 2000:
         content = content[:1997] + "..."
@@ -484,26 +511,27 @@ async def _process_message(
         if msg.is_pinned:
             state.pending_pins.append((stoat_channel_id, stoat_msg_id))
 
-        # Step 8b: Queue reactions.
-        for reaction in msg.reactions:
-            if reaction.emoji.id:  # Custom emoji.
-                stoat_emoji = state.emoji_map.get(reaction.emoji.id)
-                if stoat_emoji:
+        # Step 8b: Queue reactions (only in native mode).
+        if _effective_mode == "native":
+            for reaction in msg.reactions:
+                if reaction.emoji.id:  # Custom emoji.
+                    stoat_emoji = state.emoji_map.get(reaction.emoji.id)
+                    if stoat_emoji:
+                        state.pending_reactions.append(
+                            {
+                                "channel_id": stoat_channel_id,
+                                "message_id": stoat_msg_id,
+                                "emoji": stoat_emoji,
+                            }
+                        )
+                else:  # Unicode emoji.
                     state.pending_reactions.append(
                         {
                             "channel_id": stoat_channel_id,
                             "message_id": stoat_msg_id,
-                            "emoji": stoat_emoji,
+                            "emoji": reaction.emoji.name,
                         }
                     )
-            else:  # Unicode emoji.
-                state.pending_reactions.append(
-                    {
-                        "channel_id": stoat_channel_id,
-                        "message_id": stoat_msg_id,
-                        "emoji": reaction.emoji.name,
-                    }
-                )
 
     except Exception as exc:  # noqa: BLE001
         state.errors.append(

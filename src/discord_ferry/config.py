@@ -35,6 +35,7 @@ class FerryConfig:
     max_emoji: int = 100
     checkpoint_interval: int = 50
     skip_avatars: bool = False
+    reaction_mode: str = "text"
 
     # Discord credentials (orchestrated mode only — never persisted to disk)
     discord_token: str | None = field(default=None, repr=False)

@@ -596,6 +596,24 @@ async def test_discord_metadata_fetch_runs_with_skip_export(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
+# Review event includes reaction_mode
+# ---------------------------------------------------------------------------
+
+
+async def test_review_shows_reaction_mode(tmp_path: Path) -> None:
+    """Pre-creation review event detail includes reaction_mode from config."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, reaction_mode="native")
+    await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    review_events = [e for e in events if e.phase == "review" and e.status == "confirm"]
+    assert len(review_events) == 1
+    detail = review_events[0].detail
+    assert detail is not None
+    assert detail["reaction_mode"] == "native"
+
+
+# ---------------------------------------------------------------------------
 # run_retry_failed
 # ---------------------------------------------------------------------------
 

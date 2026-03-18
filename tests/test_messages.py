@@ -721,7 +721,7 @@ async def test_custom_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aiores
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
     state = _make_state(emoji_map={"discord_emoji_1": "stoat_emoji_1"})
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, reaction_mode="native")
     reaction = DCEReaction(emoji=DCEEmoji(id="discord_emoji_1", name="smile"), count=3)
     msg = _make_message(id="msg1", content="reacted", reactions=[reaction])
     export = _make_export(messages=[msg])
@@ -739,7 +739,7 @@ async def test_custom_emoji_not_in_map_not_queued(
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
     state = _make_state(emoji_map={})
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, reaction_mode="native")
     reaction = DCEReaction(emoji=DCEEmoji(id="unknown_emoji", name="mystery"), count=1)
     msg = _make_message(id="msg1", content="reacted", reactions=[reaction])
     export = _make_export(messages=[msg])
@@ -754,7 +754,7 @@ async def test_unicode_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aiore
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
     state = _make_state()
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, reaction_mode="native")
     reaction = DCEReaction(emoji=DCEEmoji(id="", name="👍"), count=5)
     msg = _make_message(id="msg1", content="thumbs up", reactions=[reaction])
     export = _make_export(messages=[msg])
@@ -903,7 +903,7 @@ async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> N
         channel_map={"ch1": "stoat_ch1"},
         emoji_map={"emoji1": "stoat_emoji1"},
     )
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, reaction_mode="native")
 
     reaction = DCEReaction(emoji=DCEEmoji(id="emoji1", name="fire"), count=2)
     msg1 = _make_message(
@@ -1749,3 +1749,108 @@ async def test_forwarded_message_failure_no_crash(tmp_path: Path) -> None:
     # Should not crash — content_preview should be empty string or short
     assert len(state.failed_messages) == 1
     assert len(state.failed_messages[0].content_preview) <= 50
+
+
+# ---------------------------------------------------------------------------
+# Reaction mode (text / native / skip)
+# ---------------------------------------------------------------------------
+
+
+async def test_text_mode_appends_reaction_summary(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """reaction_mode='text' appends [Reactions: ...] to content and does not queue."""
+    sent_kwargs: list[dict[str, Any]] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_kwargs.append(kwargs)
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="text")
+    reaction = DCEReaction(emoji=DCEEmoji(id="", name="thumbsup"), count=3)
+    msg = _make_message(id="msg1", content="hello", reactions=[reaction])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(state.pending_reactions) == 0
+    assert "[Reactions:" in sent_kwargs[0]["content"]
+    assert "thumbsup 3" in sent_kwargs[0]["content"]
+
+
+async def test_native_mode_queues_reactions(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """reaction_mode='native' queues reactions and does not append text."""
+    sent_kwargs: list[dict[str, Any]] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_kwargs.append(kwargs)
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="native")
+    reaction = DCEReaction(emoji=DCEEmoji(id="", name="thumbsup"), count=3)
+    msg = _make_message(id="msg1", content="hello", reactions=[reaction])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(state.pending_reactions) == 1
+    assert "[Reactions:" not in sent_kwargs[0]["content"]
+
+
+async def test_skip_mode_no_reactions(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """reaction_mode='skip' produces no reaction text and no queuing."""
+    sent_kwargs: list[dict[str, Any]] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_kwargs.append(kwargs)
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="skip")
+    reaction = DCEReaction(emoji=DCEEmoji(id="", name="thumbsup"), count=3)
+    msg = _make_message(id="msg1", content="hello", reactions=[reaction])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(state.pending_reactions) == 0
+    assert "[Reactions:" not in sent_kwargs[0]["content"]
+
+
+async def test_invalid_reaction_mode_defaults_to_text(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Invalid reaction_mode value is treated as 'text' with a warning logged."""
+    sent_kwargs: list[dict[str, Any]] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_kwargs.append(kwargs)
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="bogus")
+    reaction = DCEReaction(emoji=DCEEmoji(id="", name="thumbsup"), count=3)
+    msg = _make_message(id="msg1", content="hello", reactions=[reaction])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    # Should behave like text mode
+    assert len(state.pending_reactions) == 0
+    assert "[Reactions:" in sent_kwargs[0]["content"]
+    # Warning should be logged about invalid mode
+    assert any("reaction_mode" in w["message"] for w in state.warnings)
