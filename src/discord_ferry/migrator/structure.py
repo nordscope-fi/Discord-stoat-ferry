@@ -820,7 +820,7 @@ async def run_channels(
             if not forum_cat_stoat_id:
                 continue
             try:
-                index_name = truncate_name(f"{forum_name}-index")
+                index_name = make_unique_channel_name(f"{forum_name}-index", existing_names)
                 idx_result = await api_create_channel(
                     session,
                     config.stoat_url,
@@ -832,13 +832,20 @@ async def run_channels(
                 index_channel_id: str = idx_result["_id"]
                 await asyncio.sleep(config.upload_delay)
 
-                # Build the index message content.
+                # Build the index message content (max 2000 chars).
                 posts = forum_channel_info.get(forum_key, [])
                 if posts:
                     lines = [f"**Forum: {forum_name}**\n"]
                     for post_ch_id, _post_name, post_count in posts:
                         lines.append(f"- <#{post_ch_id}> — {post_count} messages")
                     content = "\n".join(lines)
+                    # Truncate to fit Stoat's 2000-char message limit.
+                    if len(content) > 2000:
+                        while lines and len("\n".join(lines)) > 1950:
+                            lines.pop()
+                        remaining = len(posts) - (len(lines) - 1)
+                        lines.append(f"\n*...and {remaining} more posts*")
+                        content = "\n".join(lines)
                 else:
                     content = "No posts migrated."
 
@@ -849,6 +856,7 @@ async def run_channels(
                     index_channel_id,
                     content=content,
                     masquerade={"name": "Discord Ferry"},
+                    idempotency_key=f"ferry-forum-index-{forum_key}",
                 )
                 await asyncio.sleep(config.upload_delay)
 
