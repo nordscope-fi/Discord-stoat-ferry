@@ -33,13 +33,16 @@ ALL_STOAT_PERMISSIONS = (
 )
 
 
-def translate_permissions(discord_bits: int) -> int:
+def translate_permissions(discord_bits: int, *, is_deny: bool = False) -> int:
     """Convert a Discord permission bitfield to a Stoat permission bitfield.
 
-    If ADMINISTRATOR (bit 3) is set, returns ALL_STOAT_PERMISSIONS.
-    Unmapped Discord bits are silently dropped.
+    If ADMINISTRATOR (bit 3) is set in allow context, returns ALL_STOAT_PERMISSIONS.
+    In deny context, ADMINISTRATOR is skipped (denying ADMIN in Discord doesn't
+    mean "deny all" in Stoat). Unmapped Discord bits are silently dropped.
     """
     if discord_bits & (1 << 3):  # ADMINISTRATOR
+        if is_deny:
+            return 0  # Denying ADMIN doesn't mean "deny all" in Stoat
         return ALL_STOAT_PERMISSIONS
 
     stoat_bits = 0

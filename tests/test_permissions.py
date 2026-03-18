@@ -82,3 +82,33 @@ def test_all_stoat_permissions_value() -> None:
         | 536_870_912
     )
     assert expected == ALL_STOAT_PERMISSIONS
+
+
+def test_administrator_deny_returns_zero() -> None:
+    """ADMINISTRATOR in deny context must NOT expand to all bits."""
+    assert translate_permissions(1 << 3, is_deny=True) == 0
+
+
+def test_administrator_allow_still_expands() -> None:
+    """ADMINISTRATOR in allow context preserves existing behavior."""
+    assert translate_permissions(1 << 3, is_deny=False) == ALL_STOAT_PERMISSIONS
+    assert translate_permissions(1 << 3) == ALL_STOAT_PERMISSIONS
+
+
+def test_deny_view_channel_translates() -> None:
+    """Normal deny bits translate correctly through the mapping."""
+    result = translate_permissions(1 << 10, is_deny=True)
+    assert result == 1 << 20
+
+
+def test_deny_multiple_bits() -> None:
+    """Deny with multiple mapped bits translates each one."""
+    discord_bits = (1 << 10) | (1 << 11)
+    result = translate_permissions(discord_bits, is_deny=True)
+    expected = (1 << 20) | (1 << 22)
+    assert result == expected
+
+
+def test_deny_unmapped_bits_dropped() -> None:
+    """Unmapped Discord bits in deny context are silently dropped."""
+    assert translate_permissions(1 << 1, is_deny=True) == 0
