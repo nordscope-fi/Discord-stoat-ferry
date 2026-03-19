@@ -39,6 +39,7 @@ class FerryConfig:
     min_thread_messages: int = 0
     validate_after: bool = False
     max_concurrent_requests: int = 5
+    max_concurrent_channels: int = 3
 
     # Discord credentials (orchestrated mode only — never persisted to disk)
     discord_token: str | None = field(default=None, repr=False)

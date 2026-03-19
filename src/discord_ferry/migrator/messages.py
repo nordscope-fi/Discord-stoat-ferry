@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
@@ -54,6 +55,40 @@ _SKIP_TYPES = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# ChannelResult accumulator for parallel message sends
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ChannelResult:
+    """Per-channel accumulator — merged into main state after completion."""
+
+    channel_id: str = ""
+    warnings: list[dict[str, str]] = field(default_factory=list)
+    errors: list[dict[str, str]] = field(default_factory=list)
+    failed_messages: list[FailedMessage] = field(default_factory=list)
+    message_map_updates: dict[str, str] = field(default_factory=dict)
+    pending_pins: list[tuple[str, str]] = field(default_factory=list)
+    pending_reactions: list[dict[str, object]] = field(default_factory=list)
+    attachments_uploaded: int = 0
+    attachments_skipped: int = 0
+    referenced_autumn_ids: set[str] = field(default_factory=set)
+
+
+def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
+    """Merge a per-channel result into the shared migration state."""
+    state.warnings.extend(result.warnings)
+    state.errors.extend(result.errors)
+    state.failed_messages.extend(result.failed_messages)
+    state.message_map.update(result.message_map_updates)
+    state.pending_pins.extend(result.pending_pins)
+    state.pending_reactions.extend(result.pending_reactions)
+    state.attachments_uploaded += result.attachments_uploaded
+    state.attachments_skipped += result.attachments_skipped
+    state.referenced_autumn_ids.update(result.referenced_autumn_ids)
+
+
 def _skip_attachment(
     state: MigrationState,
     filename: str,
@@ -63,6 +98,18 @@ def _skip_attachment(
     """Record a skipped attachment and return placeholder text."""
     state.attachments_skipped += 1
     state.warnings.append({"phase": phase, "type": "attachment_skipped", "message": reason})
+    return f"[{reason}]"
+
+
+def _skip_attachment_to_result(
+    result: ChannelResult,
+    filename: str,
+    reason: str,
+    phase: str = "messages",
+) -> str:
+    """Record a skipped attachment to a ChannelResult and return placeholder text."""
+    result.attachments_skipped += 1
+    result.warnings.append({"phase": phase, "type": "attachment_skipped", "message": reason})
     return f"[{reason}]"
 
 
@@ -117,6 +164,10 @@ async def run_messages(
     on_event: EventCallback,
 ) -> None:
     """Import messages oldest-first, per channel, with masquerade and resume support.
+
+    Channels are processed in parallel (up to ``config.max_concurrent_channels``).
+    Each channel worker accumulates results in a :class:`ChannelResult` that is
+    merged into ``state`` after completion, preventing non-deterministic interleaving.
 
     Args:
         config: Ferry run configuration.
@@ -177,147 +228,82 @@ async def run_messages(
         )
         return
 
-    _checkpoint_interval = max(config.checkpoint_interval, 1)
-    _last_save_time = time.monotonic()
+    # Pre-filter exports: skip unmapped channels, already-completed channels, etc.
+    eligible_exports: list[DCEExport] = []
+    for export in sorted_exports:
+        if config.skip_threads and export.is_thread:
+            continue
+
+        stoat_channel_id = state.channel_map.get(export.channel.id)
+        if stoat_channel_id is None:
+            state.warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "channel_not_mapped",
+                    "message": (
+                        f"Channel {export.channel.id} ({export.channel.name!r}) "
+                        "not found in channel_map — skipping."
+                    ),
+                }
+            )
+            on_event(
+                MigrationEvent(
+                    phase="messages",
+                    status="skipped",
+                    message=(f"Skipping channel {export.channel.name!r} (not in channel map)."),
+                    channel_name=export.channel.name,
+                )
+            )
+            continue
+
+        if config.resume and export.channel.id in state.completed_channel_ids:
+            continue
+
+        eligible_exports.append(export)
+
+    channel_sem = asyncio.Semaphore(config.max_concurrent_channels)
+    save_lock = asyncio.Lock()
 
     async with get_session(config) as session:
-        for export in sorted_exports:
-            # Skip thread/forum exports when skip_threads is enabled.
-            if config.skip_threads and export.is_thread:
-                continue
+        tasks: list[asyncio.Task[ChannelResult]] = []
+        for export in eligible_exports:
+            task = asyncio.create_task(
+                _process_single_channel(
+                    export=export,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=on_event,
+                    channel_sem=channel_sem,
+                    save_lock=save_lock,
+                ),
+                name=f"channel-{export.channel.id}",
+            )
+            tasks.append(task)
 
-            stoat_channel_id = state.channel_map.get(export.channel.id)
-            if stoat_channel_id is None:
-                state.warnings.append(
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for export, result in zip(eligible_exports, results, strict=True):
+            if isinstance(result, BaseException):
+                # Channel worker raised an unhandled exception — record as error.
+                state.errors.append(
                     {
                         "phase": "messages",
-                        "type": "channel_not_mapped",
-                        "message": (
-                            f"Channel {export.channel.id} ({export.channel.name!r}) "
-                            "not found in channel_map — skipping."
-                        ),
+                        "type": "channel_worker_failed",
+                        "message": (f"Channel {export.channel.name!r} worker failed: {result}"),
                     }
                 )
                 on_event(
                     MigrationEvent(
                         phase="messages",
-                        status="skipped",
-                        message=(f"Skipping channel {export.channel.name!r} (not in channel map)."),
+                        status="warning",
+                        message=f"Channel {export.channel.name!r} failed: {result}",
                         channel_name=export.channel.name,
                     )
                 )
-                continue
-
-            # Resume: skip channels that were fully completed in a previous run.
-            if config.resume and export.channel.id in state.completed_channel_ids:
-                continue
-
-            on_event(
-                MigrationEvent(
-                    phase="messages",
-                    status="progress",
-                    message=f"Importing {export.channel.name!r}...",
-                    channel_name=export.channel.name,
-                )
-            )
-
-            # Inject a system header for flattened threads/forum posts.
-            if export.is_thread and export.parent_channel_name:
-                if export.channel.type in (15, 16):
-                    header = f"[Forum post migrated from #{export.parent_channel_name}]"
-                else:
-                    header = f"[Thread migrated from #{export.parent_channel_name}]"
-                try:
-                    await api_send_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        stoat_channel_id,
-                        content=header,
-                        masquerade={"name": "Discord Ferry"},
-                        idempotency_key=f"ferry-header-{export.channel.id}",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    state.warnings.append(
-                        {
-                            "phase": "messages",
-                            "type": "thread_header_failed",
-                            "message": (f"Thread header for {export.channel.name!r} failed: {exc}"),
-                        }
-                    )
-                    on_event(
-                        MigrationEvent(
-                            phase="messages",
-                            status="warning",
-                            message=f"Thread header for {export.channel.name!r} failed: {exc}",
-                        )
-                    )
-
-            # Stream messages from JSON file if available (low memory), else fall back to in-memory.
-            if export.json_path is not None:
-                message_source = stream_messages(export.json_path)
             else:
-                message_source = iter(sorted(export.messages, key=lambda m: m.timestamp))
-            total = export.message_count
-
-            _channel_msg_offset = state.channel_message_offsets.get(export.channel.id, "")
-            for idx, msg in enumerate(message_source):
-                # Resume: skip messages already processed within this channel.
-                # Compare as integers — Snowflake IDs are numeric.
-                if (
-                    config.resume
-                    and _channel_msg_offset
-                    and int(msg.id) <= int(_channel_msg_offset)
-                ):
-                    continue
-
-                await _process_message(
-                    msg=msg,
-                    stoat_channel_id=stoat_channel_id,
-                    config=config,
-                    state=state,
-                    session=session,
-                    on_event=on_event,
-                )
-
-                # Periodic progress event and state save.
-                if (idx + 1) % _checkpoint_interval == 0:
-                    now = time.monotonic()
-                    if now - _last_save_time >= 5.0:
-                        state.channel_message_offsets[export.channel.id] = msg.id
-                        save_state(state, config.output_dir)
-                        _last_save_time = now
-                    on_event(
-                        MigrationEvent(
-                            phase="messages",
-                            status="progress",
-                            message=(
-                                f"{export.channel.name!r}: {idx + 1}/{total} messages imported."
-                            ),
-                            current=idx + 1,
-                            total=total,
-                            channel_name=export.channel.name,
-                        )
-                    )
-
-                # Rate-limit courtesy delay with pause/cancel support.
-                await _rate_limit_with_pause(config)
-
-            # Channel complete — save state for crash recovery.
-            state.completed_channel_ids.add(export.channel.id)
-            state.channel_message_offsets.pop(export.channel.id, None)
-            save_state(state, config.output_dir)
-
-            on_event(
-                MigrationEvent(
-                    phase="messages",
-                    status="progress",
-                    message=f"Completed {export.channel.name!r} ({total} messages).",
-                    current=total,
-                    total=total,
-                    channel_name=export.channel.name,
-                )
-            )
+                _merge_channel_result(state, result)
+                state.completed_channel_ids.add(export.channel.id)
 
     on_event(
         MigrationEvent(
@@ -326,6 +312,151 @@ async def run_messages(
             message="Message import complete.",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-channel worker
+# ---------------------------------------------------------------------------
+
+
+async def _process_single_channel(
+    *,
+    export: DCEExport,
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+    channel_sem: asyncio.Semaphore,
+    save_lock: asyncio.Lock,
+) -> ChannelResult:
+    """Process all messages in a single channel, returning a ChannelResult.
+
+    Reads from ``state`` (channel_map, emoji_map, avatar_cache, etc.) but writes
+    accumulators (warnings, errors, counters) to its own ChannelResult.
+    """
+    async with channel_sem:
+        stoat_channel_id = state.channel_map[export.channel.id]
+        result = ChannelResult(channel_id=export.channel.id)
+
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="progress",
+                message=f"Importing {export.channel.name!r}...",
+                channel_name=export.channel.name,
+            )
+        )
+
+        # Inject a system header for flattened threads/forum posts.
+        if export.is_thread and export.parent_channel_name:
+            if export.channel.type in (15, 16):
+                header = f"[Forum post migrated from #{export.parent_channel_name}]"
+            else:
+                header = f"[Thread migrated from #{export.parent_channel_name}]"
+            try:
+                await api_send_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    stoat_channel_id,
+                    content=header,
+                    masquerade={"name": "Discord Ferry"},
+                    idempotency_key=f"ferry-header-{export.channel.id}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                result.warnings.append(
+                    {
+                        "phase": "messages",
+                        "type": "thread_header_failed",
+                        "message": (f"Thread header for {export.channel.name!r} failed: {exc}"),
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="messages",
+                        status="warning",
+                        message=f"Thread header for {export.channel.name!r} failed: {exc}",
+                    )
+                )
+
+        # Stream messages from JSON file if available (low memory), else fall back to in-memory.
+        if export.json_path is not None:
+            message_source = stream_messages(export.json_path)
+        else:
+            message_source = iter(sorted(export.messages, key=lambda m: m.timestamp))
+        total = export.message_count
+
+        _checkpoint_interval = max(config.checkpoint_interval, 1)
+        _last_save_time = time.monotonic()
+
+        _channel_msg_offset = state.channel_message_offsets.get(export.channel.id, "")
+        for idx, msg in enumerate(message_source):
+            # Cancel check inside the message loop.
+            if config.cancel_event and config.cancel_event.is_set():
+                break
+
+            # Resume: skip messages already processed within this channel.
+            # Compare as integers — Snowflake IDs are numeric.
+            if config.resume and _channel_msg_offset and int(msg.id) <= int(_channel_msg_offset):
+                continue
+
+            await _process_message(
+                msg=msg,
+                stoat_channel_id=stoat_channel_id,
+                config=config,
+                state=state,
+                session=session,
+                on_event=on_event,
+                channel_result=result,
+            )
+
+            # Periodic progress event and state save.
+            if (idx + 1) % _checkpoint_interval == 0:
+                now = time.monotonic()
+                if now - _last_save_time >= 5.0:
+                    async with save_lock:
+                        state.channel_message_offsets[export.channel.id] = msg.id
+                        # Merge partial result before saving so checkpoint includes progress.
+                        _merge_channel_result(state, result)
+                        save_state(state, config.output_dir)
+                        # Reset result to avoid double-counting on next merge.
+                        result = ChannelResult(channel_id=export.channel.id)
+                    _last_save_time = now
+                on_event(
+                    MigrationEvent(
+                        phase="messages",
+                        status="progress",
+                        message=(f"{export.channel.name!r}: {idx + 1}/{total} messages imported."),
+                        current=idx + 1,
+                        total=total,
+                        channel_name=export.channel.name,
+                    )
+                )
+
+            # Rate-limit courtesy delay with pause/cancel support.
+            await _rate_limit_with_pause(config)
+
+        # Channel complete — save state for crash recovery.
+        async with save_lock:
+            _merge_channel_result(state, result)
+            state.completed_channel_ids.add(export.channel.id)
+            state.channel_message_offsets.pop(export.channel.id, None)
+            save_state(state, config.output_dir)
+            # Return empty result since we already merged.
+            result = ChannelResult(channel_id=export.channel.id)
+
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="progress",
+                message=f"Completed {export.channel.name!r} ({total} messages).",
+                current=total,
+                total=total,
+                channel_name=export.channel.name,
+            )
+        )
+
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -341,8 +472,34 @@ async def _process_message(
     state: MigrationState,
     session: aiohttp.ClientSession,
     on_event: EventCallback,
+    channel_result: ChannelResult | None = None,
 ) -> None:
-    """Process and send a single message.  Mutates *state* on success."""
+    """Process and send a single message.
+
+    When *channel_result* is provided, accumulators (warnings, errors, counters)
+    are written there instead of directly to *state*. Read-only lookups (channel_map,
+    emoji_map, message_map, etc.) still go through *state*.
+
+    When *channel_result* is ``None``, the function writes directly to *state*
+    for backward compatibility (e.g., retry path in engine.py).
+    """
+    # Choose accumulator target.
+    acc_warnings: list[dict[str, str]] = (
+        channel_result.warnings if channel_result is not None else state.warnings
+    )
+    acc_errors: list[dict[str, str]] = (
+        channel_result.errors if channel_result is not None else state.errors
+    )
+    acc_failed: list[FailedMessage] = (
+        channel_result.failed_messages if channel_result is not None else state.failed_messages
+    )
+    acc_pins: list[tuple[str, str]] = (
+        channel_result.pending_pins if channel_result is not None else state.pending_pins
+    )
+    acc_reactions: list[dict[str, object]] = (
+        channel_result.pending_reactions if channel_result is not None else state.pending_reactions
+    )
+
     # Step 0: Filter by type.
     if msg.type in _SKIP_TYPES:
         return
@@ -350,11 +507,14 @@ async def _process_message(
     # ChannelPinnedMessage: mark the referenced message for re-pinning, don't send.
     if msg.type == "ChannelPinnedMessage":
         if msg.reference and msg.reference.message_id:
+            # Check both the main state map and the channel result's local map.
             ref_stoat_id = state.message_map.get(msg.reference.message_id)
+            if ref_stoat_id is None and channel_result is not None:
+                ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
             if ref_stoat_id:
-                state.pending_pins.append((stoat_channel_id, ref_stoat_id))
+                acc_pins.append((stoat_channel_id, ref_stoat_id))
             else:
-                state.warnings.append(
+                acc_warnings.append(
                     {
                         "phase": "messages",
                         "type": "pin_reference_missing",
@@ -374,7 +534,7 @@ async def _process_message(
         and msg.reference is not None
         and msg.type == "Default"
     ):
-        state.warnings.append(
+        acc_warnings.append(
             {
                 "phase": "messages",
                 "type": "forwarded_message",
@@ -399,20 +559,32 @@ async def _process_message(
             f"\n[+{len(overflow)} more attachment(s) not migrated "
             f"(Stoat limit: 5): {overflow_names}]"
         )
-        state.attachments_skipped += len(overflow)
-        state.warnings.append(
-            {
-                "phase": "messages",
-                "type": "attachment_overflow",
-                "message": (
-                    f"Message {msg.id}: {len(overflow)} attachments exceed Stoat limit of 5"
-                ),
-            }
-        )
+        if channel_result is not None:
+            channel_result.attachments_skipped += len(overflow)
+            channel_result.warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "attachment_overflow",
+                    "message": (
+                        f"Message {msg.id}: {len(overflow)} attachments exceed Stoat limit of 5"
+                    ),
+                }
+            )
+        else:
+            state.attachments_skipped += len(overflow)
+            state.warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "attachment_overflow",
+                    "message": (
+                        f"Message {msg.id}: {len(overflow)} attachments exceed Stoat limit of 5"
+                    ),
+                }
+            )
 
     # Step 1: Upload attachments (max 5).
     autumn_ids, attachment_placeholders = await _upload_attachments(
-        msg, config, state, session, on_event
+        msg, config, state, session, on_event, channel_result=channel_result
     )
 
     # Step 1b: Upload sticker images as additional attachments.
@@ -431,9 +603,12 @@ async def _process_message(
                 config.upload_delay,
             )
             autumn_ids.append(sticker_id)
-            state.attachments_uploaded += 1
+            if channel_result is not None:
+                channel_result.attachments_uploaded += 1
+            else:
+                state.attachments_uploaded += 1
         except Exception as exc:  # noqa: BLE001
-            state.warnings.append(
+            acc_warnings.append(
                 {
                     "phase": "messages",
                     "type": "sticker_upload_failed",
@@ -469,9 +644,12 @@ async def _process_message(
                         config.upload_delay,
                     )
                     flat["media"] = media_id
-                    state.attachments_uploaded += 1
+                    if channel_result is not None:
+                        channel_result.attachments_uploaded += 1
+                    else:
+                        state.attachments_uploaded += 1
                 except Exception as exc:  # noqa: BLE001
-                    state.warnings.append(
+                    acc_warnings.append(
                         {
                             "phase": "messages",
                             "type": "embed_media_failed",
@@ -484,6 +662,8 @@ async def _process_message(
     replies: list[dict[str, Any]] = []
     if msg.reference and msg.reference.message_id:
         ref_stoat_id = state.message_map.get(msg.reference.message_id)
+        if ref_stoat_id is None and channel_result is not None:
+            ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
         if ref_stoat_id:
             replies.append({"id": ref_stoat_id, "mention": False})
 
@@ -525,11 +705,15 @@ async def _process_message(
             idempotency_key=f"ferry-{msg.id}",
         )
         stoat_msg_id: str = result["_id"]
-        state.message_map[msg.id] = stoat_msg_id
-        state.referenced_autumn_ids.update(autumn_ids)
+        if channel_result is not None:
+            channel_result.message_map_updates[msg.id] = stoat_msg_id
+            channel_result.referenced_autumn_ids.update(autumn_ids)
+        else:
+            state.message_map[msg.id] = stoat_msg_id
+            state.referenced_autumn_ids.update(autumn_ids)
 
         if msg.is_pinned:
-            state.pending_pins.append((stoat_channel_id, stoat_msg_id))
+            acc_pins.append((stoat_channel_id, stoat_msg_id))
 
         # Step 8b: Queue reactions (only in native mode).
         if _effective_mode == "native":
@@ -537,7 +721,7 @@ async def _process_message(
                 if reaction.emoji.id:  # Custom emoji.
                     stoat_emoji = state.emoji_map.get(reaction.emoji.id)
                     if stoat_emoji:
-                        state.pending_reactions.append(
+                        acc_reactions.append(
                             {
                                 "channel_id": stoat_channel_id,
                                 "message_id": stoat_msg_id,
@@ -545,7 +729,7 @@ async def _process_message(
                             }
                         )
                 else:  # Unicode emoji.
-                    state.pending_reactions.append(
+                    acc_reactions.append(
                         {
                             "channel_id": stoat_channel_id,
                             "message_id": stoat_msg_id,
@@ -554,14 +738,14 @@ async def _process_message(
                     )
 
     except Exception as exc:  # noqa: BLE001
-        state.errors.append(
+        acc_errors.append(
             {
                 "phase": "messages",
                 "type": "message_send_failed",
                 "message": f"Failed to send msg {msg.id}: {exc}",
             }
         )
-        state.failed_messages.append(
+        acc_failed.append(
             FailedMessage(
                 discord_msg_id=msg.id,
                 stoat_channel_id=stoat_channel_id,
@@ -652,6 +836,8 @@ async def _upload_attachments(
     state: MigrationState,
     session: aiohttp.ClientSession,
     on_event: EventCallback,
+    *,
+    channel_result: ChannelResult | None = None,
 ) -> tuple[list[str], list[str]]:
     """Upload up to 5 message attachments to Autumn.
 
@@ -661,6 +847,7 @@ async def _upload_attachments(
         state: Current migration state (upload_cache mutated in-place).
         session: Active aiohttp session.
         on_event: Callback for warning events.
+        channel_result: Optional accumulator for parallel mode.
 
     Returns:
         Tuple of (autumn_file_ids, placeholder_texts). Placeholders are
@@ -678,7 +865,10 @@ async def _upload_attachments(
                 f"({att.file_size_bytes / 1_048_576:.1f} MB, "
                 f"limit: {limit / 1_048_576:.1f} MB)"
             )
-            placeholder = _skip_attachment(state, att.file_name, reason)
+            if channel_result is not None:
+                placeholder = _skip_attachment_to_result(channel_result, att.file_name, reason)
+            else:
+                placeholder = _skip_attachment(state, att.file_name, reason)
             placeholders.append(placeholder)
             on_event(
                 MigrationEvent(
@@ -693,7 +883,10 @@ async def _upload_attachments(
         if local_path is None or not local_path.exists() or not local_path.is_file():
             if check_cdn_url_expiry(att.url) is True:
                 reason = f"Attachment expired: {att.file_name}"
-                placeholder = _skip_attachment(state, att.file_name, reason)
+                if channel_result is not None:
+                    placeholder = _skip_attachment_to_result(channel_result, att.file_name, reason)
+                else:
+                    placeholder = _skip_attachment(state, att.file_name, reason)
                 placeholders.append(placeholder)
                 on_event(
                     MigrationEvent(
@@ -703,17 +896,30 @@ async def _upload_attachments(
                     )
                 )
             else:
-                state.attachments_skipped += 1
-                state.warnings.append(
-                    {
-                        "phase": "messages",
-                        "type": "missing_media",
-                        "message": (
-                            f"Attachment {att.id!r} ({att.file_name!r}) "
-                            "not found locally — skipped."
-                        ),
-                    }
-                )
+                if channel_result is not None:
+                    channel_result.attachments_skipped += 1
+                    channel_result.warnings.append(
+                        {
+                            "phase": "messages",
+                            "type": "missing_media",
+                            "message": (
+                                f"Attachment {att.id!r} ({att.file_name!r}) "
+                                "not found locally — skipped."
+                            ),
+                        }
+                    )
+                else:
+                    state.attachments_skipped += 1
+                    state.warnings.append(
+                        {
+                            "phase": "messages",
+                            "type": "missing_media",
+                            "message": (
+                                f"Attachment {att.id!r} ({att.file_name!r}) "
+                                "not found locally — skipped."
+                            ),
+                        }
+                    )
                 on_event(
                     MigrationEvent(
                         phase="messages",
@@ -734,17 +940,30 @@ async def _upload_attachments(
                 config.upload_delay,
             )
             autumn_ids.append(autumn_id)
-            state.attachments_uploaded += 1
+            if channel_result is not None:
+                channel_result.attachments_uploaded += 1
+            else:
+                state.attachments_uploaded += 1
             state.autumn_uploads[autumn_id] = att.id
         except Exception as exc:  # noqa: BLE001
-            state.attachments_skipped += 1
-            state.warnings.append(
-                {
-                    "phase": "messages",
-                    "type": "attachment_upload_failed",
-                    "message": f"Attachment {att.file_name!r} upload failed: {exc}",
-                }
-            )
+            if channel_result is not None:
+                channel_result.attachments_skipped += 1
+                channel_result.warnings.append(
+                    {
+                        "phase": "messages",
+                        "type": "attachment_upload_failed",
+                        "message": f"Attachment {att.file_name!r} upload failed: {exc}",
+                    }
+                )
+            else:
+                state.attachments_skipped += 1
+                state.warnings.append(
+                    {
+                        "phase": "messages",
+                        "type": "attachment_upload_failed",
+                        "message": f"Attachment {att.file_name!r} upload failed: {exc}",
+                    }
+                )
             on_event(
                 MigrationEvent(
                     phase="messages",
