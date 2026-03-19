@@ -69,8 +69,8 @@ def test_state_with_populated_maps(tmp_path: Path) -> None:
         warnings=[{"type": "http_attachment", "message": "missing media"}],
         stoat_server_id="01STOAT",
         current_phase="reactions",
-        last_completed_channel="general",
-        last_completed_message="msg999",
+        completed_channel_ids={"general"},
+        channel_message_offsets={"general": "msg999"},
         started_at="2024-06-01T10:00:00+00:00",
         completed_at="2024-06-01T14:00:00+00:00",
     )
@@ -81,7 +81,8 @@ def test_state_with_populated_maps(tmp_path: Path) -> None:
     assert loaded.emoji_map == {"d_emoji1": "s_emoji1"}
     assert loaded.author_names == {"12345": "Alice"}
     assert loaded.upload_cache == {"/path/to/file.png": "autumn_file1"}
-    assert loaded.last_completed_channel == "general"
+    assert loaded.completed_channel_ids == {"general"}
+    assert loaded.channel_message_offsets == {"general": "msg999"}
     assert loaded.completed_at == "2024-06-01T14:00:00+00:00"
     assert len(loaded.errors) == 1
     assert len(loaded.warnings) == 1
@@ -219,3 +220,164 @@ def test_old_state_without_failed_messages_loads(tmp_path: Path) -> None:
     loaded = load_state(tmp_path)
     assert loaded.failed_messages == []
     assert loaded.validation_results == {}
+
+
+# ---------------------------------------------------------------------------
+# S2 — Resume correctness: completed_channel_ids + channel_message_offsets
+# ---------------------------------------------------------------------------
+
+
+def test_completed_channel_ids_roundtrip(tmp_path: Path) -> None:
+    """completed_channel_ids set survives JSON serialization (stored as list, loaded as set)."""
+    import json
+
+    state = MigrationState(completed_channel_ids={"ch_a", "ch_b", "ch_c"})
+    save_state(state, tmp_path)
+
+    # Verify stored as list in state.json.
+    raw = json.loads((tmp_path / "state.json").read_text())
+    assert isinstance(raw["completed_channel_ids"], list)
+    assert set(raw["completed_channel_ids"]) == {"ch_a", "ch_b", "ch_c"}
+
+    # Verify loads back as a set.
+    loaded = load_state(tmp_path)
+    assert isinstance(loaded.completed_channel_ids, set)
+    assert loaded.completed_channel_ids == {"ch_a", "ch_b", "ch_c"}
+
+
+def test_channel_message_offsets_roundtrip(tmp_path: Path) -> None:
+    """channel_message_offsets dict survives JSON serialization."""
+    state = MigrationState(channel_message_offsets={"ch1": "msg_123", "ch2": "msg_456"})
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.channel_message_offsets == {"ch1": "msg_123", "ch2": "msg_456"}
+
+
+def test_v1_state_migration(tmp_path: Path) -> None:
+    """v1 last_completed_channel/message fields are converted to v2 format on load."""
+    import json
+
+    v1_data = {
+        "channel_map": {"100": "s_ch100", "200": "s_ch200", "300": "s_ch300"},
+        "last_completed_channel": "200",
+        "last_completed_message": "msg_999",
+        "role_map": {},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(v1_data), encoding="utf-8")
+
+    import warnings
+
+    with warnings.catch_warnings(record=True):
+        loaded = load_state(tmp_path)
+
+    # Channel 100 is < 200, so it should be marked complete.
+    assert "100" in loaded.completed_channel_ids
+    # Channel 200 is NOT in completed_channel_ids (it was partial).
+    assert "200" not in loaded.completed_channel_ids
+    # Channel 300 is > 200, so it should NOT be marked complete.
+    assert "300" not in loaded.completed_channel_ids
+    # The last message for the resume channel (200) should be recorded.
+    assert loaded.channel_message_offsets.get("200") == "msg_999"
+
+
+def test_v1_state_migration_empty_fields(tmp_path: Path) -> None:
+    """v1 state with empty last_completed_channel/message migrates cleanly."""
+    import json
+    import warnings
+
+    v1_data = {
+        "channel_map": {"100": "s_ch100"},
+        "last_completed_channel": "",
+        "last_completed_message": "",
+        "role_map": {},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(v1_data), encoding="utf-8")
+
+    with warnings.catch_warnings(record=True):
+        loaded = load_state(tmp_path)
+
+    assert loaded.completed_channel_ids == set()
+    assert loaded.channel_message_offsets == {}
+
+
+def test_v1_state_backup_created(tmp_path: Path) -> None:
+    """A backup file state.json.v1.bak is created during v1→v2 migration."""
+    import json
+    import warnings
+
+    v1_data = {
+        "channel_map": {"100": "s_ch100"},
+        "last_completed_channel": "100",
+        "last_completed_message": "msg_42",
+    }
+    (tmp_path / "state.json").write_text(json.dumps(v1_data), encoding="utf-8")
+
+    with warnings.catch_warnings(record=True):
+        load_state(tmp_path)
+
+    backup = tmp_path / "state.json.v1.bak"
+    assert backup.exists()
+    bak_data = json.loads(backup.read_text())
+    assert bak_data["last_completed_channel"] == "100"
+
+
+# ---------------------------------------------------------------------------
+# S5 — Separate message_map.json file
+# ---------------------------------------------------------------------------
+
+
+def test_message_map_saved_to_separate_file(tmp_path: Path) -> None:
+    """After save_state, message_map.json exists and state.json does not contain message_map."""
+    import json
+
+    state = MigrationState(message_map={"d_msg1": "s_msg1", "d_msg2": "s_msg2"})
+    save_state(state, tmp_path)
+
+    # state.json must NOT contain message_map key.
+    raw = json.loads((tmp_path / "state.json").read_text())
+    assert "message_map" not in raw
+
+    # message_map.json must exist and contain the map.
+    mm_path = tmp_path / "message_map.json"
+    assert mm_path.exists()
+    mm_data = json.loads(mm_path.read_text())
+    assert mm_data == {"d_msg1": "s_msg1", "d_msg2": "s_msg2"}
+
+
+def test_message_map_loaded_from_separate_file(tmp_path: Path) -> None:
+    """Round-trip through separate message_map.json restores the message_map correctly."""
+    state = MigrationState(message_map={"d_msg1": "s_msg1"})
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.message_map == {"d_msg1": "s_msg1"}
+
+
+def test_message_map_v1_fallback(tmp_path: Path) -> None:
+    """v1 state.json with embedded message_map loads correctly (no message_map.json)."""
+    import json
+
+    v1_data = {
+        "message_map": {"old_msg1": "old_stoat1"},
+        "role_map": {},
+        "channel_map": {},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(v1_data), encoding="utf-8")
+    # No message_map.json exists.
+
+    loaded = load_state(tmp_path)
+    assert loaded.message_map == {"old_msg1": "old_stoat1"}
+
+
+def test_message_map_empty_dict(tmp_path: Path) -> None:
+    """Empty message_map round-trips cleanly through the separate file."""
+    import json
+
+    state = MigrationState(message_map={})
+    save_state(state, tmp_path)
+
+    mm_path = tmp_path / "message_map.json"
+    assert mm_path.exists()
+    assert json.loads(mm_path.read_text()) == {}
+
+    loaded = load_state(tmp_path)
+    assert loaded.message_map == {}
