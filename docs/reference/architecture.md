@@ -42,7 +42,8 @@ src/discord_ferry/
 │
 ├── core/
 │   ├── engine.py            # Migration orchestrator — runs all 12 phases
-│   └── events.py            # MigrationEvent dataclass and EventCallback type
+│   ├── events.py            # MigrationEvent dataclass and EventCallback type
+│   └── security.py          # SecureTokenStore — token masking and sanitization at output boundaries
 │
 ├── parser/
 │   ├── models.py            # 10 DCE dataclasses (DCEExport, DCEMessage, etc.)
@@ -169,7 +170,7 @@ class MigrationState:
     role_map: dict[str, str]
     channel_map: dict[str, str]
     category_map: dict[str, str]
-    message_map: dict[str, str]         # For reply reference resolution
+    message_map: dict[str, str]         # For reply reference resolution — saved to message_map.json
     emoji_map: dict[str, str]
 
     # Upload caches (avoid re-uploading identical files)
@@ -201,16 +202,27 @@ class MigrationState:
     stoat_server_id: str
     autumn_url: str                     # Discovered during CONNECT phase
 
+    # Forum/thread tracking
+    forum_index_message_ids: dict[str, str]   # forum channel ID → index message Stoat ID
+    forum_channel_members: dict[str, list[str]]  # forum channel ID → list of thread channel IDs
+    forum_category_names: dict[str, str]      # forum channel ID → category name on Stoat
+
     # Resume tracking
     current_phase: str                  # Phase name for resume skip logic
-    last_completed_channel: str         # Snowflake ID — messages phase granularity
-    last_completed_message: str         # Message ID within partial channel
+    completed_channel_ids: set[str]     # Discord channel IDs fully processed in MESSAGES phase
+    channel_message_offsets: dict[str, str]  # Partial channel → last processed Discord message ID
 
     # Counters
     attachments_uploaded: int
     attachments_skipped: int
     reactions_applied: int
     pins_applied: int
+    channel_message_counts: dict[str, int]   # Stoat channel ID → messages sent count
+    prior_messages_total: int                # Total messages in prior (resumed) state
+    embeds_total: int
+    embeds_dropped: int
+    replies_linked: int
+    replies_total: int
 
     # Timing
     started_at: str                     # ISO 8601
@@ -366,8 +378,20 @@ to Autumn with tag `emojis`, creates on server. 2.0s delay between creates (shar
 the MESSAGES phase begins, so message sends never block on avatar I/O. Skippable via
 `skip_avatars` config flag. Added in v1.5.0.
 
-**MESSAGES** (Phase 8): The largest phase. Processes channels sorted by Discord Snowflake ID
-(deterministic). Per channel, streams or iterates messages oldest-first. Per message:
+**MESSAGES** (Phase 8): The largest phase. In v2.0.0 this phase uses a **parallel channel
+architecture**:
+
+- Channels are processed concurrently via `asyncio.gather` bounded by
+  `asyncio.Semaphore(config.max_concurrent_channels)` (default 3)
+- Each channel worker accumulates results in a **`ChannelResult` dataclass** containing:
+  warnings, errors, failed_messages, message_map_updates, pending_pins, pending_reactions,
+  and attachment counters
+- Results from each worker are merged into the main `MigrationState` after the channel
+  completes (serialized under a `save_lock: asyncio.Lock`)
+- **Thread merge mode** (`thread_strategy="merge"`) processes thread channels sequentially
+  AFTER all parent channels finish, so parent message IDs are available for reply linking
+
+Per channel, messages are streamed oldest-first. Per message (9-step pipeline):
 
 1. Check skip types → skip system messages (join, boost, etc.)
 2. If `ChannelPinnedMessage` → extract reference, add to `pending_pins`
@@ -380,7 +404,8 @@ the MESSAGES phase begins, so message sends never block on avatar I/O. Skippable
 9. Send via `api_send_message` with `Idempotency-Key` header `ferry-{discord_msg_id}`
 
 Collects `pending_reactions` for Phase 9. Saves state every `checkpoint_interval` messages
-(default 50, time-throttled to at most once per 5 seconds) and after each channel completes.
+(default 50, time-throttled to at most once per 5 seconds via `save_lock`). Completed channel
+IDs are recorded in `state.completed_channel_ids`.
 
 **REACTIONS** (Phase 9): Iterates `state.pending_reactions`. Calls `api_add_reaction` for each.
 Enforces the 20-reactions-per-message Stoat limit. Fire-and-forget error handling (failures
@@ -468,6 +493,7 @@ writing a new callback — no engine changes needed.
 | `api_set_channel_default_permissions` | `PUT /channels/:id/permissions/default` | Set @everyone channel override |
 | `api_set_channel_role_permissions` | `PUT /channels/:id/permissions/:role_id` | Set per-role channel override |
 | `api_send_message` | `POST /channels/:id/messages` | Send message with masquerade |
+| `api_edit_message` | `PATCH /channels/:id/messages/:id` | Edit a sent message (content, embeds) |
 | `api_add_reaction` | `PUT /channels/:id/messages/:id/reactions/:emoji` | Add reaction |
 | `api_create_emoji` | `PUT /custom/emoji/:id` | Register emoji on server |
 | `api_pin_message` | `PUT /channels/:id/messages/:id/pin` | Pin a message |
@@ -499,15 +525,14 @@ Stoat uses **fixed 10-second windows** (not sliding).
     Creating a channel, a role, and an emoji in quick succession all draw from the same
     5-per-10-second budget. Ferry paces structure creation phases to stay within this limit.
 
-**Response headers** (on every response):
+**Response headers**: Stoat returns **no rate limit headers**. There are no
+`X-RateLimit-Remaining`, `X-RateLimit-Reset-After`, or `X-RateLimit-Bucket` headers on any
+response.
 
-```
-X-RateLimit-Remaining: 3
-X-RateLimit-Reset-After: 7340    ← milliseconds until window resets
-X-RateLimit-Bucket: servers
-```
-
-**429 response body**: `{ "retry_after": 4200 }` — Ferry uses this value for backoff.
+**429 response body**: `{ "retry_after": 4200 }` — Ferry sleeps for this duration (milliseconds)
+and retries. In addition, Ferry's adaptive 429-frequency optimizer tracks 429 frequency in a
+rolling 60-second window and auto-adjusts a delay multiplier (1.5× increase on burst, 0.75×
+decay when clear).
 
 ### Retry Logic
 
@@ -825,12 +850,16 @@ completed).
 
 ### Message-Level Resume
 
-The MESSAGES phase has finer granularity:
+The MESSAGES phase has finer granularity (v2.0.0+):
 
-- `state.last_completed_channel`: Discord Snowflake ID of the last fully completed channel
-- `state.last_completed_message`: Discord message ID within a partially completed channel
-- Channels are compared as integers (Snowflake ordering)
-- Messages already sent are further deduplicated by `Idempotency-Key` header
+- `state.completed_channel_ids`: set of Discord channel IDs whose messages were fully sent
+- `state.channel_message_offsets`: maps a partially-processed channel ID to the last Discord
+  message ID successfully sent — the phase resumes within that channel from that offset
+- Messages already sent are additionally deduplicated by `Idempotency-Key` header
+
+**v1→v2 automatic migration**: On `--resume` with a v1 state file, Ferry detects the old
+`last_completed_channel` / `last_completed_message` fields, converts them to the new set/dict
+format, and saves a backup of the original state file before proceeding.
 
 ### Dry-Run Rejection
 
@@ -869,9 +898,12 @@ Three layers:
 
 1. **HTTP-level retry**: `_api_request()` handles 429 responses by sleeping for the
    server-specified `retry_after` duration, then retrying (up to 3 times)
-2. **Phase-level pacing**: Structure creation phases (ROLES, CATEGORIES, CHANNELS, EMOJI) add
+2. **Adaptive 429-frequency optimizer**: A rolling 60-second window tracks 429 frequency.
+   On a 429 burst the delay multiplier increases by 1.5×; when the window is clear it decays
+   by 0.75×. This compensates for the absence of `X-RateLimit-*` response headers.
+3. **Phase-level pacing**: Structure creation phases (ROLES, CATEGORIES, CHANNELS, EMOJI) add
    explicit `asyncio.sleep()` between API calls to stay within the 5/10s `/servers` bucket
-3. **User-configurable delay**: `config.message_rate_limit` (default 1.0s) adds a sleep between
+4. **User-configurable delay**: `config.message_rate_limit` (default 1.0s) adds a sleep between
    each message send as a safety margin above the 10/10s message bucket
 
 ---
@@ -1102,9 +1134,93 @@ Ferry's VALIDATE phase warns when source data is likely to exceed these limits. 
 
 ---
 
+## Message Splitting (`migrator/messages.py`)
+
+Messages that exceed the 2,000-character Stoat limit are split into multiple sends by
+`_split_message()`:
+
+- Splits on sentence/word boundaries where possible
+- Each part carries a `[continued K/N]` marker appended to the content (budget-aware: the
+  marker length is subtracted from the available character budget before generation)
+- All parts share the same masquerade and are sent in order with a small inter-part delay
+- The Stoat message ID of the first part is recorded in `message_map` for reply linking
+
+---
+
+## Thread Strategies (`migrator/messages.py`, `migrator/structure.py`)
+
+The `thread_strategy` config option controls how forum and thread channels are handled:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `flatten` | Each thread becomes its own standalone text channel (default pre-v2) |
+| `merge` | Thread messages are appended into the parent channel after it is processed; threads are NOT created as separate channels. Processed after all parent channels complete. |
+| `archive` | Threads are created as separate channels placed in a dedicated archive category |
+
+`min_thread_messages` (default 0 = include all) filters out threads with fewer messages than
+the threshold — useful for suppressing near-empty auto-created threads.
+
+---
+
+## Migration Lock (`core/engine.py`, `core/security.py`)
+
+Ferry places an **advisory lock** in the target Stoat server's description field using the
+marker `[FERRY_LOCK:{timestamp}:{hostname}]`. This prevents two Ferry instances from
+migrating into the same server simultaneously.
+
+- Lock is set at the start of the SERVER phase and cleared on completion or error
+- Locks older than 24 hours are considered stale
+- `--force-unlock` removes a stale lock without starting a migration
+
+Using the server description (not a dedicated channel) avoids consuming one of the 200-channel
+limit.
+
+---
+
+## Fidelity Scoring (`reporter.py`)
+
+The post-migration report includes a **fidelity score**: a 0–100 weighted score across five
+categories:
+
+| Category | Weight | What is measured |
+|----------|--------|-----------------|
+| Messages | 40% | Messages sent vs. total, failed message rate |
+| Attachments | 20% | Attachments uploaded vs. total |
+| Embeds | 15% | Embeds sent vs. dropped |
+| Reactions | 15% | Reactions applied (native mode only) |
+| Replies | 10% | Reply links resolved vs. total replies |
+
+The score is written to `migration_report.json` under `fidelity_score`.
+
+---
+
+## Incremental / Delta Migration (`core/engine.py`)
+
+`--incremental` mode re-uses an existing state file's ID maps to migrate only new content:
+
+- `channel_map`, `role_map`, `category_map`, `emoji_map`, `message_map`, and `avatar_cache`
+  are carried forward from the prior state
+- Only channels whose Discord Snowflake ID is absent from `completed_channel_ids` are processed
+- Within a partially-migrated channel, `channel_message_offsets` marks the resume point
+- `--resume` and `--incremental` are mutually exclusive (enforced at CLI startup)
+
+---
+
+## SecureTokenStore (`core/security.py`)
+
+`SecureTokenStore` centralises token masking and sanitization at all output boundaries:
+
+- Tokens are stored once and never appear in log lines, event messages, or error strings
+- `sanitize(text)` replaces any stored token substring with `[REDACTED]` before the text
+  reaches a shell, logger, or state file
+- Used by the engine, CLI, and GUI before emitting any `MigrationEvent.message` that could
+  contain a request URL or header value
+
+---
+
 ## Testing
 
-426 tests across 31 files. Key patterns:
+701 tests across 31 files. Key patterns:
 
 - **Phase tests**: Mock `aiohttp.ClientSession` with `aioresponses`, inject via `config.session`
 - **Parser tests**: Use fixture JSON files in `tests/fixtures/`
