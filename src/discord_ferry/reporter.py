@@ -22,29 +22,57 @@ def compute_fidelity_score(
     failed_count: int,
     attachments_uploaded: int,
     attachments_skipped: int,
+    embeds_total: int = 0,
+    embeds_dropped: int = 0,
+    replies_linked: int = 0,
+    replies_total: int = 0,
+    reactions_applied: int = 0,
+    reactions_total: int = 0,
 ) -> dict[str, float]:
     """Compute a quantified fidelity score for the migration.
 
-    The overall score is a weighted combination:
-    - 60% weight on message success rate
-    - 40% weight on attachment success rate
+    The overall score is a weighted combination across 5 categories:
+    - 40% weight on message success rate
+    - 25% weight on attachment success rate
+    - 15% weight on embed preservation rate
+    - 10% weight on reply linkage rate
+    - 10% weight on reaction application rate
 
     Args:
         total_messages: Total messages in exports.
         failed_count: Number of messages that failed to migrate.
         attachments_uploaded: Number of attachments successfully uploaded.
         attachments_skipped: Number of attachments that could not be uploaded.
+        embeds_total: Total embeds encountered across all messages.
+        embeds_dropped: Embeds that could not be migrated (beyond cap, no title/description).
+        replies_linked: Reply references successfully resolved to a Stoat message ID.
+        replies_total: Total reply references encountered.
+        reactions_applied: Reactions successfully applied in native mode.
+        reactions_total: Total reactions queued for application.
 
     Returns:
-        Dict with 'overall', 'messages', and 'attachments' scores (0-100).
+        Dict with 'overall', 'messages', 'attachments', 'embeds', 'replies',
+        and 'reactions' scores (0-100).
     """
     msg_ratio = (total_messages - failed_count) / max(total_messages, 1)
     att_ratio = attachments_uploaded / max(attachments_uploaded + attachments_skipped, 1)
-    overall = msg_ratio * 0.60 + att_ratio * 0.40
+    embed_ratio = (embeds_total - embeds_dropped) / embeds_total if embeds_total else 1.0
+    reply_ratio = replies_linked / replies_total if replies_total else 1.0
+    reaction_ratio = reactions_applied / max(reactions_total, 1) if reactions_total else 1.0
+    overall = (
+        msg_ratio * 0.40
+        + att_ratio * 0.25
+        + embed_ratio * 0.15
+        + reply_ratio * 0.10
+        + reaction_ratio * 0.10
+    )
     return {
         "overall": round(overall * 100, 1),
         "messages": round(msg_ratio * 100, 1),
         "attachments": round(att_ratio * 100, 1),
+        "embeds": round(embed_ratio * 100, 1),
+        "replies": round(reply_ratio * 100, 1),
+        "reactions": round(reaction_ratio * 100, 1),
     }
 
 
@@ -84,6 +112,12 @@ def generate_report(
         failed_count=len(state.failed_messages),
         attachments_uploaded=state.attachments_uploaded,
         attachments_skipped=state.attachments_skipped,
+        embeds_total=state.embeds_total,
+        embeds_dropped=state.embeds_dropped,
+        replies_linked=state.replies_linked,
+        replies_total=state.replies_total,
+        reactions_applied=state.reactions_applied,
+        reactions_total=len(state.pending_reactions),
     )
 
     # Delta stats: messages migrated in this run vs cumulatively
@@ -296,11 +330,20 @@ def generate_markdown_report(
         failed_count=len(state.failed_messages),
         attachments_uploaded=state.attachments_uploaded,
         attachments_skipped=state.attachments_skipped,
+        embeds_total=state.embeds_total,
+        embeds_dropped=state.embeds_dropped,
+        replies_linked=state.replies_linked,
+        replies_total=state.replies_total,
+        reactions_applied=state.reactions_applied,
+        reactions_total=len(state.pending_reactions),
     )
     lines.append("## Fidelity Score\n")
     lines.append(f"**Overall:** {fidelity['overall']}%  ")
     lines.append(f"**Messages:** {fidelity['messages']}%  ")
-    lines.append(f"**Attachments:** {fidelity['attachments']}%\n")
+    lines.append(f"**Attachments:** {fidelity['attachments']}%  ")
+    lines.append(f"**Embeds:** {fidelity['embeds']}%  ")
+    lines.append(f"**Replies:** {fidelity['replies']}%  ")
+    lines.append(f"**Reactions:** {fidelity['reactions']}%\n")
 
     lines.append("## Summary\n")
     lines.append("| Metric | Count |")

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.0.1] - 2026-03-19
+
+### Fixes
+- **Token sanitization wired** (S1): `SecureTokenStore` now created in engine and used at error output boundaries — token values stripped from `state.errors` and event messages
+- **DCE checksums populated** (S10): SHA-256 hashes for DCE v2.46.1 (win-x64, linux-x64, osx-x64) — supply chain verification now active
+- **GUI thread strategy** (S7): Thread strategy dropdown added to GUI setup page
+- **Forum index edit** (S15): Re-runs edit existing forum index message via `api_edit_message` instead of creating duplicates
+- **Fidelity scoring expanded** (S18): 5 categories (messages 40%, attachments 25%, embeds 15%, replies 10%, reactions 10%) — up from 2
+
 ## [2.0.0] - 2026-03-19
 
 ### Security

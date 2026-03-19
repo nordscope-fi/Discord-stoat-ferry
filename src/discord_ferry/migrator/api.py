@@ -471,6 +471,39 @@ async def api_send_message(
     return await _api_request(session, "POST", url, token, data, extra_headers=extra)
 
 
+async def api_edit_message(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+    message_id: str,
+    *,
+    content: str | None = None,
+    embeds: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Edit an existing message in a channel.
+
+    Args:
+        session: An active aiohttp ClientSession.
+        stoat_url: Stoat API base URL.
+        token: Stoat session token.
+        channel_id: Channel containing the message.
+        message_id: Target message ID to edit.
+        content: New message text content. Optional.
+        embeds: New list of embed dicts. Optional.
+
+    Returns:
+        Updated message object dict from the API.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/messages/{message_id}"
+    data: dict[str, Any] = {}
+    if content is not None:
+        data["content"] = content
+    if embeds is not None:
+        data["embeds"] = embeds
+    return await _api_request(session, "PATCH", url, token, data)
+
+
 async def api_add_reaction(
     session: aiohttp.ClientSession,
     stoat_url: str,

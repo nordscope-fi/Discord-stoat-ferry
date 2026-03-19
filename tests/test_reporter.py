@@ -631,69 +631,77 @@ def test_fidelity_perfect_score() -> None:
         attachments_uploaded=50,
         attachments_skipped=0,
     )
+    # All categories at 100% (embed/reply/reaction default to 1.0 when totals are 0).
     assert score["overall"] == 100.0
     assert score["messages"] == 100.0
     assert score["attachments"] == 100.0
+    assert score["embeds"] == 100.0
+    assert score["replies"] == 100.0
+    assert score["reactions"] == 100.0
 
 
 def test_fidelity_zero_messages() -> None:
-    """Zero total messages and zero attachments: both ratios are 0.0."""
+    """Zero total messages and zero attachments: msg and att ratios are 0.0."""
     score = compute_fidelity_score(
         total_messages=0,
         failed_count=0,
         attachments_uploaded=0,
         attachments_skipped=0,
     )
-    # msg_ratio = (0-0)/max(0,1) = 0.0, att_ratio = 0/max(0,1) = 0.0
+    # msg_ratio = 0.0, att_ratio = 0.0; embed/reply/reaction default to 1.0.
+    # overall = 0*0.40 + 0*0.25 + 1.0*0.15 + 1.0*0.10 + 1.0*0.10 = 0.35
     assert score["messages"] == 0.0
     assert score["attachments"] == 0.0
-    assert score["overall"] == 0.0
+    assert score["overall"] == 35.0
 
 
 def test_fidelity_partial_messages_no_attachments() -> None:
-    """50% message success, no attachments: overall = 0.5*0.6 + 0.0*0.4 = 0.3."""
+    """50% message success, no attachments: embed/reply/react default to 1.0."""
     score = compute_fidelity_score(
         total_messages=100,
         failed_count=50,
         attachments_uploaded=0,
         attachments_skipped=0,
     )
-    # msg_ratio = 0.5, att_ratio = 0.0 (no attachments at all), overall = 0.5*0.6 + 0.0*0.4
+    # msg_ratio=0.5, att_ratio=0.0, embed/reply/react=1.0
+    # overall = 0.5*0.40 + 0*0.25 + 1.0*0.15 + 1.0*0.10 + 1.0*0.10 = 0.55
     assert score["messages"] == 50.0
     assert score["attachments"] == 0.0
-    assert score["overall"] == 30.0
+    assert score["overall"] == 55.0
 
 
 def test_fidelity_partial_attachments() -> None:
-    """All messages imported, 50% attachments uploaded yields 80% overall."""
+    """All messages imported, 50% attachments uploaded."""
     score = compute_fidelity_score(
         total_messages=100,
         failed_count=0,
         attachments_uploaded=5,
         attachments_skipped=5,
     )
-    # msg_ratio = 1.0, att_ratio = 0.5, overall = 1.0*0.6 + 0.5*0.4 = 0.8
+    # msg_ratio=1.0, att_ratio=0.5, embed/reply/react=1.0
+    # overall = 1.0*0.40 + 0.5*0.25 + 1.0*0.15 + 1.0*0.10 + 1.0*0.10 = 0.875
     assert score["messages"] == 100.0
     assert score["attachments"] == 50.0
-    assert score["overall"] == 80.0
+    assert score["overall"] == 87.5
 
 
 def test_fidelity_worst_case() -> None:
-    """All messages failed, no attachments uploaded: score is near zero."""
+    """All messages failed, no attachments uploaded: msg and att scores are zero."""
     score = compute_fidelity_score(
         total_messages=100,
         failed_count=100,
         attachments_uploaded=0,
         attachments_skipped=10,
     )
-    # msg_ratio = 0.0, att_ratio = 0.0, overall = 0.0
-    assert score["overall"] == 0.0
+    # msg_ratio=0.0, att_ratio=0.0, embed/reply/react=1.0
+    # overall = 0*0.40 + 0*0.25 + 1.0*0.15 + 1.0*0.10 + 1.0*0.10 = 0.35
     assert score["messages"] == 0.0
     assert score["attachments"] == 0.0
+    assert score["overall"] == 35.0
 
 
 def test_fidelity_included_in_json_report(tmp_path: Path) -> None:
-    """generate_report includes 'fidelity' key with overall/messages/attachments."""
+    """generate_report includes 'fidelity' key with all 5 category scores."""
     config = _make_config(tmp_path)
     state = MigrationState(
         message_map={"m1": "sm1", "m2": "sm2"},  # 2 imported
@@ -710,6 +718,9 @@ def test_fidelity_included_in_json_report(tmp_path: Path) -> None:
     assert "overall" in fidelity
     assert "messages" in fidelity
     assert "attachments" in fidelity
+    assert "embeds" in fidelity
+    assert "replies" in fidelity
+    assert "reactions" in fidelity
 
 
 def test_fidelity_included_in_markdown_report(tmp_path: Path) -> None:
@@ -735,7 +746,8 @@ def test_fidelity_rounding() -> None:
         attachments_uploaded=2,
         attachments_skipped=1,
     )
-    # msg_ratio = 2/3 ≈ 0.6667, att_ratio = 2/3 ≈ 0.6667
-    # overall = 0.6667*0.6 + 0.6667*0.4 = 0.6667 → 66.7
-    assert score["overall"] == round((2 / 3) * 100, 1)
+    # msg_ratio = 2/3, att_ratio = 2/3, embed/reply/react default to 1.0
+    # overall = (2/3)*0.40 + (2/3)*0.25 + 1.0*0.15 + 1.0*0.10 + 1.0*0.10
+    #         = (2/3)*0.65 + 0.35 ≈ 0.7833 → 78.3
+    assert score["overall"] == 78.3
     assert score["messages"] == round((2 / 3) * 100, 1)

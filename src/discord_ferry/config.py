@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
     import aiohttp
 
+    from discord_ferry.core.security import SecureTokenStore
+
 
 @dataclass
 class FerryConfig:
@@ -71,3 +73,4 @@ class FerryConfig:
     pause_event: asyncio.Event | None = field(default=None, repr=False)
     cancel_event: asyncio.Event | None = field(default=None, repr=False)
     session: aiohttp.ClientSession | None = field(default=None, repr=False)
+    token_store: SecureTokenStore | None = field(default=None, repr=False)

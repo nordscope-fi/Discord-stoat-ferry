@@ -99,6 +99,16 @@ class MigrationState:
     # Incremented by _process_message; used by forum index rebuild in REPORT phase.
     channel_message_counts: dict[str, int] = field(default_factory=dict)
 
+    # Forum index message IDs: forum_cat_key -> stoat_message_id.
+    # Populated by _rebuild_forum_indexes; used to PATCH (not re-POST) on re-runs.
+    forum_index_message_ids: dict[str, str] = field(default_factory=dict)
+
+    # Fidelity counters (S18)
+    embeds_total: int = 0
+    embeds_dropped: int = 0
+    replies_linked: int = 0
+    replies_total: int = 0
+
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
     """Save migration state to state.json using atomic write.
@@ -198,6 +208,11 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "forum_channel_members": state.forum_channel_members,
         "forum_category_names": state.forum_category_names,
         "channel_message_counts": state.channel_message_counts,
+        "forum_index_message_ids": state.forum_index_message_ids,
+        "embeds_total": state.embeds_total,
+        "embeds_dropped": state.embeds_dropped,
+        "replies_linked": state.replies_linked,
+        "replies_total": state.replies_total,
     }
 
 
@@ -237,6 +252,11 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             forum_channel_members=data.get("forum_channel_members", {}),
             forum_category_names=data.get("forum_category_names", {}),
             channel_message_counts=data.get("channel_message_counts", {}),
+            forum_index_message_ids=data.get("forum_index_message_ids", {}),
+            embeds_total=data.get("embeds_total", 0),
+            embeds_dropped=data.get("embeds_dropped", 0),
+            replies_linked=data.get("replies_linked", 0),
+            replies_total=data.get("replies_total", 0),
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e

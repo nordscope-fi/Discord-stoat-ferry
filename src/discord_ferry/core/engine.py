@@ -26,6 +26,7 @@ from discord_ferry.exporter import (
     validate_discord_token,
 )
 from discord_ferry.migrator.api import (
+    api_edit_message,
     api_edit_server,
     api_fetch_server,
     api_pin_message,
@@ -113,6 +114,14 @@ async def run_migration(
         MigrationError: If any phase raises an exception.
     """
     config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create token store for sanitizing error messages at output boundaries.
+    from discord_ferry.core.security import SecureTokenStore
+
+    tokens: dict[str, str] = {"stoat": config.token}
+    if config.discord_token:
+        tokens["discord"] = config.discord_token
+    config.token_store = SecureTokenStore(tokens)
 
     if config.resume and config.incremental:
         raise MigrationError("--resume and --incremental are mutually exclusive.")
@@ -766,25 +775,39 @@ async def _rebuild_forum_indexes(
                     content = "\n".join(lines)
 
             try:
-                msg_result = await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    index_channel_id,
-                    content=content,
-                    masquerade={"name": "Discord Ferry"},
-                    idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
-                )
-                await asyncio.sleep(config.upload_delay)
-                index_msg_id: str = msg_result["_id"]
-                await api_pin_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    index_channel_id,
-                    index_msg_id,
-                )
-                await asyncio.sleep(config.upload_delay)
+                existing_msg_id = state.forum_index_message_ids.get(forum_key)
+                if existing_msg_id:
+                    # Re-run: edit the existing index message instead of creating a duplicate.
+                    await api_edit_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        existing_msg_id,
+                        content=content,
+                    )
+                    index_msg_id: str = existing_msg_id
+                else:
+                    msg_result = await api_send_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        content=content,
+                        masquerade={"name": "Discord Ferry"},
+                        idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
+                    )
+                    await asyncio.sleep(config.upload_delay)
+                    index_msg_id = msg_result["_id"]
+                    state.forum_index_message_ids[forum_key] = index_msg_id
+                    await api_pin_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        index_msg_id,
+                    )
+                    await asyncio.sleep(config.upload_delay)
                 on_event(
                     MigrationEvent(
                         phase="report",

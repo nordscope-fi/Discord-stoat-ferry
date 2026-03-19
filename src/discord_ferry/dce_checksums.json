@@ -1,7 +1,7 @@
 {
   "2.46.1": {
-    "win-x64": "",
-    "linux-x64": "",
-    "osx-x64": ""
+    "win-x64": "73111fe3fb5700b599a11db8bdcaf7a9e211b9d9d073e46bdbbe634fdeb1ebca",
+    "linux-x64": "5732685fff0e4dafd1487eba57695a984be9630688fac2b902d053d165796615",
+    "osx-x64": "1e2cd97acebbad41f6d6e922dc0308d7063665f91c68c79ecf2cd17cb328c104"
   }
 }

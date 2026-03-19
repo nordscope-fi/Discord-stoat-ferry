@@ -438,6 +438,11 @@ def setup_page() -> None:
                         "Skip threads and forum posts",
                         value=bool(storage.get("skip_threads", False)),
                     )
+                    thread_strategy_select = ui.select(
+                        label="Thread strategy",
+                        options=["flatten", "merge", "archive"],
+                        value=storage.get("thread_strategy", "flatten"),
+                    ).classes("w-48")
                     dry_run_check = ui.checkbox(
                         "Dry run (no API calls)",
                         value=bool(storage.get("dry_run", False)),
@@ -503,6 +508,7 @@ def setup_page() -> None:
                     storage["skip_emoji"] = skip_emoji_cb.value
                     storage["skip_reactions"] = skip_reactions_cb.value
                     storage["skip_threads"] = skip_threads_cb.value
+                    storage["thread_strategy"] = thread_strategy_select.value
                     storage["dry_run"] = dry_run_check.value
                     storage["skip_export"] = mode == "offline"
 
@@ -875,6 +881,7 @@ def migrate_page() -> None:
         skip_emoji=bool(storage.get("skip_emoji", False)),
         skip_reactions=bool(storage.get("skip_reactions", False)),
         skip_threads=bool(storage.get("skip_threads", False)),
+        thread_strategy=str(storage.get("thread_strategy", "flatten")),
         output_dir=output_dir,
         resume=bool(storage.get("resume", False)),
         pause_event=pause_event,

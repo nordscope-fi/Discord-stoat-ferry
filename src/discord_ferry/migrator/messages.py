@@ -38,6 +38,14 @@ if TYPE_CHECKING:
 
 _THREAD_STRATEGIES = frozenset({"flatten", "merge", "archive"})
 
+
+def _safe_error(config: FerryConfig, text: str) -> str:
+    """Sanitize an error/warning string, stripping any token values."""
+    if config.token_store is not None:
+        return config.token_store.sanitize(text)
+    return text
+
+
 logger = logging.getLogger(__name__)
 
 _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
@@ -133,6 +141,11 @@ class ChannelResult:
     attachments_skipped: int = 0
     referenced_autumn_ids: set[str] = field(default_factory=set)
     messages_migrated: int = 0  # S15: per-channel message count for forum index rebuild
+    # S18: fidelity counters
+    embeds_total: int = 0
+    embeds_dropped: int = 0
+    replies_linked: int = 0
+    replies_total: int = 0
 
 
 def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
@@ -151,6 +164,11 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
         state.channel_message_counts[result.channel_id] = (
             state.channel_message_counts.get(result.channel_id, 0) + result.messages_migrated
         )
+    # S18: Merge fidelity counters.
+    state.embeds_total += result.embeds_total
+    state.embeds_dropped += result.embeds_dropped
+    state.replies_linked += result.replies_linked
+    state.replies_total += result.replies_total
 
 
 def _skip_attachment(
@@ -929,14 +947,31 @@ async def _process_message(
     if failed_embeds > 0:
         content += f"\n[{failed_embeds} embed(s) could not be migrated]"
 
+    # S18: Track embed fidelity counters.
+    if channel_result is not None:
+        channel_result.embeds_total += len(msg.embeds)
+        channel_result.embeds_dropped += failed_embeds
+    else:
+        state.embeds_total += len(msg.embeds)
+        state.embeds_dropped += failed_embeds
+
     # Step 5: Reply references.
     replies: list[dict[str, Any]] = []
     if msg.reference and msg.reference.message_id:
+        # S18: Track reply fidelity counters.
+        if channel_result is not None:
+            channel_result.replies_total += 1
+        else:
+            state.replies_total += 1
         ref_stoat_id = state.message_map.get(msg.reference.message_id)
         if ref_stoat_id is None and channel_result is not None:
             ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
         if ref_stoat_id:
             replies.append({"id": ref_stoat_id, "mention": False})
+            if channel_result is not None:
+                channel_result.replies_linked += 1
+            else:
+                state.replies_linked += 1
         elif msg.reference.channel_id and msg.reference.channel_id != export_channel_id:
             # Cross-channel reply — message not in map (different channel), add text fallback.
             content += f"\n[Replying to message in #{msg.reference.channel_id}]"
@@ -1057,18 +1092,19 @@ async def _process_message(
                     )
 
     except Exception as exc:  # noqa: BLE001
+        safe_exc = _safe_error(config, str(exc))
         acc_errors.append(
             {
                 "phase": "messages",
                 "type": "message_send_failed",
-                "message": f"Failed to send msg {msg.id}: {exc}",
+                "message": f"Failed to send msg {msg.id}: {safe_exc}",
             }
         )
         acc_failed.append(
             FailedMessage(
                 discord_msg_id=msg.id,
                 stoat_channel_id=stoat_channel_id,
-                error=str(exc),
+                error=safe_exc,
                 content_preview=content[:50] if content else "",
             )
         )
@@ -1076,7 +1112,7 @@ async def _process_message(
             MigrationEvent(
                 phase="messages",
                 status="warning",
-                message=f"Message {msg.id} failed: {exc}",
+                message=f"Message {msg.id} failed: {safe_exc}",
             )
         )
         return
