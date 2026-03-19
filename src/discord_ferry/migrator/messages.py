@@ -463,6 +463,7 @@ async def _process_single_channel(
                 session=session,
                 on_event=on_event,
                 channel_result=result,
+                export_channel_id=export.channel.id,
             )
 
             # Periodic progress event and state save.
@@ -528,6 +529,7 @@ async def _process_message(
     session: aiohttp.ClientSession,
     on_event: EventCallback,
     channel_result: ChannelResult | None = None,
+    export_channel_id: str = "",
 ) -> None:
     """Process and send a single message.
 
@@ -537,6 +539,9 @@ async def _process_message(
 
     When *channel_result* is ``None``, the function writes directly to *state*
     for backward compatibility (e.g., retry path in engine.py).
+
+    *export_channel_id* is the Discord channel ID of the channel being processed,
+    used for cross-channel reply detection.
     """
     # Choose accumulator target.
     acc_warnings: list[dict[str, str]] = (
@@ -726,6 +731,19 @@ async def _process_message(
             ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
         if ref_stoat_id:
             replies.append({"id": ref_stoat_id, "mention": False})
+        elif msg.reference.channel_id and msg.reference.channel_id != export_channel_id:
+            # Cross-channel reply — message not in map (different channel), add text fallback.
+            content += f"\n[Replying to message in #{msg.reference.channel_id}]"
+            warn_target: list[dict[str, str]] = (
+                channel_result.warnings if channel_result is not None else state.warnings
+            )
+            warn_target.append(
+                {
+                    "phase": "messages",
+                    "type": "cross_channel_reply",
+                    "message": f"Cross-channel reply in msg {msg.id}",
+                }
+            )
 
     # Step 6: Empty message fallback.
     if msg.content == "" and not autumn_ids and not stoat_embeds:
@@ -741,6 +759,17 @@ async def _process_message(
         remaining = 2000 - len(content)
         reaction_text = _build_reaction_text(msg.reactions, remaining)
         content += reaction_text
+
+    # Step 6b2: Append reaction count annotations in native mode (counts > 1 only).
+    if _effective_mode == "native" and msg.reactions:
+        count_annotations = [
+            f"{r.emoji.name} \u00d7{r.count}" for r in msg.reactions if r.count > 1
+        ]
+        if count_annotations:
+            annotation = f"\n[Original counts: {', '.join(count_annotations)}]"
+            remaining = 2000 - len(content)
+            if remaining >= len(annotation):
+                content += annotation
 
     # Step 6c: Append overflow text for attachments beyond the 5-file limit.
     if overflow_text:
@@ -1023,6 +1052,7 @@ async def _upload_attachments(
                 config.token,
                 state.upload_cache,
                 config.upload_delay,
+                verify_size=config.verify_uploads,
             )
             autumn_ids.append(autumn_id)
             if channel_result is not None:
