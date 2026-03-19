@@ -113,18 +113,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Fix broken mkdocs rendering: code fence `title=` attribute in cli-reference.md and self-hosted-tips.md requires `pymdownx.superfences` (not configured) — replaced with comment-based titles. Bottom half of CLI reference page was rendering as raw markdown on the live docs site.
 - Plain English audit across all user-facing docs: define jargon on first use (CLI, JSON, API, CDN, DCE, token, terminal, developer tools), add parenthetical explanations for technical terms, use direct language throughout.
 - Comprehensive architecture doc rewrite (`docs/reference/architecture.md`): expanded from ~200 lines to ~1200 lines covering every module, data model, migration phase, API pattern, async design, and design decision.
-- Claude Code config cleanup: remove CogniLayer duplication from project CLAUDE.md (~130 lines), remove PostToolUse hook, remove redundant bash/WebFetch permissions, fix tool name typo.
-- Overhaul Claude Code workflow pipeline: enforced 8-step chain (`/brief → /spec → /brainstorm → /critique → [/test-scenarios] → writing-plans → build → /ship`) with `<WORKFLOW-GATE>` blocks and Phase 0 prerequisite checks in every skill.
-- Clean up public repo: remove internal design docs, briefs, and plans from git tracking; move community files to `.github/`; gitignore local dev config (`.mcp.json`, agent memory).
-
-### Added
-
-- New `/spec` skill: transforms briefs into structured, prioritised requirements with acceptance criteria (between `/brief` and `/brainstorm`).
-- New `/brainstorm` skill: project-local design exploration replacing `superpowers:brainstorming`, with correct handoff to `/critique`.
-- New `/test-scenarios` skill: generates test scenarios from spec acceptance criteria (optional, recommended for Large tasks).
-- Key-files and security rules (`.claude/rules/key-files.md`, `.claude/rules/security.md`).
-- CogniLayer MCP wiring (`.mcp.json`, tool permissions) for two-layer memory model.
-- Change manifest pattern for `/ship` audit step (`.claude/change-manifest.md` template in CLAUDE.md).
+- Clean up public repo: remove internal design docs, briefs, and plans from git tracking; move community files to `.github/`; gitignore local dev config.
 
 ### Fixed
 
@@ -158,7 +147,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **`api_create_category()` and `api_edit_category()` removed**: Replaced by `api_upsert_categories()`.
 - **Category management rewrite**: `run_categories()` generates category IDs client-side and sends a single PATCH. `run_channels()` rebuilds the categories array for channel assignment without a server fetch.
 - **`cli.py` build command**: Updated to use `api_upsert_categories()` with client-generated IDs.
-- **Documentation**: Updated `stoat-api-notes.md` and `.claude/rules/stoat-api.md` with correct endpoints, string limits, and deprecation notes.
+- **Documentation**: Updated `stoat-api-notes.md` with correct endpoints, string limits, and deprecation notes.
 
 ## [1.3.0] — 2026-03-01
 
@@ -213,13 +202,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- **`/brief` skill**: 6-phase requirements crystallization for the design pipeline (`.claude/skills/brief/`)
-- **`/critique` skill**: 7-dimension design review adapted for Discord Ferry constraints (`.claude/skills/critique/`)
-- **PostToolUse hook**: Reminds about verification batching during multi-file edits
-- **SessionStart version display**: Shows current project version on session start
-- **Context7 library ID table**: Known IDs for faster documentation lookups
-- **Ship skill Step 4**: Uses `get_mistral_opinion` with file-category focus instead of `get_default_opinion`
-- **Ship skill Step 3**: Added "historically skipped" warning and Skill-vs-Task clarification
 - **Engine phases**: Now 12 phases (EXPORT through REPORT); validate uses `metadata_only=True`
 - **All message-consuming phases** (messages, emoji, roles) use `stream_messages()` when exports were parsed with `metadata_only=True`
 - **Runner lifecycle events**: Engine owns started/completed events; runner only emits progress
@@ -340,7 +322,6 @@ First stable release. All 11 migration phases implemented with 298 passing tests
 
 ### Changed
 
-- Updated `.claude/rules/dce-format.md` to reflect actual `GuildMemberJoin` (skip) and `ThreadCreated` (skip, header injected instead) behavior
 - **CI pipeline** (`.github/workflows/ci.yml`): lint + type check + test on push/PR with Python 3.10–3.13 matrix via uv, concurrency groups to cancel stale runs
 - **Release pipeline** (`.github/workflows/release.yml`): tag-triggered PyInstaller builds for Windows (.exe) and macOS (.app), GitHub Release with attached binaries, PyPI publish via OIDC trusted publisher
 - **PyInstaller spec** (`ferry.spec`): NiceGUI asset collection, pywebview native mode support, dynamic version from `__init__.py`, platform-specific icon fallback
@@ -431,4 +412,3 @@ First stable release. All 11 migration phases implemented with 298 passing tests
 - GUI skeleton (NiceGUI)
 - DCE parser data models (stubs)
 - Migration state management dataclass
-- Custom `/ship` skill for commit discipline
