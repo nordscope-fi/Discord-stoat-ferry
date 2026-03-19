@@ -58,3 +58,21 @@ def test_stoat_token_not_in_repr():
         token="super-secret-stoat-token",
     )
     assert "super-secret-stoat-token" not in repr(cfg)
+
+
+def test_verify_uploads_config_field():
+    """verify_uploads field defaults to False and can be set to True."""
+    cfg_default = FerryConfig(
+        export_dir=Path("/tmp/test"),
+        stoat_url="https://stoat.example",
+        token="tok",
+    )
+    assert cfg_default.verify_uploads is False
+
+    cfg_enabled = FerryConfig(
+        export_dir=Path("/tmp/test"),
+        stoat_url="https://stoat.example",
+        token="tok",
+        verify_uploads=True,
+    )
+    assert cfg_enabled.verify_uploads is True
