@@ -40,6 +40,61 @@ logger = logging.getLogger(__name__)
 
 _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
 
+# ---------------------------------------------------------------------------
+# Message splitting
+# ---------------------------------------------------------------------------
+
+_SPLIT_MARKER_RESERVE = 20  # chars reserved for "[continued K/N]" markers
+
+
+def _split_message(content: str, max_len: int = 2000) -> list[str]:
+    """Split content into chunks that fit within max_len.
+
+    Splits at word boundaries when possible. Adds ``[continued K/N]`` markers.
+    Returns a single-element list if content fits.
+
+    Args:
+        content: Message content to split (all transforms already applied).
+        max_len: Maximum length per chunk (default: 2000).
+
+    Returns:
+        List of content chunks, each ≤ max_len characters.
+    """
+    if len(content) <= max_len:
+        return [content]
+
+    # Two-pass: first collect raw chunks, then apply markers.
+    effective_max = max_len - _SPLIT_MARKER_RESERVE
+    raw_chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if len(remaining) <= effective_max:
+            raw_chunks.append(remaining)
+            break
+        # Try to split at last space within effective_max.
+        cut = remaining[:effective_max]
+        space_idx = cut.rfind(" ")
+        if space_idx > 0:
+            raw_chunks.append(remaining[:space_idx])
+            remaining = remaining[space_idx + 1 :]
+        else:
+            # Hard split — no space found.
+            raw_chunks.append(remaining[:effective_max])
+            remaining = remaining[effective_max:]
+
+    n = len(raw_chunks)
+    if n == 1:
+        # Shouldn't happen after the guard above, but be safe.
+        return raw_chunks
+
+    result: list[str] = []
+    for k, chunk in enumerate(raw_chunks, start=1):
+        if k == 1:
+            result.append(chunk + f"\n[continued 1/{n}]")
+        else:
+            result.append(f"[continued {k}/{n}] " + chunk)
+    return result
+
 # Message types that should be silently skipped without even a warning.
 _SKIP_TYPES = frozenset(
     {
@@ -658,6 +713,11 @@ async def _process_message(
                     )
             stoat_embeds.append(flat)
 
+    # Report embeds that could not be migrated (beyond cap or without title/description).
+    failed_embeds = len(msg.embeds) - len(stoat_embeds)
+    if failed_embeds > 0:
+        content += f"\n[{failed_embeds} embed(s) could not be migrated]"
+
     # Step 5: Reply references.
     replies: list[dict[str, Any]] = []
     if msg.reference and msg.reference.message_id:
@@ -686,25 +746,45 @@ async def _process_message(
     if overflow_text:
         content += overflow_text
 
-    # Step 7: Truncate to 2000 characters.
-    if len(content) > 2000:
-        content = content[:1997] + "..."
-
-    # Step 8: Send the message.
-    try:
-        result = await api_send_message(
-            session,
-            config.stoat_url,
-            config.token,
-            stoat_channel_id,
-            content=content,
-            attachments=autumn_ids if autumn_ids else None,
-            embeds=stoat_embeds if stoat_embeds else None,
-            masquerade=masquerade,
-            replies=replies if replies else None,
-            idempotency_key=f"ferry-{msg.id}",
+    # Step 7: Split content into ≤2000-char chunks (replaces hard truncation).
+    parts = _split_message(content)
+    if len(parts) > 1:
+        acc_warnings.append(
+            {
+                "phase": "messages",
+                "type": "message_split",
+                "message": (
+                    f"Message {msg.id} split into {len(parts)} parts "
+                    f"(original length: {len(content)})"
+                ),
+            }
         )
-        stoat_msg_id: str = result["_id"]
+
+    # Step 8: Send the message (all parts).
+    stoat_msg_id: str = ""
+    try:
+        for part_idx, part_content in enumerate(parts):
+            is_first = part_idx == 0
+            idem_key = (
+                f"ferry-{msg.id}" if len(parts) == 1 else f"ferry-{msg.id}_p{part_idx + 1}"
+            )
+            result = await api_send_message(
+                session,
+                config.stoat_url,
+                config.token,
+                stoat_channel_id,
+                content=part_content,
+                # Attachments, embeds, and replies only on the first part.
+                attachments=(autumn_ids if autumn_ids and is_first else None),
+                embeds=(stoat_embeds if stoat_embeds and is_first else None),
+                masquerade=masquerade,
+                replies=(replies if replies and is_first else None),
+                idempotency_key=idem_key,
+            )
+            part_stoat_id: str = result["_id"]
+            if is_first:
+                stoat_msg_id = part_stoat_id
+
         if channel_result is not None:
             channel_result.message_map_updates[msg.id] = stoat_msg_id
             channel_result.referenced_autumn_ids.update(autumn_ids)
