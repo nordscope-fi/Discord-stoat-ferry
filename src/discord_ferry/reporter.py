@@ -17,6 +17,37 @@ if TYPE_CHECKING:
     from discord_ferry.state import MigrationState
 
 
+def compute_fidelity_score(
+    total_messages: int,
+    failed_count: int,
+    attachments_uploaded: int,
+    attachments_skipped: int,
+) -> dict[str, float]:
+    """Compute a quantified fidelity score for the migration.
+
+    The overall score is a weighted combination:
+    - 60% weight on message success rate
+    - 40% weight on attachment success rate
+
+    Args:
+        total_messages: Total messages in exports.
+        failed_count: Number of messages that failed to migrate.
+        attachments_uploaded: Number of attachments successfully uploaded.
+        attachments_skipped: Number of attachments that could not be uploaded.
+
+    Returns:
+        Dict with 'overall', 'messages', and 'attachments' scores (0-100).
+    """
+    msg_ratio = (total_messages - failed_count) / max(total_messages, 1)
+    att_ratio = attachments_uploaded / max(attachments_uploaded + attachments_skipped, 1)
+    overall = msg_ratio * 0.60 + att_ratio * 0.40
+    return {
+        "overall": round(overall * 100, 1),
+        "messages": round(msg_ratio * 100, 1),
+        "attachments": round(att_ratio * 100, 1),
+    }
+
+
 def generate_report(
     config: FerryConfig,
     state: MigrationState,
@@ -47,6 +78,18 @@ def generate_report(
 
     threads_flattened = sum(1 for e in exports if e.is_thread)
 
+    # S18: Compute migration fidelity score.
+    fidelity = compute_fidelity_score(
+        total_messages=total_messages,
+        failed_count=len(state.failed_messages),
+        attachments_uploaded=state.attachments_uploaded,
+        attachments_skipped=state.attachments_skipped,
+    )
+
+    # Delta stats: messages migrated in this run vs cumulatively
+    this_run_messages = messages_imported - state.prior_messages_total
+    cumulative_messages = messages_imported
+
     report: dict[str, object] = {
         "started_at": state.started_at,
         "completed_at": state.completed_at,
@@ -68,6 +111,12 @@ def generate_report(
             "errors": len(state.errors),
             "warnings": len(state.warnings),
         },
+        "delta": {
+            "this_run": this_run_messages,
+            "cumulative": cumulative_messages,
+            "prior_run_total": state.prior_messages_total,
+        },
+        "fidelity": fidelity,
         "warnings": state.warnings,
         "errors": state.errors,
         "maps": {
@@ -233,12 +282,25 @@ def generate_markdown_report(
     Args:
         config: Ferry configuration, used for output_dir.
         state: Current migration state with all ID maps and logs.
-        exports: List of parsed DCE exports (unused but kept for signature parity).
+        exports: List of parsed DCE exports, used for message counts.
     """
     lines: list[str] = []
     lines.append("# Migration Report\n")
     lines.append(f"**Started:** {state.started_at}")
     lines.append(f"**Completed:** {state.completed_at}\n")
+
+    # S18: Fidelity score section.
+    total_msgs = sum(e.message_count for e in exports)
+    fidelity = compute_fidelity_score(
+        total_messages=total_msgs,
+        failed_count=len(state.failed_messages),
+        attachments_uploaded=state.attachments_uploaded,
+        attachments_skipped=state.attachments_skipped,
+    )
+    lines.append("## Fidelity Score\n")
+    lines.append(f"**Overall:** {fidelity['overall']}%  ")
+    lines.append(f"**Messages:** {fidelity['messages']}%  ")
+    lines.append(f"**Attachments:** {fidelity['attachments']}%\n")
 
     lines.append("## Summary\n")
     lines.append("| Metric | Count |")

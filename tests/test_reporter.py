@@ -10,7 +10,7 @@ from discord_ferry.discord.metadata import (
     save_discord_metadata,
 )
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
-from discord_ferry.reporter import generate_markdown_report, generate_report
+from discord_ferry.reporter import compute_fidelity_score, generate_markdown_report, generate_report
 from discord_ferry.state import FailedMessage, MigrationState
 
 
@@ -616,3 +616,126 @@ def test_markdown_report_empty_state(tmp_path: Path) -> None:
     content = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
     assert "No errors." in content
     assert "No warnings." in content
+
+
+# ---------------------------------------------------------------------------
+# S18: Migration fidelity scoring
+# ---------------------------------------------------------------------------
+
+
+def test_fidelity_perfect_score() -> None:
+    """Perfect migration: all messages imported, no attachments skipped."""
+    score = compute_fidelity_score(
+        total_messages=100,
+        failed_count=0,
+        attachments_uploaded=50,
+        attachments_skipped=0,
+    )
+    assert score["overall"] == 100.0
+    assert score["messages"] == 100.0
+    assert score["attachments"] == 100.0
+
+
+def test_fidelity_zero_messages() -> None:
+    """Zero total messages and zero attachments: both ratios are 0.0."""
+    score = compute_fidelity_score(
+        total_messages=0,
+        failed_count=0,
+        attachments_uploaded=0,
+        attachments_skipped=0,
+    )
+    # msg_ratio = (0-0)/max(0,1) = 0.0, att_ratio = 0/max(0,1) = 0.0
+    assert score["messages"] == 0.0
+    assert score["attachments"] == 0.0
+    assert score["overall"] == 0.0
+
+
+def test_fidelity_partial_messages_no_attachments() -> None:
+    """50% message success, no attachments: overall = 0.5*0.6 + 0.0*0.4 = 0.3."""
+    score = compute_fidelity_score(
+        total_messages=100,
+        failed_count=50,
+        attachments_uploaded=0,
+        attachments_skipped=0,
+    )
+    # msg_ratio = 0.5, att_ratio = 0.0 (no attachments at all), overall = 0.5*0.6 + 0.0*0.4
+    assert score["messages"] == 50.0
+    assert score["attachments"] == 0.0
+    assert score["overall"] == 30.0
+
+
+def test_fidelity_partial_attachments() -> None:
+    """All messages imported, 50% attachments uploaded yields 80% overall."""
+    score = compute_fidelity_score(
+        total_messages=100,
+        failed_count=0,
+        attachments_uploaded=5,
+        attachments_skipped=5,
+    )
+    # msg_ratio = 1.0, att_ratio = 0.5, overall = 1.0*0.6 + 0.5*0.4 = 0.8
+    assert score["messages"] == 100.0
+    assert score["attachments"] == 50.0
+    assert score["overall"] == 80.0
+
+
+def test_fidelity_worst_case() -> None:
+    """All messages failed, no attachments uploaded: score is near zero."""
+    score = compute_fidelity_score(
+        total_messages=100,
+        failed_count=100,
+        attachments_uploaded=0,
+        attachments_skipped=10,
+    )
+    # msg_ratio = 0.0, att_ratio = 0.0, overall = 0.0
+    assert score["overall"] == 0.0
+    assert score["messages"] == 0.0
+    assert score["attachments"] == 0.0
+
+
+def test_fidelity_included_in_json_report(tmp_path: Path) -> None:
+    """generate_report includes 'fidelity' key with overall/messages/attachments."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        message_map={"m1": "sm1", "m2": "sm2"},  # 2 imported
+        attachments_uploaded=3,
+        attachments_skipped=1,
+    )
+    exports = [_make_export(message_count=4)]
+
+    report = generate_report(config, state, exports)
+
+    assert "fidelity" in report
+    fidelity = report["fidelity"]
+    assert isinstance(fidelity, dict)
+    assert "overall" in fidelity
+    assert "messages" in fidelity
+    assert "attachments" in fidelity
+
+
+def test_fidelity_included_in_markdown_report(tmp_path: Path) -> None:
+    """generate_markdown_report includes fidelity section."""
+    config = _make_config(tmp_path)
+    state = MigrationState(attachments_uploaded=10, attachments_skipped=0)
+    exports = [_make_export(message_count=0)]
+
+    generate_markdown_report(config, state, exports)
+
+    content = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "Fidelity Score" in content
+    assert "Overall:" in content
+    assert "Messages:" in content
+    assert "Attachments:" in content
+
+
+def test_fidelity_rounding() -> None:
+    """Fidelity scores are rounded to one decimal place."""
+    score = compute_fidelity_score(
+        total_messages=3,
+        failed_count=1,
+        attachments_uploaded=2,
+        attachments_skipped=1,
+    )
+    # msg_ratio = 2/3 ≈ 0.6667, att_ratio = 2/3 ≈ 0.6667
+    # overall = 0.6667*0.6 + 0.6667*0.4 = 0.6667 → 66.7
+    assert score["overall"] == round((2 / 3) * 100, 1)
+    assert score["messages"] == round((2 / 3) * 100, 1)

@@ -409,6 +409,101 @@ async def test_run_emoji_animated_warning(tmp_path: Path) -> None:
     assert any("animated" in w["message"].lower() for w in state.warnings)
 
 
+# ---------------------------------------------------------------------------
+# Embed emoji discovery (Source 3)
+# ---------------------------------------------------------------------------
+
+
+def test_emoji_discovered_in_embed_description() -> None:
+    """Emoji in embed description is extracted by _extract_emoji_from_content."""
+    results = _extract_emoji_from_content("Check <:custom:12345> here")
+    assert len(results) == 1
+    assert results[0] == ("12345", "custom", False)
+
+
+def test_emoji_discovered_in_embed_field_value() -> None:
+    """Emoji in an embed field value is extracted by _extract_emoji_from_content."""
+    results = _extract_emoji_from_content("Value: <:star:67890>")
+    assert len(results) == 1
+    assert results[0] == ("67890", "star", False)
+
+
+def test_animated_emoji_in_embed() -> None:
+    """Animated emoji in embed text is detected with is_animated=True."""
+    results = _extract_emoji_from_content("Dance! <a:dance:98765>")
+    assert len(results) == 1
+    emoji_id, name, is_animated = results[0]
+    assert emoji_id == "98765"
+    assert name == "dance"
+    assert is_animated is True
+
+
+async def test_run_emoji_discovers_embed_description(tmp_path: Path) -> None:
+    """run_emoji discovers emoji in embed description fields."""
+    emoji_file = tmp_path / "embed_emoji.png"
+    emoji_file.write_bytes(b"PNG")
+
+    msg = _make_message(msg_id="m1", content="")
+    # Manually attach an embed with an emoji in description.
+    msg.embeds.append(
+        {
+            "description": "<:embed_emoji:11111>",
+            "title": "",
+            "fields": [],
+        }
+    )
+
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    events: list[Any] = []
+
+    # emoji discovered via embed has no image_url — expect it to be skipped (warning).
+    with (
+        patch("discord_ferry.migrator.emoji.upload_with_cache", new=AsyncMock()),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "stoat_embed"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(config, state, exports, events.append)
+
+    # The emoji should have been discovered (seen in warnings as skipped).
+    warning_messages = " ".join(w["message"] for w in state.warnings)
+    assert "embed_emoji" in warning_messages or "11111" in warning_messages
+
+
+async def test_run_emoji_discovers_embed_field_value(tmp_path: Path) -> None:
+    """run_emoji discovers emoji that appear inside embed field values."""
+    msg = _make_message(msg_id="m1", content="")
+    msg.embeds.append(
+        {
+            "description": "",
+            "title": "",
+            "fields": [{"name": "Score", "value": "<:trophy:22222>", "inline": False}],
+        }
+    )
+
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    events: list[Any] = []
+
+    with (
+        patch("discord_ferry.migrator.emoji.upload_with_cache", new=AsyncMock()),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "stoat_embed2"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(config, state, exports, events.append)
+
+    warning_messages = " ".join(w["message"] for w in state.warnings)
+    assert "trophy" in warning_messages or "22222" in warning_messages
+
+
 async def test_run_emoji_static_no_animation_warning(tmp_path: Path) -> None:
     """Static emoji does NOT trigger an animation warning."""
     emoji_file = tmp_path / "smile.png"

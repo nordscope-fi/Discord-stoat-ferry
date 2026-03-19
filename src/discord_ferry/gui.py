@@ -688,8 +688,9 @@ def export_page() -> None:
             on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
             ui.notify(f"Export failed: {exc}", type="negative")
         finally:
-            # Clear Discord token from storage (security — avoid persisting to disk)
+            # Clear tokens from storage (security — avoid persisting to disk)
             storage.pop("discord_token", None)
+            storage.pop("token", None)
 
     background_tasks.create(_run_export())
 
@@ -1171,6 +1172,7 @@ def main() -> None:
 
     ui.run(
         title="Discord Ferry",
+        host="127.0.0.1",
         port=8765,
         native=native,
         reload=False,

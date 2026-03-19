@@ -555,6 +555,20 @@ def test_strip_underline_preserves_inline_code() -> None:
     assert strip_underline(content) == content
 
 
+def test_underline_bold_collision_collapsed() -> None:
+    """**__both__** must not produce **** — should collapse to **both**."""
+    result = strip_underline("**__both__**")
+    assert "****" not in result
+    assert result == "**both**"
+
+
+def test_underline_in_code_block_preserved() -> None:
+    """__init__ inside inline code must remain unchanged."""
+    content = "`__init__`"
+    result = strip_underline(content)
+    assert result == content
+
+
 def test_strip_underline_multiple() -> None:
     assert strip_underline("__a__ and __b__") == "**a** and **b**"
 

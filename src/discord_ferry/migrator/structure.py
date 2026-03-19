@@ -204,7 +204,10 @@ async def run_server(
                 banner_dir = config.output_dir / "banners"
                 banner_dir.mkdir(parents=True, exist_ok=True)
                 banner_path = banner_dir / f"{guild_id}.png"
-                async with session.get(banner_url) as resp:
+                headers: dict[str, str] = {}
+                if config.discord_token:
+                    headers["Authorization"] = config.discord_token
+                async with session.get(banner_url, headers=headers) as resp:
                     if resp.status == 200:
                         banner_path.write_bytes(await resp.read())
                         banner_id = await upload_with_cache(
@@ -585,6 +588,10 @@ async def run_channels(
         if config.skip_threads and export.is_thread:
             continue
 
+        # In merge/archive mode, threads are NOT created as channels.
+        if export.is_thread and config.thread_strategy in ("merge", "archive"):
+            continue
+
         # Skip already-seen channel IDs (deduplicate).
         if channel.id in seen_channel_ids:
             continue
@@ -603,7 +610,11 @@ async def run_channels(
         # Build channel name; prefix with parent name for threads.
         ch_name = channel.name
         if export.is_thread and export.parent_channel_name:
-            ch_name = f"{export.parent_channel_name}-{ch_name}"
+            if config.thread_strategy == "flatten":
+                # Add tree branch prefix for visual thread hierarchy.
+                ch_name = f"\u251c\u2500 {ch_name}"
+            else:
+                ch_name = f"{export.parent_channel_name}-{ch_name}"
 
         unique_name = make_unique_channel_name(ch_name, existing_names)
 
@@ -626,8 +637,15 @@ async def run_channels(
 
     if len(channels_to_create) > effective_max:
         overflow = len(channels_to_create) - effective_max
-        # Sort so threads come last, then truncate — preserves main channels.
-        channels_to_create.sort(key=lambda t: t[4])  # False (main) before True (thread)
+        # Sort: main channels first (False < True), then threads by message_count
+        # descending so higher-traffic threads survive truncation.
+        export_by_ch = {exp.channel.id: exp for exp in exports}
+        channels_to_create.sort(
+            key=lambda t: (
+                t[4],  # is_thread: False (main) before True (thread)
+                -(export_by_ch[t[0].id].message_count if t[0].id in export_by_ch else 0),
+            )
+        )
         dropped = channels_to_create[effective_max:]
         channels_to_create = channels_to_create[:effective_max]
         dropped_names = [entry[2] for entry in dropped]
@@ -659,6 +677,7 @@ async def run_channels(
         for forum_key, forum_name in forum_categories.items():
             stoat_forum_id = _generate_category_id()
             state.category_map[forum_key] = stoat_forum_id
+            state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
             on_event(
                 MigrationEvent(
                     phase="channels",
@@ -667,8 +686,9 @@ async def run_channels(
                 )
             )
     elif forum_categories and config.dry_run:
-        for forum_key in forum_categories:
+        for forum_key, forum_name in forum_categories.items():
             state.category_map[forum_key] = f"dry-cat-{forum_key}"
+            state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
 
     if config.dry_run:
         for channel, _stoat_type, _unique_name, _discord_cat_id, _is_thread in channels_to_create:
@@ -754,6 +774,8 @@ async def run_channels(
                 forum_channel_info.setdefault(discord_cat_id, []).append(
                     (stoat_channel_id, unique_name, msg_count)
                 )
+                # S15: Track discord channel membership for REPORT phase rebuild.
+                state.forum_channel_members.setdefault(discord_cat_id, []).append(ch.id)
 
             # Apply channel permission overrides from Discord metadata.
             if ch_meta and not config.dry_run:

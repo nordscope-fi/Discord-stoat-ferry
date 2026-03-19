@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -11,6 +12,8 @@ from discord_ferry.errors import AutumnUploadError
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
@@ -31,6 +34,9 @@ async def upload_to_autumn(
     tag: str,
     file_path: Path,
     token: str,
+    *,
+    verify_size: bool = False,
+    cache: dict[str, str] | None = None,
 ) -> str:
     """Upload a file to Autumn and return the file ID.
 
@@ -40,6 +46,12 @@ async def upload_to_autumn(
         tag: Upload tag determining the bucket (attachments, avatars, icons, banners, emojis, etc.).
         file_path: Local path to the file to upload.
         token: Stoat session token for the x-session-token header.
+        verify_size: When True, compare the ``size`` field in the Autumn response (if present)
+            against the local file size. On mismatch, the cache entry is invalidated and a
+            warning is logged.  This is best-effort — not all Autumn responses include ``size``.
+        cache: Upload cache dict (``str(file_path)`` → Autumn file ID). When *verify_size*
+            is True and a size mismatch is detected, the cache entry is removed so the file
+            will be re-uploaded on the next attempt.
 
     Returns:
         Autumn file ID string returned by the server.
@@ -73,8 +85,24 @@ async def upload_to_autumn(
 
             async with session.post(url, data=form, headers=headers) as response:
                 if response.status == 200:
-                    result: dict[str, str] = await response.json()
-                    return result["id"]
+                    result: dict[str, object] = await response.json()
+                    file_id = str(result["id"])
+
+                    # Best-effort size verification.
+                    if verify_size and "size" in result:
+                        server_size = result["size"]
+                        if isinstance(server_size, int) and server_size != file_size:
+                            logger.warning(
+                                "Upload size mismatch for %r: local=%d bytes, server=%d bytes — "
+                                "invalidating cache entry.",
+                                file_path.name,
+                                file_size,
+                                server_size,
+                            )
+                            if cache is not None:
+                                cache.pop(str(file_path), None)
+
+                    return file_id
 
                 if response.status in _RETRYABLE_STATUSES:
                     if attempt == MAX_RETRIES - 1:
@@ -115,6 +143,8 @@ async def upload_with_cache(
     token: str,
     cache: dict[str, str],
     delay: float = 0.5,
+    *,
+    verify_size: bool = False,
 ) -> str:
     """Upload a file to Autumn, returning a cached ID if the file was already uploaded.
 
@@ -126,6 +156,8 @@ async def upload_with_cache(
         token: Stoat session token.
         cache: Mutable dict mapping str(file_path) -> Autumn file ID.
         delay: Seconds to sleep before uploading (rate-limit courtesy). Default 0.5s.
+        verify_size: When True, pass size verification to the upload call. On mismatch,
+            the cache entry is removed so the next call re-uploads. Best-effort.
 
     Returns:
         Autumn file ID string.
@@ -135,6 +167,14 @@ async def upload_with_cache(
         return cache[key]
 
     await asyncio.sleep(delay)
-    file_id = await upload_to_autumn(session, autumn_url, tag, file_path, token)
+    file_id = await upload_to_autumn(
+        session,
+        autumn_url,
+        tag,
+        file_path,
+        token,
+        verify_size=verify_size,
+        cache=cache,
+    )
     cache[key] = file_id
     return file_id

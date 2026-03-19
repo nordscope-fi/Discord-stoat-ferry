@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -36,10 +38,26 @@ class _CircuitState:
 _circuit_state = _CircuitState()
 _request_semaphore: asyncio.Semaphore | None = None
 
+# Adaptive rate state — tracks 429 pressure and adjusts inter-request delay.
+_rate_429_window: deque[float] = deque(maxlen=20)  # timestamps of recent 429s
+_rate_multiplier: float = 1.0
+
 
 def _reset_circuit_state() -> None:
     """Reset circuit breaker state. Called by test fixtures."""
     _circuit_state.consecutive_failures = 0
+
+
+def _reset_rate_state() -> None:
+    """Reset adaptive rate state. Called by test fixtures."""
+    global _rate_multiplier  # noqa: PLW0603
+    _rate_429_window.clear()
+    _rate_multiplier = 1.0
+
+
+def get_rate_multiplier() -> float:
+    """Return current rate multiplier for external use."""
+    return _rate_multiplier
 
 
 def init_request_semaphore(max_concurrent: int = 5) -> None:
@@ -111,6 +129,7 @@ async def _api_request_inner(
     extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Core request logic with exponential backoff and circuit breaker."""
+    global _rate_multiplier  # noqa: PLW0603
     headers = _headers(token)
     if extra_headers:
         headers.update(extra_headers)
@@ -132,9 +151,19 @@ async def _api_request_inner(
             async with session.request(method, url, json=body, headers=headers) as resp:
                 if resp.status in (200, 201):
                     _circuit_state.consecutive_failures = 0
+                    # Decay the rate multiplier gradually on successful requests.
+                    if _rate_multiplier > 1.0 and not any(
+                        time.monotonic() - t < 30 for t in _rate_429_window
+                    ):
+                        _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
                     return await resp.json()  # type: ignore[no-any-return]
                 if resp.status == 204:
                     _circuit_state.consecutive_failures = 0
+                    # Decay the rate multiplier gradually on successful requests.
+                    if _rate_multiplier > 1.0 and not any(
+                        time.monotonic() - t < 30 for t in _rate_429_window
+                    ):
+                        _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
                     return {}
 
                 if resp.status in _RETRYABLE_STATUSES:
@@ -150,6 +179,15 @@ async def _api_request_inner(
                         body_data: dict[str, Any] = await resp.json()
                         retry_ms = body_data.get("retry_after", 1000)
                         await asyncio.sleep(retry_ms / 1000)
+                        # Track 429 frequency and ramp up the rate multiplier.
+                        _rate_429_window.append(time.monotonic())
+                        recent = sum(1 for t in _rate_429_window if time.monotonic() - t < 60)
+                        if recent > 3:
+                            _rate_multiplier = min(_rate_multiplier * 1.5, 5.0)
+                            logger.info(
+                                "Rate limit pressure — delay multiplier now %.1f×",
+                                _rate_multiplier,
+                            )
                     else:
                         # 5xx — exponential backoff with jitter.
                         delay = min(2**attempt, 60) + random.uniform(0.1, 0.5)

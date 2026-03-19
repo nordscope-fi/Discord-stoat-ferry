@@ -13,6 +13,7 @@ from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import (
     _circuit_state,
     _reset_circuit_state,
+    _reset_rate_state,
     api_add_reaction,
     api_create_channel,
     api_create_emoji,
@@ -28,6 +29,7 @@ from discord_ferry.migrator.api import (
     api_set_role_permissions,
     api_set_server_default_permissions,
     api_upsert_categories,
+    get_rate_multiplier,
     init_request_semaphore,
 )
 
@@ -42,13 +44,15 @@ TOKEN = "test-session-token"
 
 @pytest.fixture(autouse=True)
 def _clean_circuit() -> None:  # type: ignore[misc]
-    """Reset circuit breaker and semaphore state between tests."""
+    """Reset circuit breaker, semaphore, and adaptive rate state between tests."""
     import discord_ferry.migrator.api as _api_mod
 
     _reset_circuit_state()
+    _reset_rate_state()
     _api_mod._request_semaphore = None
     yield  # type: ignore[misc]
     _reset_circuit_state()
+    _reset_rate_state()
     _api_mod._request_semaphore = None
 
 
@@ -682,3 +686,120 @@ async def test_network_error_exponential_backoff(mock_aiohttp: aioresponses) -> 
     assert 1.0 <= sleep_calls[0] <= 1.6
     # Attempt 1: 2^1 + jitter = ~2.1–2.5
     assert 2.0 <= sleep_calls[1] <= 2.6
+
+
+# ---------------------------------------------------------------------------
+# Adaptive 429 rate multiplier tests
+# ---------------------------------------------------------------------------
+
+
+async def test_rate_multiplier_increases_after_429_burst(mock_aiohttp: aioresponses) -> None:
+    """Multiplier increases above 1.0 after more than 3 recent 429 responses."""
+    import time as _time
+
+    import discord_ferry.migrator.api as _api_mod
+
+    # Pre-seed window with 3 recent timestamps (within 60 s).
+    now = _time.monotonic()
+    for _ in range(3):
+        _api_mod._rate_429_window.append(now)
+
+    # One more 429 → total recent = 4 → should ramp up multiplier.
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, payload={"retry_after": 10})
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert get_rate_multiplier() > 1.0
+
+
+async def test_rate_multiplier_does_not_increase_below_threshold(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Multiplier stays at 1.0 with 3 or fewer recent 429s (threshold is >3)."""
+    # 1 429, then success.
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, payload={"retry_after": 10})
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert get_rate_multiplier() == pytest.approx(1.0)
+
+
+async def test_rate_multiplier_caps_at_5x(mock_aiohttp: aioresponses) -> None:
+    """Multiplier never exceeds 5.0 regardless of 429 burst size."""
+    import time as _time
+
+    import discord_ferry.migrator.api as _api_mod
+
+    # Pre-seed window far above threshold and set multiplier near ceiling.
+    now = _time.monotonic()
+    for _ in range(20):
+        _api_mod._rate_429_window.append(now)
+    _api_mod._rate_multiplier = 4.0
+
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, payload={"retry_after": 10})
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert get_rate_multiplier() <= 5.0
+
+
+async def test_rate_multiplier_decreases_after_clear_period(mock_aiohttp: aioresponses) -> None:
+    """Multiplier decays toward 1.0 on successful requests with no recent 429s."""
+    import discord_ferry.migrator.api as _api_mod
+
+    # Set multiplier high; window holds only a stale (>30 s old) timestamp.
+    _api_mod._rate_multiplier = 3.0
+    _api_mod._rate_429_window.append(0.0)  # epoch — far in the past
+
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+
+    async with aiohttp.ClientSession() as session:
+        await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    # Should have decayed: 3.0 * 0.75 = 2.25
+    assert get_rate_multiplier() == pytest.approx(2.25, rel=1e-3)
+
+
+async def test_rate_multiplier_does_not_decay_with_recent_429(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Multiplier stays high when there is a very recent 429 in the window."""
+    import time as _time
+
+    import discord_ferry.migrator.api as _api_mod
+
+    _api_mod._rate_multiplier = 3.0
+    # Recent timestamp — within 30 s.
+    _api_mod._rate_429_window.append(_time.monotonic())
+
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+
+    async with aiohttp.ClientSession() as session:
+        await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    # Multiplier should NOT have decayed.
+    assert get_rate_multiplier() == pytest.approx(3.0)
+
+
+async def test_reset_rate_state() -> None:
+    """_reset_rate_state clears window and resets multiplier to 1.0."""
+    import time as _time
+
+    import discord_ferry.migrator.api as _api_mod
+
+    _api_mod._rate_multiplier = 4.5
+    _api_mod._rate_429_window.append(_time.monotonic())
+
+    _reset_rate_state()
+
+    assert get_rate_multiplier() == pytest.approx(1.0)
+    assert len(_api_mod._rate_429_window) == 0

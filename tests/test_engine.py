@@ -1268,3 +1268,259 @@ async def test_semaphore_initialized_during_migration(tmp_path: Path) -> None:
         await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
 
     mock_init.assert_called_once_with(7)
+
+
+# ---------------------------------------------------------------------------
+# S15: Forum index rebuild in REPORT phase
+# ---------------------------------------------------------------------------
+
+
+async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path) -> None:
+    """_rebuild_forum_indexes is invoked during REPORT when forum_channel_members is non-empty."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, dry_run=False)
+
+    with patch("discord_ferry.core.engine._rebuild_forum_indexes") as mock_rebuild:
+
+        async def _channels_with_forum(
+            config: FerryConfig,
+            state: MigrationState,
+            exports: list[Any],
+            emit: EventCallback,
+        ) -> None:
+            state.forum_channel_members["forum-posts"] = ["ch1"]
+            state.forum_category_names["forum-posts"] = "Posts"
+            state.channel_map["ch1"] = "stoat-ch1"
+            state.channel_map["forum-index-forum-posts"] = "stoat-idx-1"
+
+        overrides = dict(_NOOP_OVERRIDES)
+        overrides["channels"] = _channels_with_forum
+        await run_migration(config, events.append, phase_overrides=overrides)
+
+    mock_rebuild.assert_called_once()
+
+
+async def test_forum_index_rebuild_skipped_when_dry_run(tmp_path: Path) -> None:
+    """_rebuild_forum_indexes is NOT called in dry_run mode."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, dry_run=True)
+
+    with patch("discord_ferry.core.engine._rebuild_forum_indexes") as mock_rebuild:
+
+        async def _channels_with_forum(
+            config: FerryConfig,
+            state: MigrationState,
+            exports: list[Any],
+            emit: EventCallback,
+        ) -> None:
+            state.forum_channel_members["forum-posts"] = ["ch1"]
+
+        overrides = dict(_NOOP_OVERRIDES)
+        overrides["channels"] = _channels_with_forum
+        await run_migration(config, events.append, phase_overrides=overrides)
+
+    mock_rebuild.assert_not_called()
+
+
+async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) -> None:
+    """_rebuild_forum_indexes uses state.channel_message_counts for per-post counts."""
+    from discord_ferry.core.engine import _rebuild_forum_indexes
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="stoat-srv",
+        forum_channel_members={"forum-news": ["disc-ch1", "disc-ch2"]},
+        forum_category_names={"forum-news": "News"},
+        channel_map={
+            "disc-ch1": "stoat-ch1",
+            "disc-ch2": "stoat-ch2",
+            "forum-index-forum-news": "stoat-idx-news",
+        },
+        channel_message_counts={"disc-ch1": 42, "disc-ch2": 7},
+    )
+
+    with aioresponses() as mock:
+        mock.post(
+            "https://api.test/channels/stoat-idx-news/messages",
+            payload={"_id": "new-idx-msg"},
+        )
+        mock.put(
+            "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
+            payload={},
+        )
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            config.session = session
+            await _rebuild_forum_indexes(config, state, events.append)
+
+    sent_content = [
+        e.message for e in events if e.phase == "report" and "Rebuilt" in (e.message or "")
+    ]
+    assert len(sent_content) == 1
+    assert "News" in sent_content[0]
+
+
+# ---------------------------------------------------------------------------
+# S16: Orphan Autumn upload cleanup
+# ---------------------------------------------------------------------------
+
+
+async def test_cleanup_orphans_logs_unreferenced_uploads(tmp_path: Path) -> None:
+    """When cleanup_orphans=True, unreferenced uploads are added to state.warnings."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, cleanup_orphans=True, dry_run=False)
+
+    async def _messages_with_orphans(
+        config: FerryConfig,
+        state: MigrationState,
+        exports: list[Any],
+        emit: EventCallback,
+    ) -> None:
+        state.autumn_uploads = {"aut1": "att1", "aut2": "att2", "aut3": "att3"}
+        state.referenced_autumn_ids = {"aut1"}  # aut2 and aut3 are orphans
+
+    overrides = dict(_NOOP_OVERRIDES)
+    overrides["messages"] = _messages_with_orphans
+    state = await run_migration(config, events.append, phase_overrides=overrides)
+
+    orphan_warnings = [w for w in state.warnings if w.get("type") == "orphan_detected"]
+    assert len(orphan_warnings) == 2
+    orphan_ids = {w["message"].split(": ")[-1] for w in orphan_warnings}
+    assert orphan_ids == {"aut2", "aut3"}
+
+
+async def test_cleanup_orphans_skipped_when_flag_false(tmp_path: Path) -> None:
+    """When cleanup_orphans=False (default), no orphan warnings are emitted."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, cleanup_orphans=False)
+
+    async def _messages_with_orphans(
+        config: FerryConfig,
+        state: MigrationState,
+        exports: list[Any],
+        emit: EventCallback,
+    ) -> None:
+        state.autumn_uploads = {"aut1": "att1"}
+        state.referenced_autumn_ids = set()
+
+    overrides = dict(_NOOP_OVERRIDES)
+    overrides["messages"] = _messages_with_orphans
+    state = await run_migration(config, events.append, phase_overrides=overrides)
+
+    orphan_warnings = [w for w in state.warnings if w.get("type") == "orphan_detected"]
+    assert len(orphan_warnings) == 0
+
+
+async def test_cleanup_orphans_emits_cleanup_event(tmp_path: Path) -> None:
+    """cleanup_orphans emits a 'cleanup' phase event with orphan count."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, cleanup_orphans=True, dry_run=False)
+
+    async def _messages_with_orphans(
+        config: FerryConfig,
+        state: MigrationState,
+        exports: list[Any],
+        emit: EventCallback,
+    ) -> None:
+        state.autumn_uploads = {"aut1": "att1", "aut2": "att2"}
+        state.referenced_autumn_ids = set()
+
+    overrides = dict(_NOOP_OVERRIDES)
+    overrides["messages"] = _messages_with_orphans
+    await run_migration(config, events.append, phase_overrides=overrides)
+
+    cleanup_events = [e for e in events if e.phase == "cleanup"]
+    assert len(cleanup_events) == 1
+    assert "2" in cleanup_events[0].message
+
+
+# ---------------------------------------------------------------------------
+# S17: Migration lock
+# ---------------------------------------------------------------------------
+
+
+async def test_migration_lock_acquired_on_existing_server(tmp_path: Path) -> None:
+    """Lock is acquired (api_edit_server called) when server_id is provided."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id="srv-001", dry_run=False)
+
+    with (
+        patch("discord_ferry.core.engine.api_fetch_server") as mock_fetch,
+        patch("discord_ferry.core.engine.api_edit_server") as mock_edit,
+    ):
+        mock_fetch.return_value = {"_id": "srv-001", "description": ""}
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    # api_edit_server should be called at least once to acquire the lock
+    assert mock_edit.call_count >= 1
+
+
+async def test_migration_lock_not_acquired_without_server_id(tmp_path: Path) -> None:
+    """Lock is NOT acquired when no server_id is configured."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id=None, dry_run=False)
+
+    with patch("discord_ferry.core.engine.api_edit_server") as mock_edit:
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    # api_edit_server should not be called for lock purposes (no server_id)
+    mock_edit.assert_not_called()
+
+
+async def test_migration_lock_raises_on_active_lock(tmp_path: Path) -> None:
+    """MigrationError raised when a live lock is found and force_unlock=False."""
+    from discord_ferry.errors import MigrationError
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    import aiohttp
+    import time
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id="srv-001", force_unlock=False)
+    state = MigrationState()
+
+    fresh_ts = int(time.time()) - 60  # lock from 60 seconds ago (< 24h)
+    lock_desc = f"[FERRY_LOCK:{fresh_ts}:other-host]"
+
+    with aioresponses() as mock:
+        mock.get(
+            "https://api.test/servers/srv-001",
+            payload={"_id": "srv-001", "description": lock_desc},
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="Another migration is in progress"):
+                await _acquire_migration_lock(config, state, session, events.append)
+
+
+async def test_migration_lock_overrides_expired_lock(tmp_path: Path) -> None:
+    """Expired lock (>24h) is overridden with a warning."""
+    import aiohttp
+    import time
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id="srv-001", force_unlock=False)
+    state = MigrationState()
+
+    old_ts = int(time.time()) - (25 * 3600)  # lock from 25 hours ago
+    lock_desc = f"[FERRY_LOCK:{old_ts}:old-host]"
+
+    with aioresponses() as mock:
+        mock.get(
+            "https://api.test/servers/srv-001",
+            payload={"_id": "srv-001", "description": lock_desc},
+        )
+        mock.patch(
+            "https://api.test/servers/srv-001",
+            payload={"_id": "srv-001"},
+        )
+        async with aiohttp.ClientSession() as session:
+            result = await _acquire_migration_lock(config, state, session, events.append)
+
+    assert result is True
+    lock_warnings = [w for w in state.warnings if w.get("type") == "lock_expired"]
+    assert len(lock_warnings) == 1

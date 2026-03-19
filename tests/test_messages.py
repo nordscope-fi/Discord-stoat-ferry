@@ -625,17 +625,15 @@ async def test_empty_message_gets_placeholder(tmp_path: Path, mock_aiohttp: aior
 # ---------------------------------------------------------------------------
 
 
-async def test_content_truncated_at_2000_chars(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """Content exceeding 2000 characters is truncated to 1997 + '...'."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
-
+async def test_content_split_at_2001_chars(tmp_path: Path) -> None:
+    """Content exceeding 2000 characters is split into multiple parts (not truncated)."""
     state = _make_state()
     config = _make_config(tmp_path)
     long_content = "A" * 3000
     msg = _make_message(id="msg1", content=long_content)
     export = _make_export(messages=[msg])
 
-    # Capture the actual payload sent.
+    # Capture all payloads sent.
     sent_content: list[str] = []
 
     async def capture_send(
@@ -647,9 +645,13 @@ async def test_content_truncated_at_2000_chars(tmp_path: Path, mock_aiohttp: aio
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
 
-    assert len(sent_content) == 1
-    assert len(sent_content[0]) <= 2000
-    assert sent_content[0].endswith("...")
+    # Content is split into multiple parts, all ≤2000 chars.
+    assert len(sent_content) >= 2
+    for part in sent_content:
+        assert len(part) <= 2000
+    # First part should have continuation marker, not "..."
+    assert "continued" in sent_content[0]
+    assert not sent_content[0].endswith("...")
 
 
 # ---------------------------------------------------------------------------
@@ -771,14 +773,13 @@ async def test_unicode_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aiore
 
 
 async def test_resume_skips_completed_channels(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """Channels with IDs before last_completed_channel are skipped on resume."""
-    # Only ch 200 should be processed (100 < 200, so 100 is "done").
+    """Channels in completed_channel_ids are skipped on resume."""
+    # Only ch 200 should be processed (ch 100 is in completed_channel_ids).
     mock_aiohttp.post(f"{BASE_URL}/channels/stoat_ch200/messages", payload={"_id": "stoat_msg2"})
 
     state = _make_state(
         channel_map={"100": "stoat_ch100", "200": "stoat_ch200"},
-        last_completed_channel="100",
-        last_completed_message="",
+        completed_channel_ids={"100"},
     )
     config = _make_config(tmp_path, resume=True)
 
@@ -802,13 +803,12 @@ async def test_resume_skips_completed_channels(tmp_path: Path, mock_aiohttp: aio
 async def test_resume_skips_completed_messages_within_channel(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
-    """Messages with ID <= last_completed_message in the resume channel are skipped."""
+    """Messages with ID <= channel_message_offsets entry are skipped on resume."""
     mock_aiohttp.post(f"{BASE_URL}/channels/stoat_ch500/messages", payload={"_id": "stoat_msg2"})
 
     state = _make_state(
         channel_map={"500": "stoat_ch500"},
-        last_completed_channel="500",
-        last_completed_message="1000",
+        channel_message_offsets={"500": "1000"},
     )
     config = _make_config(tmp_path, resume=True)
 
@@ -940,7 +940,7 @@ async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> N
     assert "completed" in statuses
 
     # Channel marked as completed.
-    assert state.last_completed_channel == "ch1"
+    assert "ch1" in state.completed_channel_ids
 
 
 # ---------------------------------------------------------------------------
@@ -2026,3 +2026,219 @@ def test_discord_links_rewritten_in_content() -> None:
     assert "[Discord invite — no longer valid]" in result
     # Original Discord URL should not remain for the mapped link
     assert "discord.com/channels/111/456/789" not in result
+
+
+# ---------------------------------------------------------------------------
+# S3: Embed overflow reporting
+# ---------------------------------------------------------------------------
+
+
+async def test_embed_overflow_fallback_text(tmp_path: Path) -> None:
+    """When embeds can't be migrated (no title/description), content gets a [N embed(s)...] note."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+
+    sent_content: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_content.append(kwargs.get("content", ""))
+        return {"_id": "stoat_msg"}
+
+    # Create embeds with no title or description — flatten_embed returns empty dicts,
+    # so none pass the `flat.get("description") or flat.get("title")` guard.
+    bad_embeds = [{"color": 0xFF0000} for _ in range(3)]
+    msg = _make_message(id="msg1", content="check", embeds=bad_embeds)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent_content) >= 1
+    combined = " ".join(sent_content)
+    assert "embed(s) could not be migrated" in combined, (
+        f"Expected embed overflow notice in content, got: {combined!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# S8: Cross-channel reply fallback annotation
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_channel_reply_fallback(tmp_path: Path) -> None:
+    """Reply to a message in a different channel gets a text annotation when not in map."""
+    sent_content: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_content.append(kwargs.get("content", ""))
+        return {"_id": "stoat_msg"}
+
+    state = _make_state(message_map={})  # Referenced message not in map.
+    config = _make_config(tmp_path)
+
+    # Reference points to a different channel (ch_other != ch1).
+    ref = DCEReference(message_id="orig_in_other_ch", channel_id="ch_other")
+    msg = _make_message(
+        id="reply1",
+        msg_type="Reply",
+        content="responding to something",
+        reference=ref,
+    )
+    export = _make_export(channel_id="ch1", messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent_content) == 1
+    assert "[Replying to message in #ch_other]" in sent_content[0]
+    assert any(w["type"] == "cross_channel_reply" for w in state.warnings)
+
+
+async def test_same_channel_missing_reply_no_annotation(tmp_path: Path) -> None:
+    """Reply to unknown message in the SAME channel gets no text annotation (handled silently)."""
+    sent_content: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_content.append(kwargs.get("content", ""))
+        return {"_id": "stoat_msg"}
+
+    state = _make_state(message_map={})
+    config = _make_config(tmp_path)
+
+    # channel_id matches the export channel (ch1).
+    ref = DCEReference(message_id="missing_id", channel_id="ch1")
+    msg = _make_message(
+        id="reply2",
+        msg_type="Reply",
+        content="reply in same channel",
+        reference=ref,
+    )
+    export = _make_export(channel_id="ch1", messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent_content) == 1
+    assert "[Replying to message in #" not in sent_content[0]
+    assert not any(w["type"] == "cross_channel_reply" for w in state.warnings)
+
+
+async def test_cross_channel_reply_found_in_map_uses_reply(tmp_path: Path) -> None:
+    """Cross-channel reply that IS in message_map still uses the proper reply reference."""
+    sent_kwargs: list[dict[str, Any]] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_kwargs.append(kwargs)
+        return {"_id": "stoat_msg"}
+
+    state = _make_state(message_map={"orig_in_other_ch": "stoat_orig"})
+    config = _make_config(tmp_path)
+
+    ref = DCEReference(message_id="orig_in_other_ch", channel_id="ch_other")
+    msg = _make_message(
+        id="reply3",
+        msg_type="Reply",
+        content="can resolve this one",
+        reference=ref,
+    )
+    export = _make_export(channel_id="ch1", messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    # Should use the proper stoat reply, not text fallback.
+    assert sent_kwargs[0]["replies"] == [{"id": "stoat_orig", "mention": False}]
+    assert "[Replying to message in #" not in sent_kwargs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# S12: Reaction count annotation in native mode
+# ---------------------------------------------------------------------------
+
+
+async def test_reaction_count_native_mode_annotation(tmp_path: Path) -> None:
+    """Native mode appends [Original counts: ...] when any reaction count > 1."""
+    sent_content: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_content.append(kwargs.get("content", ""))
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="native")
+    reactions = [
+        DCEReaction(emoji=DCEEmoji(id="", name="thumbsup"), count=5),
+        DCEReaction(emoji=DCEEmoji(id="", name="tada"), count=2),
+    ]
+    msg = _make_message(id="msg1", content="great post", reactions=reactions)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent_content) == 1
+    assert "[Original counts:" in sent_content[0]
+    assert "thumbsup \u00d75" in sent_content[0]
+    assert "tada \u00d72" in sent_content[0]
+
+
+async def test_reaction_count_single_no_annotation(tmp_path: Path) -> None:
+    """Native mode does NOT append count annotation when all counts are exactly 1."""
+    sent_content: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_content.append(kwargs.get("content", ""))
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="native")
+    reactions = [
+        DCEReaction(emoji=DCEEmoji(id="", name="heart"), count=1),
+    ]
+    msg = _make_message(id="msg1", content="sweet", reactions=reactions)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent_content) == 1
+    assert "[Original counts:" not in sent_content[0]
+
+
+async def test_reaction_count_mixed_some_over_one(tmp_path: Path) -> None:
+    """Only reactions with count > 1 appear in the native mode annotation."""
+    sent_content: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_content.append(kwargs.get("content", ""))
+        return {"_id": "stoat_msg"}
+
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="native")
+    reactions = [
+        DCEReaction(emoji=DCEEmoji(id="", name="fire"), count=3),
+        DCEReaction(emoji=DCEEmoji(id="", name="wave"), count=1),
+    ]
+    msg = _make_message(id="msg1", content="nice", reactions=reactions)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert "[Original counts:" in sent_content[0]
+    assert "fire" in sent_content[0]
+    assert "wave" not in sent_content[0]

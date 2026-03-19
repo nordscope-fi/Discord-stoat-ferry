@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.0.0] - 2026-03-19
+
+### Security
+- **Token security hardening** (S1): `SecureTokenStore` for token masking, `repr=False` on tokens, NiceGUI binds to localhost, Stoat token cleared from storage
+- **DCE binary verification** (S10): SHA-256 hash verification for DiscordChatExporter downloads
+
+### Performance
+- **Parallel message sends** (S4): Cross-channel parallelism via `asyncio.gather` with `ChannelResult` accumulators
+- **Adaptive rate limiting** (S9): 429-frequency optimization with rolling window and auto-adjusting delay multiplier
+
+### Features
+- **Thread strategy** (S7): `--thread-strategy` flag with flatten/merge/archive modes
+- **Message splitting** (S3): Messages >2000 chars split with `[continued K/N]` markers instead of truncation
+- **Delta migration** (S19): `--incremental` flag for migrating only new messages since last run
+- **Migration lock** (S17): Advisory lock via server description prevents concurrent migrations
+- **Fidelity scoring** (S18): Quantified migration fidelity percentage in report
+
+### Fixes
+- **Resume correctness** (S2): `completed_channel_ids` set replaces fragile snowflake ordering
+- **Emoji collisions** (S6): Duplicate sanitized names get `_2`, `_3` suffixes
+- **Underline+bold** (S3): `****` collision collapsed to `**`
+- **Cross-channel replies** (S8): Text fallback annotation instead of silent drop
+- **Banner auth** (S11): Discord auth header for CDN downloads
+- **Masquerade discriminator** (S11): Truncated names append author ID suffix
+- **DCE freshness** (S11): Warn >7 days, error >30 days with `--force` override
+- **Reaction counts** (S12): Native mode appends original count annotation
+- **Embed overflow** (S3): Failed embeds reported with `[N embed(s) could not be migrated]`
+
+### Infrastructure
+- **Separate message_map.json** (S5): Reduces state.json size dramatically
+- **Emoji in embeds** (S6): Discovery scans embed description, title, and field values
+- **Upload verification** (S13): Optional `--verify-uploads` for post-upload size check
+- **Forum index rebuild** (S15): Index built during REPORT phase with actual migration data
+- **Orphan detection** (S16): `--cleanup-orphans` flag detects unreferenced Autumn uploads
+- **Code signing** (S20): CI pipeline prepared for macOS/Windows binary signing
+
+### Breaking Changes
+- State format v2: `completed_channel_ids` replaces `last_completed_channel`/`last_completed_message`
+- `message_map` stored in separate `message_map.json` file
+- v1 state files automatically migrated on first load (backup created)
+
 ## [1.7.1] — 2026-03-18
 
 ### Added

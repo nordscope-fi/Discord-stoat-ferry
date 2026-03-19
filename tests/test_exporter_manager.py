@@ -16,6 +16,8 @@ from discord_ferry.exporter.manager import (
     DCE_VERSION,
     _get_asset_name,
     _get_dce_dir,
+    _verify_dce_checksum,
+    check_export_freshness,
     detect_dotnet,
     download_dce,
     get_dce_path,
@@ -224,3 +226,139 @@ class TestDownloadDceRetry:
 
             with pytest.raises(DCENotFoundError):
                 await download_dce(events.append)
+
+
+# ---------------------------------------------------------------------------
+# check_export_freshness
+# ---------------------------------------------------------------------------
+
+
+class TestCheckExportFreshness:
+    def _write_json_with_age(self, tmp_path: Path, age_days: float) -> Path:
+        """Write a dummy JSON file with an mtime set to age_days days ago."""
+        import time
+
+        json_file = tmp_path / "export.json"
+        json_file.write_text("{}")
+        target_mtime = time.time() - age_days * 86400
+        import os
+
+        os.utime(json_file, (target_mtime, target_mtime))
+        return json_file
+
+    def test_export_freshness_recent(self, tmp_path: Path) -> None:
+        """Files <7 days old produce no warnings."""
+        self._write_json_with_age(tmp_path, 3)
+        warnings = check_export_freshness(tmp_path)
+        assert warnings == []
+
+    def test_export_freshness_warning(self, tmp_path: Path) -> None:
+        """Files 10 days old produce a warning string."""
+        self._write_json_with_age(tmp_path, 10)
+        warnings = check_export_freshness(tmp_path)
+        assert len(warnings) == 1
+        assert "stale" in warnings[0]
+
+    def test_export_freshness_error(self, tmp_path: Path) -> None:
+        """Files 45 days old raise ValidationError (without force)."""
+        from discord_ferry.errors import ValidationError
+
+        self._write_json_with_age(tmp_path, 45)
+        with pytest.raises(ValidationError, match="45 days"):
+            check_export_freshness(tmp_path)
+
+    def test_export_freshness_error_with_force(self, tmp_path: Path) -> None:
+        """Files 45 days old with force=True produce a warning but no error."""
+        self._write_json_with_age(tmp_path, 45)
+        warnings = check_export_freshness(tmp_path, force=True)
+        assert len(warnings) == 1
+        assert "stale" in warnings[0]
+
+    def test_export_freshness_no_json_files(self, tmp_path: Path) -> None:
+        """Directory with no JSON files produces no warnings."""
+        warnings = check_export_freshness(tmp_path)
+        assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# _verify_dce_checksum
+# ---------------------------------------------------------------------------
+
+
+def _checksums_json(version: str, platform_key: str, sha256: str) -> str:
+    """Build a minimal checksums JSON string for tests."""
+    import json
+
+    return json.dumps({version: {platform_key: sha256}})
+
+
+def _patch_checksums(checksums_json: str):  # type: ignore[return]
+    """Context manager: patch importlib.resources.files to return checksums_json."""
+    mock_files = patch("importlib.resources.files")
+
+    class _Ctx:
+        def __enter__(self) -> None:
+            self._patcher = mock_files.__enter__()
+            mock_ref = self._patcher.return_value.joinpath.return_value
+            mock_ref.read_text.return_value = checksums_json
+
+        def __exit__(self, *args: object) -> None:
+            mock_files.__exit__(*args)
+
+    return patch("importlib.resources.files")
+
+
+class TestVerifyDceChecksum:
+    def test_dce_checksum_verification_passes(self) -> None:
+        """Matching hash produces no error."""
+        import hashlib
+        import json
+
+        zip_data = b"fake-zip-content"
+        expected_hash = hashlib.sha256(zip_data).hexdigest()
+        checksums_json = _checksums_json("2.46.1", "linux-x64", expected_hash)
+
+        with patch("importlib.resources.files") as mock_files:
+            mock_ref = mock_files.return_value.joinpath.return_value
+            mock_ref.read_text.return_value = checksums_json
+            # Should not raise
+            _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+
+    def test_dce_checksum_verification_fails(self) -> None:
+        """Mismatched hash raises DCENotFoundError."""
+        from discord_ferry.errors import DCENotFoundError
+
+        zip_data = b"fake-zip-content"
+        wrong_hash = "a" * 64  # clearly wrong
+        checksums_json = _checksums_json("2.46.1", "linux-x64", wrong_hash)
+
+        with patch("importlib.resources.files") as mock_files:
+            mock_ref = mock_files.return_value.joinpath.return_value
+            mock_ref.read_text.return_value = checksums_json
+            with pytest.raises(DCENotFoundError, match="hash mismatch"):
+                _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+
+    def test_dce_checksum_empty_hash_skips(self) -> None:
+        """Empty string in checksums skips verification without error."""
+        zip_data = b"fake-zip-content"
+        checksums_json = _checksums_json("2.46.1", "linux-x64", "")
+
+        with patch("importlib.resources.files") as mock_files:
+            mock_ref = mock_files.return_value.joinpath.return_value
+            mock_ref.read_text.return_value = checksums_json
+            # Should not raise — empty hash means skip
+            _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+
+    def test_dce_checksum_missing_version_skips(self) -> None:
+        """Version not present in checksums file skips verification without error."""
+        import json
+
+        zip_data = b"fake-zip-content"
+        # Only 2.99.0 is in the file, not 2.46.1
+        checksums_json = json.dumps({"2.99.0": {"linux-x64": "a" * 64}})
+
+        with patch("importlib.resources.files") as mock_files:
+            mock_ref = mock_files.return_value.joinpath.return_value
+            mock_ref.read_text.return_value = checksums_json
+            # Should not raise — version not found means skip
+            _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")

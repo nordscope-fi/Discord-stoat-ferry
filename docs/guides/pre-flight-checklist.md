@@ -123,6 +123,24 @@ Ensure the Stoat account you are using was created at least **72 hours ago**.
 
 ---
 
+## 11. Review v2.0.0 flags before running
+
+Ferry 2.0.0 adds several new flags. Decide which apply to your migration before you start:
+
+| Flag | Purpose | When to use |
+|------|---------|-------------|
+| `--thread-strategy flatten\|merge\|archive` | Controls how Discord threads are represented in Stoat | Default is `flatten` (each thread becomes a channel). Use `merge` to append thread messages to the parent channel, or `archive` to create read-only channels |
+| `--incremental` | Migrate only messages posted since the last run | Subsequent runs on a live-but-slowing server; requires a previous completed migration |
+| `--verify-uploads` | After each file upload, fetch it back and compare size | Use when uploads may be silently corrupted (slow connections, large files) |
+| `--cleanup-orphans` | Detect Autumn files that were uploaded but never referenced in a message | Run after migration to reclaim storage on self-hosted instances |
+| `--force` | Override the DCE freshness check (exports older than 30 days) | Only use if re-running with a known-good old export |
+| `--force-unlock` | Remove the advisory migration lock from the server description | Use if a previous migration crashed and left the lock in place |
+| `--skip-dce-verify` | Skip SHA-256 verification of the DCE binary | Not recommended; use only in air-gapped environments where the hash is already verified |
+
+**Why:** Choosing the wrong thread strategy or omitting `--incremental` on a second run will duplicate messages or create an unexpected channel structure. Decide before starting — these options cannot be changed mid-migration.
+
+---
+
 ## Quick Reference
 
 Copy this condensed checklist for quick use:
@@ -137,6 +155,7 @@ Copy this condensed checklist for quick use:
 - [ ] Per-member overrides planned (single-user roles created)
 - [ ] MongoDB backed up (self-hosted only)
 - [ ] Stoat account is older than 72 hours (official service only)
+- [ ] v2.0.0 flags reviewed (`--thread-strategy`, `--incremental`, `--verify-uploads`, `--cleanup-orphans`, `--force`, `--force-unlock`, `--skip-dce-verify`)
 
 ---
 
