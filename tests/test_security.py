@@ -6,7 +6,6 @@ import pytest
 
 from discord_ferry.core.security import SecureTokenStore, sanitize_for_display
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -1471,12 +1471,12 @@ async def test_migration_lock_not_acquired_without_server_id(tmp_path: Path) -> 
 
 async def test_migration_lock_raises_on_active_lock(tmp_path: Path) -> None:
     """MigrationError raised when a live lock is found and force_unlock=False."""
-    from discord_ferry.errors import MigrationError
-
-    from discord_ferry.core.engine import _acquire_migration_lock
+    import time
 
     import aiohttp
-    import time
+
+    from discord_ferry.core.engine import _acquire_migration_lock
+    from discord_ferry.errors import MigrationError
 
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, server_id="srv-001", force_unlock=False)
@@ -1497,8 +1497,9 @@ async def test_migration_lock_raises_on_active_lock(tmp_path: Path) -> None:
 
 async def test_migration_lock_overrides_expired_lock(tmp_path: Path) -> None:
     """Expired lock (>24h) is overridden with a warning."""
-    import aiohttp
     import time
+
+    import aiohttp
 
     from discord_ferry.core.engine import _acquire_migration_lock
 

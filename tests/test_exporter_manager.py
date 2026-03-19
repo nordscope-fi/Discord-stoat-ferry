@@ -312,7 +312,6 @@ class TestVerifyDceChecksum:
     def test_dce_checksum_verification_passes(self) -> None:
         """Matching hash produces no error."""
         import hashlib
-        import json
 
         zip_data = b"fake-zip-content"
         expected_hash = hashlib.sha256(zip_data).hexdigest()
