@@ -588,6 +588,10 @@ async def run_channels(
         if config.skip_threads and export.is_thread:
             continue
 
+        # In merge/archive mode, threads are NOT created as channels.
+        if export.is_thread and config.thread_strategy in ("merge", "archive"):
+            continue
+
         # Skip already-seen channel IDs (deduplicate).
         if channel.id in seen_channel_ids:
             continue
@@ -606,7 +610,11 @@ async def run_channels(
         # Build channel name; prefix with parent name for threads.
         ch_name = channel.name
         if export.is_thread and export.parent_channel_name:
-            ch_name = f"{export.parent_channel_name}-{ch_name}"
+            if config.thread_strategy == "flatten":
+                # Add tree branch prefix for visual thread hierarchy.
+                ch_name = f"\u251c\u2500 {ch_name}"
+            else:
+                ch_name = f"{export.parent_channel_name}-{ch_name}"
 
         unique_name = make_unique_channel_name(ch_name, existing_names)
 
@@ -629,8 +637,15 @@ async def run_channels(
 
     if len(channels_to_create) > effective_max:
         overflow = len(channels_to_create) - effective_max
-        # Sort so threads come last, then truncate — preserves main channels.
-        channels_to_create.sort(key=lambda t: t[4])  # False (main) before True (thread)
+        # Sort: main channels first (False < True), then threads by message_count
+        # descending so higher-traffic threads survive truncation.
+        export_by_ch = {exp.channel.id: exp for exp in exports}
+        channels_to_create.sort(
+            key=lambda t: (
+                t[4],  # is_thread: False (main) before True (thread)
+                -(export_by_ch[t[0].id].message_count if t[0].id in export_by_ch else 0),
+            )
+        )
         dropped = channels_to_create[effective_max:]
         channels_to_create = channels_to_create[:effective_max]
         dropped_names = [entry[2] for entry in dropped]

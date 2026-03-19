@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from discord_ferry.parser.models import DCEAuthor, DCEExport, DCEMessage, DCEReaction
     from discord_ferry.state import MigrationState
 
+_THREAD_STRATEGIES = frozenset({"flatten", "merge", "archive"})
+
 logger = logging.getLogger(__name__)
 
 _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
@@ -94,6 +96,7 @@ def _split_message(content: str, max_len: int = 2000) -> list[str]:
         else:
             result.append(f"[continued {k}/{n}] " + chunk)
     return result
+
 
 # Message types that should be silently skipped without even a warning.
 _SKIP_TYPES = frozenset(
@@ -283,10 +286,21 @@ async def run_messages(
         )
         return
 
+    # Separate thread exports from parent exports based on thread_strategy.
+    thread_strategy = (
+        config.thread_strategy if config.thread_strategy in _THREAD_STRATEGIES else "flatten"
+    )
+    thread_exports: list[DCEExport] = []
+
     # Pre-filter exports: skip unmapped channels, already-completed channels, etc.
     eligible_exports: list[DCEExport] = []
     for export in sorted_exports:
         if config.skip_threads and export.is_thread:
+            continue
+
+        # In merge/archive mode, separate thread exports for later processing.
+        if export.is_thread and thread_strategy in ("merge", "archive"):
+            thread_exports.append(export)
             continue
 
         stoat_channel_id = state.channel_map.get(export.channel.id)
@@ -360,6 +374,19 @@ async def run_messages(
                 _merge_channel_result(state, result)
                 state.completed_channel_ids.add(export.channel.id)
 
+    # Process thread exports for merge/archive modes (after parent channels complete).
+    if thread_strategy == "merge" and thread_exports:
+        # Build name -> Stoat ID lookup from non-thread exports.
+        parent_name_to_stoat: dict[str, str] = {}
+        for exp in sorted_exports:
+            if not exp.is_thread:
+                stoat_id = state.channel_map.get(exp.channel.id)
+                if stoat_id:
+                    parent_name_to_stoat[exp.channel.name] = stoat_id
+        await _merge_threads(thread_exports, config, state, on_event, parent_name_to_stoat)
+    elif thread_strategy == "archive" and thread_exports:
+        _archive_threads(thread_exports, config, on_event)
+
     on_event(
         MigrationEvent(
             phase="messages",
@@ -367,6 +394,179 @@ async def run_messages(
             message="Message import complete.",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Thread strategy helpers: merge & archive
+# ---------------------------------------------------------------------------
+
+
+async def _merge_threads(
+    thread_exports: list[DCEExport],
+    config: FerryConfig,
+    state: MigrationState,
+    on_event: EventCallback,
+    parent_name_to_stoat: dict[str, str],
+) -> None:
+    """Merge thread messages into their parent channels with separators.
+
+    Each thread's messages are appended to the parent channel after a
+    separator line. Uses the original author masquerade for each message.
+
+    Args:
+        thread_exports: Thread exports to merge.
+        config: Ferry configuration.
+        state: Migration state.
+        on_event: Event callback.
+        parent_name_to_stoat: Mapping of parent channel name to Stoat channel ID.
+    """
+    async with get_session(config) as session:
+        for export in thread_exports:
+            parent_name = export.parent_channel_name or ""
+            parent_stoat_id = parent_name_to_stoat.get(parent_name)
+
+            if parent_stoat_id is None:
+                state.warnings.append(
+                    {
+                        "phase": "messages",
+                        "type": "merge_parent_not_found",
+                        "message": (
+                            f"Thread {export.channel.name!r} parent channel "
+                            f"{parent_name!r} not found — skipping merge."
+                        ),
+                    }
+                )
+                continue
+
+            # Send separator message.
+            separator = (
+                f"\u2500\u2500 Thread: {export.channel.name} "
+                f"({export.message_count} messages) \u2500\u2500"
+            )
+            try:
+                await api_send_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    parent_stoat_id,
+                    content=separator,
+                    masquerade={"name": "Discord Ferry"},
+                    idempotency_key=f"ferry-thread-sep-{export.channel.id}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": "messages",
+                        "type": "merge_separator_failed",
+                        "message": f"Thread separator for {export.channel.name!r} failed: {exc}",
+                    }
+                )
+
+            # Send all thread messages to the parent channel.
+            if export.json_path is not None:
+                message_source = stream_messages(export.json_path)
+            else:
+                message_source = iter(sorted(export.messages, key=lambda m: m.timestamp))
+
+            msg_count = 0
+            for msg in message_source:
+                if msg.type in _SKIP_TYPES:
+                    continue
+
+                content = _build_content(msg, state)
+                masquerade = await _build_masquerade(msg.author, session, state, config)
+                parts = _split_message(content)
+
+                for part_idx, part_content in enumerate(parts):
+                    idem_key = (
+                        f"ferry-merge-{msg.id}"
+                        if len(parts) == 1
+                        else f"ferry-merge-{msg.id}_p{part_idx + 1}"
+                    )
+                    try:
+                        await api_send_message(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            parent_stoat_id,
+                            content=part_content,
+                            masquerade=masquerade,
+                            idempotency_key=idem_key,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        state.warnings.append(
+                            {
+                                "phase": "messages",
+                                "type": "merge_message_failed",
+                                "message": f"Merge message {msg.id} failed: {exc}",
+                            }
+                        )
+
+                msg_count += 1
+                await _rate_limit_with_pause(config)
+
+            on_event(
+                MigrationEvent(
+                    phase="messages",
+                    status="progress",
+                    message=(
+                        f"Merged thread {export.channel.name!r} "
+                        f"({msg_count} messages) into parent channel."
+                    ),
+                    channel_name=export.channel.name,
+                )
+            )
+
+
+def _archive_threads(
+    thread_exports: list[DCEExport],
+    config: FerryConfig,
+    on_event: EventCallback,
+) -> None:
+    """Export thread messages as markdown files. No API calls.
+
+    Creates ``{output_dir}/threads/{parent_channel_name}/{thread_name}.md``
+    with each message formatted as a markdown heading with author and timestamp.
+    """
+    for export in thread_exports:
+        parent_name = export.parent_channel_name or "uncategorized"
+        thread_dir = config.output_dir / "threads" / parent_name
+        thread_dir.mkdir(parents=True, exist_ok=True)
+
+        md_path = thread_dir / f"{export.channel.name}.md"
+
+        if export.json_path is not None:
+            message_source = stream_messages(export.json_path)
+        else:
+            message_source = iter(sorted(export.messages, key=lambda m: m.timestamp))
+
+        lines: list[str] = []
+        msg_count = 0
+        for msg in message_source:
+            if msg.type in _SKIP_TYPES:
+                continue
+            # Format timestamp: extract date and time from ISO format.
+            ts = msg.timestamp
+            # Simple ISO parse: "2024-01-15T12:00:00+00:00" -> "2024-01-15 12:00 UTC"
+            ts_display = ts.replace("T", " ")[:16] + " UTC"
+            author_name = msg.author.nickname or msg.author.name
+            lines.append(f"## {author_name} \u2014 {ts_display}")
+            lines.append(msg.content)
+            lines.append("")  # blank line between messages
+            msg_count += 1
+
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="progress",
+                message=(
+                    f"Archived thread {export.channel.name!r} ({msg_count} messages) to {md_path}"
+                ),
+                channel_name=export.channel.name,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -794,9 +994,7 @@ async def _process_message(
     try:
         for part_idx, part_content in enumerate(parts):
             is_first = part_idx == 0
-            idem_key = (
-                f"ferry-{msg.id}" if len(parts) == 1 else f"ferry-{msg.id}_p{part_idx + 1}"
-            )
+            idem_key = f"ferry-{msg.id}" if len(parts) == 1 else f"ferry-{msg.id}_p{part_idx + 1}"
             result = await api_send_message(
                 session,
                 config.stoat_url,

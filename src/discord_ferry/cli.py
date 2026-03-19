@@ -260,6 +260,12 @@ _common_options = [
     click.option("--skip-emoji", is_flag=True, help="Skip emoji upload"),
     click.option("--skip-reactions", is_flag=True, help="Skip reactions"),
     click.option("--skip-threads", is_flag=True, help="Skip threads/forums"),
+    click.option(
+        "--thread-strategy",
+        type=click.Choice(["flatten", "merge", "archive"]),
+        default="flatten",
+        help="Thread handling: flatten (channels), merge (into parent), archive (markdown export)",
+    ),
     click.option("--rate-limit", default=1.0, type=float, help="Seconds between messages"),
     click.option("--upload-delay", default=0.5, type=float, help="Seconds between uploads"),
     click.option("--output-dir", default="./ferry-output", help="Report output directory"),
@@ -354,6 +360,7 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         force=kwargs.get("force", False),
         skip_dce_verify=kwargs.get("skip_dce_verify", False),
         verify_uploads=kwargs.get("verify_uploads", False),
+        thread_strategy=kwargs.get("thread_strategy", "flatten"),
     )
 
 

@@ -493,7 +493,7 @@ async def test_run_channels_assigns_to_categories(tmp_path: Path) -> None:
 
 
 async def test_run_channels_thread_flattening(tmp_path: Path) -> None:
-    """CHANNELS phase prepends parent channel name to thread channel names."""
+    """CHANNELS phase adds ├─ prefix to thread channel names in flatten mode."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -513,7 +513,7 @@ async def test_run_channels_thread_flattening(tmp_path: Path) -> None:
     with aioresponses() as m:
         m.post(
             f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-th1", "name": "general-my-thread"},
+            payload={"_id": "stoat-th1", "name": "\u251c\u2500 my-thread"},
             callback=lambda url, **kwargs: created_names.append(  # type: ignore[misc]
                 (kwargs.get("json") or {}).get("name", "")
             ),
@@ -522,7 +522,7 @@ async def test_run_channels_thread_flattening(tmp_path: Path) -> None:
         await run_channels(config, state, exports, events.append)
 
     assert state.channel_map["th1"] == "stoat-th1"
-    assert created_names[0] == "general-my-thread"
+    assert created_names[0] == "\u251c\u2500 my-thread"
 
 
 async def test_run_channels_skips_category_type(tmp_path: Path) -> None:

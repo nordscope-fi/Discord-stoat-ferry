@@ -36,6 +36,7 @@ class FerryConfig:
     checkpoint_interval: int = 50
     skip_avatars: bool = False
     reaction_mode: str = "text"
+    thread_strategy: str = "flatten"  # "flatten" | "merge" | "archive"
     min_thread_messages: int = 0
     validate_after: bool = False
     force: bool = False
