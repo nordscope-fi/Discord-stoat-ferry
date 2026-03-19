@@ -108,6 +108,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Docs accuracy pass: correct false CLI flag references (`--max-concurrent-channels`, `--reaction-mode`, `--min-thread-messages`, `--checkpoint-interval`, `--max-concurrent-requests`) — these are GUI-only settings not yet exposed as Click options. Added "GUI Only Options" section to CLI reference. Updated large-servers, self-hosted-tips, known-limitations, and pre-flight-checklist to reflect accurate availability.
+- Docs readability pass: split overwhelming 35-row feature table in README and index.md into "What gets migrated" (data table) and "Reliability features" (bulleted list). Updated pre-flight time estimates from v1 sequential to v2 parallel defaults.
+- Fix broken mkdocs rendering: code fence `title=` attribute in cli-reference.md and self-hosted-tips.md requires `pymdownx.superfences` (not configured) — replaced with comment-based titles. Bottom half of CLI reference page was rendering as raw markdown on the live docs site.
 - Plain English audit across all user-facing docs: define jargon on first use (CLI, JSON, API, CDN, DCE, token, terminal, developer tools), add parenthetical explanations for technical terms, use direct language throughout.
 - Comprehensive architecture doc rewrite (`docs/reference/architecture.md`): expanded from ~200 lines to ~1200 lines covering every module, data model, migration phase, API pattern, async design, and design decision.
 - Claude Code config cleanup: remove CogniLayer duplication from project CLAUDE.md (~130 lines), remove PostToolUse hook, remove redundant bash/WebFetch permissions, fix tool name typo.

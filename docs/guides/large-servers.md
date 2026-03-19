@@ -65,13 +65,13 @@ v2.0.0 processes multiple channels concurrently, dramatically reducing migration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `--max-concurrent-channels` | 3 | Channels processed simultaneously |
-| `--max-concurrent-requests` | 5 | Total concurrent API calls across all workers |
+| `max_concurrent_channels` | 3 | Channels processed simultaneously |
+| `max_concurrent_requests` | 5 | Total concurrent API calls across all workers |
 
 These settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent API calls. For self-hosted instances with generous rate limits, increase both.
 
-!!! tip "Increasing concurrency on self-hosted instances"
-    On a self-hosted instance with relaxed rate limits, try `--max-concurrent-channels 6 --max-concurrent-requests 12`. Monitor your Stoat server load and back off if you see errors.
+!!! info "GUI only (for now)"
+    These concurrency settings are available in the GUI's Advanced Options panel. CLI flags are planned for a future release. See the [CLI Reference](cli-reference.md#gui-only-options) for the full list.
 
 ---
 
@@ -168,15 +168,10 @@ For servers with hundreds of threads, many may contain only a few messages. Use 
     On the Setup screen, expand **Advanced Options** and set the **Min thread messages** field. Threads with fewer messages than this threshold are skipped.
 
 === "CLI"
-    ```bash
-    ferry migrate ~/exports/my-discord-server/ \
-      --stoat-url https://api.stoat.chat \
-      --token your_token_here \
-      --min-thread-messages 5
-    ```
+    Thread filtering is currently available through the GUI only. On the CLI, use `--skip-threads` to exclude all threads, or `--thread-strategy merge` to avoid creating extra channels.
 
 !!! tip "Find the right threshold"
-    Run `ferry validate` first — the counts table shows thread message counts. Setting `min_thread_messages=5` is a good starting point, skipping threads that are essentially empty.
+    Run `ferry validate` first — the counts table shows thread message counts. In the GUI, setting Min thread messages to 5 is a good starting point, skipping threads that are essentially empty.
 
 ---
 
@@ -192,27 +187,23 @@ By default, Ferry uses `reaction_mode='text'`, which appends reaction counts to 
 
 For a 10,000-message server with 20,000 reactions, `text` mode saves roughly 5 hours compared to `native` mode.
 
+=== "GUI"
+    On the Setup screen, expand **Advanced Options** and use the **Reaction mode** dropdown.
+
 === "CLI"
-    ```bash
-    ferry migrate ~/exports/my-discord-server/ \
-      --stoat-url https://api.stoat.chat \
-      --token your_token_here \
-      --reaction-mode text
-    ```
+    Reaction mode is currently available through the GUI only. On the CLI, use `--skip-reactions` to skip reactions entirely. The default `text` mode is always active otherwise.
 
 ---
 
 ## Checkpoint Tuning
 
-Ferry saves migration state every 50 messages by default (`checkpoint_interval=50`). For very large servers (100,000+ messages), you can increase this to reduce disk I/O overhead:
+Ferry saves migration state every 50 messages by default (`checkpoint_interval=50`). For very large servers (100,000+ messages), you can increase this to reduce disk I/O overhead.
+
+=== "GUI"
+    On the Setup screen, expand **Advanced Options** and adjust the **Checkpoint interval** field. A value of 200 is a good balance for large migrations.
 
 === "CLI"
-    ```bash
-    ferry migrate ~/exports/my-discord-server/ \
-      --stoat-url https://api.stoat.chat \
-      --token your_token_here \
-      --checkpoint-interval 200
-    ```
+    Checkpoint interval is currently available through the GUI only. The default of 50 works well for most migrations.
 
 !!! info "Trade-off"
     A higher checkpoint interval means faster throughput but slightly more re-work if the migration is interrupted — Ferry will replay up to `checkpoint_interval` messages on resume. For most large migrations, 200 is a good balance.

@@ -82,7 +82,6 @@ ferry migrate [OPTIONS]
 | `--dry-run` | | false | Run all phases without making API calls; produces synthetic IDs for validation |
 | `--max-channels INT` | | 200 | Channel limit; raise for self-hosted instances with custom limits |
 | `--max-emoji INT` | | 100 | Emoji limit; raise for self-hosted instances with custom limits |
-| `--max-concurrent-channels INT` | | 3 | Number of channels to process in parallel during the message migration phase |
 | `--verify-uploads` | | false | Post-upload file size verification for Autumn uploads |
 | `--cleanup-orphans` | | false | Detect and report unreferenced Autumn uploads after migration (report-only; no files are deleted) |
 | `--force-unlock` | | false | Override a stale migration lock on the target Stoat server |
@@ -96,7 +95,8 @@ ferry migrate [OPTIONS]
 
 You can set credentials in a `.env` file in your working directory. Ferry loads this file automatically.
 
-```dotenv title=".env"
+```dotenv
+# .env
 DISCORD_TOKEN=your_discord_token_here
 DISCORD_SERVER_ID=123456789012345678
 STOAT_URL=https://api.stoat.chat
@@ -108,18 +108,22 @@ STOAT_TOKEN=your_stoat_token_here
 
 ---
 
-### Engine Configuration
+### GUI Only Options
 
-These options are available in the migration engine but not yet exposed as CLI flags. They can be set programmatically or will be added as CLI options in a future release:
+These options are available in the GUI's Advanced Options panel but are not yet exposed as CLI flags. They will be added as CLI options in a future release:
 
 | Config Field | Default | Description |
 |---|---|---|
 | `skip_avatars` | False | Skip avatar pre-flight phase |
-| `validate_after` | False | Run post-migration validation |
-| `max_concurrent_requests` | 5 | API concurrency limit |
+| `validate_after` | False | Run post-migration validation comparing Stoat server against source |
+| `max_concurrent_channels` | 3 | Channels processed in parallel during message migration |
+| `max_concurrent_requests` | 5 | Total concurrent API calls across all channel workers |
+| `reaction_mode` | `"text"` | How reactions are migrated: `"text"` (append to content), `"native"` (API calls), `"skip"` |
+| `min_thread_messages` | 0 | Exclude threads with fewer than this many messages (0 = include all) |
+| `checkpoint_interval` | 50 | How often state is saved during messages (every N messages) |
 
-!!! info "More performance options"
-    `--reaction-mode`, `--min-thread-messages`, `--checkpoint-interval`, and `--max-concurrent-channels` are all available as CLI flags — see the Options table above and the [large-servers guide](large-servers.md) for details.
+!!! tip "Using these settings from the CLI"
+    These options are available in the GUI's Advanced Options section today. CLI flags for them are planned for a future release.
 
 ---
 

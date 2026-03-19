@@ -234,8 +234,8 @@ Before creating anything on Stoat, Ferry shows a review summary.
     - Live stats: messages sent, attachments uploaded, errors
     - Any warnings or skipped items are printed as they occur
 
-    !!! info "Phase 9 — Parallel channel sends"
-        Phase 9 (Messages) processes multiple channels concurrently (default: 3 at a time). You will see progress bars for several channels running simultaneously. Use `--max-concurrent-channels N` to adjust the concurrency level.
+    !!! info "Parallel channel sends"
+        The Messages phase processes multiple channels concurrently (default: 3 at a time). You will see progress bars for several channels running simultaneously. To adjust the concurrency level, use the GUI's Advanced Options or see the [large-servers guide](../guides/large-servers.md).
 
     To pause and resume later, press `Ctrl+C`. Run the same command again with `--resume` to continue from the last checkpoint.
 

@@ -32,8 +32,9 @@ The default limits in Stoat are designed for general community use. When importi
 
 Add these to your `Revolt.overrides.toml`:
 
-```toml title="Revolt.overrides.toml"
-[limits]
+```toml
+# Revolt.overrides.toml
+[limits.global]
 server_channels = 500
 server_emoji = 200
 message_length = 4000
@@ -72,20 +73,18 @@ Server banners are automatically migrated when a Discord token is provided. The 
 
 For powerful self-hosted instances, you can increase concurrency to speed up migrations. The circuit breaker (5 consecutive failures → 30s pause) provides safety regardless of concurrency level.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--max-concurrent-channels` | 3 | Channels processed in parallel during the message phase |
-| `--max-concurrent-requests` | 5 | Total concurrent API calls across all channel workers |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_concurrent_channels` | 3 | Channels processed in parallel during the message phase |
+| `max_concurrent_requests` | 5 | Total concurrent API calls across all channel workers |
 
-These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both can be raised for self-hosted instances with relaxed rate limits:
+These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both can be raised for self-hosted instances with relaxed rate limits.
 
-```bash
-ferry migrate --export-dir ~/exports/my-server/ \
-  --stoat-url https://stoat.example.com \
-  --token your_token_here \
-  --max-concurrent-channels 6 \
-  --max-concurrent-requests 12
-```
+=== "GUI"
+    On the Setup screen, expand **Advanced Options** to find the concurrency settings. Try 6 concurrent channels and 12 concurrent requests for a powerful self-hosted instance.
+
+=== "CLI"
+    These concurrency settings are currently available through the GUI only. CLI flags are planned for a future release. The defaults (3 channels, 5 requests) are safe for most setups.
 
 Monitor your Stoat server load and reduce these values if you encounter frequent 429 errors.
 

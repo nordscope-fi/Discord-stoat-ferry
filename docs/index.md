@@ -34,47 +34,44 @@ Ferry can **pause and resume** — close it anytime and pick up where you left o
 
 ## What Gets Migrated?
 
-| Feature | Status |
-|---------|--------|
-| Text channels | Supported |
-| Categories | Supported |
-| Roles (with colours and permissions) | Supported — Discord permissions translated to Stoat equivalents |
-| Channel permissions | Supported — per-role and @everyone overrides migrated |
-| NSFW channels | Supported — NSFW flag set during channel creation |
-| Messages + author names | Supported (each message shows the original author's name and avatar) |
-| File attachments | Supported |
-| Custom emoji | Supported (up to 100) |
-| Pinned messages | Supported |
-| Replies | Supported |
-| Reactions | Supported (without per-user attribution) |
-| Embeds (with media) | Supported (thumbnails and images uploaded) |
-| Polls | Supported (rendered as formatted text) |
-| Threads | Supported (converted to text channels) |
-| Forum posts | Supported (grouped into dedicated categories) |
-| Voice channels | Partial (created but do not work yet — known Stoat bug) |
-| Stickers | Image upload with text fallback for animated or unavailable stickers |
-| Original timestamps | Shown in message text, not metadata |
-| Pre-creation review | Supported — summary and confirmation before anything is created on Stoat |
-| Server blueprints | Supported — export your server's channel and role structure as a reusable template file |
-| Avatar pre-flight | Supported — uploads author avatars before migration, with CDN fallback for missing files |
-| Dead-letter queue | Supported — failed messages tracked and retryable without re-running the full migration |
-| Configurable reactions | Supported — text summary (default), native API calls, or skip entirely |
-| Discord link rewriting | Supported — jump links and invite URLs annotated for Stoat context |
-| Circuit breaker | Supported — exponential backoff prevents indefinite blocking on Stoat API failures |
-| Thread filtering | Supported — exclude low-activity threads by minimum message count |
-| Post-migration validation | Supported — verifies Stoat server structure matches the source |
-| Markdown report | Supported — human-readable `migration_report.md` generated after migration |
-| Server banner migration | Supported |
-| Forum post index channels | Supported — index channel created per forum category listing all posts |
-| CDN URL validation | Supported — detects expired Discord attachment URLs before migration starts |
-| Parallel channel sends | Process multiple channels concurrently for faster migration |
-| Message splitting | Messages >2000 chars automatically split with [continued] markers (not truncated) |
-| Thread strategies | Flatten (default), merge into parent channel, or archive as markdown |
-| Incremental migration | Only migrate new messages since last completed run |
-| Migration lock | Prevents concurrent migrations to the same server |
-| Fidelity scoring | Quantified migration quality score in the report |
-| DCE verification | SHA-256 hash verification of DiscordChatExporter binary |
-| Token security | Tokens never appear in error messages, repr output, or persisted storage |
+| Discord feature | What happens |
+|-----------------|-------------|
+| Text channels | Recreated on Stoat with the same names and topics |
+| Categories | Recreated — channels grouped the same way |
+| Roles | Recreated with colours and Discord permissions translated to Stoat equivalents |
+| Channel permissions | Per-role and @everyone overrides migrated |
+| NSFW channels | NSFW flag preserved |
+| Messages + authors | Each message shows the original author's name and avatar |
+| File attachments | Uploaded to Stoat's file storage |
+| Custom emoji | Uploaded (up to 100) |
+| Pinned messages | Re-pinned in the correct channels |
+| Replies | Reply links preserved between messages |
+| Reactions | Shown as text summary by default, or applied via API |
+| Embeds | Flattened to Stoat format with thumbnails and images uploaded |
+| Polls | Rendered as formatted text |
+| Threads | Converted to text channels, merged into parent, or archived as markdown — your choice |
+| Forum posts | Grouped into dedicated categories with an index channel |
+| Voice channels | Created, but may not work yet (known Stoat bug) |
+| Stickers | Image uploaded, or text fallback for animated/missing |
+| Server banner | Uploaded from Discord API when a Discord token is provided |
+| Original timestamps | Shown at the start of each message (e.g. `*[2024-01-15 12:00 UTC]*`) |
+
+### Reliability Features
+
+Ferry is built to handle large migrations safely:
+
+- **Pause and resume** — close Ferry anytime, pick up where you left off
+- **Parallel channel sends** — processes multiple channels concurrently (3x–5x faster)
+- **Incremental migration** — only migrate new messages since the last completed run
+- **Thread filtering** — exclude low-activity threads by minimum message count
+- **Pre-creation review** — summary and confirmation before anything is created on Stoat
+- **Migration report** — human-readable `migration_report.md` with a fidelity score
+- **Dead-letter queue** — failed messages tracked and retryable without re-running
+- **Post-migration validation** — verifies Stoat server structure matches the source
+- **Message splitting** — messages over 2000 characters are split, not truncated
+- **Migration lock** — prevents two Ferry instances from targeting the same server
+- **Circuit breaker** — automatic backoff on API failures, no indefinite blocking
+- **Server blueprints** — export your server structure as a reusable template
 
 ---
 

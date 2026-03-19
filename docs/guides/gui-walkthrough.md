@@ -47,7 +47,7 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Skip emoji | Off | Do not upload custom emoji. |
 | Skip reactions | Off | Do not add message reactions. |
 | Skip threads | Off | Do not migrate threads or forum posts. Useful when approaching the 200-channel limit. |
-| Thread strategy | Flatten | How to handle threads and forum posts. **Flatten** (default) creates a dedicated channel for each thread. **Merge** appends thread messages into the parent channel. **Archive** exports the thread as a markdown attachment in the parent channel. Added in v2.0.1. |
+| Thread strategy | Flatten | How to handle threads and forum posts. **Flatten** (default) creates a dedicated channel for each thread. **Merge** appends thread messages into the parent channel. **Archive** exports the thread as a markdown attachment in the parent channel. |
 | Dry run | Off | Run all migration phases without actually contacting the Stoat server. Useful for validating your export before committing to a full migration. |
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
 | Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more I/O. Minimum 1. |
@@ -240,8 +240,11 @@ Click **Cancel** to stop the migration entirely. Ferry saves its state to disk b
 
 ## Completion Screen
 
-When all phases finish, the Completion screen shows a summary card with final statistics: messages sent, attachments uploaded, errors, and elapsed time.
+When all phases finish, the Completion screen shows a summary card with final statistics: messages sent, attachments uploaded, errors, elapsed time, and a **fidelity score** — a 0–100 measure of migration quality based on messages, attachments, embeds, replies, and reactions.
 
 <!-- screenshot: completion screen with summary card -->
 
-Click **Open Report** to open the migration report in your browser. The report is also saved as `migration_report.json` in the `ferry-output/` folder next to your export.
+Click **Open Report** to open the migration report in your browser. Two report files are saved to the `ferry-output/` folder:
+
+- `migration_report.md` — a human-readable summary you can share with your community
+- `report.json` — a machine-readable report with full error details and ID mappings

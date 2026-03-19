@@ -57,16 +57,16 @@ The Stoat account running Ferry needs Masquerade and ManageRole permissions at m
 
 ## 5. Estimate migration duration
 
-Ferry sends approximately one message per second to stay within Stoat's rate limits. Use this to plan your time:
+Ferry processes multiple channels in parallel (default: 3 concurrent). Use these rough figures to plan:
 
 | Messages | Approximate Duration |
 |----------|---------------------|
-| 1,000 | ~17 minutes |
-| 10,000 | ~3 hours |
-| 50,000 | ~14 hours |
-| 100,000 | ~28 hours |
+| 1,000 | ~6 minutes |
+| 10,000 | ~1 hour |
+| 50,000 | ~5 hours |
+| 100,000 | ~8–10 hours |
 
-**Why:** Large migrations take hours or days. Knowing the duration upfront lets you plan around maintenance windows and avoid interrupting a migration partway through. Ferry supports resume, but an uninterrupted run is always smoother.
+**Why:** Large migrations take hours or days. Knowing the duration upfront lets you plan around maintenance windows and avoid interrupting a migration partway through. Ferry supports resume, but an uninterrupted run is always smoother. Actual speed depends on how evenly messages are distributed across channels — servers where one channel holds most messages will see less benefit from parallelism.
 
 ---
 
@@ -76,7 +76,7 @@ Stoat's default limit is **200 channels per server**. Every Discord thread and f
 
 Run `ferry validate` on your export to see the projected channel count before starting.
 
-**Why:** If the total exceeds 200, the migration will fail partway through. Use `--min-thread-messages` to filter low-activity threads, or `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md#raising-limits-for-migration).
+**Why:** If the total exceeds 200, the migration will fail partway through. In the GUI, use the **Min thread messages** setting to filter low-activity threads, or use `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md#raising-limits-for-migration).
 
 ---
 
@@ -123,19 +123,29 @@ Ensure the Stoat account you are using was created at least **72 hours ago**.
 
 ---
 
-## 11. Review v2.0.0 flags before running
+## 11. Review your options before running
 
-Ferry 2.0.0 adds several new flags. Decide which apply to your migration before you start:
+Ferry 2.0 adds several options. Decide which apply to your migration before you start:
 
-| Flag | Purpose | When to use |
-|------|---------|-------------|
+**Available as CLI flags and in the GUI:**
+
+| Option | Purpose | When to use |
+|--------|---------|-------------|
 | `--thread-strategy flatten\|merge\|archive` | Controls how Discord threads are represented in Stoat | Default is `flatten` (each thread becomes a channel). Use `merge` to append thread messages to the parent channel, or `archive` to create read-only channels |
 | `--incremental` | Migrate only messages posted since the last run | Subsequent runs on a live-but-slowing server; requires a previous completed migration |
-| `--verify-uploads` | After each file upload, fetch it back and compare size | Use when uploads may be silently corrupted (slow connections, large files) |
-| `--cleanup-orphans` | Detect Autumn files that were uploaded but never referenced in a message | Run after migration to reclaim storage on self-hosted instances |
-| `--force` | Override the DCE freshness check (exports older than 30 days) | Only use if re-running with a known-good old export |
-| `--force-unlock` | Remove the advisory migration lock from the server description | Use if a previous migration crashed and left the lock in place |
+| `--verify-uploads` | After each file upload, compare file sizes | Use when uploads may be silently corrupted (slow connections, large files) |
+| `--cleanup-orphans` | Detect files that were uploaded but never referenced | Run after migration to reclaim storage on self-hosted instances |
+| `--force` | Override the export freshness check (exports older than 30 days) | Only use if re-running with a known-good old export |
+| `--force-unlock` | Remove the advisory migration lock from the server | Use if a previous migration crashed and left the lock in place |
 | `--skip-dce-verify` | Skip SHA-256 verification of the DCE binary | Not recommended; use only in air-gapped environments where the hash is already verified |
+
+**Available in the GUI only (no CLI flag yet):**
+
+| Option | Purpose | When to use |
+|--------|---------|-------------|
+| Reaction mode | Text summary (default), native API calls, or skip | Use `native` if per-emoji reactions matter; use `skip` for fastest migration |
+| Min thread messages | Exclude threads below a message count | Use when your server has hundreds of low-activity threads |
+| Concurrent channels | Number of channels processed in parallel | Increase on self-hosted instances with relaxed rate limits |
 
 **Why:** Choosing the wrong thread strategy or omitting `--incremental` on a second run will duplicate messages or create an unexpected channel structure. Decide before starting — these options cannot be changed mid-migration.
 
@@ -155,7 +165,7 @@ Copy this condensed checklist for quick use:
 - [ ] Per-member overrides planned (single-user roles created)
 - [ ] MongoDB backed up (self-hosted only)
 - [ ] Stoat account is older than 72 hours (official service only)
-- [ ] v2.0.0 flags reviewed (`--thread-strategy`, `--incremental`, `--verify-uploads`, `--cleanup-orphans`, `--force`, `--force-unlock`, `--skip-dce-verify`)
+- [ ] Migration options reviewed (thread strategy, incremental mode, reaction mode, concurrency)
 
 ---
 
