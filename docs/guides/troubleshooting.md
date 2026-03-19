@@ -74,6 +74,14 @@ This page covers the most common problems encountered during migration, their ca
 | **Cause** | The original Discord message had no text content — for example, a message that was only a sticker, a forwarded message, or a system event with no body. This is normal behavior. |
 | **Solution** | No action needed. These are faithfully representing messages that had no text in Discord. Forwarded messages are logged separately as "forwarded message skipped" in the migration report. |
 
+### Messages show [continued 1/3] markers
+
+| | |
+|---|---|
+| **Symptom** | Some messages in Stoat are split across multiple sequential messages with `[continued 1/3]`, `[continued 2/3]`, `[continued 3/3]` markers |
+| **Cause** | The original Discord message exceeded Stoat's 2000-character message limit. Ferry automatically splits long messages into sequential parts. This is normal behavior — no content is lost. |
+| **Solution** | No action needed. The full original message content is preserved across all parts. If this affects readability, self-hosted admins can raise the `message_length` limit in `Revolt.overrides.toml` — see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
+
 ---
 
 ## Channel and Emoji Limits
@@ -118,6 +126,50 @@ xattr -d com.apple.quarantine /Applications/ferry
 
 !!! info "Right-click workaround"
     Alternatively, right-click (or Control-click) the `ferry` file, choose **Open**, and click **Open** in the dialog that appears. macOS will remember this choice and not prompt again.
+
+---
+
+## Migration Locks
+
+### Another migration is in progress
+
+| | |
+|---|---|
+| **Symptom** | Ferry reports "Another migration is in progress" or "Migration lock detected" and refuses to start |
+| **Cause** | A prior Ferry run set an advisory lock marker in the Stoat server description. This prevents two Ferry instances from running against the same server simultaneously. The lock expires after 24 hours, but may persist if the prior migration crashed before it could clean up. |
+| **Solution** | If the prior migration is genuinely still running, wait for it to finish. If it crashed, add `--force-unlock` to your command to clear the stale lock and proceed. |
+
+---
+
+## DCE Verification Errors
+
+### DCE binary hash mismatch
+
+| | |
+|---|---|
+| **Symptom** | Ferry reports "DCE binary hash mismatch" or "SHA-256 verification failed" |
+| **Cause** | The downloaded DiscordChatExporter binary does not match the expected SHA-256 checksum. This can happen if the download was corrupted, if the cached binary is from a different version, or if you are using a self-built DCE binary. |
+| **Solution** | Delete the cached DCE binary (found in the Ferry data directory) and re-run Ferry — it will re-download a fresh copy. If you are using a self-built or custom DCE binary, pass `--skip-dce-verify` to bypass the checksum check. |
+
+### DCE export is N days old
+
+| | |
+|---|---|
+| **Symptom** | Ferry warns or errors with "DCE export is N days old" and refuses to continue |
+| **Cause** | Your DiscordChatExporter export is more than 30 days old. Ferry's freshness check flags old exports because Discord CDN attachment URLs expire, which means many attachments may no longer be downloadable. |
+| **Solution** | Re-export from DiscordChatExporter to get a fresh export. If your export includes all media locally (exported with `--media`) and you want to proceed anyway, add `--force` to override the freshness check. |
+
+---
+
+## Flag Conflicts
+
+### --resume and --incremental are mutually exclusive
+
+| | |
+|---|---|
+| **Symptom** | Ferry reports `--resume and --incremental are mutually exclusive` and exits immediately |
+| **Cause** | Both flags were passed on the same command. They serve different purposes and cannot be combined. |
+| **Solution** | Use `--resume` to continue a migration that was interrupted mid-run (the state file was written but migration did not finish). Use `--incremental` when a prior migration completed successfully and you want to migrate only new messages that have arrived since. |
 
 ---
 

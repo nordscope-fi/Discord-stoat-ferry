@@ -122,6 +122,13 @@ Before you start, confirm you have these ready:
     | `--dry-run` | Run all phases without making any API calls |
     | `--max-channels N` | Channel limit (default `200`; raise for self-hosted) |
     | `--max-emoji N` | Emoji limit (default `100`; raise for self-hosted) |
+    | `--thread-strategy` | `flatten` (default), `merge`, or `archive` |
+    | `--incremental` | Delta migration — only new messages since last run |
+    | `--force` | Override freshness and soft error checks |
+    | `--verify-uploads` | Post-upload file size verification |
+    | `--cleanup-orphans` | Report unreferenced Autumn uploads |
+    | `--force-unlock` | Clear stale migration lock from server |
+    | `--skip-dce-verify` | Skip DCE binary SHA-256 verification |
 
 ---
 
@@ -227,6 +234,9 @@ Before creating anything on Stoat, Ferry shows a review summary.
     - Live stats: messages sent, attachments uploaded, errors
     - Any warnings or skipped items are printed as they occur
 
+    !!! info "Phase 9 — Parallel channel sends"
+        Phase 9 (Messages) processes multiple channels concurrently (default: 3 at a time). You will see progress bars for several channels running simultaneously. Use `--max-concurrent-channels N` to adjust the concurrency level.
+
     To pause and resume later, press `Ctrl+C`. Run the same command again with `--resume` to continue from the last checkpoint.
 
 ---
@@ -241,6 +251,7 @@ Before creating anything on Stoat, Ferry shows a review summary.
     - Total messages migrated
     - Total attachments uploaded
     - Error count (click to view details)
+    - **Fidelity score** — a quantified measure of migration quality
 
     Click **Open Report** to view the full migration report in your browser.
 
@@ -248,11 +259,21 @@ Before creating anything on Stoat, Ferry shows a review summary.
 
 === "CLI (Linux / advanced)"
 
-    Ferry prints a summary table when it finishes. The full report is saved to:
+    Ferry prints a summary table when it finishes, including a **fidelity score** — a quantified measure of migration quality (messages migrated vs. source total, attachment success rate, and other factors). The full report is saved to:
 
     ```
     ferry-output/report.json
     ```
+
+    Other files written to the output directory:
+
+    | File | Contents |
+    |------|----------|
+    | `state.json` | Channel, role, and emoji ID mappings (used for resume and incremental runs) |
+    | `message_map.json` | Discord message ID → Stoat message ID mapping (used for reply linking and incremental runs) |
+    | `discord_metadata.json` | Server structure and permission data fetched from Discord API |
+    | `migration_report.md` | Human-readable summary with fidelity score and per-channel stats |
+    | `report.json` | Machine-readable full report including error details |
 
 ---
 

@@ -6,14 +6,18 @@ This guide covers what to expect when migrating a server with hundreds of channe
 
 ## Time Estimates
 
-Ferry sends one message per second by default (the 1.0s rate limit). Use these rough figures to plan:
+Ferry sends one message per second by default (the 1.0s rate limit). v2.0.0 adds parallel channel processing, which significantly reduces wall-clock time for servers with many channels. Use these rough figures to plan:
 
-| Message count | Estimated time at 1.0s | Estimated time at 0.5s |
-|---------------|------------------------|------------------------|
-| 10,000 | ~3 hours | ~1.5 hours |
-| 50,000 | ~14 hours | ~7 hours |
-| 100,000 | ~28 hours | ~14 hours |
-| 500,000 | ~6 days | ~3 days |
+| Message count | Sequential (v1) at 1.0s | Parallel (v2, default 3 channels) |
+|---------------|-------------------------|-----------------------------------|
+| 1,000 | ~17 min | ~6 min |
+| 10,000 | ~3 hours | ~1 hour |
+| 50,000 | ~14 hours | ~5 hours |
+| 100,000 | ~28 hours | ~8–10 hours |
+| 500,000 | ~6 days | ~2 days |
+
+!!! note "Parallel estimates assume typical channel distribution"
+    Actual speedup depends on how evenly messages are distributed across channels. Servers where one channel holds 90% of messages will see less benefit from parallelism.
 
 !!! warning "Run overnight or over a weekend"
     Large migrations are not something you watch in real time. Start the migration before you go to sleep or before the weekend. Use the CLI for unattended runs — it keeps running even if you close your terminal (use `nohup` or `screen`/`tmux`).
@@ -52,6 +56,46 @@ The default 1.0s inter-message delay is conservative and suitable for the offici
 
 !!! warning "Do not go below 0.5s on the official service"
     The official Stoat service enforces 10 messages per 10 seconds. Going below 0.5s per message will reliably trigger rate limit errors and slow your migration down overall due to backoff delays.
+
+---
+
+## Parallel Channel Sends
+
+v2.0.0 processes multiple channels concurrently, dramatically reducing migration time for large servers.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `--max-concurrent-channels` | 3 | Channels processed simultaneously |
+| `--max-concurrent-requests` | 5 | Total concurrent API calls across all workers |
+
+These settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent API calls. For self-hosted instances with generous rate limits, increase both.
+
+!!! tip "Increasing concurrency on self-hosted instances"
+    On a self-hosted instance with relaxed rate limits, try `--max-concurrent-channels 6 --max-concurrent-requests 12`. Monitor your Stoat server load and back off if you see errors.
+
+---
+
+## Incremental Migration
+
+For active servers where new messages arrive between migration runs:
+
+```bash
+ferry migrate --incremental --stoat-url ... --token ...
+```
+
+Incremental mode:
+
+- Loads the prior completed state (`state.json` + `message_map.json`) from the output directory
+- Only migrates messages newer than the last completed run per channel
+- New channels since the last run are fully migrated
+- Cumulative stats shown in the report alongside delta stats
+
+**Requirements:** A prior completed migration in the same output directory.
+
+**Cannot be combined with `--resume`** — these are mutually exclusive. Use `--resume` for crashed migrations; use `--incremental` for delta updates of a successfully completed migration.
+
+!!! info "message_map.json"
+    As of v2.0.0, the message ID map is stored as a separate `message_map.json` file alongside `state.json`. Both files must be present in the output directory for `--incremental` or `--resume` to work correctly. Do not delete either file until you are satisfied the migration is complete.
 
 ---
 

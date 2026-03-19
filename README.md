@@ -50,10 +50,13 @@ Each message shows the original author's name and avatar. Pins are preserved.
 
 ## How long does it take?
 
-About **1 message per second**. Stoat limits how fast data can be sent to protect the service, which sets this pace. That means:
-- 1,000 messages ~ 17 minutes
-- 10,000 messages ~ 3 hours
-- 100,000 messages ~ 28 hours (run overnight!)
+Ferry processes multiple channels in parallel (configurable, default 3 concurrent). Typical throughput: ~3-5x faster than sequential. Stoat limits how fast data can be sent to protect the service, which sets the overall pace. That means:
+
+| Messages | Estimated time |
+|----------|---------------|
+| 1,000 | ~6 minutes |
+| 10,000 | ~1 hour |
+| 100,000 | ~8-10 hours |
 
 Ferry can **pause and resume** — close it anytime, pick up where you left off.
 
@@ -92,6 +95,14 @@ Ferry can **pause and resume** — close it anytime, pick up where you left off.
 | Post-migration validation | Verifies Stoat server matches source after migration |
 | Markdown report | Human-readable `migration_report.md` generated after migration |
 | Server banner migration | Supported |
+| Parallel channel sends | Process multiple channels concurrently for faster migration |
+| Message splitting | Messages >2000 chars automatically split with [continued] markers (not truncated) |
+| Thread strategies | Flatten (default), merge into parent channel, or archive as markdown |
+| Incremental migration | Only migrate new messages since last completed run |
+| Migration lock | Prevents concurrent migrations to the same server |
+| Fidelity scoring | Quantified migration quality score in the report |
+| DCE verification | SHA-256 hash verification of DiscordChatExporter binary |
+| Token security | Tokens never appear in error messages, repr output, or persisted storage |
 
 ---
 

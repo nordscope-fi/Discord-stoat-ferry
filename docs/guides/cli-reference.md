@@ -72,13 +72,21 @@ ferry migrate [OPTIONS]
 | `--skip-emoji` | | false | Do not upload custom emoji |
 | `--skip-reactions` | | false | Do not add reactions |
 | `--skip-threads` | | false | Do not migrate threads or forum posts |
+| `--thread-strategy TEXT` | | `flatten` | Thread handling: `flatten` (each thread becomes a channel), `merge` (thread messages merged into parent channel), or `archive` (exported as markdown attachment) |
 | `--rate-limit FLOAT` | | 1.0 | Seconds between messages (0.5–3.0 recommended) |
 | `--upload-delay FLOAT` | | 0.5 | Seconds between Autumn file uploads |
 | `--output-dir TEXT` | | `./ferry-output` | Directory for the migration report and state file |
 | `--resume` | | false | Resume an interrupted migration using the saved state file |
+| `--incremental` | | false | Delta migration — only migrate messages newer than the last completed run per channel. Cannot be combined with `--resume`. |
+| `--force` | | false | Override DCE export freshness errors (>30 days old) and other soft warnings |
 | `--dry-run` | | false | Run all phases without making API calls; produces synthetic IDs for validation |
 | `--max-channels INT` | | 200 | Channel limit; raise for self-hosted instances with custom limits |
 | `--max-emoji INT` | | 100 | Emoji limit; raise for self-hosted instances with custom limits |
+| `--max-concurrent-channels INT` | | 3 | Number of channels to process in parallel during the message migration phase |
+| `--verify-uploads` | | false | Post-upload file size verification for Autumn uploads |
+| `--cleanup-orphans` | | false | Detect and report unreferenced Autumn uploads after migration (report-only; no files are deleted) |
+| `--force-unlock` | | false | Override a stale migration lock on the target Stoat server |
+| `--skip-dce-verify` | | false | Skip SHA-256 verification of DCE binary downloads (for self-built binaries) |
 | `--verbose` / `-v` | | false | Enable debug output (per-message logging) |
 
 !!! warning "Token security"
@@ -106,12 +114,12 @@ These options are available in the migration engine but not yet exposed as CLI f
 
 | Config Field | Default | Description |
 |---|---|---|
-| `checkpoint_interval` | 50 | State save frequency (every N messages) |
 | `skip_avatars` | False | Skip avatar pre-flight phase |
-| `reaction_mode` | "text" | Reaction strategy: "text", "native", or "skip" |
-| `min_thread_messages` | 0 | Exclude threads below this message count |
 | `validate_after` | False | Run post-migration validation |
 | `max_concurrent_requests` | 5 | API concurrency limit |
+
+!!! info "More performance options"
+    `--reaction-mode`, `--min-thread-messages`, `--checkpoint-interval`, and `--max-concurrent-channels` are all available as CLI flags — see the Options table above and the [large-servers guide](large-servers.md) for details.
 
 ---
 

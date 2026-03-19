@@ -20,13 +20,8 @@ Stoat uses **fixed 10-second windows** (not sliding). Key buckets:
     Creating a channel, a role, and an emoji in quick succession all draw from the same 5/10s budget.
     Ferry paces structure creation (ROLES, CATEGORIES, CHANNELS, EMOJI phases) to stay within this limit.
 
-Rate limit headers on every response:
-
-```
-X-RateLimit-Remaining: 3
-X-RateLimit-Reset-After: 7340   ← milliseconds until window resets
-X-RateLimit-Bucket: servers
-```
+**Stoat returns no rate limit headers.** There are no `X-RateLimit-Remaining`,
+`X-RateLimit-Reset-After`, or `X-RateLimit-Bucket` headers on responses.
 
 On a 429 response the body contains:
 
@@ -34,9 +29,12 @@ On a 429 response the body contains:
 { "retry_after": 4200 }
 ```
 
-Ferry's API client (`migrator/api.py`) handles HTTP-level rate limits automatically. Ferry adds a
-configurable inter-message delay (default 1.0 s) on top of that as a safety margin to avoid
-sustained bursts.
+Ferry's API client (`migrator/api.py`) sleeps for the `retry_after` value (milliseconds) and
+retries. In addition, Ferry runs an **adaptive 429-frequency optimizer**: a rolling 60-second
+window tracks 429 frequency and automatically adjusts a delay multiplier — increasing by 1.5× on
+a burst, decaying by 0.75× when the window is clear. This reduces sustained 429s without relying
+on headers. Ferry also adds a configurable inter-message delay (default 1.0 s) as a fixed safety
+margin.
 
 ---
 

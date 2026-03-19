@@ -70,9 +70,24 @@ Server banners are automatically migrated when a Discord token is provided. The 
 
 ## Performance Tuning
 
-For powerful self-hosted instances, you can increase `max_concurrent_requests` (default 5) to allow more parallel API calls. The circuit breaker (5 consecutive failures → 30s pause) provides safety regardless of concurrency level.
+For powerful self-hosted instances, you can increase concurrency to speed up migrations. The circuit breaker (5 consecutive failures → 30s pause) provides safety regardless of concurrency level.
 
-This option is available in the migration engine but not yet exposed as a CLI flag. See the [Engine Configuration](cli-reference.md#engine-configuration) section in the CLI reference.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-concurrent-channels` | 3 | Channels processed in parallel during the message phase |
+| `--max-concurrent-requests` | 5 | Total concurrent API calls across all channel workers |
+
+These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both can be raised for self-hosted instances with relaxed rate limits:
+
+```bash
+ferry migrate --export-dir ~/exports/my-server/ \
+  --stoat-url https://stoat.example.com \
+  --token your_token_here \
+  --max-concurrent-channels 6 \
+  --max-concurrent-requests 12
+```
+
+Monitor your Stoat server load and reduce these values if you encounter frequent 429 errors.
 
 ---
 

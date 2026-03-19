@@ -47,6 +47,7 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Skip emoji | Off | Do not upload custom emoji. |
 | Skip reactions | Off | Do not add message reactions. |
 | Skip threads | Off | Do not migrate threads or forum posts. Useful when approaching the 200-channel limit. |
+| Thread strategy | Flatten | How to handle threads and forum posts. **Flatten** (default) creates a dedicated channel for each thread. **Merge** appends thread messages into the parent channel. **Archive** exports the thread as a markdown attachment in the parent channel. Added in v2.0.1. |
 | Dry run | Off | Run all migration phases without actually contacting the Stoat server. Useful for validating your export before committing to a full migration. |
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
 | Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more I/O. Minimum 1. |
@@ -205,7 +206,7 @@ The 12 phases are shown in order, with a checkmark as each completes:
 
 ### Progress Bar
 
-During the **Messages** phase, a per-channel progress bar shows how many messages have been sent in the current channel and how many remain.
+During the **Messages** phase, a per-channel progress bar shows how many messages have been sent in the current channel and how many remain. In v2.0.0+, up to 3 channels are processed concurrently by default — the progress bar reflects the active channel workers simultaneously.
 
 ### Running Totals
 

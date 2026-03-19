@@ -10,14 +10,14 @@ These limitations relate to how channels, threads, and server organization are r
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Threads | Flattened to text channels, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--min-thread-messages` to filter out low-activity threads and reduce channel count |
+| Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel, or `--thread-strategy archive` to export as a markdown attachment. Use `--min-thread-messages` to filter out low-activity threads and reduce channel count. |
 | Forum posts | Each post becomes a text channel inside a `forum-*` category, with an auto-generated index channel listing all posts | None — this is the closest structural equivalent |
 | Stage Channels | Not migrated (no Stoat equivalent) | None |
 | Scheduled Events | Not migrated | None |
 | Channel ordering | Display order may differ from the original Discord layout | Manually reorder channels in Stoat after migration |
 
-!!! note "Thread flattening and channel limits"
-    Every thread becomes a channel. A busy Discord server with hundreds of threads can easily exceed Stoat's 200-channel limit. Use `--min-thread-messages` to set a minimum message count for thread migration, or `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md).
+!!! note "Thread handling and channel limits"
+    With the default `flatten` strategy, every thread becomes a channel. A busy Discord server with hundreds of threads can easily exceed Stoat's 200-channel limit. Use `--thread-strategy merge` or `archive` to avoid creating extra channels, use `--min-thread-messages` to set a minimum message count for thread migration, or use `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md).
 
 ---
 
@@ -32,6 +32,9 @@ These limitations affect how individual messages and their content appear after 
 | Stickers | Uploaded as image attachments where the source file is available; Lottie (animated) stickers receive a text fallback | None — Lottie format is not supported by Stoat |
 | Reactions | Text summary appended to the message by default (`reaction_mode="text"`). Shows emoji and count. | Set `--reaction-mode native` for per-emoji reactions added via the Stoat API (slower, limited to 20 per message) |
 | Forwarded messages | Skipped entirely | None — this is a DiscordChatExporter limitation; forwarded messages export as empty content |
+| Long messages (>2000 chars) | Split into sequential parts with `[continued K/N]` markers (e.g. `[continued 2/3]`). Original content is fully preserved across parts. | None needed — splitting is automatic and lossless |
+| Author names >32 chars | Truncated to 29 chars with a `#XXXX` discriminator suffix derived from the author's Discord ID. Ensures uniqueness while fitting the Stoat masquerade name limit. | None — the suffix preserves attributability even after truncation |
+| Unreferenced Autumn uploads | `--cleanup-orphans` detects Autumn file IDs referenced in state but not in the final server. Reported in the migration summary. | No automatic deletion — Stoat does not expose a DELETE endpoint for Autumn files. Clean up manually via the Stoat web interface if needed. |
 
 ---
 
