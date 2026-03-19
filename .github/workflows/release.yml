@@ -33,6 +33,16 @@ jobs:
       - name: Build executable
         run: uv run --extra dev pyinstaller ferry.spec
 
+      - name: Sign Windows binary
+        if: env.WINDOWS_CERT_PFX != ''
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          echo "$WINDOWS_CERT_PFX" | base64 -d > cert.pfx
+          signtool sign /fd SHA256 /f cert.pfx /p "$WINDOWS_CERT_PASSWORD" dist/Ferry.exe
+          del cert.pfx
+
       - name: Rename artifact
         run: mv dist/Ferry.exe dist/Ferry-windows-x86_64.exe
         shell: bash
@@ -61,6 +71,14 @@ jobs:
 
       - name: Build executable
         run: uv run --extra dev pyinstaller ferry.spec
+
+      - name: Sign macOS binary
+        if: env.APPLE_IDENTITY != ''
+        env:
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          codesign --deep --force --sign "$APPLE_IDENTITY" dist/Ferry.app
+          codesign --verify dist/Ferry.app
 
       - name: Zip .app bundle
         run: cd dist && zip -r ../Ferry-macos-arm64.zip Ferry.app
