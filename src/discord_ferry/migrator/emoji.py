@@ -94,6 +94,29 @@ async def run_emoji(
                             "image_url": "",
                         }
 
+            # Source 3: emoji in embed fields.
+            for embed in msg.embeds:
+                embed_fields: list[dict[str, object]] = (
+                    embed.get("fields") if isinstance(embed.get("fields"), list) else []  # type: ignore[assignment]
+                )
+                embed_texts = [
+                    embed.get("description", ""),
+                    embed.get("title", ""),
+                    *(f.get("value", "") for f in embed_fields),
+                ]
+                for text_field in embed_texts:
+                    if text_field:
+                        for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(
+                            str(text_field)
+                        ):
+                            if emoji_id not in discovered:
+                                discovered[emoji_id] = {
+                                    "id": emoji_id,
+                                    "name": emoji_name,
+                                    "is_animated": is_animated,
+                                    "image_url": "",
+                                }
+
     if not discovered:
         on_event(MigrationEvent(phase="emoji", status="completed", message="No custom emoji found"))
         return
@@ -145,6 +168,10 @@ async def run_emoji(
             )
         )
         return
+
+    # Collision tracking: map sanitized name → occurrence count so that duplicate
+    # names receive a numeric suffix (_2, _3, …) rather than overwriting each other.
+    used_names: dict[str, int] = {}
 
     async with get_session(config) as session:
         for idx, emoji_info in enumerate(emoji_list, start=1):
@@ -219,7 +246,13 @@ async def run_emoji(
                     config.upload_delay,
                 )
 
-                sanitized_name = sanitize_emoji_name(name)
+                sanitized_name = sanitize_emoji_name(name, used_names)
+                if sanitized_name != sanitize_emoji_name(name):
+                    logger.warning(
+                        "Emoji name collision: :%s: → :%s: (duplicate sanitized name)",
+                        name,
+                        sanitized_name,
+                    )
                 await api_create_emoji(
                     session,
                     config.stoat_url,
