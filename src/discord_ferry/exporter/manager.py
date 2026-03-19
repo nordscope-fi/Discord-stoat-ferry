@@ -7,13 +7,14 @@ import io
 import logging
 import platform
 import subprocess
+import time as _time
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiohttp
 
-from discord_ferry.errors import DCENotFoundError
+from discord_ferry.errors import DCENotFoundError, ValidationError
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback
@@ -194,3 +195,32 @@ async def download_dce(on_event: EventCallback) -> Path:
     )
 
     return exe_path
+
+
+def check_export_freshness(export_dir: Path, *, force: bool = False) -> list[str]:
+    """Check if DCE export files are stale. Returns list of warning strings.
+
+    Args:
+        export_dir: Directory containing the DCE export JSON files.
+        force: If True, raise is suppressed for exports >30 days old (warning only).
+
+    Returns:
+        List of warning strings (may be empty).
+
+    Raises:
+        ValidationError: If the export is >30 days old and ``force`` is False.
+    """
+    warnings: list[str] = []
+    json_files = list(export_dir.glob("**/*.json"))
+    if not json_files:
+        return warnings
+    newest_mtime = max(f.stat().st_mtime for f in json_files)
+    age_days = (_time.time() - newest_mtime) / 86400
+    if age_days > 30 and not force:
+        raise ValidationError(
+            f"DCE export is {age_days:.0f} days old (>30 days). "
+            "Use --force to proceed anyway."
+        )
+    elif age_days > 7:
+        warnings.append(f"DCE export is {age_days:.0f} days old — data may be stale")
+    return warnings

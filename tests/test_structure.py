@@ -1505,3 +1505,88 @@ async def test_forum_index_failure_nonfatal(tmp_path: Path) -> None:
     # Warning should be recorded.
     idx_warnings = [w for w in state.warnings if w.get("type") == "forum_index_failed"]
     assert len(idx_warnings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Banner download auth header (S11)
+# ---------------------------------------------------------------------------
+
+
+async def test_banner_download_includes_auth_header(tmp_path: Path) -> None:
+    """SERVER phase sends Authorization header when discord_token is set."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, discord_token="Bot mytoken123")
+    state = MigrationState(autumn_url=AUTUMN_URL, stoat_server_id="srv1")
+    exports = [_make_export(guild_id="111")]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        banner_hash="testhash",
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    captured_headers: list[dict[str, str]] = []
+
+    def _capture_get(url: str, **kwargs: object) -> None:
+        headers = kwargs.get("headers") or {}
+        captured_headers.append(dict(headers))  # type: ignore[arg-type]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.get(
+            f"{BANNER_CDN}/111/testhash.png?size=1024",
+            body=b"FAKEPNG",
+            callback=_capture_get,
+        )
+        m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+
+        await run_server(config, state, exports, events.append)
+
+    assert captured_headers, "Banner CDN request was not made"
+    assert captured_headers[0].get("Authorization") == "Bot mytoken123"
+
+
+async def test_banner_download_no_auth_header_when_no_token(tmp_path: Path) -> None:
+    """SERVER phase sends no Authorization header when discord_token is absent."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)  # no discord_token
+    state = MigrationState(autumn_url=AUTUMN_URL, stoat_server_id="srv1")
+    exports = [_make_export(guild_id="111")]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        banner_hash="testhash",
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    captured_headers: list[dict[str, str]] = []
+
+    def _capture_get(url: str, **kwargs: object) -> None:
+        headers = kwargs.get("headers") or {}
+        captured_headers.append(dict(headers))  # type: ignore[arg-type]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.get(
+            f"{BANNER_CDN}/111/testhash.png?size=1024",
+            body=b"FAKEPNG",
+            callback=_capture_get,
+        )
+        m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+
+        await run_server(config, state, exports, events.append)
+
+    assert captured_headers, "Banner CDN request was not made"
+    assert "Authorization" not in captured_headers[0]

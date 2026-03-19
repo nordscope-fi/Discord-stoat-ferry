@@ -16,6 +16,7 @@ from discord_ferry.exporter.manager import (
     DCE_VERSION,
     _get_asset_name,
     _get_dce_dir,
+    check_export_freshness,
     detect_dotnet,
     download_dce,
     get_dce_path,
@@ -224,3 +225,55 @@ class TestDownloadDceRetry:
 
             with pytest.raises(DCENotFoundError):
                 await download_dce(events.append)
+
+
+# ---------------------------------------------------------------------------
+# check_export_freshness
+# ---------------------------------------------------------------------------
+
+
+class TestCheckExportFreshness:
+    def _write_json_with_age(self, tmp_path: Path, age_days: float) -> Path:
+        """Write a dummy JSON file with an mtime set to age_days days ago."""
+        import time
+
+        json_file = tmp_path / "export.json"
+        json_file.write_text("{}")
+        target_mtime = time.time() - age_days * 86400
+        import os
+
+        os.utime(json_file, (target_mtime, target_mtime))
+        return json_file
+
+    def test_export_freshness_recent(self, tmp_path: Path) -> None:
+        """Files <7 days old produce no warnings."""
+        self._write_json_with_age(tmp_path, 3)
+        warnings = check_export_freshness(tmp_path)
+        assert warnings == []
+
+    def test_export_freshness_warning(self, tmp_path: Path) -> None:
+        """Files 10 days old produce a warning string."""
+        self._write_json_with_age(tmp_path, 10)
+        warnings = check_export_freshness(tmp_path)
+        assert len(warnings) == 1
+        assert "stale" in warnings[0]
+
+    def test_export_freshness_error(self, tmp_path: Path) -> None:
+        """Files 45 days old raise ValidationError (without force)."""
+        from discord_ferry.errors import ValidationError
+
+        self._write_json_with_age(tmp_path, 45)
+        with pytest.raises(ValidationError, match="45 days"):
+            check_export_freshness(tmp_path)
+
+    def test_export_freshness_error_with_force(self, tmp_path: Path) -> None:
+        """Files 45 days old with force=True produce a warning but no error."""
+        self._write_json_with_age(tmp_path, 45)
+        warnings = check_export_freshness(tmp_path, force=True)
+        assert len(warnings) == 1
+        assert "stale" in warnings[0]
+
+    def test_export_freshness_no_json_files(self, tmp_path: Path) -> None:
+        """Directory with no JSON files produces no warnings."""
+        warnings = check_export_freshness(tmp_path)
+        assert warnings == []

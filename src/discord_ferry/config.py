@@ -38,6 +38,7 @@ class FerryConfig:
     reaction_mode: str = "text"
     min_thread_messages: int = 0
     validate_after: bool = False
+    force: bool = False
     max_concurrent_requests: int = 5
     max_concurrent_channels: int = 3
 

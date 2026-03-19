@@ -204,7 +204,10 @@ async def run_server(
                 banner_dir = config.output_dir / "banners"
                 banner_dir.mkdir(parents=True, exist_ok=True)
                 banner_path = banner_dir / f"{guild_id}.png"
-                async with session.get(banner_url) as resp:
+                headers: dict[str, str] = {}
+                if config.discord_token:
+                    headers["Authorization"] = config.discord_token
+                async with session.get(banner_url, headers=headers) as resp:
                     if resp.status == 200:
                         banner_path.write_bytes(await resp.read())
                         banner_id = await upload_with_cache(

@@ -274,6 +274,9 @@ _common_options = [
     click.option("--max-channels", default=200, type=int, help="Channel limit (self-hosted)"),
     click.option("--max-emoji", default=100, type=int, help="Emoji limit (self-hosted)"),
     click.option("--yes", "-y", is_flag=True, default=False, help="Skip ToS confirmation prompt"),
+    click.option(
+        "--force", is_flag=True, default=False, help="Override freshness and other soft errors"
+    ),
 ]
 
 
@@ -336,6 +339,7 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         discord_token=discord_token,
         discord_server_id=discord_server,
         skip_export=skip_export,
+        force=kwargs.get("force", False),
     )
 
 
