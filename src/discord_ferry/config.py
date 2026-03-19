@@ -30,6 +30,7 @@ class FerryConfig:
     upload_delay: float = 0.5
     output_dir: Path = Path("./ferry-output")
     resume: bool = False
+    incremental: bool = False
     verbose: bool = False
     max_channels: int = 200
     max_emoji: int = 100
@@ -56,6 +57,15 @@ class FerryConfig:
     # Post-upload verification: compare returned file metadata against local size.
     # Best-effort — not all Autumn responses include a size field.
     verify_uploads: bool = False
+
+    # S16: Detect and log orphaned Autumn uploads after migration.
+    # Compares state.autumn_uploads against state.referenced_autumn_ids and logs
+    # any unreferenced files. Does not DELETE files (endpoint unverified).
+    cleanup_orphans: bool = False
+
+    # S17: Advisory migration lock via server description.
+    # When True, overrides an existing lock older than 24h without prompting.
+    force_unlock: bool = False
 
     # Runtime-only fields (not serialized)
     pause_event: asyncio.Event | None = field(default=None, repr=False)

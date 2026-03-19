@@ -270,6 +270,12 @@ _common_options = [
     click.option("--upload-delay", default=0.5, type=float, help="Seconds between uploads"),
     click.option("--output-dir", default="./ferry-output", help="Report output directory"),
     click.option("--resume", is_flag=True, help="Resume from state file"),
+    click.option(
+        "--incremental",
+        is_flag=True,
+        default=False,
+        help="Only migrate new messages since last completed run",
+    ),
     click.option("--verbose", "-v", is_flag=True, help="Debug output"),
     click.option(
         "--dry-run",
@@ -294,6 +300,18 @@ _common_options = [
         is_flag=True,
         default=False,
         help="Verify uploaded file size against Autumn response (best-effort)",
+    ),
+    click.option(
+        "--cleanup-orphans",
+        is_flag=True,
+        default=False,
+        help="Detect and log unreferenced Autumn uploads after migration (S16)",
+    ),
+    click.option(
+        "--force-unlock",
+        is_flag=True,
+        default=False,
+        help="Override a stale migration lock on the target server (S17)",
     ),
 ]
 
@@ -351,6 +369,7 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         upload_delay=kwargs.get("upload_delay", 0.5),
         output_dir=Path(kwargs.get("output_dir", "./ferry-output")),
         resume=kwargs.get("resume", False),
+        incremental=kwargs.get("incremental", False),
         verbose=kwargs.get("verbose", False),
         max_channels=kwargs.get("max_channels", 200),
         max_emoji=kwargs.get("max_emoji", 100),
@@ -361,6 +380,8 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         skip_dce_verify=kwargs.get("skip_dce_verify", False),
         verify_uploads=kwargs.get("verify_uploads", False),
         thread_strategy=kwargs.get("thread_strategy", "flatten"),
+        cleanup_orphans=kwargs.get("cleanup_orphans", False),
+        force_unlock=kwargs.get("force_unlock", False),
     )
 
 

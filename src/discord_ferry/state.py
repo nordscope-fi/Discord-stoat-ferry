@@ -86,6 +86,19 @@ class MigrationState:
     # Post-migration validation results
     validation_results: dict[str, object] = field(default_factory=dict)
 
+    # Incremental/delta migration tracking
+    # prior_messages_total: message count from the prior run (set at init for delta mode)
+    prior_messages_total: int = 0
+
+    # Forum index tracking: populated during CHANNELS phase, consumed by REPORT phase.
+    # forum_channel_members: forum_cat_key -> list of discord_channel_ids in that forum
+    forum_channel_members: dict[str, list[str]] = field(default_factory=dict)
+    # forum_category_names: forum_cat_key -> display name of the forum
+    forum_category_names: dict[str, str] = field(default_factory=dict)
+    # Per-channel message counts: discord_channel_id -> messages migrated.
+    # Incremented by _process_message; used by forum index rebuild in REPORT phase.
+    channel_message_counts: dict[str, int] = field(default_factory=dict)
+
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
     """Save migration state to state.json using atomic write.
@@ -181,6 +194,10 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "referenced_autumn_ids": list(state.referenced_autumn_ids),
         "failed_messages": [dataclasses.asdict(fm) for fm in state.failed_messages],
         "validation_results": state.validation_results,
+        "prior_messages_total": state.prior_messages_total,
+        "forum_channel_members": state.forum_channel_members,
+        "forum_category_names": state.forum_category_names,
+        "channel_message_counts": state.channel_message_counts,
     }
 
 
@@ -216,6 +233,10 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             referenced_autumn_ids=set(data.get("referenced_autumn_ids", [])),
             failed_messages=[FailedMessage(**d) for d in data.get("failed_messages", [])],
             validation_results=data.get("validation_results", {}),
+            prior_messages_total=data.get("prior_messages_total", 0),
+            forum_channel_members=data.get("forum_channel_members", {}),
+            forum_category_names=data.get("forum_category_names", {}),
+            channel_message_counts=data.get("channel_message_counts", {}),
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e

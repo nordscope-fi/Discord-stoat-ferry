@@ -47,6 +47,10 @@ def generate_report(
 
     threads_flattened = sum(1 for e in exports if e.is_thread)
 
+    # Delta stats: messages migrated in this run vs cumulatively
+    this_run_messages = messages_imported - state.prior_messages_total
+    cumulative_messages = messages_imported
+
     report: dict[str, object] = {
         "started_at": state.started_at,
         "completed_at": state.completed_at,
@@ -67,6 +71,11 @@ def generate_report(
             "threads_flattened": threads_flattened,
             "errors": len(state.errors),
             "warnings": len(state.warnings),
+        },
+        "delta": {
+            "this_run": this_run_messages,
+            "cumulative": cumulative_messages,
+            "prior_run_total": state.prior_messages_total,
         },
         "warnings": state.warnings,
         "errors": state.errors,

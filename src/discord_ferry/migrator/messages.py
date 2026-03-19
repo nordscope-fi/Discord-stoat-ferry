@@ -132,6 +132,7 @@ class ChannelResult:
     attachments_uploaded: int = 0
     attachments_skipped: int = 0
     referenced_autumn_ids: set[str] = field(default_factory=set)
+    messages_migrated: int = 0  # S15: per-channel message count for forum index rebuild
 
 
 def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
@@ -145,6 +146,11 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
     state.attachments_uploaded += result.attachments_uploaded
     state.attachments_skipped += result.attachments_skipped
     state.referenced_autumn_ids.update(result.referenced_autumn_ids)
+    # S15: Accumulate per-channel message count for forum index rebuild.
+    if result.channel_id:
+        state.channel_message_counts[result.channel_id] = (
+            state.channel_message_counts.get(result.channel_id, 0) + result.messages_migrated
+        )
 
 
 def _skip_attachment(
@@ -1015,9 +1021,15 @@ async def _process_message(
         if channel_result is not None:
             channel_result.message_map_updates[msg.id] = stoat_msg_id
             channel_result.referenced_autumn_ids.update(autumn_ids)
+            channel_result.messages_migrated += 1  # S15: track for forum index rebuild
         else:
             state.message_map[msg.id] = stoat_msg_id
             state.referenced_autumn_ids.update(autumn_ids)
+            # S15: Track per-channel message count (direct-state path, e.g. retry).
+            if export_channel_id:
+                state.channel_message_counts[export_channel_id] = (
+                    state.channel_message_counts.get(export_channel_id, 0) + 1
+                )
 
         if msg.is_pinned:
             acc_pins.append((stoat_channel_id, stoat_msg_id))

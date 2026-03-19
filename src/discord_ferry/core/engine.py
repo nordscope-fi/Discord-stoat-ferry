@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from typing import Any
@@ -24,7 +25,14 @@ from discord_ferry.exporter import (
     run_dce_export,
     validate_discord_token,
 )
-from discord_ferry.migrator.api import api_fetch_server, get_session, init_request_semaphore
+from discord_ferry.migrator.api import (
+    api_edit_server,
+    api_fetch_server,
+    api_pin_message,
+    api_send_message,
+    get_session,
+    init_request_semaphore,
+)
 from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
 from discord_ferry.migrator.emoji import run_emoji
@@ -111,6 +119,55 @@ async def run_migration(
         state = load_state(config.output_dir)
         if state.is_dry_run:
             raise MigrationError("Cannot resume from a dry-run state. Start a fresh migration.")
+    elif config.incremental:
+        state_path = config.output_dir / "state.json"
+        if state_path.exists():
+            prior = load_state(config.output_dir)
+            state = MigrationState()
+            state.started_at = datetime.now(timezone.utc).isoformat()
+            state.is_dry_run = config.dry_run
+            # Carry over ID maps so structure phases are skipped / reused
+            state.channel_map = dict(prior.channel_map)
+            state.role_map = dict(prior.role_map)
+            state.category_map = dict(prior.category_map)
+            state.emoji_map = dict(prior.emoji_map)
+            state.avatar_cache = dict(prior.avatar_cache)
+            state.author_names = dict(prior.author_names)
+            state.stoat_server_id = prior.stoat_server_id
+            state.autumn_url = prior.autumn_url
+            # Carry over cumulative counters
+            state.attachments_uploaded = prior.attachments_uploaded
+            state.attachments_skipped = prior.attachments_skipped
+            state.reactions_applied = prior.reactions_applied
+            state.pins_applied = prior.pins_applied
+            # Record prior message total for delta reporting
+            state.prior_messages_total = len(prior.message_map)
+            # Keep offsets so messages phase resumes from last offset per channel.
+            # CLEAR completed_channel_ids so every channel is re-entered (new messages may exist).
+            state.channel_message_offsets = dict(prior.channel_message_offsets)
+            state.completed_channel_ids = set()
+            on_event(
+                MigrationEvent(
+                    phase="validate",
+                    status="progress",
+                    message=(
+                        f"Incremental mode: loaded prior state "
+                        f"({state.prior_messages_total} messages already migrated)"
+                    ),
+                )
+            )
+        else:
+            # No prior state — fall back to a fresh migration
+            state = MigrationState()
+            state.started_at = datetime.now(timezone.utc).isoformat()
+            state.is_dry_run = config.dry_run
+            on_event(
+                MigrationEvent(
+                    phase="validate",
+                    status="warning",
+                    message="Incremental mode: no prior state found — running full migration",
+                )
+            )
     else:
         state = MigrationState()
         state.started_at = datetime.now(timezone.utc).isoformat()
@@ -308,7 +365,18 @@ async def run_migration(
 
     async with aiohttp.ClientSession() as session:
         config.session = session
-        await _run_phases(config, state, exports, on_event, runnable_phases, phase_overrides)
+
+        # S17: Acquire advisory migration lock on the target server (existing server only).
+        lock_acquired = False
+        if config.server_id and not config.dry_run:
+            lock_acquired = await _acquire_migration_lock(config, state, session, on_event)
+
+        try:
+            await _run_phases(config, state, exports, on_event, runnable_phases, phase_overrides)
+        finally:
+            if lock_acquired and config.server_id and not config.dry_run:
+                await _release_migration_lock(config, state, session, on_event)
+
     config.session = None
 
     # Skip report if migration was cancelled
@@ -319,6 +387,30 @@ async def run_migration(
     state.current_phase = "report"
     on_event(MigrationEvent(phase="report", status="started", message="Generating report..."))
     state.completed_at = datetime.now(timezone.utc).isoformat()
+
+    # S15: Rebuild forum index messages with actual migration data.
+    if state.forum_channel_members and not config.dry_run:
+        await _rebuild_forum_indexes(config, state, on_event)
+
+    # S16: Detect orphaned Autumn uploads when requested.
+    if config.cleanup_orphans and not config.dry_run:
+        orphans = set(state.autumn_uploads.keys()) - state.referenced_autumn_ids
+        for orphan_id in orphans:
+            state.warnings.append(
+                {
+                    "phase": "cleanup",
+                    "type": "orphan_detected",
+                    "message": f"Orphaned Autumn upload: {orphan_id}",
+                }
+            )
+        on_event(
+            MigrationEvent(
+                phase="cleanup",
+                status="completed",
+                message=f"Found {len(orphans)} orphaned uploads",
+            )
+        )
+
     generate_report(config, state, exports)
     generate_markdown_report(config, state, exports)
     save_state(state, config.output_dir)
@@ -474,6 +566,246 @@ async def _run_phases(
             MigrationEvent(phase=phase_name, status="completed", message=f"Completed {phase_name}")
         )
         save_state(state, config.output_dir)
+
+
+_FERRY_LOCK_MARKER = "[FERRY_LOCK:"
+_LOCK_EXPIRY_SECONDS = 86400  # 24 hours
+
+
+async def _acquire_migration_lock(
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+) -> bool:
+    """S17: Acquire advisory migration lock on the target server.
+
+    Appends a ``[FERRY_LOCK:{timestamp}:{hostname}]`` marker to the server
+    description. If a live marker is found, raises ``MigrationError``.
+
+    Args:
+        config: Ferry configuration (server_id, token, stoat_url, force_unlock).
+        state: Migration state (warnings list for expired-lock warnings).
+        session: Active aiohttp session.
+        on_event: Event callback.
+
+    Returns:
+        True if lock was successfully acquired, False if skipped (no server_id).
+
+    Raises:
+        MigrationError: If a live lock is detected and force_unlock is False.
+    """
+    try:
+        server = await api_fetch_server(
+            session, config.stoat_url, config.token, config.server_id or ""
+        )
+    except Exception as exc:  # noqa: BLE001
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="warning",
+                message=f"Could not fetch server for lock check: {exc}",
+            )
+        )
+        return False
+
+    description: str = server.get("description", "") or ""
+    lock_ts: float | None = None
+
+    # Check for existing lock marker.
+    lock_start = description.find(_FERRY_LOCK_MARKER)
+    if lock_start != -1:
+        lock_end = description.find("]", lock_start)
+        if lock_end != -1:
+            marker = description[lock_start : lock_end + 1]
+            parts = marker[len(_FERRY_LOCK_MARKER) :].rstrip("]").split(":")
+            if parts:
+                try:
+                    lock_ts = float(parts[0])
+                except (ValueError, IndexError):
+                    lock_ts = None
+
+        if lock_ts is not None:
+            age = datetime.now(timezone.utc).timestamp() - lock_ts
+            if age < _LOCK_EXPIRY_SECONDS and not config.force_unlock:
+                raise MigrationError(
+                    f"Another migration is in progress (lock age: {int(age)}s). "
+                    "Use --force-unlock to override a stale lock."
+                )
+            if age >= _LOCK_EXPIRY_SECONDS:
+                warn_msg = (
+                    f"Overriding expired migration lock (age: {int(age / 3600):.1f}h)"
+                )
+                state.warnings.append(
+                    {"phase": "connect", "type": "lock_expired", "message": warn_msg}
+                )
+                on_event(
+                    MigrationEvent(phase="connect", status="warning", message=warn_msg)
+                )
+            # Remove old lock marker before appending new one.
+            description = description[:lock_start] + description[lock_end + 1 :]
+            description = description.strip()
+
+    # Append new lock marker.
+    ts = int(datetime.now(timezone.utc).timestamp())
+    hostname = socket.gethostname()
+    lock_marker = f"{_FERRY_LOCK_MARKER}{ts}:{hostname}]"
+    new_description = f"{description} {lock_marker}".strip() if description else lock_marker
+
+    try:
+        await api_edit_server(
+            session,
+            config.stoat_url,
+            config.token,
+            config.server_id or "",
+            description=new_description,
+        )
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="progress",
+                message=f"Migration lock acquired on server {config.server_id}",
+            )
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="warning",
+                message=f"Could not acquire migration lock: {exc}",
+            )
+        )
+        return False
+
+
+async def _release_migration_lock(
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+) -> None:
+    """S17: Release the advisory migration lock by removing the marker from server description."""
+    try:
+        server = await api_fetch_server(
+            session, config.stoat_url, config.token, config.server_id or ""
+        )
+        description: str = server.get("description", "") or ""
+        lock_start = description.find(_FERRY_LOCK_MARKER)
+        if lock_start != -1:
+            lock_end = description.find("]", lock_start)
+            if lock_end != -1:
+                description = description[:lock_start] + description[lock_end + 1 :]
+                description = description.strip()
+                await api_edit_server(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    config.server_id or "",
+                    description=description,
+                )
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="progress",
+                message="Migration lock released",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        on_event(
+            MigrationEvent(
+                phase="connect",
+                status="warning",
+                message=f"Could not release migration lock: {exc}",
+            )
+        )
+
+
+async def _rebuild_forum_indexes(
+    config: FerryConfig,
+    state: MigrationState,
+    on_event: EventCallback,
+) -> None:
+    """S15: Rebuild forum index messages during REPORT phase with actual migration data.
+
+    Sends a new pinned message to each forum index channel with accurate per-channel
+    message counts from ``state.channel_message_counts`` (populated by the MESSAGES phase).
+
+    Args:
+        config: Ferry configuration.
+        state: Migration state with channel and message maps populated.
+        on_event: Event callback for progress reporting.
+    """
+    async with get_session(config) as session:
+        for forum_key, discord_channel_ids in state.forum_channel_members.items():
+            index_channel_id = state.channel_map.get(f"forum-index-{forum_key}")
+            if not index_channel_id:
+                continue
+
+            forum_name = state.forum_category_names.get(forum_key, forum_key)
+
+            # Build index lines using actual migrated message counts.
+            lines = [f"**Forum: {forum_name}** *(updated after migration)*\n"]
+            for discord_ch_id in discord_channel_ids:
+                stoat_ch_id = state.channel_map.get(discord_ch_id)
+                if not stoat_ch_id:
+                    continue
+                actual_count = state.channel_message_counts.get(discord_ch_id, 0)
+                lines.append(f"- <#{stoat_ch_id}> — {actual_count} messages migrated")
+
+            if len(lines) <= 1:
+                content = f"**Forum: {forum_name}**\nNo posts migrated."
+            else:
+                content = "\n".join(lines)
+                if len(content) > 2000:
+                    while len(lines) > 1 and len("\n".join(lines)) > 1950:
+                        lines.pop()
+                    remaining = len(discord_channel_ids) - (len(lines) - 1)
+                    lines.append(f"\n*...and {remaining} more posts*")
+                    content = "\n".join(lines)
+
+            try:
+                msg_result = await api_send_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    content=content,
+                    masquerade={"name": "Discord Ferry"},
+                    idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
+                )
+                await asyncio.sleep(config.upload_delay)
+                index_msg_id: str = msg_result["_id"]
+                await api_pin_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    index_msg_id,
+                )
+                await asyncio.sleep(config.upload_delay)
+                on_event(
+                    MigrationEvent(
+                        phase="report",
+                        status="progress",
+                        message=f"Rebuilt forum index for '{forum_name}' with actual data",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": "report",
+                        "type": "forum_index_rebuild_failed",
+                        "message": f"Failed to rebuild forum index for '{forum_name}': {exc}",
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="report",
+                        status="warning",
+                        message=f"Forum index rebuild for '{forum_name}' failed: {exc}",
+                    )
+                )
 
 
 async def run_retry_failed(
