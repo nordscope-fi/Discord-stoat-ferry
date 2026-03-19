@@ -377,4 +377,6 @@ def strip_underline(content: str) -> str:
     Returns:
         Content with underline syntax converted to bold outside code spans.
     """
-    return _transform_outside_code(content, lambda s: _UNDERLINE_RE.sub(r"**\1**", s))
+    result = _transform_outside_code(content, lambda s: _UNDERLINE_RE.sub(r"**\1**", s))
+    # Collapse **** sequences that arise when underline wraps bold: **__text__** → ****text****
+    return result.replace("****", "**")
