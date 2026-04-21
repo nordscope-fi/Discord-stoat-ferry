@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.0.2] - 2026-04-21
+
+### Fixes
+- **DCE version bump**: DiscordChatExporter upgraded from 2.46.1 to 2.47.1. The upstream 2.46.1 release is no longer the latest tag and Ferry's hardcoded download URL was returning 404 for new users (reported in discussion #8 and issue #7). SHA-256 checksums for all three platforms (win-x64, linux-x64, osx-x64) added to `dce_checksums.json`; 2.46.1 entries retained for rollback.
+- **Broken Stoat app link**: `app.stoat.chat` is NXDOMAIN — canonical URL is `https://stoat.chat/app`. Fixed in README (#15, thanks @FedeltaMedia) and swept the remaining 3 references in `docs/index.md` and `docs/getting-started/setup-stoat.md`.
+
 ## [2.0.1] - 2026-03-19
 
 ### Fixes
