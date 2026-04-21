@@ -11,7 +11,7 @@ One-click app for Windows and Mac. Command-line interface for Linux. No coding r
 ## Get Started in 3 Steps
 
 1. **[Install Ferry](getting-started/install.md)** — download the app for Windows, macOS, or Linux
-2. **[Set up Stoat](getting-started/setup-stoat.md)** — find your Stoat API URL (the address Ferry uses to connect) and user token (a secret key your browser saves when you log in — no bot or app creation needed). New to Stoat? [Create a free account](https://app.stoat.chat).
+2. **[Set up Stoat](getting-started/setup-stoat.md)** — find your Stoat API URL (the address Ferry uses to connect) and user token (a secret key your browser saves when you log in — no bot or app creation needed). New to Stoat? [Create a free account](https://stoat.chat/app).
 3. **[Run your first migration](getting-started/first-migration.md)** — enter your Discord and Stoat credentials, click Migrate
 
 Already have DiscordChatExporter (DCE) exports? See [Offline Migration](getting-started/export-discord.md) to skip the export step.
