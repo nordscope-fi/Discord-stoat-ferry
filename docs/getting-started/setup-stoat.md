@@ -69,7 +69,7 @@ You will be opening a hidden panel in your browser called "developer tools." Thi
     !!! tip "Can't see the Application tab?"
         If the panel is narrow, some tabs may be hidden. Look for a **>>** button at the end of the tab row — click it to reveal the hidden tabs.
 
-4. In the left sidebar of the Application panel, look for a section called **Local Storage**. Click the small arrow or triangle next to it to expand it. You will see one or more website addresses listed underneath. Click the one that matches your Stoat instance — for example, `https://app.stoat.chat` or `https://chat.yourdomain.com`.
+4. In the left sidebar of the Application panel, look for a section called **Local Storage**. Click the small arrow or triangle next to it to expand it. You will see one or more website addresses listed underneath. Click the one that matches your Stoat instance — for example, `https://stoat.chat` or `https://chat.yourdomain.com`.
 
     <!-- screenshot: devtools-local-storage-expanded -->
 
@@ -85,7 +85,7 @@ You will be opening a hidden panel in your browser called "developer tools." Thi
 !!! question "The table is empty — there is nothing to copy?"
     This means your browser has not saved a login session yet. Try these fixes:
 
-    - **Make sure you are actually logged in.** Go to your Stoat instance (e.g. `https://app.stoat.chat`) in the same browser tab and log in. Then go back to the developer tools panel — the table should now have entries.
+    - **Make sure you are actually logged in.** Go to your Stoat instance (e.g. `https://stoat.chat/app`) in the same browser tab and log in. Then go back to the developer tools panel — the table should now have entries.
     - **Refresh the page.** Press F5 or click the refresh button, then check the table again.
     - **Disable browser extensions.** Privacy-focused extensions (uBlock Origin, Privacy Badger, etc.) can block Local Storage. Try disabling them temporarily, or open Stoat in a **private/incognito window** (Ctrl+Shift+N in Chrome, Ctrl+Shift+P in Firefox).
     - **Try a different browser.** If you normally use Firefox, try Chrome (or vice versa). Log in to Stoat there and repeat the steps above.
