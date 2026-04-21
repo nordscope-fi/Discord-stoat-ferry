@@ -21,7 +21,7 @@
 
 [Stoat](https://stoat.chat) (formerly Revolt) is an open-source chat platform — like Discord, but community-owned. You can use the official hosted service or run it on your own server. Ferry moves your entire Discord server there.
 
-New to Stoat? [Create a free account](https://app.stoat.chat) or [self-host your own instance](docs/getting-started/setup-stoat.md).
+New to Stoat? [Create a free account](https://stoat.chat/app) or [self-host your own instance](docs/getting-started/setup-stoat.md).
 
 ---
 
