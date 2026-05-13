@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-14
+
 ### Features
 - **Rollback engine** (#10): new `ferry rollback --output-dir <path> [--yes] [--force-unlock]` CLI subcommand and a GUI "Rollback this migration" button on the migration-complete page. Reverses a recorded migration by deleting Ferry-created channels, roles, custom emoji, and Ferry-owned categories from the Stoat target server. Reads `state.json` for the entity IDs to delete. Idempotent re-runs: a 404 response is treated as "already deleted" via the new `expected_404_ok=True` path on `_api_request`. Supports partial-rollback resume via `state.rollback_progress.rolled_back_ids` (a new set field on `MigrationState`); the existing entity maps (`channel_map` / `role_map` / `emoji_map`) are **never** mutated by rollback (forensic preservation). Surfaces untracked-Ferry-suspect channels — channels present on the Stoat server but absent from `state.channel_map`, likely orphans from a crashed prior migration — in the confirmation gate for per-item opt-in. Channel deletes run concurrently (bounded by `--max-concurrent-requests`, default 5); roles and emoji are serialized on Stoat's shared `/servers` 5/10s bucket. Acquires the same `[FERRY_LOCK:...]` server-description marker as `run_migration`, so a concurrent rollback or migration cannot collide. Autumn-hosted attachments are **not** removed — no public DELETE endpoint exists for Autumn files (documented in known-limitations).
 
