@@ -287,3 +287,58 @@ ferry build --blueprint my-server-blueprint.json --stoat-url https://api.stoat.c
 
 !!! tip "Blueprints use names, not IDs"
     Blueprints store role and channel names rather than Discord IDs, making them portable across different Stoat instances.
+
+---
+
+## `ferry rollback`
+
+Reverse a recorded migration by deleting Ferry-created channels, roles, custom emoji, and Ferry-owned categories from the Stoat target server. Reads `state.json` for the entity IDs to delete. Idempotent: 404 responses are treated as "already deleted" — re-runs are clean no-ops. **Autumn-hosted attachments are not removed** (no public DELETE endpoint for Autumn files; see `known-limitations.md`).
+
+```
+ferry rollback --output-dir <path> [OPTIONS]
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--output-dir PATH` | Directory containing the migration's `state.json` *(required)* |
+| `--stoat-url URL` | Stoat API base URL (or env `STOAT_URL`) *(required)* |
+| `--token TOKEN` | Stoat session token (or env `STOAT_TOKEN`) *(required)* |
+| `--server-id ID` | Override the Stoat server ID from `state.json` (rarely needed) |
+| `--yes` / `-y` | Skip the confirmation prompt and per-item opt-in for suspect channels |
+| `--force-unlock` | Override a stale `[FERRY_LOCK:...]` marker on the target server |
+| `--max-concurrent-requests INT` | Max concurrent channel DELETEs (default 5) |
+| `--verbose` / `-v` | Verbose output |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Rollback completed with no failures |
+| 1 | Engine error, or one or more entities failed to delete (DLQ — see `state.rollback_progress.failures`) |
+| 2 | `state.json` missing or unreadable |
+| 130 | Ctrl+C or user aborted at the confirmation prompt |
+
+### Confirmation Gate
+
+Before any DELETE call, rollback prints a Rich table with the counts of entities to delete plus any **untracked-Ferry-suspect** channels — channels present on the Stoat server but absent from `state.channel_map` (likely orphans from a crashed prior migration). Each suspect row shows: name, creation time (decoded from the channel's ULID), and the Stoat channel ID. You opt in to deleting each suspect individually; `--yes` skips opt-in and proceeds with mapped entities only (safe default — never auto-deletes suspects).
+
+### Examples
+
+```bash
+# Roll back the migration recorded in ./ferry-output, with confirmation prompt
+ferry rollback --output-dir ./ferry-output --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+
+# Same, but skip the confirmation prompt (CI / automation)
+ferry rollback --output-dir ./ferry-output --yes
+
+# Override a stale lock marker from a previous crashed rollback
+ferry rollback --output-dir ./ferry-output --force-unlock
+```
+
+!!! note "Forensic preservation"
+    Rollback never mutates `state.channel_map`, `state.role_map`, or `state.emoji_map`. The migration's audit trail is preserved. Deletions are tracked in a new `state.rollback_progress.rolled_back_ids` set instead. A failed rollback can be re-run; already-deleted entities are skipped via the `rolled_back_ids` set (or via 404 idempotency on a re-attempt).
+
+!!! warning "Categories cleanup is last-write-wins"
+    The final category cleanup PATCH is a "fetch then replace" operation. If you edit categories in Stoat's UI while rollback is running, your edits in the window between rollback's fetch and PATCH may be overwritten. The window is typically a few seconds; longer on large servers. See `known-limitations.md`.
