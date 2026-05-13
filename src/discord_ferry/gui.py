@@ -9,12 +9,12 @@ import secrets
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nicegui import app, background_tasks, ui
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.core.engine import PHASE_ORDER, run_migration
+from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.errors import MigrationError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
 from discord_ferry.state import load_state
@@ -918,6 +918,7 @@ def migrate_page() -> None:
     eta_label: ui.label
     pause_btn: ui.button
     cancel_btn: ui.button
+    rollback_btn: ui.button
     controls_row: ui.row
     completion_card: ui.card
 
@@ -962,9 +963,14 @@ def migrate_page() -> None:
             with ui.card().classes("w-full mt-4 hidden") as completion_card:
                 ui.label("Migration Complete").classes("text-xl font-bold text-green-600")
                 ui.label("").classes("text-sm text-gray-500").bind_text_from(errors_label, "text")
-                open_report_btn = ui.button("Open Report", on_click=lambda: _open_report()).classes(
-                    "mt-2 bg-green-600 text-white"
-                )
+                with ui.row().classes("gap-2 mt-2"):
+                    open_report_btn = ui.button(
+                        "Open Report", on_click=lambda: _open_report()
+                    ).classes("bg-green-600 text-white")
+                    rollback_btn = ui.button(
+                        "Rollback this migration",
+                        on_click=lambda: _start_rollback(),
+                    ).classes("bg-red-600 text-white")
 
     # ---------------------------------------------------------------------------
     # Cancel confirmation dialog
@@ -1071,6 +1077,102 @@ def migrate_page() -> None:
 
         review_dialog.open()
 
+    def _show_rollback_dialog(summary: object) -> None:
+        """Show a blocking rollback confirmation dialog (issue #10).
+
+        ``summary`` is a ``RollbackSummary`` dataclass (passed through
+        ``event.detail["summary"]``). Per-suspect checkboxes set
+        ``UntrackedSuspectChannel.opted_in``; engine reads that field
+        when building the channel-delete task list. Confirm releases
+        ``pause_event``; Cancel sets ``cancel_event`` and releases the
+        gate so the engine's cancel-check fires.
+        """
+        # Pull fields off the dataclass with getattr so this works even if
+        # the import fails (defensive — the engine should always send a
+        # well-formed RollbackSummary).
+        suspects = list(getattr(summary, "untracked_ferry_suspect", []) or [])
+
+        with ui.dialog() as rollback_dialog, ui.card().classes("w-[36rem]"):
+            ui.label("Pre-Rollback Review").classes("text-xl font-bold mb-2")
+            server_name = getattr(summary, "stoat_server_name", "")
+            server_id = getattr(summary, "stoat_server_id", "")
+            ui.label(f"Server: {server_name} ({server_id})").classes("font-medium")
+            ui.separator()
+
+            with ui.column().classes("gap-1 w-full"):
+                items = [
+                    ("Channels to delete", len(getattr(summary, "channels_to_delete", []))),
+                    ("Roles to delete", len(getattr(summary, "roles_to_delete", []))),
+                    ("Emoji to delete", len(getattr(summary, "emoji_to_delete", []))),
+                    ("Categories to clean", getattr(summary, "categories_to_clean", 0)),
+                ]
+                for label, value in items:
+                    with ui.row().classes("justify-between w-full"):
+                        ui.label(label)
+                        ui.label(str(value)).classes("font-medium")
+
+                orphans = getattr(summary, "autumn_orphan_count", 0)
+                if orphans:
+                    with ui.row().classes("justify-between w-full"):
+                        ui.label("Autumn orphan uploads (NOT deleted)")
+                        ui.label(str(orphans)).classes("font-medium text-amber-600")
+
+                if getattr(summary, "has_failures_from_prior_run", False):
+                    ui.label("⚠ Prior-run failures present in state.json").classes(
+                        "text-amber-600 text-sm"
+                    )
+
+            # Per-item opt-in for untracked-Ferry-suspect channels.
+            checkbox_widgets: list[tuple[Any, Any]] = []
+            if suspects:
+                ui.separator()
+                ui.label("Untracked-Ferry-suspect channels").classes("font-bold mt-2")
+                ui.label(
+                    "Present on Stoat, absent from state.json. "
+                    "Opt in per channel to delete; leave unchecked to keep."
+                ).classes("text-sm text-gray-600 mb-2")
+
+                # Header row.
+                with ui.row().classes("w-full text-xs font-bold text-gray-700"):
+                    ui.label("").classes("w-8")
+                    ui.label("Name").classes("flex-1")
+                    ui.label("Created (UTC)").classes("w-48")
+                    ui.label("Stoat ID").classes("w-64")
+
+                for suspect in suspects:
+                    name = getattr(suspect, "name", "") or "(no name)"
+                    # Display-layer translation: None → "unknown" so users don't see literal "None".
+                    created = getattr(suspect, "created_at_iso", None) or "unknown"
+                    stoat_id = getattr(suspect, "stoat_id", "")
+                    with ui.row().classes("w-full items-center"):
+                        cb = ui.checkbox(value=False)
+                        ui.label(name).classes("flex-1")
+                        ui.label(created).classes("w-48 text-xs")
+                        ui.label(stoat_id).classes("w-64 text-xs font-mono")
+                        checkbox_widgets.append((cb, suspect))
+
+            ui.separator()
+            with ui.row().classes("justify-end gap-2 mt-2"):
+
+                def _cancel() -> None:
+                    cancel_event.set()
+                    pause_event.set()
+                    rollback_dialog.close()
+
+                def _proceed() -> None:
+                    # Sync checkbox state back into the suspect dataclasses
+                    # so the engine reads opted_in=True when building tasks.
+                    for cb_widget, suspect_obj in checkbox_widgets:
+                        with contextlib.suppress(Exception):
+                            suspect_obj.opted_in = bool(cb_widget.value)
+                    pause_event.set()
+                    rollback_dialog.close()
+
+                ui.button("Cancel", on_click=_cancel).classes("bg-gray-400 text-white")
+                ui.button("Roll back", on_click=_proceed).classes("bg-red-600 text-white")
+
+        rollback_dialog.open()
+
     # ---------------------------------------------------------------------------
     # Event callback (called from the async engine, on the NiceGUI event loop)
     # ---------------------------------------------------------------------------
@@ -1135,6 +1237,11 @@ def migrate_page() -> None:
             case "confirm":
                 if event.detail:
                     _show_review_dialog(event.detail)
+            case "confirm_rollback":
+                # Without this arm the GUI silently ignores the confirmation event
+                # and the rollback hangs forever on pause_event. Guarded by SC-31.
+                if event.detail and "summary" in event.detail:
+                    _show_rollback_dialog(event.detail["summary"])
 
         log_display.push(f"[{event.phase}] {event.status}: {event.message}")
 
@@ -1151,6 +1258,43 @@ def migrate_page() -> None:
             open_report_btn.disable()
         progress_bar.set_value(1.0)
         ui.notify("Migration complete!", type="positive")
+
+    def _start_rollback() -> None:
+        """Launch a rollback in a background task.
+
+        Reuses the page's config + on_event handler. Creates fresh pause/cancel
+        events so the rollback's lifecycle is independent of the prior
+        migration's. The engine emits ``confirm_rollback`` before any DELETE;
+        the existing on_event match arm routes that to ``_show_rollback_dialog``.
+        """
+        # Fresh events for the rollback's lifecycle.
+        new_pause = asyncio.Event()
+        new_cancel = asyncio.Event()
+        config.pause_event = new_pause
+        config.cancel_event = new_cancel
+        # Update the closure-captured locals so the dialog's cancel button
+        # writes to the rollback's cancel_event, not the migration's.
+        nonlocal pause_event, cancel_event
+        pause_event = new_pause
+        cancel_event = new_cancel
+
+        rollback_btn.disable()
+
+        async def _run() -> None:
+            try:
+                state = load_state(config.output_dir)
+                await run_rollback(config, state, exports=[], on_event=on_event)
+                ui.notify("Rollback complete!", type="positive")
+            except MigrationError as exc:
+                log_display.push(f"[ERROR] Rollback failed: {exc}")
+                ui.notify(f"Rollback failed: {exc}", type="negative")
+            except Exception as exc:
+                log_display.push(f"[ERROR] Unexpected error: {exc}")
+                ui.notify(f"Unexpected error: {exc}", type="negative")
+            finally:
+                rollback_btn.enable()
+
+        background_tasks.create(_run())
 
     # ---------------------------------------------------------------------------
     # Start migration in background

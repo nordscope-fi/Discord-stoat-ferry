@@ -251,3 +251,39 @@ async def test_pause_event_blocks_message_rate_limit() -> None:
     pause.set()
     await asyncio.wait_for(task, timeout=1.0)
     assert task.done()
+
+
+# ---------------------------------------------------------------------------
+# Rollback button + dialog (issue #10, SC-31 regression guard)
+# ---------------------------------------------------------------------------
+
+
+def test_gui_handles_confirm_rollback_event() -> None:
+    """SC-31 regression guard: gui.py's match block dispatches confirm_rollback.
+
+    The migrate_page() closure builds an on_event handler with a match block
+    over event.status. Adding a "confirm_rollback" status without a matching
+    case arm makes the GUI silently ignore the confirmation event — the
+    engine waits forever on pause_event. This test reads the source to
+    assert the arm + dispatch function exist.
+    """
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    # The match arm must exist alongside the other case clauses.
+    assert 'case "confirm_rollback":' in source, (
+        'GUI match block must include a `case "confirm_rollback":` arm — '
+        "without it, run_rollback hangs forever on pause_event"
+    )
+    # The dispatch target must also exist and reference the suspect channels.
+    assert "_show_rollback_dialog" in source
+    assert "untracked_ferry_suspect" in source
+
+
+def test_gui_imports_run_rollback() -> None:
+    """The GUI module must import run_rollback so the report-page button works."""
+    import discord_ferry.gui as gui_mod
+
+    assert hasattr(gui_mod, "run_rollback")
