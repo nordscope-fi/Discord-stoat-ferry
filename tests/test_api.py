@@ -11,6 +11,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import (
+    _api_request,
     _circuit_state,
     _reset_circuit_state,
     _reset_rate_state,
@@ -19,6 +20,9 @@ from discord_ferry.migrator.api import (
     api_create_emoji,
     api_create_role,
     api_create_server,
+    api_delete_channel,
+    api_delete_emoji,
+    api_delete_role,
     api_edit_role,
     api_edit_server,
     api_fetch_server,
@@ -803,3 +807,97 @@ async def test_reset_rate_state() -> None:
 
     assert get_rate_multiplier() == pytest.approx(1.0)
     assert len(_api_mod._rate_429_window) == 0
+
+
+# ---------------------------------------------------------------------------
+# Rollback DELETE wrappers + expected_404_ok (SC-3, SC-6, SC-7)
+# ---------------------------------------------------------------------------
+
+
+async def test_api_delete_channel_204(mock_aiohttp: aioresponses) -> None:
+    """SC-3: DELETE /channels/<id> returns 204 — wrapper returns cleanly."""
+    mock_aiohttp.delete(f"{BASE_URL}/channels/ch01", status=204)
+    async with aiohttp.ClientSession() as session:
+        result = await api_delete_channel(session, BASE_URL, TOKEN, "ch01")
+    assert result is None
+    assert _circuit_state.consecutive_failures == 0
+
+
+async def test_api_delete_role_204(mock_aiohttp: aioresponses) -> None:
+    """SC-3: DELETE /servers/<id>/roles/<id> returns 204 — wrapper returns cleanly."""
+    mock_aiohttp.delete(f"{BASE_URL}/servers/srv01/roles/role01", status=204)
+    async with aiohttp.ClientSession() as session:
+        result = await api_delete_role(session, BASE_URL, TOKEN, "srv01", "role01")
+    assert result is None
+    assert _circuit_state.consecutive_failures == 0
+
+
+async def test_api_delete_emoji_204(mock_aiohttp: aioresponses) -> None:
+    """SC-3: DELETE /custom/emoji/<id> returns 204 — wrapper returns cleanly."""
+    mock_aiohttp.delete(f"{BASE_URL}/custom/emoji/em01", status=204)
+    async with aiohttp.ClientSession() as session:
+        result = await api_delete_emoji(session, BASE_URL, TOKEN, "em01")
+    assert result is None
+    assert _circuit_state.consecutive_failures == 0
+
+
+async def test_expected_404_ok_resets_circuit_state(mock_aiohttp: aioresponses) -> None:
+    """SC-6: 404+expected_404_ok resets consecutive_failures AND decays rate_multiplier."""
+    import discord_ferry.migrator.api as _api_mod
+
+    _circuit_state.consecutive_failures = 3
+    _api_mod._rate_multiplier = 2.5
+
+    mock_aiohttp.delete(f"{BASE_URL}/channels/ch01", status=404)
+    async with aiohttp.ClientSession() as session:
+        result = await api_delete_channel(session, BASE_URL, TOKEN, "ch01")
+
+    assert result is None
+    assert _circuit_state.consecutive_failures == 0
+    # 2.5 * 0.75 = 1.875, above the 1.0 floor.
+    assert get_rate_multiplier() == pytest.approx(1.875)
+
+
+async def test_expected_404_ok_false_still_raises(mock_aiohttp: aioresponses) -> None:
+    """SC-7: default (expected_404_ok=False) — 404 still raises MigrationError."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/missing",
+        status=404,
+        payload={"type": "NotFound"},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="API error 404"):
+            await _api_request(
+                session, "GET", f"{BASE_URL}/servers/missing", TOKEN
+            )
+
+
+async def test_expected_404_ok_with_real_404_body_discarded(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Edge: 404 body present but discarded by expected_404_ok path."""
+    mock_aiohttp.delete(
+        f"{BASE_URL}/channels/ch01",
+        status=404,
+        payload={"type": "NotFound"},
+    )
+    async with aiohttp.ClientSession() as session:
+        result = await api_delete_channel(session, BASE_URL, TOKEN, "ch01")
+    assert result is None  # body discarded, just like 204.
+
+
+async def test_expected_404_ok_with_204_unchanged_behaviour(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Sanity: 204 still works with expected_404_ok=True — no regression."""
+    mock_aiohttp.delete(f"{BASE_URL}/channels/ch01", status=204)
+    async with aiohttp.ClientSession() as session:
+        result = await _api_request(
+            session,
+            "DELETE",
+            f"{BASE_URL}/channels/ch01",
+            TOKEN,
+            expected_404_ok=True,
+        )
+    assert result == {}
+    assert _circuit_state.consecutive_failures == 0
