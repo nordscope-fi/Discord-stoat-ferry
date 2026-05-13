@@ -1047,3 +1047,119 @@ async def test_empty_server_id_aborts_before_lock(tmp_path: Path) -> None:
     events, emit = _emit_collector()
     with pytest.raises(MigrationError, match="no Stoat server ID"):
         await run_rollback(config, state, exports=[], on_event=emit)
+
+
+# ---------------------------------------------------------------------------
+# Confirmation gate ordering regression — clear-before-emit (code review fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_confirm_gate_clear_then_emit_not_clear_after(
+    mock_aiohttp: aioresponses, tmp_path: Path
+) -> None:
+    """The gate must be cleared BEFORE emitting the event, not after.
+
+    CLI handlers call ``pause_event.set()`` synchronously inside ``on_event``
+    (because ``click.confirm`` blocks the event loop until the user responds).
+    If we clear AFTER emit, the user's approval is erased and the wait-loop
+    hangs forever. This test simulates that pattern: the on_event handler
+    sets pause_event before returning; run_rollback must still see it set
+    when it enters the wait-loop and proceed without hanging.
+    """
+    state = MigrationState(
+        stoat_server_id=SERVER_ID,
+        channel_map={"d1": "ch1"},
+    )
+    save_state(state, tmp_path)
+
+    pause_event = asyncio.Event()
+    config = _make_config(tmp_path, pause_event=pause_event)
+
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SERVER_ID}",
+        payload={
+            "_id": SERVER_ID,
+            "description": "",
+            "channels": ["ch1"],
+            "roles": {},
+            "categories": [],
+        },
+        repeat=True,
+    )
+    mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", payload={}, repeat=True)
+    mock_aiohttp.delete(f"{BASE_URL}/channels/ch1", status=204)
+
+    def cli_style_handler(event: MigrationEvent) -> None:
+        # Simulate the CLI tracker's synchronous click.confirm + set()
+        # sequence: when the confirm event arrives, "user" approves
+        # immediately and pause_event.set() is called before returning.
+        if event.status == "confirm_rollback":
+            pause_event.set()
+
+    # Without the fix, this awaits forever. With the fix, it completes.
+    await asyncio.wait_for(
+        run_rollback(config, state, exports=[], on_event=cli_style_handler),
+        timeout=5.0,
+    )
+    rp = state.rollback_progress
+    assert rp is not None
+    assert rp.channels_deleted == 1
+
+
+# ---------------------------------------------------------------------------
+# DLQ catches unexpected exceptions (code review fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_dlq_catches_unexpected_exception_in_channel_delete(
+    mock_aiohttp: aioresponses, tmp_path: Path
+) -> None:
+    """An unexpected (non-MigrationError) exception in api_delete_channel
+    must land in the DLQ with http_status=None, not silently swallowed by
+    asyncio.gather(return_exceptions=True).
+    """
+    state = MigrationState(
+        stoat_server_id=SERVER_ID,
+        channel_map={"d1": "ch1", "d2": "ch2"},
+    )
+    save_state(state, tmp_path)
+    config = _make_config(tmp_path)
+
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SERVER_ID}",
+        payload={
+            "_id": SERVER_ID,
+            "description": "",
+            "channels": ["ch1", "ch2"],
+            "roles": {},
+            "categories": [],
+        },
+        repeat=True,
+    )
+    mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", payload={}, repeat=True)
+
+    real_delete = None
+
+    async def boom_then_succeed(*args: Any, **kwargs: Any) -> None:
+        # First call to delete raises a random non-MigrationError. Second
+        # succeeds (returns None, simulating a 204).
+        if not boom_then_succeed.fired:  # type: ignore[attr-defined]
+            boom_then_succeed.fired = True  # type: ignore[attr-defined]
+            raise RuntimeError("transient library bug")
+
+    boom_then_succeed.fired = False  # type: ignore[attr-defined]
+
+    events, emit = _emit_collector()
+    with patch("discord_ferry.core.engine.api_delete_channel", new=boom_then_succeed):
+        await run_rollback(config, state, exports=[], on_event=emit)
+
+    rp = state.rollback_progress
+    assert rp is not None
+    # One channel succeeded, one went to DLQ with http_status=None.
+    assert rp.channels_deleted == 1
+    assert len(rp.failures) == 1
+    assert rp.failures[0].entity_type == "channel"
+    assert rp.failures[0].http_status is None
+    assert "transient library bug" in rp.failures[0].error
+    # Free the unused name to silence linters.
+    _ = real_delete

@@ -1066,8 +1066,8 @@ async def _delete_one_channel(
         assert state.rollback_progress is not None  # set by run_rollback before tasks
         try:
             await api_delete_channel(session, config.stoat_url, config.token, channel_id)
-        except MigrationError as exc:
-            http_status = _parse_http_status(str(exc))
+        except Exception as exc:  # noqa: BLE001 — DLQ catches everything, gather would swallow otherwise
+            http_status = _parse_http_status(str(exc)) if isinstance(exc, MigrationError) else None
             state.rollback_progress.failures.append(
                 RollbackFailure(
                     entity_type="channel",
@@ -1114,8 +1114,8 @@ async def _delete_one_role(
     assert state.rollback_progress is not None
     try:
         await api_delete_role(session, config.stoat_url, config.token, server_id, role_id)
-    except MigrationError as exc:
-        http_status = _parse_http_status(str(exc))
+    except Exception as exc:  # noqa: BLE001 — DLQ catches everything to avoid aborting rollback
+        http_status = _parse_http_status(str(exc)) if isinstance(exc, MigrationError) else None
         state.rollback_progress.failures.append(
             RollbackFailure(
                 entity_type="role",
@@ -1151,8 +1151,8 @@ async def _delete_one_emoji(
     assert state.rollback_progress is not None
     try:
         await api_delete_emoji(session, config.stoat_url, config.token, emoji_id)
-    except MigrationError as exc:
-        http_status = _parse_http_status(str(exc))
+    except Exception as exc:  # noqa: BLE001 — DLQ catches everything to avoid aborting rollback
+        http_status = _parse_http_status(str(exc)) if isinstance(exc, MigrationError) else None
         state.rollback_progress.failures.append(
             RollbackFailure(
                 entity_type="emoji",
@@ -1343,6 +1343,16 @@ async def run_rollback(
             untracked = _build_rollback_targets(state, server_obj)
             summary = build_rollback_summary(state, server_obj, untracked)
 
+            # Clear the gate BEFORE emitting the event, not after. CLI handlers
+            # may call ``pause_event.set()`` synchronously inside ``on_event``
+            # (because ``click.confirm`` blocks the event loop until the user
+            # responds, then sets the event before returning). Clearing after
+            # would erase the user's approval and the wait-loop would hang
+            # forever. GUI dialogs are non-blocking so the ordering doesn't
+            # matter for them — but the CLI ordering is load-bearing.
+            if config.pause_event is not None:
+                config.pause_event.clear()
+
             on_event(
                 MigrationEvent(
                     phase="rollback",
@@ -1354,7 +1364,6 @@ async def run_rollback(
 
             # Wait for the shell to release the gate (CLI/GUI both honour pause_event).
             if config.pause_event is not None:
-                config.pause_event.clear()
                 while not config.pause_event.is_set():
                     if config.cancel_event is not None and config.cancel_event.is_set():
                         on_event(
