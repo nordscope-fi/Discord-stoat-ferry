@@ -867,9 +867,7 @@ async def test_expected_404_ok_false_still_raises(mock_aiohttp: aioresponses) ->
     )
     async with aiohttp.ClientSession() as session:
         with pytest.raises(MigrationError, match="API error 404"):
-            await _api_request(
-                session, "GET", f"{BASE_URL}/servers/missing", TOKEN
-            )
+            await _api_request(session, "GET", f"{BASE_URL}/servers/missing", TOKEN)
 
 
 async def test_expected_404_ok_with_real_404_body_discarded(

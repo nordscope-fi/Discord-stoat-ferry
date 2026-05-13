@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
@@ -26,11 +27,15 @@ from discord_ferry.exporter import (
     validate_discord_token,
 )
 from discord_ferry.migrator.api import (
+    api_delete_channel,
+    api_delete_emoji,
+    api_delete_role,
     api_edit_message,
     api_edit_server,
     api_fetch_server,
     api_pin_message,
     api_send_message,
+    api_upsert_categories,
     get_session,
     init_request_semaphore,
 )
@@ -44,8 +49,21 @@ from discord_ferry.migrator.structure import run_categories, run_channels, run_r
 from discord_ferry.parser.dce_parser import parse_export_directory, stream_messages, validate_export
 from discord_ferry.parser.models import DCEExport, DCEMessage
 from discord_ferry.reporter import generate_markdown_report, generate_report
-from discord_ferry.review import build_review_summary
-from discord_ferry.state import FailedMessage, MigrationState, load_state, save_state
+from discord_ferry.review import (
+    UntrackedSuspectChannel,
+    _channel_names_from_server,
+    _decode_ulid_timestamp,
+    build_review_summary,
+    build_rollback_summary,
+)
+from discord_ferry.state import (
+    FailedMessage,
+    MigrationState,
+    RollbackFailure,
+    RollbackProgress,
+    load_state,
+    save_state,
+)
 
 PhaseFunction = Callable[
     [FerryConfig, MigrationState, list[DCEExport], EventCallback],
@@ -944,3 +962,504 @@ async def run_retry_failed(
             message=f"Retry complete: {retried} succeeded, {remaining} still failed.",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Rollback engine (issue #10)
+# ---------------------------------------------------------------------------
+
+
+_HTTP_STATUS_RE = re.compile(r"(?:API error|after \d+ retries:)\s*(\d{3})")
+
+
+def _parse_http_status(error_text: str) -> int | None:
+    """Extract HTTP status from MigrationError text raised by _api_request.
+
+    Patterns covered:
+      - "API error 404: ..." (non-retryable single attempt)
+      - "API request failed after 3 retries: 503 ..." (retryable exhausted)
+      - "Network error after 3 retries: ..." → None (no status)
+    """
+    m = _HTTP_STATUS_RE.search(error_text)
+    return int(m.group(1)) if m else None
+
+
+def _validate_rollback_inputs(state: MigrationState, config: FerryConfig) -> str:
+    """Validate that rollback has a server to act against.
+
+    Returns the resolved server ID (preferring ``state.stoat_server_id``,
+    falling back to ``config.server_id``).
+
+    Raises:
+        MigrationError: If neither is populated.
+    """
+    server_id = state.stoat_server_id or (config.server_id or "")
+    if not server_id:
+        raise MigrationError(
+            "Cannot run rollback: no Stoat server ID recorded in state.json "
+            "and no --server-id provided. Nothing to roll back."
+        )
+    return server_id
+
+
+def _build_rollback_targets(
+    state: MigrationState,
+    server_obj: dict[str, Any],
+) -> list[UntrackedSuspectChannel]:
+    """Identify untracked-Ferry-suspect channels by diffing server vs state.
+
+    Channels present on the Stoat server but absent from ``state.channel_map``
+    are surfaced for per-item opt-in in the confirmation gate. Names are
+    best-effort from the server response (Stoat's GET /servers/{id} returns
+    a list of IDs, not channel objects, so names are usually empty —
+    display layer falls back to the stoat_id).
+
+    Args:
+        state: Current MigrationState — NOT mutated by this function.
+        server_obj: Result of ``api_fetch_server`` (fresh fetch).
+
+    Returns:
+        Sorted list of suspect channels (each with opted_in=False).
+    """
+    channel_names = _channel_names_from_server(server_obj)
+    server_channel_ids: set[str] = set()
+    for c in server_obj.get("channels", []):
+        if isinstance(c, str):
+            server_channel_ids.add(c)
+        elif isinstance(c, dict):
+            cid = c.get("_id") or c.get("id")
+            if cid:
+                server_channel_ids.add(cid)
+
+    mapped_ids = set(state.channel_map.values())
+    untracked_ids = server_channel_ids - mapped_ids
+
+    suspects = [
+        UntrackedSuspectChannel(
+            stoat_id=cid,
+            name=channel_names.get(cid, ""),
+            created_at_iso=_decode_ulid_timestamp(cid),
+        )
+        for cid in untracked_ids
+    ]
+    # Deterministic ordering for stable CLI/GUI presentation + reproducible tests.
+    suspects.sort(key=lambda s: (s.name, s.stoat_id))
+    return suspects
+
+
+async def _delete_one_channel(
+    channel_id: str,
+    sem: asyncio.BoundedSemaphore,
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+    *,
+    is_suspect: bool = False,
+) -> None:
+    """Delete one channel with bounded concurrency + per-entity DLQ on failure."""
+    if config.cancel_event is not None and config.cancel_event.is_set():
+        return
+    async with sem:
+        if config.cancel_event is not None and config.cancel_event.is_set():
+            return
+        assert state.rollback_progress is not None  # set by run_rollback before tasks
+        try:
+            await api_delete_channel(session, config.stoat_url, config.token, channel_id)
+        except MigrationError as exc:
+            http_status = _parse_http_status(str(exc))
+            state.rollback_progress.failures.append(
+                RollbackFailure(
+                    entity_type="channel",
+                    stoat_id=channel_id,
+                    error=str(exc),
+                    http_status=http_status,
+                )
+            )
+            save_state(state, config.output_dir)
+            severity = "error" if http_status == 401 else "warning"
+            msg = f"Failed to delete channel {channel_id}: {exc}"
+            if http_status == 401:
+                msg += " (session token may be invalid)"
+            on_event(MigrationEvent(phase="rollback", status=severity, message=msg))
+            return
+
+        # Success path — includes 404 (idempotent) via expected_404_ok=True.
+        if is_suspect:
+            state.rollback_progress.untracked_channels_deleted += 1
+        else:
+            state.rollback_progress.channels_deleted += 1
+        state.rollback_progress.rolled_back_ids.add(channel_id)
+        save_state(state, config.output_dir)
+        on_event(
+            MigrationEvent(
+                phase="rollback",
+                status="progress",
+                message=f"Deleted channel {channel_id}",
+            )
+        )
+
+
+async def _delete_one_role(
+    role_id: str,
+    server_id: str,
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+) -> None:
+    """Delete one role serially with per-entity DLQ on failure."""
+    if config.cancel_event is not None and config.cancel_event.is_set():
+        return
+    assert state.rollback_progress is not None
+    try:
+        await api_delete_role(session, config.stoat_url, config.token, server_id, role_id)
+    except MigrationError as exc:
+        http_status = _parse_http_status(str(exc))
+        state.rollback_progress.failures.append(
+            RollbackFailure(
+                entity_type="role",
+                stoat_id=role_id,
+                error=str(exc),
+                http_status=http_status,
+            )
+        )
+        save_state(state, config.output_dir)
+        severity = "error" if http_status == 401 else "warning"
+        msg = f"Failed to delete role {role_id}: {exc}"
+        if http_status == 401:
+            msg += " (session token may be invalid)"
+        on_event(MigrationEvent(phase="rollback", status=severity, message=msg))
+        return
+
+    state.rollback_progress.roles_deleted += 1
+    state.rollback_progress.rolled_back_ids.add(role_id)
+    save_state(state, config.output_dir)
+    on_event(MigrationEvent(phase="rollback", status="progress", message=f"Deleted role {role_id}"))
+
+
+async def _delete_one_emoji(
+    emoji_id: str,
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+) -> None:
+    """Delete one custom emoji serially with per-entity DLQ on failure."""
+    if config.cancel_event is not None and config.cancel_event.is_set():
+        return
+    assert state.rollback_progress is not None
+    try:
+        await api_delete_emoji(session, config.stoat_url, config.token, emoji_id)
+    except MigrationError as exc:
+        http_status = _parse_http_status(str(exc))
+        state.rollback_progress.failures.append(
+            RollbackFailure(
+                entity_type="emoji",
+                stoat_id=emoji_id,
+                error=str(exc),
+                http_status=http_status,
+            )
+        )
+        save_state(state, config.output_dir)
+        severity = "error" if http_status == 401 else "warning"
+        msg = f"Failed to delete emoji {emoji_id}: {exc}"
+        if http_status == 401:
+            msg += " (session token may be invalid)"
+        on_event(MigrationEvent(phase="rollback", status=severity, message=msg))
+        return
+
+    state.rollback_progress.emoji_deleted += 1
+    state.rollback_progress.rolled_back_ids.add(emoji_id)
+    save_state(state, config.output_dir)
+    on_event(
+        MigrationEvent(phase="rollback", status="progress", message=f"Deleted emoji {emoji_id}")
+    )
+
+
+async def _clean_categories(
+    state: MigrationState,
+    config: FerryConfig,
+    server_id: str,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+) -> None:
+    """Final PATCH to remove Ferry-owned categories from the server.
+
+    Re-fetches the server immediately before PATCH to minimise the TOCTOU
+    window — last-write-wins on user edits during rollback is documented
+    behaviour. If no Ferry categories were created, this is a no-op.
+    """
+    assert state.rollback_progress is not None
+    if not state.category_map:
+        state.rollback_progress.categories_cleaned = True
+        save_state(state, config.output_dir)
+        return
+
+    ferry_cat_ids = set(state.category_map.values())
+    try:
+        server = await api_fetch_server(session, config.stoat_url, config.token, server_id)
+    except MigrationError as exc:
+        state.rollback_progress.failures.append(
+            RollbackFailure(
+                entity_type="category",
+                stoat_id="<all>",
+                error=f"Could not fetch server for category cleanup: {exc}",
+                http_status=_parse_http_status(str(exc)),
+            )
+        )
+        save_state(state, config.output_dir)
+        on_event(
+            MigrationEvent(
+                phase="rollback",
+                status="warning",
+                message=f"Category cleanup skipped: {exc}",
+            )
+        )
+        return
+
+    current_categories = server.get("categories") or []
+    remaining = [c for c in current_categories if c.get("id") not in ferry_cat_ids]
+
+    try:
+        await api_upsert_categories(session, config.stoat_url, config.token, server_id, remaining)
+    except MigrationError as exc:
+        state.rollback_progress.failures.append(
+            RollbackFailure(
+                entity_type="category",
+                stoat_id="<all>",
+                error=str(exc),
+                http_status=_parse_http_status(str(exc)),
+            )
+        )
+        save_state(state, config.output_dir)
+        on_event(
+            MigrationEvent(
+                phase="rollback",
+                status="warning",
+                message=f"Category cleanup PATCH failed: {exc}",
+            )
+        )
+        return
+
+    state.rollback_progress.categories_cleaned = True
+    save_state(state, config.output_dir)
+    on_event(
+        MigrationEvent(
+            phase="rollback",
+            status="progress",
+            message=f"Cleaned {len(ferry_cat_ids)} Ferry-owned categories",
+        )
+    )
+
+
+async def run_rollback(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],  # noqa: ARG001 — signature parity with run_migration
+    on_event: EventCallback,
+) -> MigrationState:
+    """Reverse a recorded migration by deleting Ferry-created entities.
+
+    Order: channels (parallel, bounded by ``config.max_concurrent_requests``)
+    → roles (serial, shared /servers bucket) → emoji (serial, shared bucket)
+    → category cleanup (single PATCH). Per-entity DLQ on failure; rollback
+    never aborts on a single delete error.
+
+    Idempotent: 404 responses are treated as "already deleted" and counted
+    via ``expected_404_ok=True`` on the DELETE wrappers. State.json's entity
+    maps (``channel_map`` / ``role_map`` / ``emoji_map``) are NEVER mutated
+    — forensic preservation. Deletions are tracked in
+    ``state.rollback_progress.rolled_back_ids``.
+
+    Args:
+        config: Ferry configuration. ``config.pause_event``, if provided, is
+            cleared and awaited for the confirmation gate. ``config.cancel_event``
+            is checked at task boundaries for cooperative cancellation.
+        state: Current MigrationState. Must have ``stoat_server_id`` set, or
+            ``config.server_id`` must be set instead.
+        exports: Unused (signature parity with ``run_migration``).
+        on_event: Event callback. Receives ``confirm_rollback`` event before
+            any DELETE, and ``progress`` / ``warning`` / ``completed`` events
+            during the run.
+
+    Returns:
+        Mutated ``state`` with ``rollback_progress`` populated.
+
+    Raises:
+        MigrationError: If neither state.stoat_server_id nor config.server_id
+            is set, or if the migration lock cannot be acquired (a concurrent
+            operation is in progress).
+    """
+    server_id = _validate_rollback_inputs(state, config)
+    # Ensure the lock helpers use the resolved server ID.
+    config.server_id = server_id
+
+    if state.rollback_progress is None:
+        state.rollback_progress = RollbackProgress(
+            started_at=datetime.now(timezone.utc).isoformat()
+        )
+
+    on_event(
+        MigrationEvent(
+            phase="rollback",
+            status="started",
+            message=f"Starting rollback on server {server_id}",
+        )
+    )
+
+    async with get_session(config) as session:
+        config.session = session
+        init_request_semaphore(config.max_concurrent_requests)
+
+        # Lock gate — MUST run before the try, since _acquire_migration_lock
+        # returns False on PATCH failure rather than raising. Wrapping inside
+        # the try would let `finally` invoke _release_migration_lock on a lock
+        # that was never written. The acquire helper does raise on live-lock
+        # conflict — that raise propagates here, before the try is entered.
+        lock_acquired = await _acquire_migration_lock(config, state, session, on_event)
+        if not lock_acquired:
+            raise MigrationError(
+                "Could not acquire rollback lock — aborting to avoid concurrent "
+                "operation. Pass --force-unlock if the existing lock is stale."
+            )
+
+        try:
+            # Fetch server + build summary for confirmation gate.
+            try:
+                server_obj = await api_fetch_server(
+                    session, config.stoat_url, config.token, server_id
+                )
+            except MigrationError as exc:
+                on_event(
+                    MigrationEvent(
+                        phase="rollback",
+                        status="error",
+                        message=f"Could not fetch server {server_id}: {exc}",
+                    )
+                )
+                raise
+
+            untracked = _build_rollback_targets(state, server_obj)
+            summary = build_rollback_summary(state, server_obj, untracked)
+
+            on_event(
+                MigrationEvent(
+                    phase="rollback",
+                    status="confirm_rollback",
+                    message="Review rollback before proceeding",
+                    detail={"summary": summary},
+                )
+            )
+
+            # Wait for the shell to release the gate (CLI/GUI both honour pause_event).
+            if config.pause_event is not None:
+                config.pause_event.clear()
+                while not config.pause_event.is_set():
+                    if config.cancel_event is not None and config.cancel_event.is_set():
+                        on_event(
+                            MigrationEvent(
+                                phase="rollback",
+                                status="cancelled",
+                                message="Rollback cancelled at confirmation gate",
+                            )
+                        )
+                        return state
+                    await asyncio.sleep(0.1)
+
+            # Early cancel-check after the gate is released.
+            if config.cancel_event is not None and config.cancel_event.is_set():
+                on_event(
+                    MigrationEvent(
+                        phase="rollback",
+                        status="cancelled",
+                        message="Rollback cancelled before channel deletes",
+                    )
+                )
+                return state
+
+            # Channels — parallel with shared semaphore. Construct ONCE here
+            # and pass by reference into each task. Constructing inside the
+            # task would give every task its own semaphore at count=N and
+            # defeat the limit.
+            sem = asyncio.BoundedSemaphore(config.max_concurrent_requests)
+            channel_tasks: list[Coroutine[Any, Any, None]] = []
+            seen: set[str] = set()
+            for stoat_id in state.channel_map.values():
+                if stoat_id in seen:
+                    continue
+                seen.add(stoat_id)
+                if stoat_id in state.rollback_progress.rolled_back_ids:
+                    continue
+                channel_tasks.append(
+                    _delete_one_channel(stoat_id, sem, config, state, session, on_event)
+                )
+            # Opted-in untracked-Ferry-suspect channels.
+            for suspect in untracked:
+                if suspect.opted_in and suspect.stoat_id not in seen:
+                    seen.add(suspect.stoat_id)
+                    if suspect.stoat_id in state.rollback_progress.rolled_back_ids:
+                        continue
+                    channel_tasks.append(
+                        _delete_one_channel(
+                            suspect.stoat_id,
+                            sem,
+                            config,
+                            state,
+                            session,
+                            on_event,
+                            is_suspect=True,
+                        )
+                    )
+
+            if channel_tasks:
+                await asyncio.gather(*channel_tasks, return_exceptions=True)
+
+            # Roles — serial (shared /servers 5/10s bucket).
+            for stoat_id in state.role_map.values():
+                if config.cancel_event is not None and config.cancel_event.is_set():
+                    break
+                if stoat_id in state.rollback_progress.rolled_back_ids:
+                    continue
+                await _delete_one_role(stoat_id, server_id, config, state, session, on_event)
+
+            # Emoji — serial (shared /servers bucket).
+            for stoat_id in state.emoji_map.values():
+                if config.cancel_event is not None and config.cancel_event.is_set():
+                    break
+                if stoat_id in state.rollback_progress.rolled_back_ids:
+                    continue
+                await _delete_one_emoji(stoat_id, config, state, session, on_event)
+
+            # Category cleanup — single PATCH.
+            if not (config.cancel_event is not None and config.cancel_event.is_set()):
+                await _clean_categories(state, config, server_id, session, on_event)
+
+            # Final summary.
+            state.rollback_progress.completed_at = datetime.now(timezone.utc).isoformat()
+            save_state(state, config.output_dir)
+            final_status = (
+                "completed_with_failures" if state.rollback_progress.failures else "completed"
+            )
+            on_event(
+                MigrationEvent(
+                    phase="rollback",
+                    status=final_status,
+                    message=(
+                        f"Rollback finished: {state.rollback_progress.channels_deleted} channels, "
+                        f"{state.rollback_progress.untracked_channels_deleted} suspects, "
+                        f"{state.rollback_progress.roles_deleted} roles, "
+                        f"{state.rollback_progress.emoji_deleted} emoji, "
+                        f"{len(state.rollback_progress.failures)} failures"
+                    ),
+                    detail={"summary": state.rollback_progress},
+                )
+            )
+
+        finally:
+            if lock_acquired:
+                await _release_migration_lock(config, state, session, on_event)
+
+        config.session = None
+
+    return state

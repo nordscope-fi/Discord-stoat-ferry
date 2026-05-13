@@ -364,9 +364,7 @@ def test_build_rollback_summary_carries_prior_failures_flag() -> None:
         stoat_server_id="srv01",
         rollback_progress=RollbackProgress(
             failures=[
-                RollbackFailure(
-                    entity_type="role", stoat_id="r1", error="x", http_status=403
-                )
+                RollbackFailure(entity_type="role", stoat_id="r1", error="x", http_status=403)
             ]
         ),
     )
