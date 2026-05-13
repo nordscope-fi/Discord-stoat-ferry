@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixes
+- **GUI progress emit gap during DCE export** (issue #23): the GUI used to freeze on `"Checking for DCE binary..."` for the entire DCE channel-enumeration phase, which on large servers can run several minutes before DCE prints its first per-channel progress line. Added three intermediate emits: `"Verifying .NET 8 runtime..."` (before `detect_dotnet()`), `"Launching DiscordChatExporter..."` (before the subprocess spawn), and `"DiscordChatExporter started — enumerating channels..."` (inside `run_dce_export` immediately after the subprocess is alive but before the first stdout line). Applied symmetrically to the GUI shell and the CLI/engine path.
+
 ## [2.0.2] - 2026-04-21
 
 ### Fixes

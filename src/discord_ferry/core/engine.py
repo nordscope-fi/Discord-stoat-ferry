@@ -191,6 +191,13 @@ async def run_migration(
     if not config.skip_export:
         on_event(MigrationEvent(phase="export", status="started", message="Starting export..."))
         await validate_discord_token(config.discord_token or "")
+        on_event(
+            MigrationEvent(
+                phase="export",
+                status="progress",
+                message="Verifying .NET 8 runtime...",
+            )
+        )
         if not detect_dotnet():
             raise DotNetMissingError(
                 "DCE requires .NET 8 runtime. "
@@ -199,6 +206,13 @@ async def run_migration(
         dce_path = get_dce_path()
         if dce_path is None:
             dce_path = await download_dce(on_event, skip_verify=config.skip_dce_verify)
+        on_event(
+            MigrationEvent(
+                phase="export",
+                status="progress",
+                message="Launching DiscordChatExporter...",
+            )
+        )
         await run_dce_export(config, dce_path, on_event)
         state.export_completed = True
         save_state(state, config.output_dir)

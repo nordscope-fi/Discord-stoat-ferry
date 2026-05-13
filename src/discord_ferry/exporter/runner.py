@@ -126,6 +126,20 @@ async def run_dce_export(
         stderr=asyncio.subprocess.PIPE,
     )
 
+    # DCE prints nothing while it enumerates the guild's channels — on large
+    # servers that pre-output phase can run several minutes and previously
+    # left the GUI looking frozen on the last emitted status.
+    on_event(
+        MigrationEvent(
+            phase="export",
+            status="progress",
+            message=(
+                "DiscordChatExporter started — enumerating channels "
+                "(large servers may take several minutes before per-channel progress appears)..."
+            ),
+        )
+    )
+
     stderr_lines: list[str] = []
 
     try:
