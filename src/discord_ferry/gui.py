@@ -655,6 +655,13 @@ def export_page() -> None:
                 )
                 dce_path = await download_dce(on_export_event)
 
+            on_export_event(
+                _MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message="Verifying .NET 8 runtime...",
+                )
+            )
             if not detect_dotnet():
                 raise DotNetMissingError(
                     "DCE requires .NET 8 runtime. "
@@ -670,6 +677,13 @@ def export_page() -> None:
                 cancel_event=cancel_event,
             )
 
+            on_export_event(
+                _MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message="Launching DiscordChatExporter...",
+                )
+            )
             await run_dce_export(config, dce_path, on_export_event)
 
             on_export_event(

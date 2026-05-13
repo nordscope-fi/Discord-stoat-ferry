@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aioresponses import aioresponses
@@ -13,6 +13,7 @@ from discord_ferry.exporter.runner import (
     _DCE_PROGRESS_RE,
     _build_dce_command,
     _check_disk_space,
+    run_dce_export,
     validate_discord_token,
 )
 
@@ -123,3 +124,55 @@ class TestValidateDiscordToken:
             m.get("https://discord.com/api/v10/users/@me", status=500)
             with pytest.raises(DiscordAuthError, match="unexpected status"):
                 await validate_discord_token("some-token")
+
+
+class TestRunDceExportProgressEmits:
+    """Lock in the progress-emit contract that closes the silent-window UX gap.
+
+    Without an emit between subprocess spawn and the first stdout regex match,
+    the GUI used to freeze on the last status for the entire DCE enumeration
+    phase (minutes on large servers — see issue #23).
+    """
+
+    @pytest.mark.asyncio
+    async def test_enumerating_emit_fires_before_stdout_progress(self, tmp_path: Path) -> None:
+        async def _empty_iter():
+            for _ in ():
+                yield b""
+
+        async def _stdout_iter():
+            yield b"[1/3] Exporting #general... 50.0%\n"
+
+        process = MagicMock()
+        process.stdout = _stdout_iter()
+        process.stderr = _empty_iter()
+        process.wait = AsyncMock(return_value=0)
+        process.returncode = 0
+
+        cfg = FerryConfig(
+            export_dir=tmp_path / "exports",
+            stoat_url="https://stoat.example",
+            token="st",
+            discord_token="dt",
+            discord_server_id="12345",
+        )
+
+        events: list[MigrationEvent] = []
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", events.append)
+
+        messages = [e.message for e in events]
+        enumerating_idx = next(
+            (i for i, m in enumerate(messages) if "enumerating channels" in m), None
+        )
+        exporting_idx = next(
+            (i for i, m in enumerate(messages) if m.startswith("Exporting #")), None
+        )
+        assert enumerating_idx is not None, f"missing 'enumerating channels' emit; got {messages!r}"
+        assert exporting_idx is not None, f"missing per-channel emit; got {messages!r}"
+        assert enumerating_idx < exporting_idx, (
+            "enumeration emit must precede the first per-channel progress emit"
+        )
