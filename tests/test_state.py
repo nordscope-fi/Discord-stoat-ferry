@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from discord_ferry.errors import StateError
-from discord_ferry.state import MigrationState, load_state, save_state
+from discord_ferry.state import (
+    MigrationState,
+    RollbackFailure,
+    RollbackProgress,
+    load_state,
+    save_state,
+)
 
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
@@ -381,3 +387,123 @@ def test_message_map_empty_dict(tmp_path: Path) -> None:
 
     loaded = load_state(tmp_path)
     assert loaded.message_map == {}
+
+
+# ---------------------------------------------------------------------------
+# RollbackProgress / RollbackFailure round-trip (SC-4, SC-13, plus edges)
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_progress_round_trip(tmp_path: Path) -> None:
+    """SC-4: a fully-populated RollbackProgress round-trips through state.json."""
+    state = MigrationState(
+        rollback_progress=RollbackProgress(
+            channels_deleted=3,
+            roles_deleted=2,
+            emoji_deleted=1,
+            categories_cleaned=True,
+            untracked_channels_deleted=1,
+            rolled_back_ids={"a", "b", "c"},
+            failures=[
+                RollbackFailure(
+                    entity_type="role",
+                    stoat_id="r1",
+                    error="permission denied",
+                    http_status=403,
+                ),
+            ],
+            started_at="2026-05-13T10:00:00Z",
+            completed_at="2026-05-13T10:00:42Z",
+        )
+    )
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+
+    rp = loaded.rollback_progress
+    assert rp is not None
+    assert rp.channels_deleted == 3
+    assert rp.roles_deleted == 2
+    assert rp.emoji_deleted == 1
+    assert rp.categories_cleaned is True
+    assert rp.untracked_channels_deleted == 1
+    assert isinstance(rp.rolled_back_ids, set)
+    assert rp.rolled_back_ids == {"a", "b", "c"}
+    assert len(rp.failures) == 1
+    assert isinstance(rp.failures[0], RollbackFailure)
+    assert rp.failures[0].http_status == 403
+    assert rp.failures[0].entity_type == "role"
+    assert rp.started_at == "2026-05-13T10:00:00Z"
+
+
+def test_old_state_json_without_rollback_progress_loads_clean(tmp_path: Path) -> None:
+    """SC-13: state.json without rollback_progress key loads with field=None."""
+    import json
+
+    # Hand-crafted v1.7.0-shape state.json.
+    raw = {
+        "role_map": {"d1": "s1"},
+        "channel_map": {},
+        "category_map": {},
+        "message_map": {},
+        "emoji_map": {},
+        "stoat_server_id": "srv01",
+    }
+    (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
+    (tmp_path / "message_map.json").write_text("{}", encoding="utf-8")
+
+    loaded = load_state(tmp_path)
+
+    assert loaded.rollback_progress is None
+    assert loaded.role_map == {"d1": "s1"}
+
+
+def test_rollback_failure_with_none_http_status(tmp_path: Path) -> None:
+    """Edge: RollbackFailure(http_status=None) round-trips cleanly (network error)."""
+    state = MigrationState(
+        rollback_progress=RollbackProgress(
+            failures=[
+                RollbackFailure(
+                    entity_type="channel",
+                    stoat_id="ch1",
+                    error="connection reset",
+                    http_status=None,
+                )
+            ]
+        )
+    )
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+
+    assert loaded.rollback_progress is not None
+    assert loaded.rollback_progress.failures[0].http_status is None
+
+
+def test_empty_rolled_back_ids_serializes_as_empty_list(tmp_path: Path) -> None:
+    """Edge: empty set serializes as `[]`, not as `null` or `{}`."""
+    import json
+
+    state = MigrationState(
+        rollback_progress=RollbackProgress(
+            rolled_back_ids=set(),
+        )
+    )
+    save_state(state, tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert raw["rollback_progress"]["rolled_back_ids"] == []
+    # And it round-trips back to an empty set.
+    loaded = load_state(tmp_path)
+    assert loaded.rollback_progress is not None
+    assert loaded.rollback_progress.rolled_back_ids == set()
+
+
+def test_rollback_progress_none_serializes_as_null(tmp_path: Path) -> None:
+    """Edge: rollback_progress=None serializes as JSON null, not omitted."""
+    import json
+
+    state = MigrationState()
+    save_state(state, tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert "rollback_progress" in raw
+    assert raw["rollback_progress"] is None

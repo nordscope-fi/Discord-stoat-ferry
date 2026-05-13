@@ -17,13 +17,15 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.core.engine import PHASE_ORDER, run_migration
-from discord_ferry.errors import MigrationError
+from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
+from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
+from discord_ferry.state import load_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
+    from discord_ferry.review import RollbackSummary
 
 console = Console()
 
@@ -684,6 +686,268 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
         f"({len(bp.categories)} categories, "
         f"{sum(len(c.channels) for c in bp.categories) + len(uncategorized)} channels)"
     )
+
+
+class _RollbackProgressTracker:
+    """Render rollback progress + confirmation gate via Rich/Click.
+
+    Dedicated tracker (NOT a case arm on _ProgressTracker.on_event) per
+    design decision: keeps the migration progress display separate from
+    the rollback confirmation flow.
+    """
+
+    def __init__(
+        self,
+        *,
+        pause_event: asyncio.Event,
+        skip_confirmations: bool,
+        verbose: bool = False,
+    ) -> None:
+        self.pause_event = pause_event
+        self.skip_confirmations = skip_confirmations
+        self.verbose = verbose
+        self.error_count = 0
+        self.warning_count = 0
+        self.last_summary: RollbackSummary | None = None
+
+    def on_event(self, event: MigrationEvent) -> None:
+        match event.status:
+            case "started":
+                console.print(f"[bold cyan][>>][/] {event.message}")
+            case "confirm_rollback":
+                self._render_summary_and_prompt(event)
+            case "progress":
+                if self.verbose:
+                    console.print(f"[dim]    {event.message}[/]")
+            case "completed":
+                console.print(f"[bold green][OK][/] {event.message}")
+                if event.detail is not None:
+                    self._render_final(event.detail.get("summary"))
+            case "completed_with_failures":
+                console.print(f"[bold yellow][!!][/] {event.message}")
+                if event.detail is not None:
+                    self._render_final(event.detail.get("summary"))
+            case "cancelled":
+                console.print(f"[yellow][--][/] {event.message}")
+            case "warning":
+                self.warning_count += 1
+                if self.verbose:
+                    console.print(f"[yellow]    {event.message}[/]")
+            case "error":
+                self.error_count += 1
+                console.print(f"[bold red][!!][/] {event.message}")
+
+    def _render_summary_and_prompt(self, event: MigrationEvent) -> None:
+        """Render the RollbackSummary table and gate on user confirmation."""
+        summary_obj = None
+        if event.detail is not None:
+            summary_obj = event.detail.get("summary")
+        if summary_obj is None:
+            # Defensive — engine should always send a summary; if not, just proceed.
+            self.pause_event.set()
+            return
+
+        # mypy: we know this is a RollbackSummary from the engine event.
+        summary: RollbackSummary = summary_obj  # type: ignore[assignment]
+        self.last_summary = summary
+
+        console.print("\n[bold]Pre-Rollback Review[/]")
+
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Item", style="cyan")
+        table.add_column("Count", justify="right")
+        table.add_row("Server", f"{summary.stoat_server_name} ({summary.stoat_server_id})")
+        table.add_row("Channels to delete", str(len(summary.channels_to_delete)))
+        table.add_row("Roles to delete", str(len(summary.roles_to_delete)))
+        table.add_row("Emoji to delete", str(len(summary.emoji_to_delete)))
+        table.add_row("Categories to clean", str(summary.categories_to_clean))
+        table.add_row("Untracked-Ferry-suspect channels", str(len(summary.untracked_ferry_suspect)))
+        if summary.autumn_orphan_count > 0:
+            table.add_row("Autumn orphan uploads (NOT deleted)", str(summary.autumn_orphan_count))
+        if summary.has_failures_from_prior_run:
+            table.add_row("Prior-run failures present", "yes")
+        console.print(table)
+
+        if summary.untracked_ferry_suspect:
+            console.print(
+                "\n[bold yellow]Untracked-Ferry-suspect channels[/] "
+                "(present on Stoat, absent from state.json):"
+            )
+            suspect_table = Table(show_header=True, header_style="bold")
+            suspect_table.add_column("Name", style="cyan")
+            suspect_table.add_column("Created (UTC)")
+            suspect_table.add_column("Stoat ID", style="dim")
+            for s in summary.untracked_ferry_suspect:
+                # Display-layer translation: None -> "unknown" so users don't see literal "None".
+                created = s.created_at_iso if s.created_at_iso is not None else "unknown"
+                name = s.name if s.name else "(no name available)"
+                suspect_table.add_row(name, created, s.stoat_id)
+            console.print(suspect_table)
+
+        if self.skip_confirmations:
+            # --yes: don't delete untracked suspects (safe default), proceed.
+            console.print(
+                "[dim]--yes: skipping per-item opt-in; proceeding with mapped entities only[/]"
+            )
+            self.pause_event.set()
+            return
+
+        try:
+            click.confirm("\nProceed with rollback?", abort=True)
+        except click.exceptions.Abort:
+            # Aborting click.confirm raises Abort which exits the program.
+            # We won't reach here, but for clarity we'd need cancel handling.
+            raise
+
+        # Per-item opt-in for untracked suspects.
+        for suspect in summary.untracked_ferry_suspect:
+            created = suspect.created_at_iso if suspect.created_at_iso is not None else "unknown"
+            name = suspect.name if suspect.name else "(no name available)"
+            suspect.opted_in = click.confirm(
+                f"Also delete untracked channel '{name}' "
+                f"(created {created}, id {suspect.stoat_id})?",
+                default=False,
+            )
+
+        self.pause_event.set()
+
+    def _render_final(self, summary_obj: object) -> None:
+        """Render the final progress dataclass (RollbackProgress) as a table."""
+        # The engine emits the RollbackProgress dataclass directly in detail["summary"].
+        if summary_obj is None:
+            return
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Item", style="cyan")
+        table.add_column("Count", justify="right")
+        table.add_row("Channels deleted", str(getattr(summary_obj, "channels_deleted", 0)))
+        table.add_row(
+            "Untracked channels deleted",
+            str(getattr(summary_obj, "untracked_channels_deleted", 0)),
+        )
+        table.add_row("Roles deleted", str(getattr(summary_obj, "roles_deleted", 0)))
+        table.add_row("Emoji deleted", str(getattr(summary_obj, "emoji_deleted", 0)))
+        cats_done = "yes" if getattr(summary_obj, "categories_cleaned", False) else "no"
+        table.add_row("Categories cleaned", cats_done)
+        failures = getattr(summary_obj, "failures", []) or []
+        table.add_row("Failures", str(len(failures)))
+        console.print("\n[bold]Rollback complete[/]")
+        console.print(table)
+        if failures:
+            console.print("\n[bold red]Failures:[/]")
+            for f in failures:
+                status = f.http_status if f.http_status is not None else "n/a"
+                console.print(
+                    f"  [red]- {f.entity_type} {f.stoat_id} (HTTP {status})[/]: {f.error}"
+                )
+
+
+@main.command(name="rollback")
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False),
+    required=True,
+    help="Directory containing state.json from the migration to roll back",
+)
+@click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
+@click.option(
+    "--token",
+    envvar="STOAT_TOKEN",
+    default=None,
+    help="Stoat user token (from browser Local Storage)",
+)
+@click.option(
+    "--server-id",
+    default=None,
+    help="Override the Stoat server ID from state.json (rarely needed)",
+)
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt(s)")
+@click.option(
+    "--force-unlock",
+    is_flag=True,
+    default=False,
+    help="Override a stale [FERRY_LOCK:...] marker on the target server",
+)
+@click.option(
+    "--max-concurrent-requests",
+    default=5,
+    type=int,
+    help="Max concurrent channel DELETEs (default 5)",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def rollback_cmd(
+    output_dir: str,
+    stoat_url: str | None,
+    token: str | None,
+    server_id: str | None,
+    yes: bool,
+    force_unlock: bool,
+    max_concurrent_requests: int,
+    verbose: bool,
+) -> None:
+    """Reverse a recorded migration by deleting Ferry-created entities.
+
+    Reads ``state.json`` from --output-dir and deletes the Stoat entities
+    listed there: channels, roles, custom emoji, and Ferry-owned categories.
+    Idempotent: 404 responses are treated as "already deleted" and re-runs
+    are clean no-ops. Autumn-hosted attachments are NOT removed (no public
+    DELETE endpoint).
+    """
+    load_dotenv()
+
+    if not stoat_url:
+        console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
+        sys.exit(1)
+    if not token:
+        console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
+        sys.exit(1)
+
+    out_path = Path(output_dir)
+    try:
+        state = load_state(out_path)
+    except StateError as exc:
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {exc}")
+        sys.exit(2)
+
+    config = FerryConfig(
+        export_dir=out_path,  # not used by rollback but required by dataclass
+        stoat_url=stoat_url,
+        token=token,
+        output_dir=out_path,
+        server_id=server_id or state.stoat_server_id or None,
+        skip_export=True,
+        force_unlock=force_unlock,
+        max_concurrent_requests=max_concurrent_requests,
+        verbose=verbose,
+    )
+
+    async def _runner() -> None:
+        pause_event = asyncio.Event()
+        cancel_event = asyncio.Event()
+        config.pause_event = pause_event
+        config.cancel_event = cancel_event
+        tracker = _RollbackProgressTracker(
+            pause_event=pause_event,
+            skip_confirmations=yes,
+            verbose=verbose,
+        )
+        await run_rollback(config, state, exports=[], on_event=tracker.on_event)
+
+        # Exit code reflects rollback outcome.
+        if state.rollback_progress is not None and state.rollback_progress.failures:
+            sys.exit(1)
+
+    console.print("[bold]Discord Ferry[/] — starting rollback\n")
+    try:
+        asyncio.run(_runner())
+    except MigrationError as exc:
+        console.print(f"\n[bold red]Rollback failed:[/] {exc}")
+        sys.exit(1)
+    except click.exceptions.Abort:
+        console.print("\n[yellow]Aborted.[/]")
+        sys.exit(130)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/] State saved — re-run to resume.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

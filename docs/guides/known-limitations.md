@@ -91,6 +91,17 @@ These limitations relate to platform-level features that either work differently
 
 ---
 
+## Rollback
+
+| Limitation | Why | Workaround |
+|------------|-----|------------|
+| **Autumn objects are not removed by rollback** | Stoat's Autumn file store has no public DELETE endpoint. Uploaded attachments, avatars, and emoji images uploaded by a migration become orphan files on the Autumn server. | None — the orphans are inaccessible from Stoat's UI once their parent channels/messages/emoji are deleted, but they continue to consume Autumn storage on the host. Contact the Stoat instance admin if cleanup is critical. The rollback confirmation summary reports the orphan count. |
+| **Editing categories during rollback may overwrite your changes** | The final category cleanup PATCH is last-write-wins. Rollback fetches the current categories array, filters out Ferry-owned entries, and PATCHes the remainder back. Any category edits you make between rollback's fetch and PATCH are overwritten. | The window is typically a few seconds; on large servers it can extend to the duration of the channel + role + emoji deletion phases (~minutes). Don't edit categories while a rollback is running. |
+| **Rollback does not delete the Stoat server itself** | Out of scope per design — Ferry never calls `DELETE /servers/{id}`. Rollback's job is to remove what Ferry created inside the server, not to delete the user's container. | Delete the server manually in Stoat's UI if you want a clean slate. |
+| **Rollback cannot run without a `state.json`** | The rollback engine reads entity IDs from `state.json` (`channel_map`, `role_map`, `emoji_map`, `category_map`). Without it, nothing to delete safely. | If you lose `state.json` but want to clean up, you'll need to identify and delete Ferry-created entities manually. |
+
+---
+
 ## See Also
 
 - [Troubleshooting](troubleshooting.md) — solutions for common migration errors

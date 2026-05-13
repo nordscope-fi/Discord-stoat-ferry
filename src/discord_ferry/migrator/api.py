@@ -88,6 +88,7 @@ async def _api_request(
     json_data: dict[str, Any] | None = None,
     *,
     extra_headers: dict[str, str] | None = None,
+    expected_404_ok: bool = False,
 ) -> dict[str, Any]:
     """Make an authenticated API request with retry on 429/5xx.
 
@@ -102,6 +103,11 @@ async def _api_request(
         token: Stoat session token for the x-session-token header.
         json_data: Optional JSON body. Not sent for GET requests.
         extra_headers: Additional HTTP headers to merge into the request.
+        expected_404_ok: When True, a 404 response is treated as functional
+            success — returns ``{}``, resets ``_circuit_state.consecutive_failures``
+            and decays ``_rate_multiplier`` identically to a 204. Used by
+            rollback DELETE wrappers so idempotent re-runs don't prime the
+            circuit breaker.
 
     Returns:
         Parsed JSON response as a dict.
@@ -112,10 +118,22 @@ async def _api_request(
     if _request_semaphore is not None:
         async with _request_semaphore:
             return await _api_request_inner(
-                session, method, url, token, json_data, extra_headers=extra_headers
+                session,
+                method,
+                url,
+                token,
+                json_data,
+                extra_headers=extra_headers,
+                expected_404_ok=expected_404_ok,
             )
     return await _api_request_inner(
-        session, method, url, token, json_data, extra_headers=extra_headers
+        session,
+        method,
+        url,
+        token,
+        json_data,
+        extra_headers=extra_headers,
+        expected_404_ok=expected_404_ok,
     )
 
 
@@ -127,6 +145,7 @@ async def _api_request_inner(
     json_data: dict[str, Any] | None = None,
     *,
     extra_headers: dict[str, str] | None = None,
+    expected_404_ok: bool = False,
 ) -> dict[str, Any]:
     """Core request logic with exponential backoff and circuit breaker."""
     global _rate_multiplier  # noqa: PLW0603
@@ -157,7 +176,7 @@ async def _api_request_inner(
                     ):
                         _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
                     return await resp.json()  # type: ignore[no-any-return]
-                if resp.status == 204:
+                if resp.status == 204 or (resp.status == 404 and expected_404_ok):
                     _circuit_state.consecutive_failures = 0
                     # Decay the rate multiplier gradually on successful requests.
                     if _rate_multiplier > 1.0 and not any(
@@ -631,3 +650,50 @@ async def api_set_channel_default_permissions(
     return await _api_request(
         session, "PUT", url, token, {"permissions": {"allow": allow, "deny": deny}}
     )
+
+
+async def api_delete_channel(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+) -> None:
+    """Delete a channel by ID.
+
+    Uses DELETE /channels/{channel_id}. A 404 response is treated as success
+    (idempotent re-rolls) via ``expected_404_ok=True``.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
+    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+
+
+async def api_delete_role(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+    role_id: str,
+) -> None:
+    """Delete a role from a server.
+
+    Uses DELETE /servers/{server_id}/roles/{role_id}. A 404 response is
+    treated as success (idempotent re-rolls) via ``expected_404_ok=True``.
+    """
+    url = f"{stoat_url.rstrip('/')}/servers/{server_id}/roles/{role_id}"
+    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+
+
+async def api_delete_emoji(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    emoji_id: str,
+) -> None:
+    """Delete a custom emoji.
+
+    Uses DELETE /custom/emoji/{emoji_id}. A 404 response is treated as success
+    (idempotent re-rolls) via ``expected_404_ok=True``. Requires
+    ``ManageCustomisation`` permission at the server level.
+    """
+    url = f"{stoat_url.rstrip('/')}/custom/emoji/{emoji_id}"
+    await _api_request(session, "DELETE", url, token, expected_404_ok=True)

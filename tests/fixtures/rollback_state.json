@@ -1,0 +1,57 @@
+{
+  "role_map": {
+    "d_role_1": "role01",
+    "d_role_2": "role02",
+    "d_role_3": "role03"
+  },
+  "channel_map": {
+    "d_ch_1": "ch01",
+    "d_ch_2": "ch02",
+    "d_ch_3": "ch03",
+    "d_ch_4": "ch04",
+    "d_ch_5": "ch05"
+  },
+  "category_map": {
+    "d_cat_1": "cat_uuid_1",
+    "d_cat_2": "cat_uuid_2"
+  },
+  "message_map": {},
+  "emoji_map": {
+    "d_em_1": "em01",
+    "d_em_2": "em02"
+  },
+  "avatar_cache": {},
+  "upload_cache": {},
+  "author_names": {},
+  "pending_pins": [],
+  "pending_reactions": [],
+  "errors": [],
+  "warnings": [],
+  "stoat_server_id": "srv01",
+  "autumn_url": "https://autumn.test",
+  "current_phase": "report",
+  "completed_channel_ids": ["d_ch_1", "d_ch_2", "d_ch_3", "d_ch_4", "d_ch_5"],
+  "channel_message_offsets": {},
+  "attachments_uploaded": 0,
+  "attachments_skipped": 0,
+  "reactions_applied": 0,
+  "pins_applied": 0,
+  "started_at": "2026-05-13T10:00:00+00:00",
+  "completed_at": "2026-05-13T10:05:00+00:00",
+  "is_dry_run": false,
+  "export_completed": true,
+  "autumn_uploads": {},
+  "referenced_autumn_ids": [],
+  "failed_messages": [],
+  "validation_results": {},
+  "prior_messages_total": 0,
+  "forum_channel_members": {},
+  "forum_category_names": {},
+  "channel_message_counts": {},
+  "forum_index_message_ids": {},
+  "embeds_total": 0,
+  "embeds_dropped": 0,
+  "replies_linked": 0,
+  "replies_total": 0,
+  "rollback_progress": null
+}

@@ -457,3 +457,239 @@ def test_confirm_event_handled() -> None:
     )
     # Should not raise
     tracker.on_event(event)
+
+
+# ---------------------------------------------------------------------------
+# Rollback subcommand (issue #10)
+# ---------------------------------------------------------------------------
+
+
+def _write_rollback_state(tmp_path: Path) -> None:
+    """Copy the rollback_state.json fixture into tmp_path."""
+    fixture = Path(__file__).parent / "fixtures" / "rollback_state.json"
+    (tmp_path / "state.json").write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "message_map.json").write_text("{}", encoding="utf-8")
+
+
+def test_rollback_help(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["rollback", "--help"])
+    assert result.exit_code == 0
+    assert "--output-dir" in result.output
+    assert "--force-unlock" in result.output
+
+
+def test_rollback_missing_state_file(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-32: empty output dir → exit code 2, error message about state.json."""
+    result = runner.invoke(
+        main,
+        [
+            "rollback",
+            "--output-dir",
+            str(tmp_path),
+            "--yes",
+            "--stoat-url",
+            "http://localhost",
+            "--token",
+            "test-token",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 2
+    assert "state.json" in result.output
+
+
+def test_rollback_missing_url(runner: CliRunner, tmp_path: Path) -> None:
+    _write_rollback_state(tmp_path)
+    result = runner.invoke(
+        main,
+        ["rollback", "--output-dir", str(tmp_path), "--token", "test-token"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    assert "--stoat-url is required" in result.output
+
+
+def test_rollback_missing_token(runner: CliRunner, tmp_path: Path) -> None:
+    _write_rollback_state(tmp_path)
+    result = runner.invoke(
+        main,
+        ["rollback", "--output-dir", str(tmp_path), "--stoat-url", "http://localhost"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    assert "--token is required" in result.output
+
+
+def test_rollback_calls_engine_yes_flag(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-2: CLI happy path with --yes — calls run_rollback with correct config."""
+    _write_rollback_state(tmp_path)
+    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id="srv01"))
+    with patch("discord_ferry.cli.run_rollback", mock_engine):
+        result = runner.invoke(
+            main,
+            [
+                "rollback",
+                "--output-dir",
+                str(tmp_path),
+                "--yes",
+                "--stoat-url",
+                "http://localhost",
+                "--token",
+                "test-token",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    mock_engine.assert_called_once()
+    config = mock_engine.call_args[0][0]
+    assert config.stoat_url == "http://localhost"
+    assert config.token == "test-token"
+    assert config.output_dir == tmp_path
+    assert config.server_id == "srv01"  # loaded from state.json
+    assert config.skip_export is True
+    assert config.force_unlock is False
+    assert config.pause_event is not None  # engine needs this for the confirm gate
+
+
+def test_rollback_force_unlock(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-29: --force-unlock propagates to FerryConfig."""
+    _write_rollback_state(tmp_path)
+    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id="srv01"))
+    with patch("discord_ferry.cli.run_rollback", mock_engine):
+        result = runner.invoke(
+            main,
+            [
+                "rollback",
+                "--output-dir",
+                str(tmp_path),
+                "--yes",
+                "--force-unlock",
+                "--stoat-url",
+                "http://localhost",
+                "--token",
+                "test-token",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    config = mock_engine.call_args[0][0]
+    assert config.force_unlock is True
+
+
+def test_rollback_exit_code_on_failures(runner: CliRunner, tmp_path: Path) -> None:
+    """Exit code 1 when state.rollback_progress.failures is non-empty."""
+    _write_rollback_state(tmp_path)
+    from discord_ferry.state import RollbackFailure, RollbackProgress
+
+    async def fake_rollback(config: object, state: MigrationState, **kw: object) -> MigrationState:
+        # Simulate engine writing a failure to state.
+        state.rollback_progress = RollbackProgress(
+            failures=[
+                RollbackFailure(entity_type="channel", stoat_id="ch1", error="x", http_status=403)
+            ]
+        )
+        return state
+
+    with patch("discord_ferry.cli.run_rollback", fake_rollback):
+        result = runner.invoke(
+            main,
+            [
+                "rollback",
+                "--output-dir",
+                str(tmp_path),
+                "--yes",
+                "--stoat-url",
+                "http://localhost",
+                "--token",
+                "test-token",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 1
+
+
+def test_rollback_engine_error(runner: CliRunner, tmp_path: Path) -> None:
+    """Engine MigrationError → exit 1 with error message."""
+    _write_rollback_state(tmp_path)
+    mock_engine = AsyncMock(side_effect=MigrationError("Lock conflict"))
+    with patch("discord_ferry.cli.run_rollback", mock_engine):
+        result = runner.invoke(
+            main,
+            [
+                "rollback",
+                "--output-dir",
+                str(tmp_path),
+                "--yes",
+                "--stoat-url",
+                "http://localhost",
+                "--token",
+                "test-token",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 1
+    assert "Lock conflict" in result.output
+
+
+def test_rollback_tracker_renders_suspect_columns() -> None:
+    """SC-33: Rich table renders created_at + stoat_id columns for untracked suspects."""
+    import asyncio as _asyncio
+    import io
+
+    from rich.console import Console as _Console
+
+    from discord_ferry.cli import _RollbackProgressTracker
+    from discord_ferry.core.events import MigrationEvent as _Event
+    from discord_ferry.review import RollbackSummary, UntrackedSuspectChannel
+
+    # Capture stdout via a fresh Console.
+    buf = io.StringIO()
+    fake_console = _Console(file=buf, force_terminal=False, no_color=True, width=140)
+
+    suspects = [
+        UntrackedSuspectChannel(
+            stoat_id="01KPTJT1G00123456789ABCDEF",
+            name="orphan-room",
+            created_at_iso="2026-04-22T12:32:00+00:00",
+        ),
+        UntrackedSuspectChannel(
+            stoat_id="not-a-ulid-id-here",  # falls back to "unknown"
+            name="weird-id",
+            created_at_iso=None,
+        ),
+    ]
+    summary = RollbackSummary(
+        stoat_server_id="srv01",
+        stoat_server_name="Target",
+        channels_to_delete=[],
+        untracked_ferry_suspect=suspects,
+        roles_to_delete=[],
+        emoji_to_delete=[],
+        categories_to_clean=0,
+        autumn_orphan_count=0,
+        has_failures_from_prior_run=False,
+    )
+
+    pause = _asyncio.Event()
+    tracker = _RollbackProgressTracker(pause_event=pause, skip_confirmations=True)
+    # Patch the module-level console reference inside _render_summary_and_prompt.
+    with patch("discord_ferry.cli.console", fake_console):
+        tracker.on_event(
+            _Event(
+                phase="rollback",
+                status="confirm_rollback",
+                message="review",
+                detail={"summary": summary},
+            )
+        )
+
+    out = buf.getvalue()
+    # Suspect columns: name, created_at, stoat_id.
+    assert "orphan-room" in out
+    assert "2026-04-22T12:32:00+00:00" in out
+    assert "01KPTJT1G00123456789ABCDEF" in out
+    # Non-ULID fallback to "unknown".
+    assert "unknown" in out
+    assert "not-a-ulid-id-here" in out
+    # --yes mode releases the gate.
+    assert pause.is_set()

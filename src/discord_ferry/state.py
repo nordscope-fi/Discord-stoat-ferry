@@ -22,6 +22,36 @@ class FailedMessage:
 
 
 @dataclass
+class RollbackFailure:
+    """A single entity that failed to delete during rollback."""
+
+    entity_type: str  # "channel" | "role" | "emoji" | "category"
+    stoat_id: str
+    error: str
+    http_status: int | None = None
+
+
+@dataclass
+class RollbackProgress:
+    """Progress + DLQ for an in-flight or completed rollback.
+
+    ``rolled_back_ids`` is the source of truth for what's already been deleted
+    (or already-404'd). ``channel_map`` / ``role_map`` / ``emoji_map`` are NEVER
+    mutated by rollback — they preserve the migration's audit trail.
+    """
+
+    channels_deleted: int = 0
+    roles_deleted: int = 0
+    emoji_deleted: int = 0
+    categories_cleaned: bool = False
+    untracked_channels_deleted: int = 0
+    rolled_back_ids: set[str] = field(default_factory=set)
+    failures: list[RollbackFailure] = field(default_factory=list)
+    started_at: str = ""
+    completed_at: str = ""
+
+
+@dataclass
 class MigrationState:
     """Tracks all ID mappings and progress for resume support."""
 
@@ -109,6 +139,11 @@ class MigrationState:
     replies_linked: int = 0
     replies_total: int = 0
 
+    # Rollback tracking (S8 — issue #10). ``None`` when no rollback has been
+    # attempted; populated incrementally by ``run_rollback``. Forensic-preserving:
+    # the entity maps above are never mutated by rollback.
+    rollback_progress: RollbackProgress | None = None
+
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
     """Save migration state to state.json using atomic write.
@@ -174,6 +209,14 @@ def load_state(output_dir: Path) -> MigrationState:
 
 
 def _state_to_dict(state: MigrationState) -> dict[str, Any]:
+    rp_data: dict[str, Any] | None
+    if state.rollback_progress is not None:
+        rp_data = dataclasses.asdict(state.rollback_progress)
+        # set → list for JSON.
+        rp_data["rolled_back_ids"] = sorted(state.rollback_progress.rolled_back_ids)
+    else:
+        rp_data = None
+
     return {
         "role_map": state.role_map,
         "channel_map": state.channel_map,
@@ -213,10 +256,29 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "embeds_dropped": state.embeds_dropped,
         "replies_linked": state.replies_linked,
         "replies_total": state.replies_total,
+        "rollback_progress": rp_data,
     }
 
 
 def _dict_to_state(data: dict[str, Any]) -> MigrationState:
+    rp_data = data.get("rollback_progress")
+    rollback_progress: RollbackProgress | None
+    if rp_data is None:
+        rollback_progress = None
+    else:
+        failures = [RollbackFailure(**f) for f in rp_data.get("failures", [])]
+        rollback_progress = RollbackProgress(
+            channels_deleted=rp_data.get("channels_deleted", 0),
+            roles_deleted=rp_data.get("roles_deleted", 0),
+            emoji_deleted=rp_data.get("emoji_deleted", 0),
+            categories_cleaned=rp_data.get("categories_cleaned", False),
+            untracked_channels_deleted=rp_data.get("untracked_channels_deleted", 0),
+            rolled_back_ids=set(rp_data.get("rolled_back_ids", [])),
+            failures=failures,
+            started_at=rp_data.get("started_at", ""),
+            completed_at=rp_data.get("completed_at", ""),
+        )
+
     try:
         return MigrationState(
             role_map=data.get("role_map", {}),
@@ -257,6 +319,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             embeds_dropped=data.get("embeds_dropped", 0),
             replies_linked=data.get("replies_linked", 0),
             replies_total=data.get("replies_total", 0),
+            rollback_progress=rollback_progress,
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e
