@@ -1,7 +1,7 @@
 site_name: Discord Ferry
 site_description: Migrate Discord servers to Stoat (formerly Revolt)
-repo_url: https://github.com/psthubhorizon/Discord-stoat-ferry
-repo_name: psthubhorizon/Discord-stoat-ferry
+repo_url: https://github.com/nordscope-fi/Discord-stoat-ferry
+repo_name: nordscope-fi/Discord-stoat-ferry
 theme:
   name: material
   palette:
