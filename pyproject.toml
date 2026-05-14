@@ -41,8 +41,8 @@ ferry-gui = "discord_ferry.gui:main"
 ferry-desktop = "discord_ferry.gui:main"
 
 [project.urls]
-Homepage = "https://github.com/psthubhorizon/Discord-stoat-ferry"
-Issues = "https://github.com/psthubhorizon/Discord-stoat-ferry/issues"
+Homepage = "https://github.com/nordscope-fi/Discord-stoat-ferry"
+Issues = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues"
 
 [project.optional-dependencies]
 native = [

@@ -8,7 +8,7 @@ Pick your operating system below to get started.
 
 === "Windows"
 
-    1. Go to the [Discord Ferry releases page](https://github.com/psthubhorizon/Discord-stoat-ferry/releases) on GitHub.
+    1. Go to the [Discord Ferry releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases) on GitHub.
     2. Under the latest release, click **Ferry.exe** to download it.
     3. Double-click **Ferry.exe** to run it. Your browser will open automatically.
 
@@ -26,7 +26,7 @@ Pick your operating system below to get started.
 
 === "macOS"
 
-    1. Go to the [Discord Ferry releases page](https://github.com/psthubhorizon/Discord-stoat-ferry/releases) on GitHub.
+    1. Go to the [Discord Ferry releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases) on GitHub.
     2. Under the latest release, click **Ferry-macos-arm64.zip** to download it.
     3. Unzip the downloaded file.
     4. Drag the **Ferry.app** icon into your **Applications** folder.
@@ -113,4 +113,4 @@ sudo apt install python3.11
 ```
 
 !!! tip "Still stuck?"
-    Open an issue on the [Discord Ferry GitHub page](https://github.com/psthubhorizon/Discord-stoat-ferry/issues) and include the error message you saw. Someone from the community will help you out.
+    Open an issue on the [Discord Ferry GitHub page](https://github.com/nordscope-fi/Discord-stoat-ferry/issues) and include the error message you saw. Someone from the community will help you out.

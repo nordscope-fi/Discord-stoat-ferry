@@ -11,7 +11,7 @@ Thank you for your interest in contributing!
 
 ## Development setup
 
-1. Clone the repo: `git clone https://github.com/psthubhorizon/Discord-stoat-ferry.git`
+1. Clone the repo: `git clone https://github.com/nordscope-fi/Discord-stoat-ferry.git`
 2. Install uv: `pip install uv`
 3. Install dependencies: `uv sync --all-extras`
 4. Run tests: `uv run pytest`

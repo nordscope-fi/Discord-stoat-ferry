@@ -104,7 +104,7 @@ This page covers the most common problems encountered during migration, their ca
 |---|---|
 | **Symptom** | Windows Defender or another antivirus quarantines or blocks `ferry.exe` |
 | **Cause** | Ferry is packaged as a single-file app using PyInstaller (a Python packaging tool). These self-extracting apps are frequently flagged as false positives by antivirus software because the extraction technique resembles some malware behavior. |
-| **Solution** | Add `ferry.exe` to your antivirus exclusion list. If your organization's policy prevents this, use the Python source distribution instead: clone the [GitHub repository](https://github.com/psthubhorizon/Discord-stoat-ferry) and install with `uv pip install .`, then run with `ferry` directly. The source distribution is not affected by this issue. |
+| **Solution** | Add `ferry.exe` to your antivirus exclusion list. If your organization's policy prevents this, use the Python source distribution instead: clone the [GitHub repository](https://github.com/nordscope-fi/Discord-stoat-ferry) and install with `uv pip install .`, then run with `ferry` directly. The source distribution is not affected by this issue. |
 
 ### macOS "app is damaged and can't be opened"
 
