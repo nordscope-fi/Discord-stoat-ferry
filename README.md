@@ -11,8 +11,8 @@
 
 | Platform | Download | Size |
 |----------|----------|------|
-| **Windows** | [Ferry.exe](https://github.com/psthubhorizon/Discord-stoat-ferry/releases/latest/download/Ferry-windows-x86_64.exe) | ~25 MB |
-| **macOS** | [Ferry.zip](https://github.com/psthubhorizon/Discord-stoat-ferry/releases/latest/download/Ferry-macos-arm64.zip) | ~25 MB |
+| **Windows** | [Ferry.exe](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-windows-x86_64.exe) | ~25 MB |
+| **macOS** | [Ferry.zip](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-macos-arm64.zip) | ~25 MB |
 | **Linux / pip** | `pipx install discord-ferry` | ~2 MB |
 
 ---
@@ -99,6 +99,7 @@ Ferry is built to handle large migrations safely:
 - **Message splitting** — messages over 2000 characters are split, not truncated
 - **Migration lock** — prevents two Ferry instances from targeting the same server
 - **Circuit breaker** — automatic backoff on API failures, no indefinite blocking
+- **Rollback** — undo a migration with one command (or one click in the GUI) — deletes Ferry-created channels, roles, and emoji from the Stoat server
 
 ---
 

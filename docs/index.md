@@ -71,6 +71,7 @@ Ferry is built to handle large migrations safely:
 - **Message splitting** — messages over 2000 characters are split, not truncated
 - **Migration lock** — prevents two Ferry instances from targeting the same server
 - **Circuit breaker** — automatic backoff on API failures, no indefinite blocking
+- **Rollback** — undo a migration with `ferry rollback` (or the GUI "Rollback this migration" button) — deletes Ferry-created channels, roles, and emoji from the Stoat server
 - **Server blueprints** — export your server structure as a reusable template
 
 ---

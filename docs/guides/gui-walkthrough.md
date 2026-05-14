@@ -248,3 +248,14 @@ Click **Open Report** to open the migration report in your browser. Two report f
 
 - `migration_report.md` — a human-readable summary you can share with your community
 - `report.json` — a machine-readable report with full error details and ID mappings
+
+### Rollback this migration
+
+If you want to undo the migration, click **Rollback this migration**. Ferry shows a confirmation dialog with the counts of channels, roles, custom emoji, and Ferry-owned categories it will delete from the Stoat target server. Any **untracked Ferry-suspect** channels — channels present on the Stoat server but missing from Ferry's state file, likely orphans from a previous crashed migration — are listed separately so you can opt in to each one individually before proceeding.
+
+Rollback is idempotent — if it's interrupted, just click the button again and it picks up where it left off. The migration's `state.json` and entity maps are preserved as a forensic audit trail; deletions are tracked in a separate `rollback_progress.rolled_back_ids` field.
+
+!!! note "What rollback does not delete"
+    Uploaded attachments, avatars, and emoji images remain on Stoat's Autumn file store — Autumn has no public DELETE endpoint. The rollback summary reports the orphan count. The Stoat server itself is never deleted; rollback only removes what Ferry created inside it.
+
+The same operation is available on the CLI as `ferry rollback --output-dir <path>` — see the [CLI reference](cli-reference.md#ferry-rollback) for full options.
