@@ -138,23 +138,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Resilience**: Oversized attachments are pre-checked against size limits before upload attempt, with text placeholder injected into message content.
 - **Resilience**: Expired CDN URLs produce `[Attachment expired: filename]` placeholder in message content instead of silent failure.
 
-## [Unreleased]
-
-### Changed
-
-- Docs accuracy pass: correct false CLI flag references (`--max-concurrent-channels`, `--reaction-mode`, `--min-thread-messages`, `--checkpoint-interval`, `--max-concurrent-requests`) — these are GUI-only settings not yet exposed as Click options. Added "GUI Only Options" section to CLI reference. Updated large-servers, self-hosted-tips, known-limitations, and pre-flight-checklist to reflect accurate availability.
-- Docs readability pass: split overwhelming 35-row feature table in README and index.md into "What gets migrated" (data table) and "Reliability features" (bulleted list). Updated pre-flight time estimates from v1 sequential to v2 parallel defaults.
-- Fix broken mkdocs rendering: code fence `title=` attribute in cli-reference.md and self-hosted-tips.md requires `pymdownx.superfences` (not configured) — replaced with comment-based titles. Bottom half of CLI reference page was rendering as raw markdown on the live docs site.
-- Plain English audit across all user-facing docs: define jargon on first use (CLI, JSON, API, CDN, DCE, token, terminal, developer tools), add parenthetical explanations for technical terms, use direct language throughout.
-- Comprehensive architecture doc rewrite (`docs/reference/architecture.md`): expanded from ~200 lines to ~1200 lines covering every module, data model, migration phase, API pattern, async design, and design decision.
-- Clean up public repo: remove internal design docs, briefs, and plans from git tracking; move community files to `.github/`; gitignore local dev config.
-
-### Fixed
-
-- Fix misleading "bot token" terminology across entire project: GUI labels, CLI help, all user-facing docs, code comments, and reference docs now consistently say "user token" with plain-English explanations for non-technical users. Expanded token setup guide with step-by-step browser instructions and Local Storage troubleshooting.
-- Exclude internal design docs (`docs/plans/`, brief) from public docs site via `exclude_docs`.
-- Add dark/light mode toggle and GitHub repo link to docs site theme.
-
 ## [1.4.0] — 2026-03-09
 
 ### Fixed
