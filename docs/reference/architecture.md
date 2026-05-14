@@ -28,7 +28,9 @@ that configure the engine, subscribe to its event stream, and render progress in
 
 ## CI / Build Tooling
 
-All Ferry workflows run on the Node 24 GitHub Actions runtime as of v2.1.1, ahead of GitHub's June 2026 Node 20 retirement. Action pins follow the lowest-Node-24-major principle (for example, `actions/checkout@v6` and `actions/upload-artifact@v5`) to minimise behavior delta versus the previous Node 20 versions. The `pypa/gh-action-pypi-publish` step is Docker-based and unaffected by Node runtime deprecation.
+All Ferry workflows run on the Node 24 GitHub Actions runtime as of v2.1.2, ahead of GitHub's June 2026 Node 20 retirement. Action pins follow the lowest-Node-24-major principle (for example, `actions/checkout@v6` and `actions/upload-artifact@v6`) to minimise behavior delta versus the previous Node 20 versions. The `pypa/gh-action-pypi-publish` step is Docker-based and unaffected by Node runtime deprecation.
+
+The `auto-tag.yml` → `release.yml` cascade — tag pushes from `auto-tag.yml` automatically firing `release.yml` to build binaries and publish to PyPI — is enabled (as of v2.1.3) by a GitHub App (`Ferry Auto-Tag Bot`, owned by `nordscope-fi`, installed on this repo only with `Contents: Read and write` permission). The App's credentials (`AUTO_TAG_APP_CLIENT_ID` variable + `AUTO_TAG_APP_PRIVATE_KEY` secret) live in the `auto-tag` GitHub Environment. At runtime, `auto-tag.yml` mints a ~1-hour installation token via `actions/create-github-app-token@v3` and passes it to `actions/checkout@v6`'s `token:` input — the resulting tag push originates from the App identity (not `GITHUB_TOKEN`), so it triggers downstream workflows. If the App is deleted or the credentials revoked, `auto-tag.yml` silently regresses to no-cascade; the manual `git push --delete origin v<tag>` + re-push protocol remains the fallback.
 
 ---
 
