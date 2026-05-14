@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-05-14
+
+### Fixed
+
+- **CI hygiene correction — `upload-artifact` and `download-artifact` were still on Node 20 in v2.1.1**: the v2.1.1 pins `actions/upload-artifact@v5` and `actions/download-artifact@v6` were chosen based on release-notes wording ("supports Node v24.x") that turned out to mean *compatible with Node 24 runners*, not *runs on Node 24 by default*. The action.yml's `runs.using:` field is authoritative — for `upload-artifact` that flipped from `node20` to `node24` at v6.0.0; for `download-artifact` at v7.0.0. GitHub's release.yml run for v2.1.1 surfaced this with a `Node.js 20 actions are deprecated` annotation. Bumped both pins to their actual lowest Node-24 majors: `upload-artifact@v5 → @v6`, `download-artifact@v6 → @v7`. All other v2.1.1 pins (`checkout@v6`, `setup-uv@v7`, `upload-pages-artifact@v5`, `deploy-pages@v5`, `action-gh-release@v3`) were verified against `action.yml` and are genuinely on Node 24.
+
 ## [2.1.1] - 2026-05-14
 
 ### Changed

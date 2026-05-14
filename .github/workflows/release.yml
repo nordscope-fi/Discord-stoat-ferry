@@ -47,7 +47,7 @@ jobs:
         run: mv dist/Ferry.exe dist/Ferry-windows-x86_64.exe
         shell: bash
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: ferry-windows
           path: dist/Ferry-windows-x86_64.exe
@@ -83,7 +83,7 @@ jobs:
       - name: Zip .app bundle
         run: cd dist && zip -r ../Ferry-macos-arm64.zip Ferry.app
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: ferry-macos
           path: Ferry-macos-arm64.zip
@@ -104,13 +104,13 @@ jobs:
           enable-cache: true
 
       - name: Download Windows artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: ferry-windows
           path: release-assets/
 
       - name: Download macOS artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: ferry-macos
           path: release-assets/
