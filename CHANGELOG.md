@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-05-14
+
+### Changed
+
+- **CI hygiene — Node 20 → Node 24 Actions runtime**: bumped every Node-20 `actions/*` reference across all four workflows (`ci.yml`, `release.yml`, `auto-tag.yml`, `docs.yml`) to its lowest version that ships Node 24, ahead of GitHub's June 2026 runtime retirement. Specifically: `actions/checkout@v4 → @v6`, `actions/upload-artifact@v4 → @v5`, `actions/download-artifact@v4 → @v6`, `actions/upload-pages-artifact@v3 → @v5`, `actions/deploy-pages@v4 → @v5`, `astral-sh/setup-uv@v5/@v6 → @v7` (also fixes the version drift in `docs.yml`), `softprops/action-gh-release@v2 → @v3`. `pypa/gh-action-pypi-publish` unchanged (Docker action, unaffected). No user-visible code changes; pure CI maintenance.
+
 ## [2.1.0] - 2026-05-14
 
 ### Features

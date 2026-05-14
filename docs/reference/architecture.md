@@ -26,6 +26,12 @@ that configure the engine, subscribe to its event stream, and render progress in
 
 ---
 
+## CI / Build Tooling
+
+All Ferry workflows run on the Node 24 GitHub Actions runtime as of v2.1.1, ahead of GitHub's June 2026 Node 20 retirement. Action pins follow the lowest-Node-24-major principle (for example, `actions/checkout@v6` and `actions/upload-artifact@v5`) to minimise behavior delta versus the previous Node 20 versions. The `pypa/gh-action-pypi-publish` step is Docker-based and unaffected by Node runtime deprecation.
+
+---
+
 ## Project Layout
 
 ```
