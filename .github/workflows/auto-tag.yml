@@ -10,12 +10,21 @@ jobs:
   auto-tag:
     name: Create tag if version changed
     runs-on: ubuntu-latest
+    environment: auto-tag
     permissions:
       contents: write
     steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AUTO_TAG_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTO_TAG_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Check for version bump
         id: version

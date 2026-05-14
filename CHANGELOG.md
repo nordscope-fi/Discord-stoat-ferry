@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **GITHUB_TOKEN cascade gap closed (Option C)**: `auto-tag.yml` now uses a GitHub App installation token (minted via `actions/create-github-app-token@v3`) instead of the default `GITHUB_TOKEN` for tag pushes. The default token by GitHub safety does NOT trigger downstream workflows — three sequential releases (v2.1.0, v2.1.1, v2.1.2) all required a manual `git push --delete origin v<tag>` + re-push protocol to fire `release.yml`. After this fix, `v*.*.*` tag pushes from `auto-tag.yml` fire `release.yml` automatically. Credentials live in the new `auto-tag` GitHub Environment (`AUTO_TAG_APP_CLIENT_ID` variable + `AUTO_TAG_APP_PRIVATE_KEY` secret). The App (`Ferry Auto-Tag Bot`, owned by `nordscope-fi`, installed on this repo only) has `Contents: Read and write` permission — minimum scope. No user-visible code changes.
+
 ## [2.1.2] - 2026-05-14
 
 ### Fixed
