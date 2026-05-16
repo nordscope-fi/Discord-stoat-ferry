@@ -10,6 +10,7 @@ calls parse_dce_line on each decoded stdout line and dispatches on the union.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -87,9 +88,24 @@ class Raw:
 ParsedDceLine = PerChannel | Phase | Success | Banner | StatusDot | Error | Raw
 
 
+_PHASE_PATTERNS: tuple[tuple[PhaseKind, re.Pattern[str]], ...] = (
+    ("fetching_channels", re.compile(r"^Fetching channels\.\.\.$")),
+    ("fetching_threads", re.compile(r"^Fetching threads\.\.\.$")),
+    ("fetched_channels", re.compile(r"^Fetched (?P<n>\d+) channel\(s\)\.$")),
+    ("fetched_threads", re.compile(r"^Fetched (?P<n>\d+) thread\(s\)\.$")),
+    ("exporting_header", re.compile(r"^Exporting (?P<n>\d+) channel\(s\)\.\.\.$")),
+)
+
+
 def parse_dce_line(line: str) -> ParsedDceLine:
     """Map one DCE stdout line to a typed ParsedDceLine.
 
     Total function: every input maps to some result; never raises.
     """
+    for kind, pattern in _PHASE_PATTERNS:
+        match = pattern.match(line)
+        if match:
+            count = int(match.group("n")) if "n" in match.groupdict() and match.group("n") else None
+            return Phase(kind=kind, count=count, message=line)
+
     return Raw(message=line)

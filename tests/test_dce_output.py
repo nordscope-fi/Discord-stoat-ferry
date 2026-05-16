@@ -8,6 +8,7 @@ import pytest
 
 from discord_ferry.exporter.dce_output import (
     PerChannel,
+    Phase,
     Raw,
     parse_dce_line,
 )
@@ -27,3 +28,37 @@ class TestModuleShape:
     def test_parse_dce_line_is_total_on_empty_string(self) -> None:
         result = parse_dce_line("")
         assert isinstance(result, Raw)
+
+
+class TestPhaseParsing:
+    def test_phase_fetching_channels(self) -> None:
+        result = parse_dce_line("Fetching channels...")
+        assert isinstance(result, Phase)
+        assert result.kind == "fetching_channels"
+        assert result.count is None
+        assert result.message == "Fetching channels..."
+
+    def test_phase_fetched_channels(self) -> None:
+        result = parse_dce_line("Fetched 142 channel(s).")
+        assert isinstance(result, Phase)
+        assert result.kind == "fetched_channels"
+        assert result.count == 142
+
+    def test_phase_fetching_threads(self) -> None:
+        result = parse_dce_line("Fetching threads...")
+        assert isinstance(result, Phase)
+        assert result.kind == "fetching_threads"
+        assert result.count is None
+
+    def test_phase_fetched_threads(self) -> None:
+        result = parse_dce_line("Fetched 87 thread(s).")
+        assert isinstance(result, Phase)
+        assert result.kind == "fetched_threads"
+        assert result.count == 87
+
+    def test_phase_exporting_header(self) -> None:
+        result = parse_dce_line("Exporting 229 channel(s)...")
+        assert isinstance(result, Phase)
+        assert result.kind == "exporting_header"
+        assert result.count == 229
+        assert result.message == "Exporting 229 channel(s)..."
