@@ -45,7 +45,7 @@ claude_log/
 
 # Internal design docs (kept locally, not in public repo)
 docs/plans/
-docs/superpowers/plans/
+docs/superpowers/
 docs/discord-ferry-claude-code-brief.md
 
 # MkDocs build output
