@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.1.6] - 2026-05-16
+
+### Fixed
+
+- **Open Report button now works on Windows** (#38). Previously, the GUI's "Open report" action tried to invoke `xdg-open` on Windows (`sys.platform == "win32"` falls into the non-darwin branch), which doesn't exist — the click silently failed with a `ui.notify` toast. Replaced with a three-branch platform check using `os.startfile(path)` on Windows. Bundled audit confirmed `xdg-open` was the only Windows-incompat bug in `src/` (full grep results in `docs/superpowers/specs/2026-05-15-issue-38-windows-compat-audit-design.md`); no other code paths needed changes.
+
 ## [2.1.5] - 2026-05-16
 
 ### Fixed
