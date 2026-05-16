@@ -18,6 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - **`reporter._calculate_duration` → `reporter.calculate_duration`**: promoted from private to public (with docstring) so `stats.py` and `reporter.py` share one implementation of the ISO-8601 elapsed-seconds helper. No behavioural change; pure rename + docstring + return-literal-tightening (`0` → `0.0`) for mypy strict mode.
 
+### Known Issues
+
+- **Unsanitized error messages in `state.errors` (pre-existing)**: audit during 2.2.0 ship-review found that `state.errors.append` callsites in `migrator/emoji.py:296`, `migrator/reactions.py:112`, `migrator/pins.py:83`, `migrator/messages.py:382`, and `core/engine.py:599` do **not** wrap their messages with `_safe_error` / `config.token_store.sanitize` — meaning a Stoat/Discord/Autumn exception whose `repr()` happens to contain a token (e.g. token-in-URL leak from a misconfigured HTTP library) would land in `state.json` unredacted. This pre-existing exposure also affects `reporter.generate_markdown_report` (which renders `state.errors` verbatim) and on-disk inspection of `state.json` itself. The new `ferry stats` command surfaces these errors via a truncated 80-char preview, making the exposure more discoverable but not creating new ingress. **Follow-up**: a separate PR will wrap all `state.errors.append` callsites in the migrator with `_safe_error`. The fix belongs in the engine, not in stats consumers — stats was deliberately designed without `FerryConfig`/`token_store` access. Until then, treat `ferry-output/state.json` as sensitive (it always has been).
+
 ## [2.2.2] - 2026-05-16
 
 ### Added

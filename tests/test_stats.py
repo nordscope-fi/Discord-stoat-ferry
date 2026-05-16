@@ -278,7 +278,7 @@ def _summary_with_overrides(**overrides: object) -> StateSummary:
     return replace(base, **overrides)
 
 
-def test_build_stats_table_title_includes_server_name() -> None:
+def test_build_stats_table_title_includes_stoat_server_id() -> None:
     summary = summarize_state(_full_state())
     table = _build_stats_table(summary)
     assert table.title is not None
@@ -388,9 +388,12 @@ def test_stats_happy_path_exits_zero(runner: CliRunner, tmp_path: object) -> Non
     assert "01HXYZSERVER" in result.output
 
 
-def test_stats_missing_dir_exits_nonzero_no_traceback(runner: CliRunner) -> None:
+def test_stats_missing_dir_exits_two_no_traceback(runner: CliRunner) -> None:
+    # Click's `Path(exists=True)` validation rejects missing paths with exit
+    # code 2 (UsageError) before the function body runs. Asserting the
+    # specific code catches regressions if Click's behaviour changes.
     result = runner.invoke(main, ["stats", "/nonexistent/path/to/nowhere"])
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert "Traceback" not in result.output
 
 
