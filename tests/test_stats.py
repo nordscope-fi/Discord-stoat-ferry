@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from discord_ferry.cli import _build_channels_table, _build_rollback_table, _build_stats_table
 from discord_ferry.state import MigrationState, RollbackProgress
 from discord_ferry.stats import FidelityBlock, RollbackBlock, StateSummary, summarize_state
 
@@ -259,3 +260,83 @@ def test_summarize_state_no_errors_no_warnings_renders_none() -> None:
     assert summary.error_count == 0
     assert summary.last_error is None
     assert summary.last_warning is None
+
+
+def _summary_with_overrides(**overrides: object) -> StateSummary:
+    base = summarize_state(_full_state())
+    # Replace named fields without subclassing
+    from dataclasses import replace
+
+    return replace(base, **overrides)
+
+
+def test_build_stats_table_title_includes_server_name() -> None:
+    summary = summarize_state(_full_state())
+    table = _build_stats_table(summary)
+    assert table.title is not None
+    assert "01HXYZSERVER" in table.title
+
+
+def test_build_stats_table_dry_run_badge_in_title() -> None:
+    summary = _summary_with_overrides(is_dry_run=True)
+    table = _build_stats_table(summary)
+    assert table.title is not None
+    assert "[DRY-RUN]" in table.title
+
+
+def test_build_stats_table_no_dry_run_badge_when_false() -> None:
+    summary = summarize_state(_full_state())
+    table = _build_stats_table(summary)
+    assert table.title is not None
+    assert "[DRY-RUN]" not in table.title
+
+
+def test_build_channels_table_returns_none_when_breakdown_empty() -> None:
+    summary = _summary_with_overrides(channel_breakdown={})
+    assert _build_channels_table(summary) is None
+
+
+def test_build_channels_table_returns_table_when_populated() -> None:
+    summary = summarize_state(_full_state())
+    table = _build_channels_table(summary)
+    assert table is not None
+    assert table.row_count >= 1
+
+
+def test_build_rollback_table_returns_none_when_absent() -> None:
+    summary = summarize_state(_full_state())  # _full_state has no rollback
+    assert _build_rollback_table(summary) is None
+
+
+def test_build_rollback_table_returns_table_when_present() -> None:
+    state = _full_state()
+    state.rollback_progress = RollbackProgress(
+        channels_deleted=5,
+        roles_deleted=2,
+        emoji_deleted=8,
+        categories_cleaned=True,
+        untracked_channels_deleted=0,
+        started_at="2026-05-16T11:00:00",
+        completed_at="2026-05-16T11:01:00",
+    )
+    summary = summarize_state(state)
+    table = _build_rollback_table(summary)
+    assert table is not None
+    assert table.row_count >= 1
+
+
+def test_build_stats_table_truncates_long_error() -> None:
+    long_msg = "x" * 200
+    state = _full_state()
+    state.errors = [{"phase": "MESSAGES", "message": long_msg}]
+    summary = summarize_state(state)
+    table = _build_stats_table(summary)
+    # Render to string via Rich's Console capture
+    from rich.console import Console
+
+    console = Console(width=120, record=True)
+    console.print(table)
+    rendered = console.export_text()
+    # The 200-char string should not appear in full; should be truncated to ~80.
+    assert long_msg not in rendered
+    assert "x" * 80 in rendered or "…" in rendered

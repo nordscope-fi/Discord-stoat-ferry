@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import textwrap
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
     from discord_ferry.review import RollbackSummary
+    from discord_ferry.stats import StateSummary
 
 console = Console()
 
@@ -86,6 +88,127 @@ def _build_validate_table(exports: list[DCEExport]) -> Table:
     table.add_row("Custom Emoji", str(len(emoji_ids)))
     table.add_row("Threads/Forums", str(threads))
 
+    return table
+
+
+def _build_stats_table(summary: StateSummary) -> Table:
+    """Build the main migration-stats summary table.
+
+    Renders entity counts, message counters, fidelity score with sub-scores,
+    error/warning summary with truncated last-message preview, and elapsed
+    duration with trinary state handling.
+    """
+    dry_tag = " [DRY-RUN]" if summary.is_dry_run else ""
+    title = f"Migration Stats — {summary.server_name}{dry_tag}"
+
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("Section / Item", style="cyan")
+    table.add_column("Value", justify="right")
+
+    # Entities
+    table.add_row("[bold]Entities[/]", "")
+    table.add_row("  Channels", str(summary.channels))
+    table.add_row("  Roles", str(summary.roles))
+    table.add_row("  Categories", str(summary.categories))
+    table.add_row("  Emojis", str(summary.emojis))
+    table.add_row("  Messages migrated", f"{summary.messages:,}")
+
+    # Counters
+    table.add_row("[bold]Counters[/]", "")
+    table.add_row("  Attachments uploaded", f"{summary.attachments_uploaded:,}")
+    table.add_row("  Attachments skipped", f"{summary.attachments_skipped:,}")
+    table.add_row("  Pins applied", str(summary.pins_applied))
+    table.add_row("  Reactions applied", f"{summary.reactions_applied:,}")
+    table.add_row(
+        "  Replies linked / total",
+        f"{summary.replies_linked:,} / {summary.replies_total:,}",
+    )
+    table.add_row(
+        "  Embeds total / dropped",
+        f"{summary.embeds_total:,} / {summary.embeds_dropped:,}",
+    )
+    table.add_row("  Failed messages", str(summary.failed_messages))
+    table.add_row("  Prior messages total", f"{summary.prior_messages_total:,}")
+
+    # Fidelity
+    fb = summary.fidelity
+    table.add_row("[bold]Fidelity[/]", "")
+    table.add_row("  Overall", f"{fb.overall:.1f}%")
+    table.add_row("  Messages", f"{fb.messages:.1f}%")
+    table.add_row("  Attachments", f"{fb.attachments:.1f}%")
+    table.add_row("  Embeds", f"{fb.embeds:.1f}%" if fb.embeds is not None else "n/a")
+    table.add_row("  Replies", f"{fb.replies:.1f}%" if fb.replies is not None else "n/a")
+    table.add_row("  Reactions", f"{fb.reactions:.1f}%" if fb.reactions is not None else "n/a")
+
+    # Errors / warnings
+    table.add_row("[bold]Errors / Warnings[/]", "")
+    if summary.error_count == 0:
+        table.add_row("  Errors", "0 (clean)")
+    else:
+        preview = textwrap.shorten(summary.last_error or "", width=80, placeholder="…")
+        table.add_row("  Errors", f"{summary.error_count} — last: {preview}")
+    if summary.warning_count == 0:
+        table.add_row("  Warnings", "0 (clean)")
+    else:
+        preview = textwrap.shorten(summary.last_warning or "", width=80, placeholder="…")
+        table.add_row("  Warnings", f"{summary.warning_count} — last: {preview}")
+
+    # Elapsed
+    table.add_row("[bold]Timing[/]", "")
+    if summary.duration_state == "complete":
+        secs = int(summary.duration_seconds or 0)
+        hh = secs // 3600
+        mm = (secs % 3600) // 60
+        ss = secs % 60
+        table.add_row("  Elapsed", f"{hh:02d}:{mm:02d}:{ss:02d}")
+    elif summary.duration_state == "in_progress":
+        table.add_row("  Elapsed", "in progress")
+    else:
+        table.add_row("  Elapsed", "unknown")
+
+    return table
+
+
+def _build_channels_table(summary: StateSummary) -> Table | None:
+    """Per-channel message breakdown. Returns None when no channels recorded."""
+    if not summary.channel_breakdown:
+        return None
+
+    sorted_items = sorted(
+        summary.channel_breakdown.items(),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    top = sorted_items[:20]
+    remainder = len(sorted_items) - len(top)
+
+    table = Table(title="Per-Channel Messages", show_header=True, header_style="bold")
+    table.add_column("Channel ID", style="cyan")
+    table.add_column("Messages", justify="right")
+    for ch_id, count in top:
+        table.add_row(ch_id, f"{count:,}")
+    if remainder > 0:
+        table.add_row(f"+{remainder} more", "")
+    return table
+
+
+def _build_rollback_table(summary: StateSummary) -> Table | None:
+    """Rollback counters table. Returns None when no rollback recorded."""
+    rb = summary.rollback
+    if rb is None:
+        return None
+
+    table = Table(title="Rollback", show_header=True, header_style="bold")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value", justify="right")
+    table.add_row("Channels deleted", str(rb.channels_deleted))
+    table.add_row("Roles deleted", str(rb.roles_deleted))
+    table.add_row("Emoji deleted", str(rb.emoji_deleted))
+    table.add_row("Categories cleaned", "yes" if rb.categories_cleaned else "no")
+    table.add_row("Untracked channels deleted", str(rb.untracked_channels_deleted))
+    table.add_row("Failures", str(rb.failure_count))
+    table.add_row("Started at", rb.started_at or "—")
+    table.add_row("Completed at", rb.completed_at or "—")
     return table
 
 
