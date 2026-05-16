@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,7 @@ from discord_ferry.exporter.dce_output import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from discord_ferry.config import FerryConfig
@@ -205,6 +207,63 @@ def _emit_for_parsed(
             )
 
 
+async def _heartbeat(
+    process: asyncio.subprocess.Process,
+    on_event: EventCallback,
+    process_start: float,
+    get_last_activity: Callable[[], float],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    initial_interval: float = 60.0,
+    max_interval: float = 300.0,
+) -> None:
+    """Emit `status="heartbeat"` events during prolonged DCE silence.
+
+    Adaptive backoff: first fires at `initial_interval` (60s) seconds of silence,
+    then doubles after each consecutive fire, capped at `max_interval` (300s).
+    Any "real activity" (detected by the caller via `get_last_activity`) resets
+    the schedule back to the baseline interval.
+
+    The `sleep` and `monotonic` callables are injectable so tests can drive a
+    fake clock without monkey-patching the global `asyncio.sleep` (which would
+    break the stdout/stderr `async for` loops, `process.wait()`, and aiohttp).
+    """
+    interval = initial_interval
+    last_fire_at = process_start
+    try:
+        while process.returncode is None:
+            now = monotonic()
+            silence = now - get_last_activity()
+            # Activity since the last heartbeat fire -> reset to baseline.
+            if get_last_activity() > last_fire_at:
+                interval = initial_interval
+            if silence >= interval:
+                elapsed_min = int((now - process_start) / 60)
+                silence_sec = int(silence)
+                on_event(
+                    MigrationEvent(
+                        phase="export",
+                        status="heartbeat",
+                        message=(
+                            f"Still working - DCE has been running for {elapsed_min} min, "
+                            f"no new output for {silence_sec}s..."
+                        ),
+                    )
+                )
+                last_fire_at = now
+                interval = min(interval * 2, max_interval)
+                # Sleep at least a short tick before the next check after firing.
+                await sleep(min(10.0, interval))
+                continue
+            # Adaptive: wake up at most when the next fire could occur, but no
+            # less than 1s and no more than 10s, so cancellation stays snappy.
+            remaining = max(1.0, min(10.0, interval - silence))
+            await sleep(remaining)
+    except asyncio.CancelledError:
+        return
+
+
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     """Platform-aware subprocess termination.
 
@@ -311,6 +370,16 @@ async def run_dce_export(
         creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP,
     )
 
+    process_start = time.monotonic()
+    last_activity = process_start
+
+    def _record_activity() -> None:
+        nonlocal last_activity
+        last_activity = time.monotonic()  # noqa: F821 -- nonlocal is intentional
+
+    def _get_last_activity() -> float:
+        return last_activity
+
     # DCE prints nothing while it enumerates the guild's channels — on large
     # servers that pre-output phase can run several minutes and previously
     # left the GUI looking frozen on the last emitted status.
@@ -339,6 +408,9 @@ async def run_dce_export(
                 stderr_lines.append(line)
 
     stderr_task = asyncio.create_task(_read_stderr())
+    heartbeat_task = asyncio.create_task(
+        _heartbeat(process, on_event, process_start, _get_last_activity)
+    )
 
     try:
         while True:
@@ -372,6 +444,8 @@ async def run_dce_export(
             logger.debug("DCE: %s", line)
             parsed = parse_dce_line(line)
             _emit_for_parsed(parsed, on_event, state)
+            if isinstance(parsed, (PerChannel, Phase, Success, Raw)):
+                _record_activity()
 
         await process.wait()
 
@@ -379,9 +453,12 @@ async def run_dce_export(
         await _terminate_process(process)
         raise
     finally:
-        # IMPORTANT: cancel stderr_task BEFORE awaiting it so a hung _read_stderr
-        # does not deadlock the cleanup. Heartbeat-style tasks (#39) follow this
-        # same pattern.
+        # IMPORTANT: cancel heartbeat_task FIRST so it cannot fire a false
+        # "Still working" event after stdout drains but before process.wait()
+        # records returncode. Then drain stderr.
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
         if not stderr_task.done():
             stderr_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
