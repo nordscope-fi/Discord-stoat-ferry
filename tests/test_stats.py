@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from discord_ferry.cli import _build_channels_table, _build_rollback_table, _build_stats_table
 from discord_ferry.state import MigrationState, RollbackProgress
 from discord_ferry.stats import FidelityBlock, RollbackBlock, StateSummary, summarize_state
@@ -340,3 +342,108 @@ def test_build_stats_table_truncates_long_error() -> None:
     # The 200-char string should not appear in full; should be truncated to ~80.
     assert long_msg not in rendered
     assert "x" * 80 in rendered or "…" in rendered
+
+
+import json  # noqa: E402
+
+from click.testing import CliRunner
+
+from discord_ferry.cli import main
+
+
+def _write_state_json(tmp_path: object, state: MigrationState) -> object:
+    """Persist a state to an output dir for CliRunner tests."""
+    from pathlib import Path
+
+    from discord_ferry.state import save_state
+
+    out = Path(str(tmp_path)) / "ferry-out"  # type: ignore[arg-type]
+    out.mkdir(parents=True, exist_ok=True)
+    save_state(state, out)
+    return out
+
+
+@pytest.fixture()
+def runner() -> CliRunner:
+    return CliRunner()
+
+
+def test_stats_help_lists_subcommand(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "stats" in result.output
+
+
+def test_stats_command_help_prints(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["stats", "--help"])
+    assert result.exit_code == 0
+    assert "OUTPUT_DIR" in result.output
+
+
+def test_stats_happy_path_exits_zero(runner: CliRunner, tmp_path: object) -> None:
+    out = _write_state_json(tmp_path, _full_state())
+    result = runner.invoke(main, ["stats", str(out)])
+    assert result.exit_code == 0
+    assert "Migration Stats" in result.output
+    assert "Fidelity" in result.output
+    assert "01HXYZSERVER" in result.output
+
+
+def test_stats_missing_dir_exits_nonzero_no_traceback(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["stats", "/nonexistent/path/to/nowhere"])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+
+
+def test_stats_corrupt_state_exits_one_no_traceback(runner: CliRunner, tmp_path: object) -> None:
+    from pathlib import Path
+
+    out = Path(str(tmp_path)) / "ferry-out"  # type: ignore[arg-type]
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "state.json").write_text("not valid json {{{", encoding="utf-8")
+    result = runner.invoke(main, ["stats", str(out)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "Error" in result.output
+
+
+def test_stats_dry_run_badge_appears_in_output(runner: CliRunner, tmp_path: object) -> None:
+    state = _full_state()
+    state.is_dry_run = True
+    out = _write_state_json(tmp_path, state)
+    result = runner.invoke(main, ["stats", str(out)])
+    assert result.exit_code == 0
+    assert "[DRY-RUN]" in result.output
+
+
+def test_stats_rollback_section_appears_when_present(runner: CliRunner, tmp_path: object) -> None:
+    state = _full_state()
+    state.rollback_progress = RollbackProgress(
+        channels_deleted=3,
+        roles_deleted=1,
+        emoji_deleted=2,
+        categories_cleaned=True,
+        untracked_channels_deleted=0,
+        started_at="2026-05-16T11:00:00",
+        completed_at="2026-05-16T11:01:00",
+    )
+    out = _write_state_json(tmp_path, state)
+    result = runner.invoke(main, ["stats", str(out)])
+    assert result.exit_code == 0
+    assert "Rollback" in result.output
+
+
+def test_stats_channels_section_appears_when_populated(runner: CliRunner, tmp_path: object) -> None:
+    out = _write_state_json(tmp_path, _full_state())
+    result = runner.invoke(main, ["stats", str(out)])
+    assert result.exit_code == 0
+    assert "Per-Channel Messages" in result.output
+
+
+def test_stats_channels_section_omitted_when_empty(runner: CliRunner, tmp_path: object) -> None:
+    state = _full_state()
+    state.channel_message_counts = {}
+    out = _write_state_json(tmp_path, state)
+    result = runner.invoke(main, ["stats", str(out)])
+    assert result.exit_code == 0
+    assert "Per-Channel Messages" not in result.output

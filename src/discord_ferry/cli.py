@@ -22,6 +22,7 @@ from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
 from discord_ferry.state import load_state
+from discord_ferry.stats import summarize_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
@@ -809,6 +810,35 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
         f"({len(bp.categories)} categories, "
         f"{sum(len(c.channels) for c in bp.categories) + len(uncategorized)} channels)"
     )
+
+
+@main.command()
+@click.argument("output_dir", type=click.Path(exists=True))
+def stats(output_dir: str) -> None:
+    """Print aggregate stats for a completed (or in-progress) migration.
+
+    Reads state.json from OUTPUT_DIR and renders entity counts, message
+    counters, fidelity score, error/warning summary, optional per-channel
+    breakdown, optional rollback section, and elapsed duration.
+
+    Exits 1 with a single-line error on missing or corrupt state.json.
+    """
+    try:
+        state = load_state(Path(output_dir))
+    except StateError as e:
+        console.print(f"[red]Error:[/] {e}")
+        sys.exit(1)
+
+    summary = summarize_state(state)
+    console.print(_build_stats_table(summary))
+
+    channels_table = _build_channels_table(summary)
+    if channels_table is not None:
+        console.print(channels_table)
+
+    rollback_table = _build_rollback_table(summary)
+    if rollback_table is not None:
+        console.print(rollback_table)
 
 
 class _RollbackProgressTracker:
