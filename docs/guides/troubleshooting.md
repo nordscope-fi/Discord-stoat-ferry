@@ -247,8 +247,9 @@ If your issue is not listed here:
 
 1. Run `ferry validate` on your export and check the warnings output — it often points directly to the problem.
 2. Run the migration with `--verbose` (CLI) to get per-message detail in the log.
-3. Check the migration report in `ferry-output/` for a full list of errors and warnings.
-4. Open an issue on the Discord Ferry GitHub repository and include the relevant section of your log output.
+3. Run `ferry stats <output-dir>` after a failed or partial migration to see the aggregate picture: counts, fidelity score, and a truncated preview of the most recent error — often faster than scanning `state.json` by hand. See the [CLI reference](cli-reference.md#ferry-stats).
+4. Check the migration report in `ferry-output/` for a full list of errors and warnings.
+5. Open an issue on the Discord Ferry GitHub repository and include the relevant section of your log output.
 
 !!! warning "Before sharing logs"
     Review your log output before sharing it publicly. Logs may contain channel names, user display names, or message content from your server. Redact any sensitive information before posting.

@@ -9,7 +9,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has four top-level commands: `migrate`, `validate`, `build`, and `export-blueprint`.
+Ferry has six top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, and `stats`.
 
 ---
 
@@ -342,3 +342,55 @@ ferry rollback --output-dir ./ferry-output --force-unlock
 
 !!! warning "Categories cleanup is last-write-wins"
     The final category cleanup PATCH is a "fetch then replace" operation. If you edit categories in Stoat's UI while rollback is running, your edits in the window between rollback's fetch and PATCH may be overwritten. The window is typically a few seconds; longer on large servers. See `known-limitations.md`.
+
+---
+
+## `ferry stats`
+
+Print aggregate stats for a completed (or in-progress) migration. Read-only — loads `state.json` and `message_map.json` from the output directory and renders a Rich-table summary to the console. Makes **zero network calls** — no Stoat, Discord, or Autumn API.
+
+Use this after a migration has finished (or after a crash) to see what got migrated, what failed, and how close you came to a perfect fidelity score, without re-running anything.
+
+```
+ferry stats OUTPUT_DIR
+```
+
+`OUTPUT_DIR` is the path to a directory containing `state.json` (typically `./ferry-output/`).
+
+### What gets rendered
+
+A single Rich table titled `Migration Stats — Stoat ID: <id>` with these sections:
+
+- **Entities** — counts of channels, roles, categories, emojis, and messages migrated.
+- **Counters** — attachments uploaded/skipped, pins applied, reactions applied, replies linked/total, embeds total/dropped, failed messages, prior messages total.
+- **Fidelity** — the overall fidelity score plus five sub-scores (messages, attachments, embeds, replies, reactions). Sub-scores render as `n/a` when the corresponding category had no items in the migration (e.g., a server with no custom embeds).
+- **Errors / Warnings** — counts plus a truncated 80-character preview of the most recent message in each list.
+- **Timing** — elapsed wall-clock as `HH:MM:SS` when the migration completed, `in progress` when it was interrupted before completion, or `unknown` when timestamps are unavailable.
+
+Two optional sub-sections render only when present in the state:
+
+- **Per-Channel Messages** — top 20 channels by message count, with a `+N more` footer if applicable. Omitted when no per-channel counts are recorded.
+- **Rollback** — counters from `state.rollback_progress` (channels deleted, roles deleted, categories cleaned, failures). Omitted when no rollback was performed.
+
+When the migration was a dry-run, the title carries a `[DRY-RUN]` badge.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Stats rendered successfully |
+| `1` | `state.json` is missing inside `OUTPUT_DIR` or contains invalid JSON |
+| `2` | `OUTPUT_DIR` does not exist (Click validation error) |
+
+### Examples
+
+```bash
+# Stats from the default output directory
+ferry stats ./ferry-output/
+
+# Stats from a specific run's output
+ferry stats ~/migrations/my-server-2026-05-15/
+```
+
+!!! note "What stats does NOT do"
+    `ferry stats` is read-only. It does not write to `state.json`, does not call any API, and does not modify the Stoat server. For a richer Markdown report including the original Discord export context, use the `migration_report.md` file written into the output directory by `ferry migrate` — it includes fields that require the original DCE exports to compute.

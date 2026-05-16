@@ -91,7 +91,7 @@ def generate_report(
     Returns:
         The report dict that was serialised to disk.
     """
-    duration_seconds = _calculate_duration(state.started_at, state.completed_at)
+    duration_seconds = calculate_duration(state.started_at, state.completed_at)
 
     source_guild: dict[str, str]
     if exports:
@@ -295,15 +295,28 @@ def _build_checklist(
     return items
 
 
-def _calculate_duration(started_at: str, completed_at: str) -> float:
+def calculate_duration(started_at: str, completed_at: str) -> float:
+    """Compute elapsed seconds between two ISO-8601 timestamps.
+
+    Returns 0.0 when either timestamp is empty or cannot be parsed.
+    Used by both ``reporter.generate_markdown_report`` and
+    ``stats.summarize_state`` so the two surfaces agree on duration math.
+
+    Args:
+        started_at: ISO-8601 timestamp string for migration start.
+        completed_at: ISO-8601 timestamp string for migration end.
+
+    Returns:
+        Elapsed seconds as a float. 0.0 if either input is missing or invalid.
+    """
     if not started_at or not completed_at:
-        return 0
+        return 0.0
     try:
         start = datetime.fromisoformat(started_at)
         end = datetime.fromisoformat(completed_at)
         return (end - start).total_seconds()
     except ValueError:
-        return 0
+        return 0.0
 
 
 def generate_markdown_report(
