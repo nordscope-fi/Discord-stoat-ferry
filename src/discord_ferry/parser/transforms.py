@@ -207,7 +207,7 @@ def flatten_embed(
             fvalue = str(field_obj.get("value", ""))
             if not fname and not fvalue:
                 continue
-            is_inline = bool(field_obj.get("inline", False))
+            is_inline = bool(field_obj.get("isInline", False))
             if is_inline:
                 inline_row.append((fname, fvalue))
                 if len(inline_row) >= 3:
