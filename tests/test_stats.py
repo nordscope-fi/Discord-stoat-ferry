@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from click.testing import CliRunner
 
-from discord_ferry.cli import _build_channels_table, _build_rollback_table, _build_stats_table
+from discord_ferry.cli import (
+    _build_channels_table,
+    _build_rollback_table,
+    _build_stats_table,
+    main,
+)
 from discord_ferry.state import MigrationState, RollbackProgress
 from discord_ferry.stats import FidelityBlock, RollbackBlock, StateSummary, summarize_state
 
@@ -342,13 +348,6 @@ def test_build_stats_table_truncates_long_error() -> None:
     # The 200-char string should not appear in full; should be truncated to ~80.
     assert long_msg not in rendered
     assert "x" * 80 in rendered or "…" in rendered
-
-
-import json  # noqa: E402
-
-from click.testing import CliRunner
-
-from discord_ferry.cli import main
 
 
 def _write_state_json(tmp_path: object, state: MigrationState) -> object:
