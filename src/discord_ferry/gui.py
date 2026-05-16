@@ -83,6 +83,22 @@ _STEP_LABELS: list[str] = ["Configure", "Export", "Validate", "Migrate", "Done"]
 # ---------------------------------------------------------------------------
 
 
+def _open_path(path: Path) -> None:
+    """Open a file in the OS default handler.
+
+    Path-with-spaces invariant: all three branches handle paths containing
+    spaces correctly because none invoke a shell. Do NOT "simplify" any branch
+    into a string command (e.g. shell=True, or `cmd /c start ...` as a single
+    string) — that re-introduces shell-parsing bugs for paths with spaces.
+    """
+    if sys.platform == "win32":
+        os.startfile(path)  # Python 3.8+ accepts Path objects
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
 def _format_bytes(n: int | float) -> str:
     """Format a byte count as a human-readable string."""
     value = float(n)
@@ -1017,8 +1033,7 @@ def migrate_page() -> None:
     def _open_report() -> None:
         if report_path:
             try:
-                opener = "open" if sys.platform == "darwin" else "xdg-open"
-                subprocess.Popen([opener, str(report_path[0])])
+                _open_path(report_path[0])  # report_path[0] is already a Path
             except Exception as exc:
                 ui.notify(f"Could not open report: {exc}", type="negative")
 
