@@ -638,6 +638,11 @@ def export_page() -> None:
                 channel_label.set_text(event.message)
             elif event.status == "error":
                 channel_label.set_text(f"Error: {event.message}")
+            elif event.status == "heartbeat":
+                # Heartbeat events surface in the log only; do not touch
+                # progress_bar or channel_label (which represent real progress
+                # and should not be perturbed by liveness pings).
+                pass  # log_display.push() already happened above
 
     async def _run_export() -> None:
         from discord_ferry.errors import DiscordAuthError, DotNetMissingError
