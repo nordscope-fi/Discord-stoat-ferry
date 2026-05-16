@@ -826,7 +826,7 @@ def stats(output_dir: str) -> None:
     try:
         state = load_state(Path(output_dir))
     except StateError as e:
-        console.print(f"[red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {e}")
         sys.exit(1)
 
     summary = summarize_state(state)
