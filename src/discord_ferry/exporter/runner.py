@@ -6,7 +6,9 @@ import asyncio
 import logging
 import re
 import shutil
+import signal
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -210,6 +212,58 @@ def _emit_for_parsed(
                     message=f"[dce] {parsed.message}",
                 )
             )
+
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    """Platform-aware subprocess termination.
+
+    POSIX: SIGTERM (process.terminate()) -- DCE has a chance to flush partial
+    JSON before exit.
+
+    Windows: CTRL_BREAK_EVENT to the child's process group (safe because we
+    spawned with CREATE_NEW_PROCESS_GROUP -- the signal targets only the child,
+    not Ferry). DCE's .NET CancelKeyPress handler runs a graceful shutdown.
+    Falls back to hard kill after 3s if the child does not exit.
+    """
+    if sys.platform == "win32":
+        try:
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        except (ValueError, OSError):
+            process.terminate()  # fallback: hard kill
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+    else:
+        process.terminate()
+        await process.wait()
+
+
+async def _drain_overlong_line(reader: asyncio.StreamReader) -> int:
+    r"""Consume bytes from `reader` until we reach `\n` (or EOF).
+
+    Used after `readuntil(b"\n")` raised LimitOverrunError to ensure the
+    remainder of the over-long line does not end up returned by the next
+    `readuntil` call as if it were its own line. Returns total bytes consumed.
+
+    Loops until either:
+      - `readuntil` finds the next `\n` (returns tail, total + len(tail))
+      - EOF is hit (IncompleteReadError, total + len(exc.partial))
+      - Another LimitOverrunError fires (consume that 64KiB chunk and keep going)
+    """
+    total = 0
+    while True:
+        try:
+            tail = await reader.readuntil(b"\n")
+            total += len(tail)
+            return total
+        except asyncio.LimitOverrunError as exc:
+            chunk = await reader.readexactly(exc.consumed)
+            total += len(chunk)
+        except asyncio.IncompleteReadError as exc:
+            total += len(exc.partial)
+            return total
 
 
 async def validate_discord_token(token: str) -> None:
