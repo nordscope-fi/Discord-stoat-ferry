@@ -1,22 +1,38 @@
 # Design: DCE parser rewrite (issue #23)
 
-**Date:** 2026-05-15 (revised 2026-05-16 after critique pass)
+**Date:** 2026-05-15 (revised 2026-05-16 after first critique pass; revised again 2026-05-16 after second critique pass)
 **Issue:** [#23](https://github.com/nordscope-fi/discord-stoat-ferry/issues/23)
 **Ships as:** v2.2.0 (minor) — single release; the original v2.1.4/v2.2.0 split was ceremony, see Phasing
 **Status:** Spec — awaiting implementation (deferred to next session per user)
 
-## Revisions from critique pass (2026-05-16)
+## Revisions from second critique pass (2026-05-16, later)
 
-The critique pass identified six critical findings + significant gaps in this spec. Resolutions:
+The second-pass critique caught implementation-blocking bugs the first revision introduced. Fixes applied:
 
-| Critique finding | Resolution in this revision |
-|------------------|---------------------------|
-| Phasing rationale collapses (v2.1.4 vs v2.2.0 split is weak semver) | **Collapsed to single v2.2.0 release** |
-| Per-channel UI bar reset is wrong UX | **Reversed: use overall progress (channels_done / total) for bar; per-channel pct in label** |
-| Cancel path on Windows unanalyzed | New section "Windows cancellation semantics" added |
-| `/tmp/dce-stdout-piped.log` already exists | Replaced "hand-derived" with "captured + hybrid-derived where uncaptured" |
+| Second-pass finding | Resolution |
+|---------------------|------------|
+| `PerChannel` regex `^.+?:\s\d+%$` non-greedy contradicts the channel-with-colon test (would match only `"category"` from `"category: subname / channel: 50%"`) | **Made regex greedy + anchored: `^(?P<channel>.+):\s(?P<pct>\d+)%$`** — backtracking lets it match the largest channel that still leaves `: <digits>%` at the end |
+| `channels_done` overshoots on DCE channel retries (a channel that hits 100%, fails, retries from 25%, hits 100% again, double-counts) | **Replaced counter with set: `state.channels_completed: set[str]`; `channels_done = len(channels_completed)`** — name dedup is structural |
+| `gui.py` changes missing from the change table | **Added row to Phasing table; new "GUI consumer changes" section** |
+| `LimitOverrunError` handler consumed `exc.consumed` bytes but left the rest of the over-long line in the buffer (next `readuntil` would return the remainder as a "line") | **Replaced with full-drain loop that keeps consuming until next `\n` (or EOF) is reached, then emits one truncated-byte-count event** |
+| `Phase.kind: str` is weaker than the rest of the union (typos slip past type checks) | **Changed to `Literal["fetching_channels", "fetched_channels", "fetching_threads", "fetched_threads", "exporting_header"]`** |
+| `_emit_for_parsed` location was tentative ("Tentative: runner.py") | **Decided: runner.py** (state lives there); removed from open questions |
+| `MigrationEvent.current/total` semantics flip from per-channel-pct to overall-channels — undocumented breaking shape | **Added explicit CHANGELOG `### Changed` entry calling this out for any external consumer** |
+| `gui.py:608-609` hard-codes `f"Exporting #{event.channel_name}..."` — `#` prefix is wrong for DCE's hierarchical names like `Information / general / my-thread` | **Spec now explicitly removes the `#` prefix in `on_export_event`; channel_label uses `f"{channel} ({pct}%)"` directly** |
+| Critique claimed `CTRL_BREAK_EVENT` signals Ferry too — actually mitigated by `CREATE_NEW_PROCESS_GROUP` (child is in its own group, signal targets only that group) | **Added clarifying paragraph in Windows cancellation section explaining the isolation** |
+
+## Revisions from first critique pass (2026-05-16)
+
+The first critique identified six critical findings + significant gaps. Resolutions:
+
+| First-pass finding | Resolution |
+|--------------------|------------|
+| Phasing rationale collapses (v2.1.4 vs v2.2.0 split is weak semver) | Collapsed to single v2.2.0 release |
+| Per-channel UI bar reset is wrong UX | Reversed: overall progress (channels_done / total) for bar; per-channel pct in label |
+| Cancel path on Windows unanalyzed | New section "Windows cancellation semantics" |
+| `/tmp/dce-stdout-piped.log` already exists | Used as captured prefix; hybrid-derived suffix from DCE source |
 | `ParsedDceLine` conflates tagged union | Restructured as per-kind dataclasses (Python 3.10 union) |
-| 64KB StreamReader limit unaddressed | New error handling for `LimitOverrunError` |
+| 64KB StreamReader limit unaddressed | Error handling for `LimitOverrunError` (full-drain in second-pass revision) |
 | Adversarial test coverage gap | Added 6 new test cases |
 | Success vs Exporting count delta | Surface as warning event |
 
@@ -65,22 +81,27 @@ New module `src/discord_ferry/exporter/dce_output.py`. The parser returns one of
 ```python
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Literal
 
 @dataclass(frozen=True, slots=True)
 class PerChannel:
     channel: str   # e.g. "Information / general / my-thread"
     pct: int       # 0-100, integer
 
+PhaseKind = Literal[
+    "fetching_channels", "fetched_channels",
+    "fetching_threads", "fetched_threads",
+    "exporting_header",
+]
+
 @dataclass(frozen=True, slots=True)
 class Phase:
     """Headline phase line from DCE.
 
-    kind is one of: 'fetching_channels', 'fetched_channels',
-    'fetching_threads', 'fetched_threads', 'exporting_header'.
     count is None for 'fetching_*' (no integer in the line),
     int for 'fetched_*' and 'exporting_header'.
     """
-    kind: str
+    kind: PhaseKind   # Literal-typed; mypy/pyright catches typos at static-check time
     count: int | None
     message: str  # original line text, for log panel display
 
@@ -117,7 +138,11 @@ def parse_dce_line(line: str) -> ParsedDceLine:
     """Pure, sync, no I/O. Maps one DCE stdout line to a typed result.
 
     Tries patterns in order:
-      1. PerChannel:   ^(?P<channel>.+?):\s(?P<pct>\d+)%$
+      1. PerChannel:   ^(?P<channel>.+):\s(?P<pct>\d+)%$
+                       (greedy + anchored — channel may itself contain colons,
+                       e.g. "category: subname / channel: 50%". Backtracking
+                       resolves to the largest channel that leaves ': <digits>%'
+                       at the end.)
       2. Phase:        Fetching/Fetched headlines + Exporting header
       3. Success:      ^Successfully exported (?P<n>\d+) channel\(s\)\.$
       4. StatusDot:    ^\.{3,}$
@@ -192,12 +217,13 @@ DCE stdout (LF-terminated UTF-8)
 
 **Reversed from the original brainstorming choice.** A 229-channel guild under per-channel-bar UX = 229 reset cycles (0->25->50->75->100->0->25->...). That's user-hostile and the "complexity defense" was false: tracking `(channels_done, total)` is one extra integer.
 
-- `Phase(kind="exporting_header", count=N)` arrives -> `state.total_channels = N`, emit `MigrationEvent(current=0, total=N, message="Exporting N channel(s)...")`.
+- `Phase(kind="exporting_header", count=N)` arrives -> `state.total_channels = N` (set-once; subsequent headers are ignored to defend against DCE retries re-emitting the header), emit `MigrationEvent(current=0, total=N, message="Exporting N channel(s)...")`.
 - Each `PerChannel(channel, pct)` event:
   - Updates `channel_label` to `f"{channel} ({pct}%)"`.
-  - When `pct == 100`, increments `state.channels_done` and emits a fresh `MigrationEvent(current=channels_done, total=total_channels, channel_name=channel, message=f"Finished {channel}")`.
-  - For `pct < 100`, emits `MigrationEvent(current=channels_done, total=total_channels, channel_name=channel, message=f"{channel}: {pct}%")` so the log gets a line but the bar value doesn't move backward.
-- The overall bar is monotonic non-decreasing.
+  - When `pct == 100`, **adds `channel` to `state.channels_completed: set[str]`** (set, not counter) and emits a fresh `MigrationEvent(current=len(channels_completed), total=total_channels, channel_name=channel, message=f"Finished {channel}")`.
+  - For `pct < 100`, emits `MigrationEvent(current=len(channels_completed), total=total_channels, channel_name=channel, message=f"{channel}: {pct}%")` so the log gets a line but the bar value doesn't move backward.
+- **Set-based dedup is structural defense against DCE channel retries.** DCE re-emits `name: 25%` from the start when a channel transient-fails and retries (verified by reading `ChannelExporter.cs` retry loop in DCE source). With a counter, the same channel hitting 100% twice would double-count and overshoot `total_channels`. With a set, idempotence is automatic.
+- The overall bar is monotonic non-decreasing (set size never shrinks).
 - The per-channel detail (`pct`) lives in the channel label, where reset is expected on channel change.
 
 ### Pre-export phase UI
@@ -210,6 +236,17 @@ Before `Exporting N channel(s)...` arrives, `state.total_channels` is `None`. Du
 ### DCE Ukraine banner
 
 Show all 11 lines in Ferry's log panel as `[dce] <line>`. No filtering, no `FUCK_RUSSIA=1` env var. User sees what DCE actually emits.
+
+### GUI consumer changes (`gui.py`)
+
+The current `on_export_event` at `gui.py:600-614` hard-codes `f"Exporting #{event.channel_name}..."` for the channel label and uses `event.current / event.total` as a 0-100 progress fraction. With #23 v2.2.0:
+
+- **Drop the `#` prefix.** DCE emits hierarchical names like `Information / general / my-thread`; prefixing with `#` produces the misleading `#Information / general / my-thread`. Use `event.message` directly when set (the parser controls the format), falling back to `event.channel_name` only if `message` is empty.
+- **`event.current / event.total` is now `channels_done / total_channels`** (per-export semantics), no longer a per-channel percentage. The fraction calculation `progress_bar.set_value(event.current / event.total)` still works correctly because the new semantics also produce a 0-1 fraction (just with different meaning) — but the user-visible label must change to reflect "channel X of Y" rather than "X% complete."
+- `channel_label` for `PerChannel` events: render as `event.message` (which the parser sets to `f"{channel} ({pct}%)"` or `f"Finished {channel}"`).
+- `channel_label` for `Phase` events: render the phase line directly (`"Fetching channels..."`, etc.) so users see the pre-export phase activity in the label, not just the log.
+
+Implementation note: `on_export_event` should `match event.status / event.message` to dispatch correctly. The single-line `log_display.push(f"[{event.status}] {event.message}")` is preserved (every event still flows to the log).
 
 ### Success vs Exporting count delta = warning
 
@@ -234,6 +271,8 @@ Two acceptable resolutions:
 1. **Accept the asymmetry.** Document in user-facing release notes: "On Windows, cancelling a running export may leave partial JSON files in the output folder; delete the export folder before retrying." Pro: zero implementation cost. Con: silently bad UX for cancel-mid-export.
 
 2. **Send `CTRL_BREAK_EVENT` instead.** Spawn DCE with `creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP` on Windows, then on cancel call `process.send_signal(signal.CTRL_BREAK_EVENT)`. .NET's default console handler for Ctrl+Break runs a graceful shutdown (CancelKeyPress event in System.Console). DCE is a normal .NET console app and should honor it; partial files are still possible but DCE has at least a chance to close handles.
+
+**Process group isolation (clarifying second-pass critique concern):** the second-pass critique flagged that `process.send_signal(CTRL_BREAK_EVENT)` could signal Ferry too if both share a console group. **`CREATE_NEW_PROCESS_GROUP` prevents this:** it places the child in its own process group (group ID = child PID), and Python's `Popen.send_signal(CTRL_BREAK_EVENT)` on Windows calls `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child_group_id)` — the signal targets only the child's group, not Ferry's. (Per CPython source `Lib/asyncio/windows_utils.py` and `_winapi.GenerateConsoleCtrlEvent` docs.) Ferry is unaffected.
 
 **Decision: option 2.** Implementation cost is ~10 lines (a `_terminate_process(process)` helper + the `creationflags` bit at spawn time). Code:
 
@@ -291,12 +330,13 @@ try:
             raw_line = exc.partial
             if not raw_line:
                 break  # clean EOF
-        except asyncio.LimitOverrunError as exc:
-            # Line longer than 64 KiB. Consume what's available and emit Raw.
-            chunk = await process.stdout.readexactly(exc.consumed)
+        except asyncio.LimitOverrunError:
+            # Line longer than 64 KiB. Drain to next \n entirely so the
+            # remainder doesn't get parsed as a separate "line".
+            consumed_total = await _drain_overlong_line(process.stdout)
             on_event(MigrationEvent(
                 phase="export", status="progress",
-                message=f"[dce] <truncated {len(chunk)} bytes; line exceeded 64 KiB>",
+                message=f"[dce] <truncated {consumed_total} bytes; line exceeded 64 KiB>",
             ))
             continue
         # ... cancel check, decode, parse, emit
@@ -308,9 +348,32 @@ finally:
         stderr_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await stderr_task
+
+
+async def _drain_overlong_line(reader: asyncio.StreamReader) -> int:
+    """Consume bytes from `reader` until we reach a `\n` (or EOF).
+
+    Used after `readuntil(b"\\n")` raised LimitOverrunError to ensure the
+    remainder of the over-long line doesn't end up returned by the next
+    `readuntil` call as if it were its own line. Returns total bytes consumed.
+    """
+    total = 0
+    while True:
+        try:
+            tail = await reader.readuntil(b"\n")
+            total += len(tail)
+            return total
+        except asyncio.LimitOverrunError as exc:
+            # Still no \n in the next 64 KiB window; consume and keep draining.
+            chunk = await reader.readexactly(exc.consumed)
+            total += len(chunk)
+        except asyncio.IncompleteReadError as exc:
+            # EOF reached without ever finding \n.
+            total += len(exc.partial)
+            return total
 ```
 
-(Switching from `async for raw_line in process.stdout` to an explicit `readuntil` loop is what gives us the seam to catch `LimitOverrunError`. The behavior on normal-length lines is identical.)
+(Switching from `async for raw_line in process.stdout` to an explicit `readuntil` loop is what gives us the seam to catch `LimitOverrunError`. The behavior on normal-length lines is identical. The `_drain_overlong_line` helper closes the second-pass-critique gap where the first revision's handler consumed only `exc.consumed` bytes and left the line's remainder in the buffer.)
 
 ## Phasing
 
@@ -332,10 +395,12 @@ Going with single v2.2.0:
 | `_terminate_process` helper with Windows `CTRL_BREAK_EVENT` path | runner.py |
 | `creationflags=CREATE_NO_WINDOW \| CREATE_NEW_PROCESS_GROUP` on Windows for both `runner.py` subprocess and `manager.py:detect_dotnet` (latter only `CREATE_NO_WINDOW`) | runner.py, manager.py |
 | `_read_stderr` task cleaned up on all exit paths via `try/finally` | runner.py |
-| Switch `async for` over stdout to explicit `readuntil` loop with `LimitOverrunError` handler | runner.py |
+| Switch `async for` over stdout to explicit `readuntil` loop with `LimitOverrunError` handler + `_drain_overlong_line` helper | runner.py |
+| **`gui.py:on_export_event` updated**: stop hard-coding `f"Exporting #{event.channel_name}..."` (the `#` prefix is wrong for DCE's hierarchical names like `Information / general / my-thread`); use `event.message` for label updates so the parser controls the format | gui.py |
+| **CHANGELOG `### Changed` entry: `MigrationEvent.current/total` semantics flip from per-channel-pct to overall-channels (channels_done / total_channels)** for export events. Any external consumer reading those fields needs to know. | CHANGELOG.md |
 | `tests/fixtures/dce_stdout_sample.txt` REPLACED with hybrid (captured prefix + source-derived suffix) fixture | fixtures |
 | New `tests/test_dce_output.py` with ~18 cases (12 happy + 6 adversarial) | new test |
-| CHANGELOG `### Changed` and `### Fixed` entries under v2.2.0 | CHANGELOG.md |
+| CHANGELOG `### Fixed` entries (parser, Windows console flash, stderr-task leak, LimitOverrunError crash) | CHANGELOG.md |
 
 ### What's NOT in this release (covered by other issues)
 
@@ -437,8 +502,11 @@ Full sequence: Ukraine banner (11 lines) -> blank -> `Fetching channels...` -> `
 
 - Exact regex for Ukraine banner detection (matches box-drawing edge characters). Decide during implementation; Banner classification is cosmetic (line still surfaces in log either way).
 - Whether to suppress the empty line after the Ukraine banner box. Cosmetic; current decision is to NOT suppress (`if not line: continue` already drops empty lines before parse).
-- Whether `_emit_for_parsed` lives in `dce_output.py` or `runner.py`. Both work; runner.py keeps the `on_event` + `_RunState` coupling local. **Tentative: runner.py** (state lives there).
-- Whether `Phase.kind` should be a `Literal[...]` type for static checking. Adds ~5 imports for marginal benefit; defer to implementation taste.
+
+## Resolved during second-pass critique
+
+- **`_emit_for_parsed` location:** **runner.py** (state lives there; coupling is local). Removed from open questions.
+- **`Phase.kind` typing:** **`Literal[...]`** (already in the dataclass definition above). The static-check value justifies the one extra import.
 
 ## Cross-references
 
