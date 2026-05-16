@@ -10,6 +10,7 @@ from discord_ferry.exporter.dce_output import (
     PerChannel,
     Phase,
     Raw,
+    Success,
     parse_dce_line,
 )
 
@@ -62,3 +63,17 @@ class TestPhaseParsing:
         assert result.kind == "exporting_header"
         assert result.count == 229
         assert result.message == "Exporting 229 channel(s)..."
+
+
+class TestSuccessParsing:
+    def test_success_typical(self) -> None:
+        result = parse_dce_line("Successfully exported 229 channel(s).")
+        assert isinstance(result, Success)
+        assert result.count == 229
+        assert result.message == "Successfully exported 229 channel(s)."
+
+    def test_success_count_zero(self) -> None:
+        # Edge case: empty server or all channels filtered out.
+        result = parse_dce_line("Successfully exported 0 channel(s).")
+        assert isinstance(result, Success)
+        assert result.count == 0

@@ -96,6 +96,8 @@ _PHASE_PATTERNS: tuple[tuple[PhaseKind, re.Pattern[str]], ...] = (
     ("exporting_header", re.compile(r"^Exporting (?P<n>\d+) channel\(s\)\.\.\.$")),
 )
 
+_SUCCESS_RE = re.compile(r"^Successfully exported (?P<n>\d+) channel\(s\)\.$")
+
 
 def parse_dce_line(line: str) -> ParsedDceLine:
     """Map one DCE stdout line to a typed ParsedDceLine.
@@ -107,5 +109,9 @@ def parse_dce_line(line: str) -> ParsedDceLine:
         if match:
             count = int(match.group("n")) if "n" in match.groupdict() else None
             return Phase(kind=kind, count=count, message=line)
+
+    success_match = _SUCCESS_RE.match(line)
+    if success_match:
+        return Success(count=int(success_match.group("n")), message=line)
 
     return Raw(message=line)
