@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.1.4] - 2026-05-16
+
+### Fixed
+
+- **Embed fields with `isInline: true` now correctly render as pipe-separated rows in migrated messages** (#36). The parser previously read the wrong key (`inline`), causing every multi-field Discord embed to render as a stacked list since v1. Verified against DCE 2.47.1 source (`JsonMessageWriter.cs:259` writes `isInline`). Re-running migration on a server with bot-posted embeds will produce visibly cleaner output. The accompanying parser-audit appendix (see spec `docs/superpowers/specs/2026-05-15-issue-36-isinline-and-parser-audit-design.md`) confirmed this was the only key-typo in `transforms.py` and `dce_parser.py`.
+
 ## [2.1.3] - 2026-05-14
 
 ### Fixed
