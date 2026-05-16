@@ -78,7 +78,7 @@ class StateSummary:
     rollback: RollbackBlock | None
     channel_breakdown: dict[str, int]
     is_dry_run: bool
-    server_name: str
+    stoat_server_id: str
     duration_seconds: float | None
     duration_state: DurationState
     current_phase: str
@@ -183,7 +183,7 @@ def summarize_state(state: MigrationState) -> StateSummary:
         rollback=rollback,
         channel_breakdown=dict(state.channel_message_counts),
         is_dry_run=state.is_dry_run,
-        server_name=state.stoat_server_id or "unknown",
+        stoat_server_id=state.stoat_server_id or "unknown",
         duration_seconds=duration_seconds,
         duration_state=duration_state,
         current_phase=state.current_phase,

@@ -100,7 +100,7 @@ def _build_stats_table(summary: StateSummary) -> Table:
     duration with trinary state handling.
     """
     dry_tag = " [DRY-RUN]" if summary.is_dry_run else ""
-    title = f"Migration Stats — {summary.server_name}{dry_tag}"
+    title = f"Migration Stats — Stoat ID: {summary.stoat_server_id}{dry_tag}"
 
     table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("Section / Item", style="cyan")
@@ -821,7 +821,9 @@ def stats(output_dir: str) -> None:
     counters, fidelity score, error/warning summary, optional per-channel
     breakdown, optional rollback section, and elapsed duration.
 
-    Exits 1 with a single-line error on missing or corrupt state.json.
+    Exit codes: 0 on success; 2 when OUTPUT_DIR does not exist (Click
+    validation); 1 when state.json is missing inside OUTPUT_DIR or contains
+    invalid JSON.
     """
     try:
         state = load_state(Path(output_dir))

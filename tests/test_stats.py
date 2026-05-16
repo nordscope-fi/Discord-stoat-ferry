@@ -80,12 +80,12 @@ def test_state_summary_default_construction_is_explicit() -> None:
         rollback=None,
         channel_breakdown={},
         is_dry_run=False,
-        server_name="unknown",
+        stoat_server_id="unknown",
         duration_seconds=None,
         duration_state="unknown",
         current_phase="",
     )
-    assert summary.server_name == "unknown"
+    assert summary.stoat_server_id == "unknown"
     assert summary.rollback is None
     assert summary.channel_breakdown == {}
 
@@ -356,7 +356,7 @@ def _write_state_json(tmp_path: object, state: MigrationState) -> object:
 
     from discord_ferry.state import save_state
 
-    out = Path(str(tmp_path)) / "ferry-out"  # type: ignore[arg-type]
+    out = Path(str(tmp_path)) / "ferry-out"  # type: ignore[arg-type]  # pytest tmp_path is LocalPath at runtime; str() narrows for Path()
     out.mkdir(parents=True, exist_ok=True)
     save_state(state, out)
     return out
@@ -397,7 +397,7 @@ def test_stats_missing_dir_exits_nonzero_no_traceback(runner: CliRunner) -> None
 def test_stats_corrupt_state_exits_one_no_traceback(runner: CliRunner, tmp_path: object) -> None:
     from pathlib import Path
 
-    out = Path(str(tmp_path)) / "ferry-out"  # type: ignore[arg-type]
+    out = Path(str(tmp_path)) / "ferry-out"  # type: ignore[arg-type]  # pytest tmp_path is LocalPath at runtime; str() narrows for Path()
     out.mkdir(parents=True, exist_ok=True)
     (out / "state.json").write_text("not valid json {{{", encoding="utf-8")
     result = runner.invoke(main, ["stats", str(out)])
