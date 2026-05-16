@@ -362,3 +362,59 @@ class TestVerifyDceChecksum:
             mock_ref.read_text.return_value = checksums_json
             # Should not raise — version not found means skip
             _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+
+
+class TestDceChecksumsJson:
+    """Schema validation for src/discord_ferry/dce_checksums.json.
+
+    These tests prevent silent-skip regressions: if a new platform is added to
+    _PLATFORM_MAP without a corresponding hash in this JSON,
+    test_dce_checksums_json_covers_all_supported_platforms fires.
+    """
+
+    def _load_checksums(self) -> dict:
+        import importlib.resources as pkg_resources
+        import json as _json
+
+        ref = pkg_resources.files("discord_ferry").joinpath("dce_checksums.json")
+        return _json.loads(ref.read_text(encoding="utf-8"))
+
+    def test_dce_checksums_json_is_well_formed(self):
+        data = self._load_checksums()
+        assert isinstance(data, dict)
+        assert len(data) >= 1, "checksums file has no version entries"
+
+    def test_dce_checksums_json_covers_current_version(self):
+        data = self._load_checksums()
+        assert DCE_VERSION in data, (
+            f"dce_checksums.json is missing entries for the pinned DCE_VERSION={DCE_VERSION}"
+        )
+
+    def test_dce_checksums_json_covers_all_supported_platforms(self):
+        """REGRESSION GUARD: every platform in _PLATFORM_MAP must have a hash for DCE_VERSION.
+
+        This is the structural test that would have caught the original #37 bug:
+        adding a platform to _PLATFORM_MAP without pinning its hash silently
+        skipped verification for users on that platform.
+        """
+        from discord_ferry.exporter.manager import _PLATFORM_MAP
+
+        data = self._load_checksums()
+        version_block = data.get(DCE_VERSION, {})
+        for (_system, _machine), platform_key in _PLATFORM_MAP.items():
+            assert platform_key in version_block, (
+                f"dce_checksums.json[{DCE_VERSION!r}] is missing hash for "
+                f"platform '{platform_key}' (in _PLATFORM_MAP)"
+            )
+
+    def test_dce_checksums_json_values_look_like_sha256(self):
+        import re
+
+        sha256_re = re.compile(r"^[0-9a-f]{64}$")
+        data = self._load_checksums()
+        for version, block in data.items():
+            for platform_key, value in block.items():
+                assert sha256_re.match(value), (
+                    f"dce_checksums.json[{version!r}][{platform_key!r}] = {value!r} "
+                    "does not look like a 64-char lowercase hex SHA-256 string"
+                )

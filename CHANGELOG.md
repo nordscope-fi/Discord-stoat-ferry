@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.1.5] - 2026-05-16
+
+### Fixed
+
+- **ARM platforms (`osx-arm64`, `linux-arm64`) now have SHA-256 hash verification on DCE download** (#37, phase 1 of 2). Previously, `_verify_dce_checksum` (`src/discord_ferry/exporter/manager.py:75-77`) silently skipped verification for any platform without a pinned hash — Apple Silicon (default Mac since 2020) was downloading DCE binaries with no integrity check. Now pinned for DCE 2.47.1: `osx-arm64`, `linux-arm64`. The silent-skip behavior is preserved as a fallback for any future unrecognized platform (phase 2, shipping as v2.2.0, will flip silent-skip to a loud `DCENotFoundError`). New schema-validation tests in `tests/test_exporter_manager.py::TestDceChecksumsJson` guard against future regressions: any new platform added to `_PLATFORM_MAP` without a corresponding hash now fails CI.
+
 ## [2.1.4] - 2026-05-16
 
 ### Fixed
