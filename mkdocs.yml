@@ -24,6 +24,7 @@ theme:
     - content.code.copy
 exclude_docs: |
   plans/
+  superpowers/
   discord-ferry-claude-code-brief.md
 nav:
   - Home: index.md
