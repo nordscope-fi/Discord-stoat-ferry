@@ -105,7 +105,7 @@ def parse_dce_line(line: str) -> ParsedDceLine:
     for kind, pattern in _PHASE_PATTERNS:
         match = pattern.match(line)
         if match:
-            count = int(match.group("n")) if "n" in match.groupdict() and match.group("n") else None
+            count = int(match.group("n")) if "n" in match.groupdict() else None
             return Phase(kind=kind, count=count, message=line)
 
     return Raw(message=line)
