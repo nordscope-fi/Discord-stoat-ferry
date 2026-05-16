@@ -1,12 +1,47 @@
-Starting export of guild 123456789...
-[1/15] Exporting #general...
-[1/15] Exporting #general... 25.0%
-[1/15] Exporting #general... 50.0%
-[1/15] Exporting #general... 100.0%
-[2/15] Exporting #announcements...
-[2/15] Exporting #announcements... 100.0%
-[3/15] Exporting #memes...
-[3/15] Exporting #memes... 33.3%
-[3/15] Exporting #memes... 66.7%
-[3/15] Exporting #memes... 100.0%
-Export complete.
+# Hybrid DCE 2.47.1 stdout fixture for Ferry parser tests.
+#
+# Lines 1-13 (before the [HYBRID BOUNDARY] comment): captured 2026-05-15
+# from real DCE 2.47.1 invocation (macOS-arm64, stdout piped, intentionally
+# invalid token to keep the capture short). Original at /tmp/dce-stdout-piped.log.
+#
+# Lines after the boundary: derived from DCE source at tag 2.47.1 --
+# specifically ExportGuildCommand.cs, ExportCommandBase.cs, and Spectre's
+# FallbackProgressRenderer.cs. The post-auth path is not yet captured because
+# we don't have a test Discord server. See #35 for the plan to replace the
+# suffix with a real capture.
+#
+# Comment lines (this header) start with '#' and are stripped by tests that
+# read this file; the parser itself never sees them.
+┌────────────────────────────────────────────────────────────────────┐
+│   Thank you for supporting Ukraine <3                              │
+│                                                                    │
+│   As Russia wages a genocidal war against my country,              │
+│   I'm grateful to everyone who continues to                        │
+│   stand with Ukraine in our fight for freedom.                     │
+│                                                                    │
+│   Learn more: https://tyrrrz.me/ukraine                            │
+└────────────────────────────────────────────────────────────────────┘
+
+Fetching channels...
+...
+# [HYBRID BOUNDARY] -- below this point: source-derived
+Fetched 3 channel(s).
+Fetching threads...
+Fetched 0 thread(s).
+Exporting 3 channel(s)...
+general: 25%
+general: 50%
+general: 75%
+general: 95%
+general: 100%
+announcements: 25%
+announcements: 50%
+announcements: 75%
+announcements: 95%
+announcements: 100%
+memes: 25%
+memes: 50%
+memes: 75%
+memes: 95%
+memes: 100%
+Successfully exported 3 channel(s).
