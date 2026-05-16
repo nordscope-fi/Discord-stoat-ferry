@@ -72,6 +72,7 @@ Ferry is built to handle large migrations safely:
 - **Migration lock** — prevents two Ferry instances from targeting the same server
 - **Circuit breaker** — automatic backoff on API failures, no indefinite blocking
 - **Rollback** — undo a migration with `ferry rollback` (or the GUI "Rollback this migration" button) — deletes Ferry-created channels, roles, and emoji from the Stoat server
+- **Post-migration stats** — `ferry stats <output-dir>` prints a console-friendly summary (entity counts, fidelity score, per-channel breakdown, error preview, elapsed time) from a completed migration — useful for support, scripting, and quick sanity checks without re-opening the report
 - **Server blueprints** — export your server structure as a reusable template
 
 ---
