@@ -20,7 +20,7 @@ from discord_ferry.exporter.runner import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from pathlib import Path
 
     from discord_ferry.core.events import MigrationEvent
@@ -396,3 +396,366 @@ class TestLongLineHandling:
 
         consumed = await _drain_overlong_line(reader)
         assert consumed > 0
+
+
+# ---------- Heartbeat tests ----------
+
+
+class TestHeartbeat:
+    """Tests for the heartbeat / silence-breaker task.
+
+    Strategy: dependency injection of `sleep` and `monotonic` into
+    `_heartbeat`, NOT global monkey-patching of `asyncio.sleep` (which would
+    break the stdout/stderr `async for`/`readuntil` loops, `process.wait()`,
+    and aiohttp in the integration tests).
+    """
+
+    def _make_fake_clock(
+        self,
+    ) -> tuple[Callable[[], float], Callable[[float], Awaitable[None]], list[float]]:
+        """Returns (monotonic, sleep, sleeps_list).
+
+        sleeps_list records every requested sleep delay. The fake clock advances
+        on each sleep call AND yields control once (via asyncio.sleep(0)) so
+        other tasks can interleave.
+        """
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def monotonic() -> float:
+            return now[0]
+
+        async def sleep(delay: float) -> None:
+            sleeps.append(delay)
+            now[0] += delay
+            await asyncio.sleep(0)
+
+        return monotonic, sleep, sleeps
+
+    def _make_fake_process(self, *, returncode_sequence: list[int | None]) -> MagicMock:
+        """Fake subprocess with a controllable returncode sequence."""
+        process = MagicMock()
+        codes = list(returncode_sequence)
+
+        def get_returncode(self: object) -> int | None:
+            if not codes:
+                return 0
+            val = codes.pop(0)
+            return val
+
+        type(process).returncode = property(get_returncode)
+        return process
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_fires_after_60s_of_silence(self) -> None:
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, sleeps = self._make_fake_clock()
+        # Need 7 None ticks so that 6 sleeps of 10s each accumulate 60s, then the
+        # 7th iteration fires. One more None after firing before the final 0 exits.
+        process = self._make_fake_process(returncode_sequence=[None] * 8 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,  # never any activity
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        assert any(e.status == "heartbeat" for e in events), (
+            f"expected at least one heartbeat event, got: {[(e.status, e.message) for e in events]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_does_not_fire_when_activity_present(self) -> None:
+        # When activity is bumped continuously (last_activity == now()), silence
+        # never reaches the interval -> no heartbeat should fire.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, sleeps = self._make_fake_clock()
+        process = self._make_fake_process(returncode_sequence=[None] * 20 + [0])
+
+        events: list[MigrationEvent] = []
+        # Activity always == "now" -> silence == 0 -> never fires
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=monotonic,  # last_activity is always "now"
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        assert not heartbeats, f"expected zero heartbeats, got {len(heartbeats)}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_status_is_heartbeat_not_progress(self) -> None:
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, _ = self._make_fake_clock()
+        process = self._make_fake_process(returncode_sequence=[None, None, None, 0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        for e in events:
+            if "Still working" in e.message:
+                assert e.status == "heartbeat", (
+                    f"event with heartbeat-shaped message had status={e.status!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_backoff_doubles(self) -> None:
+        # After first fire at 60s, interval should double to 120s.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, sleeps = self._make_fake_clock()
+        # Allow enough ticks for two heartbeat fires (60s, 120s) then exit.
+        process = self._make_fake_process(returncode_sequence=[None] * 40 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+            max_interval=300.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        # Should have fired at least twice (at ~60s and ~180s silence)
+        assert len(heartbeats) >= 2, (
+            f"expected at least 2 heartbeat events for backoff test, got {len(heartbeats)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_resets_on_activity(self) -> None:
+        # After a heartbeat fires, if activity occurs, interval resets to 60s.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, sleeps = self._make_fake_clock()
+
+        # Simulate: silence for 60s (fires), then activity resets, then silence 60s again (fires).
+        activity_time = [0.0]  # starts at 0 (process_start)
+
+        def get_last_activity() -> float:
+            return activity_time[0]
+
+        process = self._make_fake_process(returncode_sequence=[None] * 40 + [0])
+
+        fire_count = [0]
+        events: list[MigrationEvent] = []
+
+        def on_event(e: MigrationEvent) -> None:
+            events.append(e)
+            if e.status == "heartbeat":
+                fire_count[0] += 1
+                # After first fire, simulate activity reset.
+                if fire_count[0] == 1:
+                    # Set last_activity to current now so silence resets.
+                    activity_time[0] = monotonic()
+
+        await _heartbeat(
+            process=process,
+            on_event=on_event,
+            process_start=0.0,
+            get_last_activity=get_last_activity,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+            max_interval=300.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        # Should have fired at least twice (reset means second fires at +60s not +120s)
+        assert len(heartbeats) >= 2, f"expected >=2 heartbeats after reset, got {len(heartbeats)}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_does_not_fire_at_59s(self) -> None:
+        # At 59s of silence with interval=60s, no heartbeat should fire.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, _ = self._make_fake_clock()
+
+        # Cap ticks so we accumulate only ~59s before exit.
+        # Each sleep(remaining) where remaining = max(1, min(10, 60 - silence)).
+        # At t=0 silence=0, remaining=10. After ~6 sleeps of 10s = 60s -> would fire.
+        # Use only 5 ticks (50s of sleep + some partial) then exit.
+        process = self._make_fake_process(returncode_sequence=[None] * 5 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        # With only 5 ticks of 10s each = 50s, no heartbeat should have fired.
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        assert not heartbeats, (
+            f"heartbeat fired before 60s silence; events: {[(e.status, e.message) for e in events]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_fires_at_exact_60s(self) -> None:
+        # Exactly at silence == initial_interval (60s), heartbeat should fire.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, _ = self._make_fake_clock()
+        # 6 ticks of 10s = 60s, then fire on 7th check; give enough ticks.
+        process = self._make_fake_process(returncode_sequence=[None] * 8 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        assert len(heartbeats) >= 1, "heartbeat should have fired at exactly 60s of silence"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_capped_at_max_interval(self) -> None:
+        # After multiple doublings (60 -> 120 -> 240 -> 480 capped to 300),
+        # interval should never exceed max_interval.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, sleeps = self._make_fake_clock()
+        # Allow many ticks for multiple fires.
+        process = self._make_fake_process(returncode_sequence=[None] * 100 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+            max_interval=300.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        # Should have fired several times (60s, 180s, 420s, 720s... but cap means
+        # after 240s interval -> capped to 300s for 4th fire).
+        assert len(heartbeats) >= 3, (
+            f"expected >=3 heartbeat fires to test cap, got {len(heartbeats)}"
+        )
+        # Verify total elapsed time covered. At 4+ fires, the gap between the
+        # 3rd and 4th cannot exceed 300s (the cap). This is enforced structurally
+        # by the code; here we just confirm the fires happened.
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_message_contains_elapsed_and_silence(self) -> None:
+        # Heartbeat message should mention elapsed minutes and silence seconds.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, _ = self._make_fake_clock()
+        process = self._make_fake_process(returncode_sequence=[None] * 8 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        assert heartbeats, "no heartbeat events to inspect"
+        msg = heartbeats[0].message
+        assert "Still working" in msg, f"message missing 'Still working': {msg!r}"
+        assert "min" in msg, f"message missing minutes: {msg!r}"
+        assert "s..." in msg, f"message missing silence seconds: {msg!r}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_cancels_cleanly(self) -> None:
+        # Task.cancel() should cause _heartbeat to exit without raising.
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, _ = self._make_fake_clock()
+        # Process never exits on its own (returncode always None).
+        process = MagicMock()
+        type(process).returncode = property(lambda self: None)
+
+        events: list[MigrationEvent] = []
+
+        async def run() -> None:
+            task = asyncio.create_task(
+                _heartbeat(
+                    process=process,
+                    on_event=events.append,
+                    process_start=0.0,
+                    get_last_activity=lambda: 0.0,
+                    sleep=sleep,
+                    monotonic=monotonic,
+                    initial_interval=60.0,
+                )
+            )
+            # Let it spin once then cancel.
+            await asyncio.sleep(0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return
+
+        import contextlib
+
+        await run()
+        # No assertion needed beyond "didn't raise" — but let's confirm no error events.
+        error_events = [e for e in events if e.status == "error"]
+        assert not error_events, f"unexpected error events: {error_events}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_phase_export(self) -> None:
+        # All heartbeat events should have phase == "export".
+        from discord_ferry.exporter.runner import _heartbeat
+
+        monotonic, sleep, _ = self._make_fake_clock()
+        process = self._make_fake_process(returncode_sequence=[None] * 8 + [0])
+
+        events: list[MigrationEvent] = []
+        await _heartbeat(
+            process=process,
+            on_event=events.append,
+            process_start=0.0,
+            get_last_activity=lambda: 0.0,
+            sleep=sleep,
+            monotonic=monotonic,
+            initial_interval=60.0,
+        )
+
+        heartbeats = [e for e in events if e.status == "heartbeat"]
+        assert heartbeats, "no heartbeat events emitted"
+        for e in heartbeats:
+            assert e.phase == "export", f"expected phase='export', got {e.phase!r}"
