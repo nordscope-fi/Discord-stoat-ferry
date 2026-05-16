@@ -6,12 +6,23 @@ import asyncio
 import logging
 import re
 import shutil
+import subprocess
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.errors import DiscordAuthError, ExportError
+from discord_ferry.exporter.dce_output import (
+    Banner,
+    ParsedDceLine,
+    PerChannel,
+    Phase,
+    Raw,
+    StatusDot,
+    Success,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,6 +39,14 @@ _DCE_PROGRESS_RE = re.compile(
 )
 
 _DISK_WARN_BYTES = 5_000_000_000  # 5 GB
+
+# Windows console + signal flags. On non-Windows these are 0 (no-op).
+_CREATE_NEW_PROCESS_GROUP: int = (
+    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+)
+_CREATE_NO_WINDOW: int = (
+    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+)
 
 
 def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
@@ -71,6 +90,126 @@ def _check_disk_space(export_dir: Path, on_event: EventCallback) -> None:
             )
     except OSError:
         pass  # Can't check disk space -- not critical
+
+
+@dataclass
+class _RunState:
+    """Per-export mutable state for tracking overall progress.
+
+    `total_channels` is set once when the `Exporting N channel(s)...` headline
+    arrives; subsequent headers are ignored to defend against DCE retries
+    re-emitting the header.
+
+    `channels_completed` is a SET (not a counter) for structural defense
+    against DCE's per-channel retry behavior: a channel that hits 100%, fails
+    transiently, retries from 25%, and hits 100% again would otherwise
+    double-count and overshoot total_channels.
+    """
+
+    total_channels: int | None = None
+    channels_completed: set[str] = field(default_factory=set)
+
+
+def _emit_for_parsed(
+    parsed: ParsedDceLine,
+    on_event: EventCallback,
+    state: _RunState,
+) -> None:
+    """Translate a ParsedDceLine into one or more MigrationEvents.
+
+    PerChannel:
+      - Updates state on pct==100 (adds channel to channels_completed set).
+      - Emits with current=len(channels_completed), total=total_channels.
+      - Label format: `Finished <ch>` for 100%, `<ch> (<pct>%)` otherwise.
+
+    Phase(exporting_header):
+      - Sets state.total_channels (set-once); emits a progress event.
+
+    Phase(other):
+      - Emits the headline message verbatim.
+
+    Success:
+      - If count < state.total_channels, emits a warning about silent failures
+        BEFORE emitting the success message itself.
+
+    Banner / StatusDot / Raw:
+      - Emit prefixed with `[dce] ` to make their provenance clear in the log.
+    """
+    match parsed:
+        case PerChannel(channel=ch, pct=p):
+            if p == 100:
+                state.channels_completed.add(ch)
+            current = len(state.channels_completed)
+            total = state.total_channels or 0
+            label = f"Finished {ch}" if p == 100 else f"{ch} ({p}%)"
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=label,
+                    channel_name=ch,
+                    current=current,
+                    total=total,
+                )
+            )
+        case Phase(kind="exporting_header", count=n, message=msg):
+            if state.total_channels is None and n is not None:
+                state.total_channels = n
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=msg,
+                    current=len(state.channels_completed),
+                    total=state.total_channels or 0,
+                )
+            )
+        case Phase(message=msg):
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=msg,
+                )
+            )
+        case Success(count=s, message=msg):
+            if state.total_channels is not None and s < state.total_channels:
+                missing = state.total_channels - s
+                on_event(
+                    MigrationEvent(
+                        phase="export",
+                        status="warning",
+                        message=(
+                            f"DCE reports {s} of {state.total_channels} channels "
+                            f"exported successfully. {missing} channel(s) appear "
+                            "to have failed silently."
+                        ),
+                    )
+                )
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=msg,
+                )
+            )
+        case Banner(message=msg) | StatusDot(message=msg) | Raw(message=msg):
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=f"[dce] {msg}",
+                )
+            )
+        case _:
+            # Future variants (Error, etc.) -- emit as warning so never silent.
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="warning",
+                    message=f"[dce] {parsed.message}",
+                )
+            )
 
 
 async def validate_discord_token(token: str) -> None:
