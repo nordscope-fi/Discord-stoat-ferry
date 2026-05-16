@@ -7,9 +7,11 @@ import dataclasses
 import pytest
 
 from discord_ferry.exporter.dce_output import (
+    Banner,
     PerChannel,
     Phase,
     Raw,
+    StatusDot,
     Success,
     parse_dce_line,
 )
@@ -128,4 +130,41 @@ class TestPerChannelParsing:
     def test_per_channel_decimal_pct_falls_through(self) -> None:
         # DCE per-source emits integer-only milestone percents. Reject decimals.
         result = parse_dce_line("general: 25.5%")
+        assert isinstance(result, Raw)
+
+
+class TestStatusDotParsing:
+    def test_status_dot_three(self) -> None:
+        result = parse_dce_line("...")
+        assert isinstance(result, StatusDot)
+        assert result.message == "..."
+
+    def test_status_dot_more(self) -> None:
+        # Spectre may emit longer dot runs.
+        result = parse_dce_line("......")
+        assert isinstance(result, StatusDot)
+
+
+class TestBannerParsing:
+    def test_banner_top_edge(self) -> None:
+        # Box-drawing top edge of Ukraine banner.
+        line = "┌" + "─" * 68 + "┐"
+        result = parse_dce_line(line)
+        assert isinstance(result, Banner)
+
+    def test_banner_text_inside(self) -> None:
+        # Vertical bar + text + vertical bar = Banner content row.
+        line = "│   Thank you for supporting Ukraine <3" + " " * 30 + "│"
+        result = parse_dce_line(line)
+        assert isinstance(result, Banner)
+
+
+class TestRawFallthrough:
+    def test_raw_unknown_text(self) -> None:
+        result = parse_dce_line("Some unknown DCE line we have not seen before")
+        assert isinstance(result, Raw)
+        assert result.message == "Some unknown DCE line we have not seen before"
+
+    def test_raw_empty_string(self) -> None:
+        result = parse_dce_line("")
         assert isinstance(result, Raw)

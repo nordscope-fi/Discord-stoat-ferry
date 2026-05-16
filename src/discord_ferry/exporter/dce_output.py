@@ -103,6 +103,12 @@ _PHASE_PATTERNS: tuple[tuple[PhaseKind, re.Pattern[str]], ...] = (
 
 _SUCCESS_RE = re.compile(r"^Successfully exported (?P<n>\d+) channel\(s\)\.$")
 
+_STATUS_DOT_RE = re.compile(r"^\.{3,}$")
+
+# Ukraine banner box-drawing characters: corners, edges, vertical bar.
+# Box edges and content rows all start with one of these.
+_BANNER_RE = re.compile(r"^[┌┐└┘─│]")
+
 
 def parse_dce_line(line: str) -> ParsedDceLine:
     """Map one DCE stdout line to a typed ParsedDceLine.
@@ -110,10 +116,12 @@ def parse_dce_line(line: str) -> ParsedDceLine:
     Total function: every input maps to some result; never raises.
 
     Patterns tried in order:
-      1. PerChannel -- most common at runtime
-      2. Phase headlines
-      3. Success final line
-      4. Raw fallthrough
+      1. PerChannel  -- most common at runtime
+      2. Phase       -- headline lines
+      3. Success     -- final line
+      4. StatusDot   -- Spectre fallback `...`
+      5. Banner      -- Ukraine banner box-drawing
+      6. Raw         -- fallthrough
     """
     pc_match = _PER_CHANNEL_RE.match(line)
     if pc_match:
@@ -131,5 +139,11 @@ def parse_dce_line(line: str) -> ParsedDceLine:
     success_match = _SUCCESS_RE.match(line)
     if success_match:
         return Success(count=int(success_match.group("n")), message=line)
+
+    if _STATUS_DOT_RE.match(line):
+        return StatusDot(message=line)
+
+    if _BANNER_RE.match(line):
+        return Banner(message=line)
 
     return Raw(message=line)
