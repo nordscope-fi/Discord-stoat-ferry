@@ -103,12 +103,15 @@ def detect_dotnet() -> bool:
     """Check if .NET 8+ runtime is available. Always True on Windows (self-contained)."""
     if platform.system() == "Windows":
         return True
+    # On non-Windows the Windows-only flag does not exist -- pass 0 (no-op).
+    creationflags = 0
     try:
         result = subprocess.run(
             ["dotnet", "--version"],
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=creationflags,
         )
         if result.returncode != 0:
             return False

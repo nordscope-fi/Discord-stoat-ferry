@@ -3,15 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import re
 import shutil
+import signal
+import subprocess
+import sys
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.errors import DiscordAuthError, ExportError
+from discord_ferry.exporter.dce_output import (
+    Banner,
+    ParsedDceLine,
+    PerChannel,
+    Phase,
+    Raw,
+    StatusDot,
+    Success,
+    parse_dce_line,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,13 +35,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Regex to parse DCE stdout progress lines.
-# Matches: "[1/15] Exporting #general... 50.0%" or "[1/15] Exporting #general..."
-_DCE_PROGRESS_RE = re.compile(
-    r"\[\d+/\d+\] Exporting #(?P<channel>[^\s.]+)\.{3}\s*(?:(?P<pct>[\d.]+)%)?"
-)
-
 _DISK_WARN_BYTES = 5_000_000_000  # 5 GB
+
+# Windows console + signal flags. On non-Windows these are 0 (no-op).
+_CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+_CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
@@ -71,6 +83,178 @@ def _check_disk_space(export_dir: Path, on_event: EventCallback) -> None:
             )
     except OSError:
         pass  # Can't check disk space -- not critical
+
+
+@dataclass
+class _RunState:
+    """Per-export mutable state for tracking overall progress.
+
+    `total_channels` is set once when the `Exporting N channel(s)...` headline
+    arrives; subsequent headers are ignored to defend against DCE retries
+    re-emitting the header.
+
+    `channels_completed` is a SET (not a counter) for structural defense
+    against DCE's per-channel retry behavior: a channel that hits 100%, fails
+    transiently, retries from 25%, and hits 100% again would otherwise
+    double-count and overshoot total_channels.
+    """
+
+    total_channels: int | None = None
+    channels_completed: set[str] = field(default_factory=set)
+
+
+def _emit_for_parsed(
+    parsed: ParsedDceLine,
+    on_event: EventCallback,
+    state: _RunState,
+) -> None:
+    """Translate a ParsedDceLine into one or more MigrationEvents.
+
+    PerChannel:
+      - Updates state on pct==100 (adds channel to channels_completed set).
+      - Emits with current=len(channels_completed), total=total_channels.
+      - Label format: `Finished <ch>` for 100%, `<ch> (<pct>%)` otherwise.
+
+    Phase(exporting_header):
+      - Sets state.total_channels (set-once); emits a progress event.
+
+    Phase(other):
+      - Emits the headline message verbatim.
+
+    Success:
+      - If count < state.total_channels, emits a warning about silent failures
+        BEFORE emitting the success message itself.
+
+    Banner / StatusDot / Raw:
+      - Emit prefixed with `[dce] ` to make their provenance clear in the log.
+    """
+    match parsed:
+        case PerChannel(channel=ch, pct=p):
+            if p == 100:
+                state.channels_completed.add(ch)
+            current = len(state.channels_completed)
+            total = state.total_channels or 0
+            label = f"Finished {ch}" if p == 100 else f"{ch} ({p}%)"
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=label,
+                    channel_name=ch,
+                    current=current,
+                    total=total,
+                )
+            )
+        case Phase(kind="exporting_header", count=n, message=msg):
+            if state.total_channels is None and n is not None:
+                state.total_channels = n
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=msg,
+                    current=len(state.channels_completed),
+                    total=state.total_channels or 0,
+                )
+            )
+        case Phase(message=msg):
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=msg,
+                )
+            )
+        case Success(count=s, message=msg):
+            if state.total_channels is not None and s < state.total_channels:
+                missing = state.total_channels - s
+                on_event(
+                    MigrationEvent(
+                        phase="export",
+                        status="warning",
+                        message=(
+                            f"DCE reports {s} of {state.total_channels} channels "
+                            f"exported successfully. {missing} channel(s) appear "
+                            "to have failed silently."
+                        ),
+                    )
+                )
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=msg,
+                )
+            )
+        case Banner(message=msg) | StatusDot(message=msg) | Raw(message=msg):
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="progress",
+                    message=f"[dce] {msg}",
+                )
+            )
+        case _:
+            # Future variants (Error, etc.) -- emit as warning so never silent.
+            on_event(
+                MigrationEvent(
+                    phase="export",
+                    status="warning",
+                    message=f"[dce] {parsed.message}",
+                )
+            )
+
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    """Platform-aware subprocess termination.
+
+    POSIX: SIGTERM (process.terminate()) -- DCE has a chance to flush partial
+    JSON before exit.
+
+    Windows: CTRL_BREAK_EVENT to the child's process group (safe because we
+    spawned with CREATE_NEW_PROCESS_GROUP -- the signal targets only the child,
+    not Ferry). DCE's .NET CancelKeyPress handler runs a graceful shutdown.
+    Falls back to hard kill after 3s if the child does not exit.
+    """
+    if sys.platform == "win32":
+        try:
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        except (ValueError, OSError):
+            process.terminate()  # fallback: hard kill
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+    else:
+        process.terminate()
+        await process.wait()
+
+
+async def _drain_overlong_line(reader: asyncio.StreamReader) -> int:
+    r"""Consume bytes from `reader` until we reach `\n` (or EOF).
+
+    Used after `readuntil(b"\n")` raised LimitOverrunError to ensure the
+    remainder of the over-long line does not end up returned by the next
+    `readuntil` call as if it were its own line. Returns total bytes consumed.
+
+    Loops until either:
+      - `readuntil` finds the next `\n` (returns tail, total + len(tail))
+      - EOF is hit (IncompleteReadError, total + len(exc.partial))
+      - Another LimitOverrunError fires (consume that 64KiB chunk and keep going)
+    """
+    total = 0
+    while True:
+        try:
+            tail = await reader.readuntil(b"\n")
+            total += len(tail)
+            return total
+        except asyncio.LimitOverrunError as exc:
+            chunk = await reader.readexactly(exc.consumed)
+            total += len(chunk)
+        except asyncio.IncompleteReadError as exc:
+            total += len(exc.partial)
+            return total
 
 
 async def validate_discord_token(token: str) -> None:
@@ -124,6 +308,7 @@ async def run_dce_export(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP,
     )
 
     # DCE prints nothing while it enumerates the guild's channels — on large
@@ -140,26 +325,44 @@ async def run_dce_export(
         )
     )
 
+    state = _RunState()
     stderr_lines: list[str] = []
 
-    try:
-        assert process.stdout is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    async def _read_stderr() -> None:
         assert process.stderr is not None
+        async for raw_line in process.stderr:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if line:
+                stderr_lines.append(line)
 
-        async def _read_stderr() -> None:
-            assert process.stderr is not None
-            async for raw_line in process.stderr:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if line:
-                    stderr_lines.append(line)
+    stderr_task = asyncio.create_task(_read_stderr())
 
-        stderr_task = asyncio.create_task(_read_stderr())
+    try:
+        while True:
+            try:
+                raw_line = await process.stdout.readuntil(b"\n")
+            except asyncio.IncompleteReadError as exc:
+                raw_line = exc.partial
+                if not raw_line:
+                    break  # clean EOF
+            except asyncio.LimitOverrunError:
+                # Line longer than 64 KiB -- drain to next \n entirely so the
+                # remainder does not get parsed as a separate "line".
+                consumed = await _drain_overlong_line(process.stdout)
+                on_event(
+                    MigrationEvent(
+                        phase="export",
+                        status="progress",
+                        message=(f"[dce] <truncated {consumed} bytes; line exceeded 64 KiB>"),
+                    )
+                )
+                continue
 
-        async for raw_line in process.stdout:
-            # Check cancel event.
             if config.cancel_event and config.cancel_event.is_set():
-                process.terminate()
-                await process.wait()
+                await _terminate_process(process)
                 raise asyncio.CancelledError("Export cancelled by user")
 
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -167,30 +370,22 @@ async def run_dce_export(
                 continue
 
             logger.debug("DCE: %s", line)
+            parsed = parse_dce_line(line)
+            _emit_for_parsed(parsed, on_event, state)
 
-            match = _DCE_PROGRESS_RE.search(line)
-            if match:
-                channel = match.group("channel")
-                pct_str = match.group("pct")
-                pct = int(float(pct_str)) if pct_str else 0
-                on_event(
-                    MigrationEvent(
-                        phase="export",
-                        status="progress",
-                        message=f"Exporting #{channel}...",
-                        channel_name=channel,
-                        current=pct,
-                        total=100,
-                    )
-                )
-
-        await stderr_task
         await process.wait()
 
     except asyncio.CancelledError:
-        process.terminate()
-        await process.wait()
+        await _terminate_process(process)
         raise
+    finally:
+        # IMPORTANT: cancel stderr_task BEFORE awaiting it so a hung _read_stderr
+        # does not deadlock the cleanup. Heartbeat-style tasks (#39) follow this
+        # same pattern.
+        if not stderr_task.done():
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
 
     if process.returncode != 0:
         last_err = stderr_lines[-1] if stderr_lines else "Unknown error"

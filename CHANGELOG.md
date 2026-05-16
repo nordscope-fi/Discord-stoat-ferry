@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-16
+
+### Changed
+
+- **`MigrationEvent.current` / `MigrationEvent.total` semantics changed for export-phase events** (issue #23). Previously these fields held the per-channel percentage (`current=NN, total=100`). They now hold the overall channel count (`current=channels_done, total=total_channels`). The progress-bar fraction `current / total` is unchanged in shape (still 0-1) but its meaning is "fraction of channels completed" instead of "fraction of current channel completed." Any external consumer of `MigrationEvent` reading these fields needs to know.
+
+### Fixed
+
+- **DCE export progress was invisible -- bug latent since 2026-02-28** (issue #23): the per-channel progress regex never matched any line that DCE 2.47.1 actually emits. Verified by reading `Tyrrrz/DiscordChatExporter@2.47.1` source -- DCE uses Spectre.Console's `FallbackProgressRenderer` when stdout is piped, which emits `<channel name>: NN%` (no brackets, no `#`, hierarchical names joined with ` / `). User-visible symptom: GUI sat on `"Discord Chat Exporter -- Started"` for 5-30 minutes on large servers. Replaced with a typed-union parser (`src/discord_ferry/exporter/dce_output.py`) handling all DCE 2.47.1 line types: `PerChannel`, `Phase` (Fetching/Fetched/Exporting headlines), `Success`, `Banner`, `StatusDot`, and `Raw` fallthrough for unknown lines. Unknown lines now surface to the GUI as `[dce] <line>` instead of being lost to `logger.debug`. Reported by @The-Red-Priest.
+- **Windows console flash during DCE startup**: DCE child process was spawned without `CREATE_NO_WINDOW`, briefly flashing a console window before the parent claimed the pipes. Now spawned with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` on Windows.
+- **Stderr drain task leaked on cancel path**: cancelling an export mid-stream left the `_read_stderr` task running until garbage collection. Now cleaned up via `try/finally` on every exit path.
+- **`asyncio.LimitOverrunError` would crash the GUI on long lines**: a single DCE stdout line exceeding 64 KiB (improbable, but possible from malformed JSON paths in error traces) would bubble out of the stdout loop, bypassing cancel checks and crashing the event loop. Now caught and reported as `[dce] <truncated N bytes; line exceeded 64 KiB>` while the loop continues.
+- **Windows cancel left partial JSON files**: hard-kill on Windows gave DCE no chance to flush. Now sends `CTRL_BREAK_EVENT` to the DCE process group (DCE has a `CancelKeyPress` handler), with a 3-second graceful-shutdown window before falling back to hard kill. POSIX behavior unchanged (already used `SIGTERM`). Caveat: the channel currently being exported may still produce a partial JSON file -- users should expect to delete the export folder before retrying after a cancel.
+
 ## [2.1.6] - 2026-05-16
 
 ### Fixed

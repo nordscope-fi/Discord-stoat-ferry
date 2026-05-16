@@ -621,11 +621,21 @@ def export_page() -> None:
             if event.status == "progress":
                 if event.total > 0:
                     progress_bar.set_value(event.current / event.total)
-                if event.channel_name:
-                    channel_label.set_text(f"Exporting #{event.channel_name}...")
+                # The parser controls the label format. event.message is set
+                # for PerChannel ("<ch> (<pct>%)" or "Finished <ch>") and Phase
+                # ("Fetching channels...", etc.) events. Fall back to channel_name
+                # only if message is somehow empty.
+                if event.message:
+                    channel_label.set_text(event.message)
+                elif event.channel_name:
+                    channel_label.set_text(event.channel_name)
             elif event.status == "completed":
                 channel_label.set_text("Export complete!")
                 progress_bar.set_value(1.0)
+            elif event.status == "warning":
+                # Warnings (e.g. "DCE reports N of M channels...") deserve label
+                # surface time, not just the log panel.
+                channel_label.set_text(event.message)
             elif event.status == "error":
                 channel_label.set_text(f"Error: {event.message}")
 
