@@ -307,9 +307,9 @@ def test_all_inline_fields_in_rows() -> None:
     """3 inline fields render as a pipe-separated row."""
     embed: dict[str, object] = {
         "fields": [
-            {"name": "HP", "value": "100", "inline": True},
-            {"name": "MP", "value": "50", "inline": True},
-            {"name": "ATK", "value": "25", "inline": True},
+            {"name": "HP", "value": "100", "isInline": True},
+            {"name": "MP", "value": "50", "isInline": True},
+            {"name": "ATK", "value": "25", "isInline": True},
         ],
     }
     result, _ = flatten_embed(embed)
@@ -318,11 +318,33 @@ def test_all_inline_fields_in_rows() -> None:
     assert "100 | 50 | 25" in desc
 
 
+def test_embed_field_inline_grouping_uses_dce_key() -> None:
+    """Regression for #36: parser must read DCE's `isInline`, not `inline`.
+
+    Before the fix, the parser read `inline` and silently ignored the real
+    `isInline` key, so every multi-field embed rendered as a stacked list
+    instead of a pipe-separated row.
+    """
+    # DCE 2.47.1 writes `isInline` (JsonMessageWriter.cs:259).
+    embed: dict[str, object] = {
+        "fields": [
+            {"name": "A", "value": "1", "isInline": True},
+            {"name": "B", "value": "2", "isInline": True},
+        ],
+    }
+    result, _ = flatten_embed(embed)
+    desc = str(result["description"])
+    # If the parser reads the wrong key, both fields collapse to non-inline blocks
+    # (`**A**\n1\n\n**B**\n2`), and `**A** | **B**` is absent.
+    assert "**A** | **B**" in desc
+    assert "1 | 2" in desc
+
+
 def test_non_inline_field_own_line() -> None:
     """Non-inline field renders as bold name on its own line, value below."""
     embed: dict[str, object] = {
         "fields": [
-            {"name": "Description", "value": "Long text", "inline": False},
+            {"name": "Description", "value": "Long text", "isInline": False},
         ],
     }
     result, _ = flatten_embed(embed)
@@ -335,11 +357,11 @@ def test_mixed_inline_breaks_rows() -> None:
     """[inline, inline, non-inline, inline, inline] produces 2 rows + 1 block."""
     embed: dict[str, object] = {
         "fields": [
-            {"name": "A", "value": "1", "inline": True},
-            {"name": "B", "value": "2", "inline": True},
-            {"name": "C", "value": "3", "inline": False},
-            {"name": "D", "value": "4", "inline": True},
-            {"name": "E", "value": "5", "inline": True},
+            {"name": "A", "value": "1", "isInline": True},
+            {"name": "B", "value": "2", "isInline": True},
+            {"name": "C", "value": "3", "isInline": False},
+            {"name": "D", "value": "4", "isInline": True},
+            {"name": "E", "value": "5", "isInline": True},
         ],
     }
     result, _ = flatten_embed(embed)
@@ -358,12 +380,12 @@ def test_max_three_inline_per_row() -> None:
     """6 inline fields produce exactly 2 rows of 3."""
     embed: dict[str, object] = {
         "fields": [
-            {"name": "A", "value": "1", "inline": True},
-            {"name": "B", "value": "2", "inline": True},
-            {"name": "C", "value": "3", "inline": True},
-            {"name": "D", "value": "4", "inline": True},
-            {"name": "E", "value": "5", "inline": True},
-            {"name": "F", "value": "6", "inline": True},
+            {"name": "A", "value": "1", "isInline": True},
+            {"name": "B", "value": "2", "isInline": True},
+            {"name": "C", "value": "3", "isInline": True},
+            {"name": "D", "value": "4", "isInline": True},
+            {"name": "E", "value": "5", "isInline": True},
+            {"name": "F", "value": "6", "isInline": True},
         ],
     }
     result, _ = flatten_embed(embed)
@@ -419,8 +441,8 @@ def test_unicode_field_names_preserved() -> None:
     """Unicode characters in field names and values are preserved."""
     embed: dict[str, object] = {
         "fields": [
-            {"name": "\u2764\ufe0f Health", "value": "\u2b50 100", "inline": True},
-            {"name": "\u2694\ufe0f Attack", "value": "\u2b50 50", "inline": True},
+            {"name": "\u2764\ufe0f Health", "value": "\u2b50 100", "isInline": True},
+            {"name": "\u2694\ufe0f Attack", "value": "\u2b50 50", "isInline": True},
         ],
     }
     result, _ = flatten_embed(embed)
