@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-05-16
+
+### Added
+
+- **DCE contract test in CI** (#34). New `tests/test_dce_contract.py` invokes the real DCE 2.47.1 `--help` and asserts every flag `_build_dce_command()` passes is still present in DCE's output; new `tests/test_dce_output_replay.py` replays the captured fixture through `parse_dce_line` and asserts the typed result for each non-comment line. Both run in a dedicated `contract-test` CI job on `ubuntu-latest` (Python 3.12, .NET 8 preinstalled on `ubuntu-24.04`), with the DCE binary cached across runs by `DCE_VERSION`. When `DCE_VERSION` bumps in future, the cache key changes and a fresh DCE is downloaded + re-asserted against `_build_dce_command()` — drift in either direction now fails CI on the bump PR instead of silently shipping.
+
 ## [2.2.0] - 2026-05-16
 
 ### Changed

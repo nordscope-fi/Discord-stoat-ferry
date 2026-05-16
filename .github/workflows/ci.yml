@@ -43,3 +43,32 @@ jobs:
 
       - name: Tests
         run: uv run pytest
+
+  contract-test:
+    name: Contract test (DCE binary)
+    runs-on: ubuntu-latest  # ubuntu-24.04 ships .NET 8 SDK preinstalled
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Cache DCE binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.discord-ferry/bin/dce/2.47.1
+          key: dce-${{ runner.os }}-2.47.1
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev --extra native
+
+      - name: Sanity-check .NET 8
+        run: dotnet --version
+
+      - name: Run contract + replay tests
+        run: uv run pytest tests/test_dce_contract.py tests/test_dce_output_replay.py -v
+
