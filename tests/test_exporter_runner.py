@@ -286,10 +286,13 @@ class TestStderrTaskDrainedOnCancel:
             if len(events) == 2:
                 cfg.cancel_event.set()
 
-        with patch(
-            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=process),
-        ), pytest.raises(asyncio.CancelledError):
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await run_dce_export(cfg, tmp_path / "dce", cancel_after_first)
 
         if sys.platform != "win32":
@@ -310,13 +313,15 @@ class TestWindowsCreationFlags:
             captured_kwargs.update(kwargs)
             return process
 
-        with patch("discord_ferry.exporter.runner.sys.platform", "win32"), \
-             patch("discord_ferry.exporter.runner._CREATE_NO_WINDOW", 0x08000000), \
-             patch("discord_ferry.exporter.runner._CREATE_NEW_PROCESS_GROUP", 0x00000200), \
-             patch(
-                 "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
-                 new=_capture,
-             ):
+        with (
+            patch("discord_ferry.exporter.runner.sys.platform", "win32"),
+            patch("discord_ferry.exporter.runner._CREATE_NO_WINDOW", 0x08000000),
+            patch("discord_ferry.exporter.runner._CREATE_NEW_PROCESS_GROUP", 0x00000200),
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=_capture,
+            ),
+        ):
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         flags = captured_kwargs.get("creationflags", 0)
@@ -347,13 +352,15 @@ class TestCancelSendsCtrlBreakOnWindows:
         # CTRL_BREAK_EVENT only exists on Windows; patch it in for POSIX runs.
         ctrl_break = getattr(_signal, "CTRL_BREAK_EVENT", 1)  # Windows value is 1
 
-        with patch("discord_ferry.exporter.runner.sys.platform", "win32"), \
-             patch.object(_signal, "CTRL_BREAK_EVENT", ctrl_break, create=True), \
-             patch(
-                 "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
-                 new=AsyncMock(return_value=process),
-             ), \
-             pytest.raises(asyncio.CancelledError):
+        with (
+            patch("discord_ferry.exporter.runner.sys.platform", "win32"),
+            patch.object(_signal, "CTRL_BREAK_EVENT", ctrl_break, create=True),
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await run_dce_export(cfg, tmp_path / "dce", cancel_immediately)
 
         assert process.send_signal.called or process.terminate.called

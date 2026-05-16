@@ -38,12 +38,8 @@ logger = logging.getLogger(__name__)
 _DISK_WARN_BYTES = 5_000_000_000  # 5 GB
 
 # Windows console + signal flags. On non-Windows these are 0 (no-op).
-_CREATE_NEW_PROCESS_GROUP: int = (
-    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-)
-_CREATE_NO_WINDOW: int = (
-    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-)
+_CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+_CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
@@ -360,10 +356,7 @@ async def run_dce_export(
                     MigrationEvent(
                         phase="export",
                         status="progress",
-                        message=(
-                            f"[dce] <truncated {consumed} bytes; "
-                            "line exceeded 64 KiB>"
-                        ),
+                        message=(f"[dce] <truncated {consumed} bytes; line exceeded 64 KiB>"),
                     )
                 )
                 continue
