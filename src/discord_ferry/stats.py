@@ -146,9 +146,11 @@ def summarize_state(state: MigrationState) -> StateSummary:
 
     if state.started_at and state.completed_at:
         duration_state: DurationState = "complete"
-        duration_seconds: float | None = calculate_duration(
-            state.started_at,
-            state.completed_at,
+        # Collapse calculate_duration's 0.0 parse-error sentinel to None so
+        # callers don't see "complete migration, zero seconds" for malformed
+        # timestamps in state.json.
+        duration_seconds: float | None = (
+            calculate_duration(state.started_at, state.completed_at) or None
         )
     elif state.started_at:
         duration_state = "in_progress"

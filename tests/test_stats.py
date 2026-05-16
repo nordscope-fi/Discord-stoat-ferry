@@ -200,6 +200,22 @@ def test_summarize_state_duration_unknown() -> None:
     assert summary.duration_seconds is None
 
 
+def test_summarize_state_duration_complete_but_malformed_returns_none() -> None:
+    """Malformed ISO timestamps with both fields populated → duration_seconds is None.
+
+    Without this guard, calculate_duration's 0.0 parse-error sentinel would
+    produce "complete migration, zero seconds" — a silent misread.
+    """
+    state = _full_state()
+    state.started_at = "not-an-iso-timestamp"
+    state.completed_at = "also-bogus"
+    summary = summarize_state(state)
+    # We keep duration_state == "complete" because both fields are present;
+    # the parse-failure surfaces via duration_seconds being None.
+    assert summary.duration_state == "complete"
+    assert summary.duration_seconds is None
+
+
 def test_summarize_state_dry_run_flag() -> None:
     state = _full_state()
     state.is_dry_run = True
