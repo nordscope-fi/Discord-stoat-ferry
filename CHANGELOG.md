@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-05-16
+
+### Added
+
+- **Adaptive heartbeat during prolonged DCE silence** (#39). Long Discord channel-enumeration phases (5-15 min on large guilds) previously left the GUI silent because Spectre.Console's status ticker is suppressed when stdout is piped. The runner now spawns a `_heartbeat` task alongside the existing stdout/stderr drain that emits `status="heartbeat"` `MigrationEvent`s at adaptive intervals (60s, 120s, 240s, then capped at 300s). Any "real activity" (per-channel progress, phase headlines, success, or any non-banner/non-status-dot line) resets the interval to 60s. Heartbeats appear in the GUI log panel only — the progress bar and channel label are untouched. `MigrationEvent.status` now recognizes `"heartbeat"` as a value; existing consumers that don't recognize it degrade gracefully (the GUI's `on_export_event` already pushes every event to the log regardless of status).
+
 ## [2.2.1] - 2026-05-16
 
 ### Added

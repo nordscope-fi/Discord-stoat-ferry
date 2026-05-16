@@ -436,7 +436,11 @@ wheels = [
 
 [[package]]
 name = "discord-ferry"
+<<<<<<< HEAD
 version = "2.2.1"
+=======
+version = "2.2.2"
+>>>>>>> fa3a994 (chore: bump to 2.2.2 + changelog for #39 heartbeat)
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
