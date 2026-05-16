@@ -77,3 +77,55 @@ class TestSuccessParsing:
         result = parse_dce_line("Successfully exported 0 channel(s).")
         assert isinstance(result, Success)
         assert result.count == 0
+
+
+class TestPerChannelParsing:
+    """Per-channel `<name>: NN%` lines from DCE's Spectre fallback renderer.
+
+    The regex is intentionally greedy + anchored: ^(?P<channel>.+):\\s(?P<pct>\\d+)%$.
+    A non-greedy .+? would match only the prefix up to the first `:` and orphan
+    the rest of channels named like `category: subname / channel: 50%`. Backtracking
+    on greedy match resolves to the largest channel that still leaves : <digits>%$.
+    """
+
+    def test_per_channel_25(self) -> None:
+        result = parse_dce_line("general: 25%")
+        assert isinstance(result, PerChannel)
+        assert result.channel == "general"
+        assert result.pct == 25
+
+    def test_per_channel_hierarchical(self) -> None:
+        # DCE joins forum/thread hierarchy with " / ", NOT Discord's "#" prefix.
+        result = parse_dce_line("Information / general / my-thread: 50%")
+        assert isinstance(result, PerChannel)
+        assert result.channel == "Information / general / my-thread"
+        assert result.pct == 50
+
+    def test_per_channel_100(self) -> None:
+        result = parse_dce_line("announcements: 100%")
+        assert isinstance(result, PerChannel)
+        assert result.channel == "announcements"
+        assert result.pct == 100
+
+    def test_per_channel_with_colon_in_name(self) -> None:
+        # Adversarial: channel name itself contains ': '. Greedy match required.
+        # Non-greedy would yield channel="category" and orphan the rest.
+        result = parse_dce_line("category: subname / channel: 50%")
+        assert isinstance(result, PerChannel)
+        assert result.channel == "category: subname / channel"
+        assert result.pct == 50
+
+    def test_per_channel_no_percent_falls_through(self) -> None:
+        # Bare "25" might be a count or part of a name -- require the % suffix.
+        result = parse_dce_line("general: 25")
+        assert isinstance(result, Raw)
+
+    def test_per_channel_no_space_falls_through(self) -> None:
+        # Spectre always emits ": " (colon-space). Be strict about the separator.
+        result = parse_dce_line("general:25%")
+        assert isinstance(result, Raw)
+
+    def test_per_channel_decimal_pct_falls_through(self) -> None:
+        # DCE per-source emits integer-only milestone percents. Reject decimals.
+        result = parse_dce_line("general: 25.5%")
+        assert isinstance(result, Raw)

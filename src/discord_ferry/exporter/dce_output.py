@@ -88,6 +88,11 @@ class Raw:
 ParsedDceLine = PerChannel | Phase | Success | Banner | StatusDot | Error | Raw
 
 
+# GREEDY (.+, not .+?) + anchored: backtracking lets the channel match the
+# largest substring that still leaves ': <digits>%$' at the end. This is what
+# makes `category: subname / channel: 50%` parse correctly.
+_PER_CHANNEL_RE = re.compile(r"^(?P<channel>.+):\s(?P<pct>\d+)%$")
+
 _PHASE_PATTERNS: tuple[tuple[PhaseKind, re.Pattern[str]], ...] = (
     ("fetching_channels", re.compile(r"^Fetching channels\.\.\.$")),
     ("fetching_threads", re.compile(r"^Fetching threads\.\.\.$")),
@@ -103,7 +108,20 @@ def parse_dce_line(line: str) -> ParsedDceLine:
     """Map one DCE stdout line to a typed ParsedDceLine.
 
     Total function: every input maps to some result; never raises.
+
+    Patterns tried in order:
+      1. PerChannel -- most common at runtime
+      2. Phase headlines
+      3. Success final line
+      4. Raw fallthrough
     """
+    pc_match = _PER_CHANNEL_RE.match(line)
+    if pc_match:
+        return PerChannel(
+            channel=pc_match.group("channel"),
+            pct=int(pc_match.group("pct")),
+        )
+
     for kind, pattern in _PHASE_PATTERNS:
         match = pattern.match(line)
         if match:
