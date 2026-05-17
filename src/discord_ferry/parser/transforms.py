@@ -3,7 +3,7 @@
 import logging
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -330,7 +330,7 @@ def format_original_timestamp(iso_timestamp: str) -> str:
         Formatted string like ``*[2024-01-15 12:00 UTC]*``.
     """
     dt = datetime.fromisoformat(iso_timestamp)
-    utc_dt = dt.astimezone(timezone.utc)
+    utc_dt = dt.astimezone(UTC)
     return f"*[{utc_dt.strftime('%Y-%m-%d %H:%M')} UTC]*"
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -162,7 +162,7 @@ def _decode_ulid_timestamp(stoat_id: str) -> str | None:
         return None
     try:
         timestamp_ms = _crockford_base32_decode(stoat_id[:10])
-        return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC).isoformat()
     except (ValueError, OverflowError, OSError):
         return None
 
