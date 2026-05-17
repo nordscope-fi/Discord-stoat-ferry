@@ -60,6 +60,12 @@ docs = [
     "mkdocs-material>=9.0",
 ]
 
+# Import firewall: explicitly package only src/discord_ferry into wheels.
+# tests/provisioning/ contains bot-auth write paths that must NEVER ship as
+# part of the installable package. See docs/plans/designs/2026-05-16-issue-35-*.md.
+[tool.hatch.build.targets.wheel]
+packages = ["src/discord_ferry"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
