@@ -282,7 +282,7 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
             process.terminate()  # fallback: hard kill
         try:
             await asyncio.wait_for(process.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             process.kill()
             await process.wait()
     else:

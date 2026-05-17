@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from discord_ferry.discord.client import fetch_guild, fetch_guild_channels, fetch_guild_roles
@@ -98,7 +98,7 @@ async def fetch_and_translate_guild_metadata(
 
     return DiscordMetadata(
         guild_id=guild_id,
-        fetched_at=datetime.now(timezone.utc).isoformat(),
+        fetched_at=datetime.now(UTC).isoformat(),
         server_default_permissions=server_default,
         role_permissions=role_permissions,
         channel_metadata=channel_metadata,

@@ -6,7 +6,7 @@ import asyncio
 import re
 import socket
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -154,7 +154,7 @@ async def run_migration(
         if state_path.exists():
             prior = load_state(config.output_dir)
             state = MigrationState()
-            state.started_at = datetime.now(timezone.utc).isoformat()
+            state.started_at = datetime.now(UTC).isoformat()
             state.is_dry_run = config.dry_run
             # Carry over ID maps so structure phases are skipped / reused
             state.channel_map = dict(prior.channel_map)
@@ -191,7 +191,7 @@ async def run_migration(
         else:
             # No prior state — fall back to a fresh migration
             state = MigrationState()
-            state.started_at = datetime.now(timezone.utc).isoformat()
+            state.started_at = datetime.now(UTC).isoformat()
             state.is_dry_run = config.dry_run
             on_event(
                 MigrationEvent(
@@ -202,7 +202,7 @@ async def run_migration(
             )
     else:
         state = MigrationState()
-        state.started_at = datetime.now(timezone.utc).isoformat()
+        state.started_at = datetime.now(UTC).isoformat()
         state.is_dry_run = config.dry_run
 
     # Phase 0: EXPORT — run DCE subprocess inline (orchestrated mode)
@@ -432,7 +432,7 @@ async def run_migration(
     # Phase 11: REPORT — generate and save inline
     state.current_phase = "report"
     on_event(MigrationEvent(phase="report", status="started", message="Generating report..."))
-    state.completed_at = datetime.now(timezone.utc).isoformat()
+    state.completed_at = datetime.now(UTC).isoformat()
 
     # S15: Rebuild forum index messages with actual migration data.
     if state.forum_channel_members and not config.dry_run:
@@ -672,7 +672,7 @@ async def _acquire_migration_lock(
                     lock_ts = None
 
         if lock_ts is not None:
-            age = datetime.now(timezone.utc).timestamp() - lock_ts
+            age = datetime.now(UTC).timestamp() - lock_ts
             if age < _LOCK_EXPIRY_SECONDS and not config.force_unlock:
                 raise MigrationError(
                     f"Another migration is in progress (lock age: {int(age)}s). "
@@ -689,7 +689,7 @@ async def _acquire_migration_lock(
             description = description.strip()
 
     # Append new lock marker.
-    ts = int(datetime.now(timezone.utc).timestamp())
+    ts = int(datetime.now(UTC).timestamp())
     hostname = socket.gethostname()
     lock_marker = f"{_FERRY_LOCK_MARKER}{ts}:{hostname}]"
     new_description = f"{description} {lock_marker}".strip() if description else lock_marker
@@ -1296,9 +1296,7 @@ async def run_rollback(
     config.server_id = server_id
 
     if state.rollback_progress is None:
-        state.rollback_progress = RollbackProgress(
-            started_at=datetime.now(timezone.utc).isoformat()
-        )
+        state.rollback_progress = RollbackProgress(started_at=datetime.now(UTC).isoformat())
 
     on_event(
         MigrationEvent(
@@ -1445,7 +1443,7 @@ async def run_rollback(
                 await _clean_categories(state, config, server_id, session, on_event)
 
             # Final summary.
-            state.rollback_progress.completed_at = datetime.now(timezone.utc).isoformat()
+            state.rollback_progress.completed_at = datetime.now(UTC).isoformat()
             save_state(state, config.output_dir)
             final_status = (
                 "completed_with_failures" if state.rollback_progress.failures else "completed"

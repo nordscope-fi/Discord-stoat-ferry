@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-05-17
+
+### Internal
+
+- **Foundation for `tests/provisioning/` dev tool (issue #35 enabler)**. Establishes the architectural firewall and bootstraps the package for the upcoming Discord test-server provisioning CLI. Three pieces shipped: (a) `[tool.hatch.build.targets.wheel] packages = ["src/discord_ferry"]` stanza in `pyproject.toml` ensures `tests/provisioning/` is excluded from built wheels (verified: 0 entries under `tests/` in the built `.whl`); (b) PEP 561 `src/discord_ferry/py.typed` marker so downstream `mypy tests/` can honor the package's types instead of treating it as untyped; (c) `tests/provisioning/__init__.py` + `_bot_api.py` exposing a `ProvisioningError` hierarchy that deliberately does NOT inherit from `FerryError` — the firewall is enforced structurally (location → wheel exclusion) and reinforced in types (no shared exception root). The full provisioning tool (provision/teardown/verify subcommands, ~1,400 LOC across ~20 commits) is planned for a follow-up session.
+
+### Changed
+
+- **Python floor formalized at 3.11.** `requires-python` bumped from `>=3.10` to `>=3.11`, the 3.10 trove classifier removed, ruff `target-version` bumped to `py311`, and mypy `python_version` bumped to `3.11`. CLAUDE.md has declared Python 3.11+ as the floor since the project's first internal commit; this PR aligns the externally-visible metadata. Any consumer pinning to Python 3.10 should remain on `2.2.3` or upgrade their interpreter. The ruff bump surfaced 12 modernization opportunities in `src/`, all auto-applied: `datetime.now(timezone.utc)` → `datetime.now(UTC)` (PEP 615 alias added in 3.11), and `except asyncio.TimeoutError` → `except TimeoutError` (3.11 stdlib alias). Behavioural equivalence preserved.
+
 ## [2.2.3] - 2026-05-16
 
 ### Features
