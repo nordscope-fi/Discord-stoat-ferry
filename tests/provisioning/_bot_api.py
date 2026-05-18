@@ -178,3 +178,31 @@ class BotApi:
             None,
         )
         return result  # type: ignore[return-value]
+
+    async def list_active_threads(self, guild_id: str) -> list[dict[str, Any]]:
+        """GET /guilds/{id}/threads/active — guild-wide active threads."""
+        result = await _request_with_retry(
+            self._session,
+            "GET",
+            f"{DISCORD_API_BASE}/guilds/{guild_id}/threads/active",
+            self._headers(),
+            None,
+        )
+        # API returns {"threads": [...], "members": [...]} — extract threads.
+        return result["threads"]  # type: ignore[call-overload,no-any-return]
+
+    async def list_archived_public_threads(self, parent_channel_id: str) -> list[dict[str, Any]]:
+        """GET /channels/{parent}/threads/archived/public — per-parent.
+
+        Pagination NOT implemented; test server is bounded to <100 threads
+        per parent by spec. If has_more becomes true at scale, paginate via
+        the `before` cursor.
+        """
+        result = await _request_with_retry(
+            self._session,
+            "GET",
+            f"{DISCORD_API_BASE}/channels/{parent_channel_id}/threads/archived/public",
+            self._headers(),
+            None,
+        )
+        return result["threads"]  # type: ignore[call-overload,no-any-return]

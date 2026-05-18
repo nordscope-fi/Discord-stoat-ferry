@@ -240,3 +240,40 @@ async def test_list_messages_uses_limit_query(mock_discord: aioresponses) -> Non
         result = await api.list_messages("100")
     assert len(result) == 1
     assert result[0]["id"] == "m1"
+
+
+async def test_list_active_threads_returns_threads(mock_discord: aioresponses) -> None:
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{GUILD_ID}/threads/active",
+        payload={
+            "threads": [
+                {"id": "t1", "name": "Cool Thread", "type": 11, "parent_id": "100"},
+            ],
+            "members": [],
+        },
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.list_active_threads(GUILD_ID)
+    assert len(result) == 1
+    assert result[0]["name"] == "Cool Thread"
+
+
+async def test_list_archived_public_threads_returns_threads(
+    mock_discord: aioresponses,
+) -> None:
+    mock_discord.get(
+        f"{DISCORD_API}/channels/100/threads/archived/public",
+        payload={
+            "threads": [
+                {"id": "t2", "name": "Archived Thread", "type": 11, "parent_id": "100"},
+            ],
+            "members": [],
+            "has_more": False,
+        },
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.list_archived_public_threads("100")
+    assert len(result) == 1
+    assert result[0]["id"] == "t2"
