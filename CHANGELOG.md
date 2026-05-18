@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Added `tests/provisioning/` script** for Discord test-server provisioning
   (issue #35 enabler). Standalone CLI with `provision` / `teardown` / `verify`
   subcommands using a Discord bot token. Human-run only; never executed in CI.
+  The diff comparator normalizes channel names (lowercase + spaces→hyphens +
+  strip non-`[a-z0-9_-]`) to match Discord's server-side rule — verified by
+  live smoke test against a test guild (provision → verify → idempotent
+  re-provision → teardown → verify-drift, all six steps pass).
 
 ## [2.2.4] - 2026-05-17
 
