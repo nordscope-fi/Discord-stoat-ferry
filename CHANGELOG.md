@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.8] - 2026-05-18
+
+### Bug Fixes
+
+- **`diff()` thread-keying disambiguates threads from forum posts** (`tests/provisioning/_applier.py`). Both Discord threads and forum posts use channel type `11`, so the previous `actual_threads = {ch.name: ch for ch in actual.channels if ch.type == 11}` would silently collide if a manifest grew to include a thread and a forum post with the same name — only one would survive in the dict and the other manifest entity would be spuriously reported as missing/needing creation. Re-keyed to `(parent_id, name)` tuples and threaded a `manifest_tc_id_to_discord_id` map through the diff so the lookup targets the correct text-channel parent. Current fixture (`Cool Thread` vs `Bug Report`) doesn't trigger the collision; the new `test_diff_distinguishes_thread_from_forum_post_with_same_name` regression test injects a colliding foreign forum post named "Cool Thread" inside `feedback-forum` and asserts the manifest's `Cool Thread` thread under `general` is still matched without drift.
+
+### Docs
+
+- **`tests/provisioning/README.md` "no CI" rule scoped explicitly**. The previous wording ("this script must NEVER run in CI") was ambiguous about whether the rule covered `provision_test_server.py` (yes — that's the human-only CLI) or `tests/provisioning/test_*.py` (no — those are hermetic via `aioresponses` and run alongside the rest of the suite in CI). Clarified that the rule applies to the CLI only.
+
 ## [2.2.7] - 2026-05-18
 
 ### Bug Fixes

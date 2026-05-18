@@ -506,6 +506,52 @@ def test_diff_matches_discord_normalized_channel_names() -> None:
     assert d.mismatched_embeds == ()
 
 
+def test_diff_distinguishes_thread_from_forum_post_with_same_name() -> None:
+    """Forum posts and threads both have Discord type 11. If a forum post
+    shares its name with a manifest thread, the previous `{ch.name: ch}` key
+    would arbitrarily keep only one of them and the manifest thread would be
+    spuriously reported as missing. The fix keys by `(parent_id, name)` so
+    threads-under-text-channel and posts-under-forum are disambiguated.
+    """
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+
+    # Add a foreign forum post inside the feedback-forum that collides on name
+    # with the manifest's "Cool Thread" (which lives under the general text
+    # channel). Without the (parent_id, name) keying fix, the dict lookup
+    # would resolve "Cool Thread" to whichever channel iterated last, causing
+    # spurious drift in `diff()`.
+    feedback_forum = next(
+        ch for ch in actual.channels if ch.name == "Feedback Forum" and ch.type == 15
+    )
+    # Note: deliberately no entry for "9999" in messages_by_channel. On the
+    # old code (name-only key), the dict lookup would resolve to this foreign
+    # post and `_thread_has_marker` would return False (no messages → no
+    # marker), spuriously triggering CreateThreadOp. The tuple-keyed fix
+    # avoids the lookup entirely.
+    colliding_post = ActualChannel(
+        discord_id="9999",
+        name="Cool Thread",
+        type=11,
+        topic=None,
+        parent_id=feedback_forum.discord_id,
+    )
+    actual = ActualState(
+        guild_id=actual.guild_id,
+        channels=actual.channels + (colliding_post,),
+        messages_by_channel=actual.messages_by_channel,
+    )
+
+    d = diff(manifest, actual)
+    # The manifest thread is still matched under its real parent text channel.
+    assert d.missing_entities == ()
+    assert d.ops == ()
+    # The colliding foreign post is type 11 and therefore not reported as
+    # extra_foreign (type-11 entities are excluded from foreign-drift). The
+    # important property is the manifest thread isn't shadowed.
+
+
 def _build_fully_matching_state(manifest: Manifest) -> ActualState:
     """Construct an ActualState that perfectly mirrors the manifest."""
     channels: list[ActualChannel] = []

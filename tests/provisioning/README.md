@@ -78,11 +78,17 @@ the Discord UI; doing so will cause `provision` re-runs to create duplicates
 
 ## The "no CI" rule
 
-This script must NEVER run in CI per issue #35's deferred design. Reason:
-the DCE capture step that follows provisioning is fundamentally human-run
-(DCE requires interactive authentication). Automating provisioning without
-automating capture would be misleading — the captured fixtures could drift
-from what we expect to capture.
+The `provision_test_server.py` CLI (the `provision` / `teardown` / `verify`
+subcommands documented above) must NEVER run in CI per issue #35's design.
+Reason: the DCE capture step that follows provisioning is fundamentally
+human-run (DCE requires interactive authentication). Automating provisioning
+without automating capture would be misleading — the captured fixtures could
+drift from what we expect to capture.
+
+This rule applies ONLY to the CLI; the unit tests in `tests/provisioning/
+test_*.py` (`test_applier.py`, `test_bot_api.py`, `test_cli.py`) are
+hermetic — they mock the Discord REST API via `aioresponses` and run in CI
+alongside the rest of the suite without contacting any real guild.
 
 ## Manifest
 
