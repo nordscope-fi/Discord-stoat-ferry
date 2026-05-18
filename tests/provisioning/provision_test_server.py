@@ -36,6 +36,7 @@ from tests.provisioning._bot_api import (
     BotApi,
     ProvisioningAuthError,
     ProvisioningError,
+    ProvisioningPermissionError,
     TokenRedactingFilter,
     configure_aiohttp_logging,
 )
@@ -194,6 +195,9 @@ async def _run_provision(
         except ProvisioningAuthError as exc:
             click.echo(f"auth error: {exc}", err=True)
             sys.exit(2)
+        except ProvisioningPermissionError as exc:
+            click.echo(f"permission error: {exc}", err=True)
+            sys.exit(2)
         except ProvisioningError as exc:
             click.echo(f"provisioning error: {exc}", err=True)
             sys.exit(1)
@@ -236,8 +240,17 @@ async def _run_teardown(token: str, guild_id: str, manifest: Manifest, yes: bool
                 actual, api, marker=manifest.marker, audit_reason="teardown (issue #35)"
             )
             click.echo(f"deleted {result.deleted_count} entities")
+            if result.skipped_count > 0:
+                click.echo(
+                    f"WARNING: {result.skipped_count} entities skipped due to errors; "
+                    f"re-run teardown to retry",
+                    err=True,
+                )
         except ProvisioningAuthError as exc:
             click.echo(f"auth error: {exc}", err=True)
+            sys.exit(2)
+        except ProvisioningPermissionError as exc:
+            click.echo(f"permission error: {exc}", err=True)
             sys.exit(2)
         except ProvisioningError as exc:
             click.echo(f"teardown error: {exc}", err=True)
@@ -274,6 +287,9 @@ async def _run_verify(token: str, guild_id: str, manifest: Manifest) -> None:
                 sys.exit(1)
         except ProvisioningAuthError as exc:
             click.echo(f"auth error: {exc}", err=True)
+            sys.exit(2)
+        except ProvisioningPermissionError as exc:
+            click.echo(f"permission error: {exc}", err=True)
             sys.exit(2)
         except ProvisioningError as exc:
             click.echo(f"verify error: {exc}", err=True)

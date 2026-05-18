@@ -91,8 +91,9 @@ async def _request_with_retry(
                 if resp.status == 401:
                     raise ProvisioningAuthError("bot token rejected by Discord (401 Unauthorized)")
                 if resp.status == 403:
+                    endpoint = url.removeprefix(DISCORD_API_BASE) or url
                     raise ProvisioningPermissionError(
-                        f"missing permission for {method} {url.split('/')[-2]} (403 Forbidden)"
+                        f"missing permission for {method} {endpoint} (403 Forbidden)"
                     )
                 if resp.status == 429:
                     body = await resp.json()

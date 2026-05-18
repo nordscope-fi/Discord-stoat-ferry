@@ -12,7 +12,12 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, assert_never
 
-from tests.provisioning._bot_api import BotApi, ProvisioningError
+from tests.provisioning._bot_api import (
+    BotApi,
+    ProvisioningAuthError,
+    ProvisioningError,
+    ProvisioningPermissionError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -864,6 +869,10 @@ async def reconcile_teardown(
         try:
             await api.delete_channel(ch.discord_id, audit_reason=audit_reason)
             deleted_ids.append(ch.discord_id)
+        except (ProvisioningAuthError, ProvisioningPermissionError):
+            # Auth/permission failures cannot be salvaged by retrying with the
+            # next channel — re-raise so the CLI can surface them as exit 2.
+            raise
         except ProvisioningError:
             skipped += 1
     return TeardownResult(
