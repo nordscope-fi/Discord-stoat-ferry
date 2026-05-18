@@ -193,3 +193,18 @@ async def test_botapi_sends_bot_prefixed_authorization(
     call = requests[key][0]
     assert call.kwargs["headers"]["Authorization"] == f"Bot {TOKEN}"
     assert "DiscordFerry-TestProvisioner" in call.kwargs["headers"]["User-Agent"]
+
+
+def test_botapi_headers_includes_audit_reason_when_provided() -> None:
+    """X-Audit-Log-Reason is set only when audit_reason is provided."""
+    api = BotApi(session=None, token=TOKEN)  # type: ignore[arg-type]
+    with_reason = api._headers(audit_reason="cleanup test")
+    without_reason = api._headers()
+    assert with_reason["X-Audit-Log-Reason"] == "cleanup test"
+    assert "X-Audit-Log-Reason" not in without_reason
+
+
+def test_botapi_token_only_stored_in_underscore_token() -> None:
+    """Regression guard: token must never be cached on any other attribute."""
+    api = BotApi(session=None, token="abc123")  # type: ignore[arg-type]
+    assert set(api.__dict__.keys()) == {"_session", "_token"}
