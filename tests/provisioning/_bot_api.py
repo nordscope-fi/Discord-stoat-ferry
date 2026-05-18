@@ -206,3 +206,44 @@ class BotApi:
             None,
         )
         return result["threads"]  # type: ignore[call-overload,no-any-return]
+
+    async def send_message(
+        self,
+        channel_id: str,
+        *,
+        content: str,
+        embed: dict[str, Any] | None,
+        audit_reason: str,
+    ) -> dict[str, Any]:
+        """POST /channels/{id}/messages — supports text + optional embed."""
+        body: dict[str, Any] = {"content": content}
+        if embed is not None:
+            body["embeds"] = [embed]
+        result = await _request_with_retry(
+            self._session,
+            "POST",
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
+            self._headers(audit_reason),
+            body,
+        )
+        return result  # type: ignore[return-value]
+
+    async def create_channel(
+        self,
+        guild_id: str,
+        *,
+        name: str,
+        channel_type: int,
+        topic: str,
+        audit_reason: str,
+    ) -> dict[str, Any]:
+        """POST /guilds/{id}/channels — text (type=0) or forum (type=15)."""
+        body = {"name": name, "type": channel_type, "topic": topic}
+        result = await _request_with_retry(
+            self._session,
+            "POST",
+            f"{DISCORD_API_BASE}/guilds/{guild_id}/channels",
+            self._headers(audit_reason),
+            body,
+        )
+        return result  # type: ignore[return-value]

@@ -277,3 +277,59 @@ async def test_list_archived_public_threads_returns_threads(
         result = await api.list_archived_public_threads("100")
     assert len(result) == 1
     assert result[0]["id"] == "t2"
+
+
+async def test_send_message_posts_content_and_embed(mock_discord: aioresponses) -> None:
+    mock_discord.post(
+        f"{DISCORD_API}/channels/100/messages",
+        payload={"id": "m99", "channel_id": "100", "content": "hi"},
+        status=200,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.send_message(
+            "100",
+            content="hi [ferry:msg-001]",
+            embed=None,
+            audit_reason="provision (issue #35)",
+        )
+    assert result["id"] == "m99"
+    # Audit reason header was sent:
+    call = list(mock_discord.requests.values())[0][0]
+    assert call.kwargs["headers"]["X-Audit-Log-Reason"] == "provision (issue #35)"
+
+
+async def test_create_channel_text_type_zero(mock_discord: aioresponses) -> None:
+    mock_discord.post(
+        f"{DISCORD_API}/guilds/{GUILD_ID}/channels",
+        payload={"id": "100", "name": "general", "type": 0},
+        status=201,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.create_channel(
+            GUILD_ID,
+            name="general",
+            channel_type=0,
+            topic="[ferry-fixture] primary test channel",
+            audit_reason="provision (issue #35)",
+        )
+    assert result["id"] == "100"
+
+
+async def test_create_channel_forum_type_fifteen(mock_discord: aioresponses) -> None:
+    mock_discord.post(
+        f"{DISCORD_API}/guilds/{GUILD_ID}/channels",
+        payload={"id": "101", "name": "Feedback Forum", "type": 15},
+        status=201,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.create_channel(
+            GUILD_ID,
+            name="Feedback Forum",
+            channel_type=15,
+            topic="[ferry-fixture] forum channel",
+            audit_reason="provision (issue #35)",
+        )
+    assert result["type"] == 15
