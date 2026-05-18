@@ -457,12 +457,12 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
     marker = manifest.marker
 
     actual_text_channels = {
-        ch.name: ch
+        _normalize_channel_name(ch.name): ch
         for ch in actual.channels
         if ch.type == 0 and ch.topic and ch.topic.startswith(marker)
     }
     actual_forum_channels = {
-        ch.name: ch
+        _normalize_channel_name(ch.name): ch
         for ch in actual.channels
         if ch.type == 15 and ch.topic and ch.topic.startswith(marker)
     }
@@ -472,7 +472,7 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
 
     # Text channels and their messages
     for tc in manifest.text_channels:
-        actual_ch = actual_text_channels.get(tc.name)
+        actual_ch = actual_text_channels.get(_normalize_channel_name(tc.name))
         if actual_ch is None:
             missing.append(tc.id)
             ops.append(CreateTextChannelOp(target=tc, reason="missing from guild"))
@@ -519,7 +519,7 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
 
     # Forum channels and posts
     for fc in manifest.forum_channels:
-        actual_fc = actual_forum_channels.get(fc.name)
+        actual_fc = actual_forum_channels.get(_normalize_channel_name(fc.name))
         if actual_fc is None:
             missing.append(fc.id)
             ops.append(CreateForumChannelOp(target=fc, reason="missing from guild"))
@@ -579,6 +579,20 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
 
 
 _MARKER_PATTERN = re.compile(r"\[ferry:([a-zA-Z0-9_-]+)\]")
+
+_CHANNEL_NAME_STRIP = re.compile(r"[^a-z0-9_-]")
+
+
+def _normalize_channel_name(name: str) -> str:
+    """Apply Discord's server-side normalization rule to a channel name.
+
+    Discord lowercases the name, replaces internal whitespace with hyphens,
+    and strips characters outside `[a-z0-9_-]`. Use this on both sides of
+    channel matching so manifest names like 'Feedback Forum' match actual
+    channels stored as 'feedback-forum'. Threads and forum posts are NOT
+    normalized — their names preserve case and spaces.
+    """
+    return _CHANNEL_NAME_STRIP.sub("", name.strip().lower().replace(" ", "-"))
 
 
 def _extract_marker_ids(content: str) -> list[str]:

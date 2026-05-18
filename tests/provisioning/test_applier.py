@@ -472,6 +472,40 @@ def test_diff_embed_field_text_drift_detected() -> None:
     )
 
 
+def test_diff_matches_discord_normalized_channel_names() -> None:
+    """Discord lowercases + hyphenates channel names server-side.
+
+    Manifest says 'Feedback Forum'; Discord stores 'feedback-forum'. The diff
+    comparator must normalize both sides so the names match. Without this fix,
+    verify against a real guild reports the forum channel as missing and the
+    Discord-normalized name as an extra marker entity.
+    """
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+    # Rewrite the forum channel's name to Discord's normalized form
+    new_channels = tuple(
+        ActualChannel(
+            discord_id=ch.discord_id,
+            name="feedback-forum" if ch.name == "Feedback Forum" else ch.name,
+            type=ch.type,
+            topic=ch.topic,
+            parent_id=ch.parent_id,
+        )
+        for ch in actual.channels
+    )
+    actual = ActualState(
+        guild_id=actual.guild_id,
+        channels=new_channels,
+        messages_by_channel=actual.messages_by_channel,
+    )
+    d = diff(manifest, actual)
+    assert d.ops == ()
+    assert d.missing_entities == ()
+    assert d.extra_marker_entities == ()
+    assert d.mismatched_embeds == ()
+
+
 def _build_fully_matching_state(manifest: Manifest) -> ActualState:
     """Construct an ActualState that perfectly mirrors the manifest."""
     channels: list[ActualChannel] = []
