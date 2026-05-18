@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Tooling
+
+- **Added `tests/provisioning/` script** for Discord test-server provisioning
+  (issue #35 enabler). Standalone CLI with `provision` / `teardown` / `verify`
+  subcommands using a Discord bot token. Human-run only; never executed in CI.
+
 ## [2.2.4] - 2026-05-17
 
 ### Internal
