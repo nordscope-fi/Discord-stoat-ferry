@@ -375,3 +375,30 @@ async def test_create_forum_post_uses_threads_endpoint(
         )
     assert result["id"] == "t20"
     assert result["message"]["id"] == "msg-in-post"
+
+
+async def test_create_guild_returns_new_guild(mock_discord: aioresponses) -> None:
+    mock_discord.post(
+        f"{DISCORD_API}/guilds",
+        payload={"id": "999", "name": "Discord Ferry Test Fixture"},
+        status=201,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.create_guild(
+            name="Discord Ferry Test Fixture",
+            audit_reason="bootstrap (issue #35)",
+        )
+    assert result["id"] == "999"
+
+
+async def test_delete_channel(mock_discord: aioresponses) -> None:
+    mock_discord.delete(
+        f"{DISCORD_API}/channels/100",
+        payload={},
+        status=200,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        await api.delete_channel("100", audit_reason="teardown (issue #35)")
+    # No assertion needed — successful return is the test

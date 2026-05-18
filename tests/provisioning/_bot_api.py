@@ -293,3 +293,25 @@ class BotApi:
             body,
         )
         return result  # type: ignore[return-value]
+
+    async def create_guild(self, *, name: str, audit_reason: str) -> dict[str, Any]:
+        """POST /guilds — bootstrap a new guild (bot must be in <10 guilds)."""
+        body = {"name": name}
+        result = await _request_with_retry(
+            self._session,
+            "POST",
+            f"{DISCORD_API_BASE}/guilds",
+            self._headers(audit_reason),
+            body,
+        )
+        return result  # type: ignore[return-value]
+
+    async def delete_channel(self, channel_id: str, *, audit_reason: str) -> None:
+        """DELETE /channels/{id}."""
+        await _request_with_retry(
+            self._session,
+            "DELETE",
+            f"{DISCORD_API_BASE}/channels/{channel_id}",
+            self._headers(audit_reason),
+            None,
+        )
