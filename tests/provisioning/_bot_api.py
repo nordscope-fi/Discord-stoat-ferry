@@ -247,3 +247,49 @@ class BotApi:
             body,
         )
         return result  # type: ignore[return-value]
+
+    async def create_thread_from_message(
+        self,
+        channel_id: str,
+        message_id: str,
+        *,
+        name: str,
+        audit_reason: str,
+    ) -> dict[str, Any]:
+        """POST /channels/{ch}/messages/{msg}/threads — thread from text-channel message."""
+        body = {"name": name, "auto_archive_duration": 1440}
+        result = await _request_with_retry(
+            self._session,
+            "POST",
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/threads",
+            self._headers(audit_reason),
+            body,
+        )
+        return result  # type: ignore[return-value]
+
+    async def create_forum_post(
+        self,
+        forum_channel_id: str,
+        *,
+        name: str,
+        first_message_content: str,
+        audit_reason: str,
+    ) -> dict[str, Any]:
+        """POST /channels/{forum}/threads — creates forum post (thread+nested first message).
+
+        Forum channels REJECT POST /messages. Posts go through this endpoint
+        which returns a channel object with the nested first message.
+        """
+        body = {
+            "name": name,
+            "auto_archive_duration": 1440,
+            "message": {"content": first_message_content},
+        }
+        result = await _request_with_retry(
+            self._session,
+            "POST",
+            f"{DISCORD_API_BASE}/channels/{forum_channel_id}/threads",
+            self._headers(audit_reason),
+            body,
+        )
+        return result  # type: ignore[return-value]

@@ -333,3 +333,45 @@ async def test_create_channel_forum_type_fifteen(mock_discord: aioresponses) -> 
             audit_reason="provision (issue #35)",
         )
     assert result["type"] == 15
+
+
+async def test_create_thread_from_message(mock_discord: aioresponses) -> None:
+    mock_discord.post(
+        f"{DISCORD_API}/channels/100/messages/m1/threads",
+        payload={"id": "t10", "name": "Cool Thread", "type": 11, "parent_id": "100"},
+        status=201,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.create_thread_from_message(
+            "100", "m1", name="Cool Thread", audit_reason="provision (issue #35)"
+        )
+    assert result["id"] == "t10"
+    # auto_archive_duration must be 1440:
+    call = list(mock_discord.requests.values())[0][0]
+    assert call.kwargs["json"]["auto_archive_duration"] == 1440
+
+
+async def test_create_forum_post_uses_threads_endpoint(
+    mock_discord: aioresponses,
+) -> None:
+    """Forum posts MUST use /channels/{forum}/threads, NOT /messages."""
+    mock_discord.post(
+        f"{DISCORD_API}/channels/101/threads",
+        payload={
+            "id": "t20",
+            "name": "Bug Report",
+            "message": {"id": "msg-in-post", "content": "Bug report body."},
+        },
+        status=201,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.create_forum_post(
+            "101",
+            name="Bug Report",
+            first_message_content="Bug report body. [ferry:post-bug]",
+            audit_reason="provision (issue #35)",
+        )
+    assert result["id"] == "t20"
+    assert result["message"]["id"] == "msg-in-post"
