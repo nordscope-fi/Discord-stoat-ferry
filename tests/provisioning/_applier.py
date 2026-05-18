@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from tests.provisioning._bot_api import ProvisioningError
+from tests.provisioning._bot_api import BotApi, ProvisioningError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -364,3 +364,80 @@ class Diff:
     extra_marker_entities: tuple[ActualChannel, ...]  # actual+marker+not-in-manifest
     extra_foreign_entities: tuple[ActualChannel, ...]  # actual+no-marker (informational)
     mismatched_embeds: tuple[EmbedMismatch, ...]
+
+
+# ---- State fetcher ----
+
+
+async def fetch_actual_state(api: BotApi, guild_id: str) -> ActualState:
+    """Fetch the live guild state for diffing against the manifest.
+
+    Fans out:
+      - GET /guilds/{id}/channels (text + forum, NOT threads)
+      - GET /guilds/{id}/threads/active (guild-wide active threads)
+      - GET /channels/{parent}/threads/archived/public per text channel
+      - GET /channels/{id}/messages?limit=100 for each channel and thread
+
+    The merged channels tuple includes archived threads so that `verify`
+    works after the 24h auto-archive boundary.
+    """
+    raw_channels = await api.list_channels(guild_id)
+    raw_active_threads = await api.list_active_threads(guild_id)
+
+    # Archived public threads — per parent text channel only
+    text_channel_ids = [str(ch["id"]) for ch in raw_channels if ch["type"] == 0]
+    raw_archived: list[dict[str, Any]] = []
+    for parent_id in text_channel_ids:
+        raw_archived.extend(await api.list_archived_public_threads(parent_id))
+
+    # Build ActualChannel tuple
+    all_raw = raw_channels + raw_active_threads + raw_archived
+    channels = tuple(
+        ActualChannel(
+            discord_id=str(c["id"]),
+            name=c["name"],
+            type=c["type"],
+            topic=c.get("topic"),
+            parent_id=str(c["parent_id"]) if c.get("parent_id") else None,
+        )
+        for c in all_raw
+    )
+
+    # Fetch messages for every channel (text + threads — but NOT forum channels;
+    # forum channels reject /messages by design)
+    messages_by_channel: dict[str, tuple[ActualMessage, ...]] = {}
+    for ch in channels:
+        if ch.type == 15:  # forum channels: no direct messages
+            continue
+        raw_msgs = await api.list_messages(ch.discord_id)
+        messages_by_channel[ch.discord_id] = tuple(
+            _parse_actual_message(m, ch.discord_id) for m in raw_msgs
+        )
+
+    return ActualState(
+        guild_id=guild_id,
+        channels=channels,
+        messages_by_channel=messages_by_channel,
+    )
+
+
+def _parse_actual_message(raw: dict[str, Any], channel_id: str) -> ActualMessage:
+    embed = None
+    embeds = raw.get("embeds") or []
+    if embeds:
+        e = embeds[0]
+        embed = ActualEmbed(
+            title=e.get("title", ""),
+            description=e.get("description", ""),
+            color=e.get("color", 0),
+            fields=tuple(
+                ActualEmbedField(name=f["name"], value=f["value"], inline=f.get("inline", False))
+                for f in (e.get("fields") or [])
+            ),
+        )
+    return ActualMessage(
+        discord_id=str(raw["id"]),
+        channel_discord_id=channel_id,
+        content=raw.get("content", ""),
+        embed=embed,
+    )

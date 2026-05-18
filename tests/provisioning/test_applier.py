@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import pytest
+from aioresponses import aioresponses
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 from tests.provisioning._applier import (
     ActualChannel,
@@ -30,9 +35,13 @@ from tests.provisioning._applier import (
     ManifestMessage,
     ManifestTextChannel,
     ManifestThread,
+    fetch_actual_state,
     load_manifest,
 )
-from tests.provisioning._bot_api import ProvisioningError
+from tests.provisioning._bot_api import BotApi, ProvisioningError
+
+DISCORD_API = "https://discord.com/api/v10"
+TOKEN = "test-bot-token"
 
 
 def test_public_dataclass_surface_is_importable() -> None:
@@ -264,3 +273,92 @@ def test_empty_diff_is_no_op() -> None:
         mismatched_embeds=(),
     )
     assert len(diff.ops) == 0
+
+
+@pytest.fixture
+def mock_discord_for_state() -> Generator[aioresponses, None, None]:
+    with aioresponses() as m:
+        yield m
+
+
+async def test_fetch_actual_state_merges_active_and_archived_threads(
+    mock_discord_for_state: aioresponses,
+) -> None:
+    guild = "111"
+    # Channels: one text + one forum
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/guilds/{guild}/channels",
+        payload=[
+            {
+                "id": "100",
+                "name": "general",
+                "type": 0,
+                "topic": "[ferry-fixture] x",
+                "parent_id": None,
+            },
+            {
+                "id": "101",
+                "name": "Feedback Forum",
+                "type": 15,
+                "topic": "[ferry-fixture] y",
+                "parent_id": None,
+            },
+        ],
+    )
+    # Active threads: one in text channel
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/guilds/{guild}/threads/active",
+        payload={
+            "threads": [
+                {"id": "t1", "name": "Active Thread", "type": 11, "topic": None, "parent_id": "100"}
+            ],
+            "members": [],
+        },
+    )
+    # Archived public threads per parent channel
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/channels/100/threads/archived/public",
+        payload={
+            "threads": [
+                {
+                    "id": "t2",
+                    "name": "Archived Thread",
+                    "type": 11,
+                    "topic": None,
+                    "parent_id": "100",
+                }
+            ],
+            "members": [],
+            "has_more": False,
+        },
+    )
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/channels/101/threads/archived/public",
+        payload={"threads": [], "members": [], "has_more": False},
+    )
+    # Messages in each channel (empty for this test)
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/channels/100/messages?limit=100",
+        payload=[],
+    )
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/channels/101/messages?limit=100",
+        payload=[],
+    )
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/channels/t1/messages?limit=100",
+        payload=[],
+    )
+    mock_discord_for_state.get(
+        f"{DISCORD_API}/channels/t2/messages?limit=100",
+        payload=[],
+    )
+
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        state = await fetch_actual_state(api, guild)
+
+    # 4 channels total: 1 text + 1 forum + 1 active thread + 1 archived thread
+    assert len(state.channels) == 4
+    thread_ids = {ch.discord_id for ch in state.channels if ch.type == 11}
+    assert thread_ids == {"t1", "t2"}
