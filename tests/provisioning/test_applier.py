@@ -639,3 +639,56 @@ async def test_reconcile_provision_on_empty_guild(
         )
 
     assert result.created_count >= 14  # 1 text + 10 msgs + 1 thread + 1 forum + 1 post
+
+
+from tests.provisioning._applier import (  # noqa: E402
+    TeardownResult,
+    VerifyResult,
+    reconcile_teardown,
+    reconcile_verify,
+)
+
+
+async def test_reconcile_teardown_deletes_marker_channels(
+    mock_discord_for_state: aioresponses,
+) -> None:
+    actual = ActualState(
+        guild_id="111",
+        channels=(
+            ActualChannel("100", "general", 0, "[ferry-fixture] x", None),
+            ActualChannel("101", "Feedback Forum", 15, "[ferry-fixture] y", None),
+            ActualChannel("200", "user-channel", 0, None, None),
+        ),
+        messages_by_channel={},
+    )
+    mock_discord_for_state.delete(f"{DISCORD_API}/channels/100", status=200, payload={})
+    mock_discord_for_state.delete(f"{DISCORD_API}/channels/101", status=200, payload={})
+
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await reconcile_teardown(
+            actual, api, marker="[ferry-fixture]", audit_reason="teardown (issue #35)"
+        )
+    assert isinstance(result, TeardownResult)
+    assert result.deleted_count == 2
+    assert "200" not in result.deleted_ids
+
+
+def test_reconcile_verify_returns_exit_zero_on_match() -> None:
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+    d = diff(manifest, actual)
+    result = reconcile_verify(d)
+    assert isinstance(result, VerifyResult)
+    assert result.exit_code == 0
+
+
+def test_reconcile_verify_returns_exit_one_on_drift() -> None:
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = ActualState(guild_id="111", channels=(), messages_by_channel={})
+    d = diff(manifest, actual)
+    result = reconcile_verify(d)
+    assert result.exit_code == 1
+    assert len(result.diff_lines) > 0

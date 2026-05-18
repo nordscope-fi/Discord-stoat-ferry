@@ -814,3 +814,75 @@ async def apply_op(
             await api.delete_channel(t.discord_id, audit_reason=audit_reason)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+# ---- Reconciler: teardown + verify ----
+
+
+@dataclass(frozen=True)
+class TeardownResult:
+    deleted_count: int
+    deleted_ids: tuple[str, ...]
+    skipped_count: int
+
+
+async def reconcile_teardown(
+    actual: ActualState,
+    api: BotApi,
+    *,
+    marker: str,
+    audit_reason: str,
+) -> TeardownResult:
+    """Delete only marker-carrying entities; ignore the manifest entirely.
+
+    Channels are matched by topic prefix. Threads/forum-posts get deleted
+    automatically when their parent channel is deleted (Discord cascade),
+    so we only iterate top-level channels (type 0 = text, type 15 = forum).
+    """
+    to_delete = [
+        ch
+        for ch in actual.channels
+        if ch.type in (0, 15) and ch.topic and ch.topic.startswith(marker)
+    ]
+    deleted_ids: list[str] = []
+    skipped = 0
+    for ch in to_delete:
+        try:
+            await api.delete_channel(ch.discord_id, audit_reason=audit_reason)
+            deleted_ids.append(ch.discord_id)
+        except ProvisioningError:
+            skipped += 1
+    return TeardownResult(
+        deleted_count=len(deleted_ids),
+        deleted_ids=tuple(deleted_ids),
+        skipped_count=skipped,
+    )
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    exit_code: int  # 0=match, 1=drift, 2=error
+    diff_lines: tuple[str, ...]
+
+
+def reconcile_verify(d: Diff) -> VerifyResult:
+    """Pure-read verification: classify the diff into a 3-way exit code."""
+    if (
+        not d.ops
+        and not d.missing_entities
+        and not d.extra_marker_entities
+        and not d.mismatched_embeds
+    ):
+        return VerifyResult(exit_code=0, diff_lines=())
+
+    lines: list[str] = []
+    for mid in d.missing_entities:
+        lines.append(f"missing: {mid}")
+    for ch in d.extra_marker_entities:
+        lines.append(f"extra marker entity: #{ch.name} ({ch.discord_id})")
+    for ch in d.extra_foreign_entities:
+        lines.append(f"foreign entity (informational): #{ch.name}")
+    for em in d.mismatched_embeds:
+        lines.append(f"embed mismatch on {em.manifest_message_id}: {em.reason}")
+
+    return VerifyResult(exit_code=1, diff_lines=tuple(lines))
