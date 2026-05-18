@@ -8,7 +8,11 @@ exception hierarchy reinforces that isolation in the type system.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
+
+import aiohttp
 
 
 class ProvisioningError(Exception):
@@ -49,3 +53,64 @@ class TokenRedactingFilter(logging.Filter):
             record.msg = message.replace(self._token, self.REDACTED)
             record.args = None
         return True
+
+
+_MAX_RETRIES = 3
+_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+_JITTER_SECONDS = 0.05
+
+
+async def _request_with_retry(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    json_body: dict[str, Any] | None,
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """Perform an HTTP request with 429/5xx/network retry.
+
+    On 429: sleep retry_after + jitter, retry up to 3 times total.
+    On 5xx or aiohttp.ClientError: exp backoff 1/2/4s, retry up to 3 times.
+    On 401: ProvisioningAuthError (no retry).
+    On 403: ProvisioningPermissionError (no retry).
+    On 4xx (other): ProvisioningError with Discord's code + message (never errors).
+    """
+    last_exception: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            async with session.request(method, url, headers=headers, json=json_body) as resp:
+                if resp.status in (200, 201, 204):
+                    if resp.status == 204:
+                        return {}
+                    return await resp.json()  # type: ignore[no-any-return]
+                if resp.status == 401:
+                    raise ProvisioningAuthError("bot token rejected by Discord (401 Unauthorized)")
+                if resp.status == 403:
+                    raise ProvisioningPermissionError(
+                        f"missing permission for {method} {url.split('/')[-2]} (403 Forbidden)"
+                    )
+                if resp.status == 429:
+                    body = await resp.json()
+                    retry_after = float(body.get("retry_after", 1))
+                    await asyncio.sleep(retry_after + _JITTER_SECONDS)
+                    continue
+                if 500 <= resp.status < 600:
+                    last_exception = ProvisioningError(f"Discord server error ({resp.status})")
+                    await asyncio.sleep(_BACKOFF_SECONDS[attempt])
+                    continue
+                # 4xx (other): surface code + message ONLY
+                body = await resp.json()
+                code = body.get("code", "unknown")
+                message = body.get("message", "no message")
+                raise ProvisioningError(f"Discord {resp.status} (code {code}): {message}")
+        except (ProvisioningAuthError, ProvisioningPermissionError, ProvisioningError):
+            raise
+        except aiohttp.ClientError as exc:
+            last_exception = ProvisioningError(f"network error: {type(exc).__name__}")
+            await asyncio.sleep(_BACKOFF_SECONDS[attempt])
+            continue
+
+    # Loop exhausted
+    if isinstance(last_exception, ProvisioningError):
+        raise last_exception
+    raise ProvisioningRateLimitError("rate limited after 3 retries")
