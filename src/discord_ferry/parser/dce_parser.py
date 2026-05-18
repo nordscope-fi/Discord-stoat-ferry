@@ -30,6 +30,23 @@ _CONTENT_EMOJI_RE = re.compile(r"<a?:[^:]+:(\d+)>")
 _THREE_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) - (.+?) \[(\d+)\]$")
 _TWO_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) \[(\d+)\]$")
 
+# DCE 2.47.1 emits enum-named channel types; pre-2.47 emitted integers.
+# Downstream callers (migrator/structure.py, migrator/messages.py, review.py)
+# branch on Discord-canonical integer codes, so we normalize on parse.
+_DCE_CHANNEL_TYPE_TO_INT: dict[str, int] = {
+    "GuildTextChat": 0,
+    "GuildVoiceChat": 2,
+    "GuildCategory": 4,
+    "GuildNews": 5,
+    "GuildNewsThread": 10,
+    "GuildPublicThread": 11,
+    "GuildPrivateThread": 12,
+    "GuildStageVoice": 13,
+    "GuildDirectory": 14,
+    "GuildForum": 15,
+    "GuildMedia": 16,
+}
+
 
 def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> list[DCEExport]:
     """Parse all DCE JSON files in a directory (top-level only).
@@ -313,14 +330,35 @@ def _parse_guild(raw: Any) -> DCEGuild:
     )
 
 
+def _coerce_channel_type(raw: Any) -> int:
+    """Map a DCE channel-type value to its Discord-canonical integer code.
+
+    Accepts both DCE 2.47.1's enum strings (``"GuildTextChat"``) and the
+    pre-2.47 integer form so the parser tolerates either shape on disk.
+    """
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        if raw.isdigit():
+            return int(raw)
+        if raw in _DCE_CHANNEL_TYPE_TO_INT:
+            return _DCE_CHANNEL_TYPE_TO_INT[raw]
+    raise ValueError(f"Unrecognized DCE channel type: {raw!r}")
+
+
 def _parse_channel(raw: Any) -> DCEChannel:
+    # `raw.get(K, "")` would return None when the key exists with a null value
+    # (the default only fires when the key is missing). DCE emits null for
+    # `categoryId`/`category` on top-level channels and `topic` on threads,
+    # so we collapse None to "" before stringifying — otherwise the field
+    # becomes the truthy string "None" and slips past downstream truthy guards.
     return DCEChannel(
         id=str(raw["id"]),
-        type=int(raw["type"]),
+        type=_coerce_channel_type(raw["type"]),
         name=str(raw["name"]),
-        category_id=str(raw.get("categoryId", "")),
-        category=str(raw.get("category", "")),
-        topic=str(raw.get("topic", "")),
+        category_id=str(raw.get("categoryId") or ""),
+        category=str(raw.get("category") or ""),
+        topic=str(raw.get("topic") or ""),
     )
 
 
@@ -333,9 +371,11 @@ def _parse_message(raw: Any) -> DCEMessage:
     ref_raw = raw.get("reference")
     if ref_raw is not None:
         reference = DCEReference(
-            message_id=str(ref_raw.get("messageId", "")),
-            channel_id=str(ref_raw.get("channelId", "")),
-            guild_id=str(ref_raw.get("guildId", "")),
+            # `messageId` is null on `ThreadCreated` system messages; collapse
+            # None → "" (see _parse_channel for the same rationale).
+            message_id=str(ref_raw.get("messageId") or ""),
+            channel_id=str(ref_raw.get("channelId") or ""),
+            guild_id=str(ref_raw.get("guildId") or ""),
         )
 
     embeds: list[dict[str, object]] = list(raw.get("embeds") or [])

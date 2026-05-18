@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.6] - 2026-05-18
+
+### Tests
+
+- **Real DCE 2.47.1 fixtures replace synthetic ones (closes issue #35)**. Three real `DiscordChatExporter exportguild` captures from a Discord guild provisioned via `tests/provisioning/provision_test_server.py` now back the parser test contract: `Discord Ferry Test - general [1506019498094891120].json` (10 user messages + 1 `ThreadCreated`, including the 3-inline + 2-non-inline embed), `Discord Ferry Test - general - Cool Thread [1506019505778987190].json` (thread starter + reply), and `Discord Ferry Test - feedback-forum - Bug Report [1506019530294562938].json` (forum post body). The synthetic `Test Server - general - Cool Thread [888888888888888888].json` and `Test Server - Feedback Forum - Bug Report [999999999999999999].json` are removed. `test_parser.py` updated for the new filenames, the `parse_export_directory` count assertion (5 → 6 valid DCE JSONs), and the Discord-normalized `feedback-forum` parent name in `test_forum_export_detected`.
+
+### Bug Fixes
+
+- **Parser accepts DCE 2.47.1's enum-named channel types**. DCE 2.47.1 emits `"type": "GuildTextChat"` and `"type": "GuildPublicThread"` where pre-2.47 releases emitted integers (`0` and `11`). The parser previously called `int(raw["type"])` directly, which `ValueError`s on the new format — discovered when the real DCE captures used to replace `tests/fixtures/` synthetics failed to parse. Fixed with a `_DCE_CHANNEL_TYPE_TO_INT` mapping covering the 11 channel enum names emitted by DCE's `ChannelKind` and a `_coerce_channel_type` helper that accepts both string and integer inputs; downstream callers (`migrator/structure.py`, `migrator/messages.py`, `review.py`) continue to branch on Discord-canonical integer codes unchanged. Locked by five new unit tests covering int passthrough, known-string mapping, digit-only strings, `None` input, and unknown-string `ValueError`.
+- **Null JSON fields collapse to `""` instead of the truthy string `"None"`**. DCE emits `null` for `categoryId`/`category` on top-level channels and for `topic` on threads — and for `reference.messageId` on `ThreadCreated` system messages. The previous `str(raw.get(K, ""))` pattern returned `"None"` for these (because `dict.get` only uses the default when the key is *missing*, not when it's present with a null value). The four-character truthy string `"None"` then slipped past downstream truthy guards in `migrator/structure.py:496` (`if cat_id and ...`), `review.py:73` (`if export.channel.category_id: ...`), and `cli.py`/`gui.py` channel-scan summaries — potentially leading to phantom-category creation. The synthetic fixtures hid the bug by using `""` empty strings; the real captures surfaced it. Fixed with `str(raw.get(K) or "")` in `_parse_channel` (3 fields) and `_parse_message`'s reference block (3 fields). Locked by `test_null_json_fields_collapse_to_empty_string` against the new captured fixtures.
+
 ## [2.2.5] - 2026-05-18
 
 ### Tooling
