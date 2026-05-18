@@ -10,6 +10,7 @@ import pytest
 from aioresponses import aioresponses
 
 from tests.provisioning._bot_api import (
+    BotApi,
     ProvisioningAuthError,
     ProvisioningError,
     ProvisioningPermissionError,
@@ -162,3 +163,33 @@ async def test_request_with_retry_400_includes_code_and_message_not_errors(
     assert "50035" in msg
     assert "Invalid Form Body" in msg
     assert "leak me" not in msg
+
+
+async def test_botapi_repr_redacts_token(mock_discord: aioresponses) -> None:
+    real_looking_token = "MTM0NTY3ODkwMTIz.ABCdef.real-looking-token-xyz"
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, real_looking_token)
+        rendered = repr(api)
+    assert "MTM0NTY3" not in rendered
+    assert "<redacted>" in rendered
+
+
+async def test_botapi_sends_bot_prefixed_authorization(
+    mock_discord: aioresponses,
+) -> None:
+    """Every request must carry Authorization: Bot <token> and a User-Agent."""
+    mock_discord.get(
+        f"{DISCORD_API}/users/@me/guilds",
+        payload=[],
+        status=200,
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        await api.list_my_guilds()
+
+    # aioresponses stores requests in .requests; verify headers
+    requests = mock_discord.requests
+    key = list(requests.keys())[0]
+    call = requests[key][0]
+    assert call.kwargs["headers"]["Authorization"] == f"Bot {TOKEN}"
+    assert "DiscordFerry-TestProvisioner" in call.kwargs["headers"]["User-Agent"]

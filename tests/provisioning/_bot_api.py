@@ -14,6 +14,11 @@ from typing import Any
 
 import aiohttp
 
+DISCORD_API_BASE = "https://discord.com/api/v10"
+USER_AGENT = (
+    "DiscordFerry-TestProvisioner (https://github.com/nordscope-fi/Discord-stoat-ferry, v0.0.0)"
+)
+
 
 class ProvisioningError(Exception):
     """Base for all provisioning failures."""
@@ -114,3 +119,40 @@ async def _request_with_retry(
     if isinstance(last_exception, ProvisioningError):
         raise last_exception
     raise ProvisioningRateLimitError("rate limited after 3 retries")
+
+
+class BotApi:
+    """Authenticated async client for Discord REST API v10 using Bot tokens.
+
+    The Authorization HEADER DICT is built ad-hoc inside each method;
+    the token VALUE is stored once as self._token and never exposed via
+    introspection (overridden __repr__ redacts it).
+    """
+
+    def __init__(self, session: aiohttp.ClientSession, token: str) -> None:
+        self._session = session
+        self._token = token
+
+    def __repr__(self) -> str:
+        return "BotApi(token=<redacted>)"
+
+    def _headers(self, audit_reason: str | None = None) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bot {self._token}",
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/json",
+        }
+        if audit_reason is not None:
+            headers["X-Audit-Log-Reason"] = audit_reason
+        return headers
+
+    async def list_my_guilds(self) -> list[dict[str, Any]]:
+        """GET /users/@me/guilds — for --create-guild preflight."""
+        result = await _request_with_retry(
+            self._session,
+            "GET",
+            f"{DISCORD_API_BASE}/users/@me/guilds",
+            self._headers(),
+            None,
+        )
+        return result  # type: ignore[return-value]
