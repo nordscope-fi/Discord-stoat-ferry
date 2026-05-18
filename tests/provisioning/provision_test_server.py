@@ -12,11 +12,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiohttp
 import click
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 from tests.provisioning._applier import (
     Manifest,
@@ -36,6 +41,35 @@ from tests.provisioning._bot_api import (
 )
 
 DEFAULT_MANIFEST = Path(__file__).parent / "fixture-spec.json"
+
+_sigint_count = 0
+
+
+def _install_sigint_handler() -> None:
+    """Install a SIGINT handler that escalates on the second Ctrl-C.
+
+    First SIGINT: print interrupt message + raise KeyboardInterrupt so the
+    async stack unwinds through the existing exception handlers. Second
+    SIGINT: hard exit with code 130 (128 + SIGINT). Reset per subcommand
+    so each invocation starts with a clean count.
+    """
+    global _sigint_count
+    _sigint_count = 0
+
+    def handler(signum: int, frame: FrameType | None) -> None:
+        global _sigint_count
+        _sigint_count += 1
+        if _sigint_count == 1:
+            click.echo(
+                "\nInterrupted. Re-run with same --guild-id to resume; "
+                "idempotency will skip already-created entities.",
+                err=True,
+            )
+            raise KeyboardInterrupt
+        click.echo("\nHard exit.", err=True)
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, handler)
 
 
 @click.group()
@@ -91,6 +125,7 @@ def provision(
         sys.exit(2)
 
     token = _require_token()
+    _install_sigint_handler()
     _setup_logging(token, verbose=verbose)
     manifest = _load_manifest_or_exit(manifest_path)
     asyncio.run(_run_provision(token, guild_id, create_guild_name, manifest, dry_run))
@@ -172,6 +207,7 @@ async def _run_provision(
 def teardown(guild_id: str, manifest_path: str | None, yes: bool, verbose: bool) -> None:
     """Delete every marker-carrying entity. Does NOT delete the guild itself."""
     token = _require_token()
+    _install_sigint_handler()
     _setup_logging(token, verbose=verbose)
     manifest = _load_manifest_or_exit(manifest_path)
     asyncio.run(_run_teardown(token, guild_id, manifest, yes))
@@ -215,6 +251,7 @@ async def _run_teardown(token: str, guild_id: str, manifest: Manifest, yes: bool
 def verify(guild_id: str, manifest_path: str | None, verbose: bool) -> None:
     """Compare manifest to live guild state; exit 0=match, 1=drift, 2=error."""
     token = _require_token()
+    _install_sigint_handler()
     _setup_logging(token, verbose=verbose)
     manifest = _load_manifest_or_exit(manifest_path)
     asyncio.run(_run_verify(token, guild_id, manifest))
