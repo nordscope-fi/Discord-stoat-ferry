@@ -112,7 +112,7 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         channel=channel,
         messages=messages,
         message_count=int(raw["messageCount"]),
-        exported_at=str(raw.get("exportedAt", "")),
+        exported_at=str(raw.get("exportedAt") or ""),
         is_thread=is_thread,
         parent_channel_name=parent_channel_name,
         json_path=json_path,
@@ -326,7 +326,7 @@ def _parse_guild(raw: Any) -> DCEGuild:
     return DCEGuild(
         id=str(raw["id"]),
         name=str(raw["name"]),
-        icon_url=str(raw.get("iconUrl", "")),
+        icon_url=str(raw.get("iconUrl") or ""),
     )
 
 
@@ -414,11 +414,14 @@ def _parse_author(raw: Any) -> DCEAuthor:
     return DCEAuthor(
         id=str(raw["id"]),
         name=str(raw["name"]),
-        discriminator=str(raw.get("discriminator", "0000")),
-        nickname=str(raw.get("nickname", "")),
+        # `raw.get(K, default)` returns the default only when K is missing; if
+        # K is present-but-null, `.get` returns None and `str(None) == "None"`.
+        # Collapse via `or` to preserve the intended default for both shapes.
+        discriminator=str(raw.get("discriminator") or "0000"),
+        nickname=str(raw.get("nickname") or ""),
         color=str(raw["color"]) if raw.get("color") else None,
         is_bot=bool(raw.get("isBot", False)),
-        avatar_url=str(raw.get("avatarUrl", "")),
+        avatar_url=str(raw.get("avatarUrl") or ""),
         roles=roles,
     )
 
@@ -434,11 +437,13 @@ def _parse_attachment(raw: Any) -> DCEAttachment:
 
 def _parse_reaction(raw: Any) -> DCEReaction:
     emoji_raw = raw["emoji"]
+    # Unicode emojis emit `"id": null` in DCE output; without `or ""` we'd
+    # produce the truthy 4-char string "None" instead of an empty ID.
     emoji = DCEEmoji(
-        id=str(emoji_raw.get("id", "")),
-        name=str(emoji_raw.get("name", "")),
+        id=str(emoji_raw.get("id") or ""),
+        name=str(emoji_raw.get("name") or ""),
         is_animated=bool(emoji_raw.get("isAnimated", False)),
-        image_url=str(emoji_raw.get("imageUrl", "")),
+        image_url=str(emoji_raw.get("imageUrl") or ""),
     )
     return DCEReaction(
         emoji=emoji,

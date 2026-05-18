@@ -8,6 +8,9 @@ import pytest
 from discord_ferry.parser.dce_parser import (
     _coerce_channel_type,
     _infer_thread_info,
+    _parse_author,
+    _parse_guild,
+    _parse_reaction,
     check_cdn_url_expiry,
     parse_export_directory,
     parse_single_export,
@@ -322,6 +325,54 @@ def test_null_json_fields_collapse_to_empty_string(fixtures_dir: Path) -> None:
         fixtures_dir / "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
     )
     assert cool_thread.channel.topic == ""
+
+
+def test_parse_guild_null_icon_url_collapses() -> None:
+    """A guild without a custom icon emits `"iconUrl": null` — must not stringify to `"None"`."""
+    guild = _parse_guild({"id": "1", "name": "Iconless Guild", "iconUrl": None})
+    assert guild.icon_url == ""
+
+
+def test_parse_author_null_fields_collapse_to_defaults() -> None:
+    """Author fields default to their intended values when JSON-null.
+
+    Pomelo-era users have no discriminator and may have neither a server-specific
+    nickname nor a custom avatar; DCE serializes those as `null`, not as missing
+    keys. The defaults must hold whether the key is missing or present-but-null.
+    """
+    author = _parse_author(
+        {
+            "id": "100",
+            "name": "pomelo_user",
+            "discriminator": None,
+            "nickname": None,
+            "color": None,
+            "isBot": False,
+            "avatarUrl": None,
+            "roles": [],
+        }
+    )
+    assert author.discriminator == "0000"
+    assert author.nickname == ""
+    assert author.avatar_url == ""
+
+
+def test_parse_reaction_unicode_emoji_null_id() -> None:
+    """Unicode emojis emit `"id": null` and `"imageUrl": null` — must collapse to ``\"\"``."""
+    reaction_raw = {
+        "emoji": {
+            "id": None,
+            "name": "\N{THUMBS UP SIGN}",
+            "isAnimated": False,
+            "imageUrl": None,
+        },
+        "count": 1,
+        "users": [],
+    }
+    reaction = _parse_reaction(reaction_raw)
+    assert reaction.emoji.id == ""
+    assert reaction.emoji.image_url == ""
+    assert reaction.emoji.name == "\N{THUMBS UP SIGN}"
 
 
 # ---------------------------------------------------------------------------
