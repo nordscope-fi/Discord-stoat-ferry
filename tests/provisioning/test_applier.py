@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,9 +20,6 @@ from tests.provisioning._applier import (
     load_manifest,
 )
 from tests.provisioning._bot_api import ProvisioningError
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_public_dataclass_surface_is_importable() -> None:
@@ -188,3 +186,19 @@ def test_load_manifest_rejects_two_embed_messages(tmp_path: Path) -> None:
     path.write_text(json.dumps(data))
     with pytest.raises(ProvisioningError, match="embed"):
         load_manifest(path)
+
+
+def test_committed_fixture_spec_loads() -> None:
+    """The committed fixture-spec.json must pass load_manifest invariants."""
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    assert len(manifest.text_channels) == 1
+    assert len(manifest.text_channels[0].messages) == 10
+    assert len(manifest.threads) == 1
+    assert len(manifest.forum_channels) == 1
+    assert len(manifest.forum_channels[0].posts) == 1
+    # Verify the embed has exactly 3 inline + 2 non-inline:
+    embed_msg = next(m for m in manifest.text_channels[0].messages if m.embed)
+    assert embed_msg.embed is not None
+    inline = sum(1 for f in embed_msg.embed.fields if f.inline)
+    assert inline == 3

@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "marker": "[ferry-fixture]",
+  "guild_name_for_bootstrap": "Discord Ferry Test Fixture",
+  "text_channels": [
+    {
+      "id": "ch-general",
+      "name": "general",
+      "topic_suffix": "primary test channel for DCE fixture capture",
+      "messages": [
+        {"id": "msg-001", "content": "Hello, this is message 1 of the test fixture."},
+        {"id": "msg-002", "content": "Plain text message 2 — used for parser baseline."},
+        {"id": "msg-thread-anchor", "content": "Message anchoring the thread reply chain."},
+        {"id": "msg-004", "content": "Message 4 — plain text continuation."},
+        {"id": "msg-005", "content": "Message 5 — plain text continuation."},
+        {"id": "msg-006", "content": "Message 6 — plain text continuation."},
+        {"id": "msg-007", "content": "Message 7 — plain text continuation."},
+        {"id": "msg-008", "content": "Message 8 — plain text continuation."},
+        {"id": "msg-009", "content": "Message 9 — plain text continuation."},
+        {
+          "id": "msg-embed",
+          "content": "Message with rich embed (inline+non-inline field mix).",
+          "embed": {
+            "title": "Embed title",
+            "description": "Embed description testing mixed inline fields.",
+            "color": 5814783,
+            "fields": [
+              {"name": "Inline 1", "value": "Value 1", "inline": true},
+              {"name": "Inline 2", "value": "Value 2", "inline": true},
+              {"name": "Inline 3", "value": "Value 3", "inline": true},
+              {"name": "Full-width 1", "value": "Value 4", "inline": false},
+              {"name": "Full-width 2", "value": "Value 5", "inline": false}
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "threads": [
+    {
+      "id": "thread-cool",
+      "name": "Cool Thread",
+      "parent_channel_id": "ch-general",
+      "anchor_message_id": "msg-thread-anchor",
+      "first_message_content": "First reply in the thread."
+    }
+  ],
+  "forum_channels": [
+    {
+      "id": "fch-feedback",
+      "name": "Feedback Forum",
+      "topic_suffix": "forum channel for DCE fixture capture",
+      "posts": [
+        {
+          "id": "post-bug",
+          "name": "Bug Report",
+          "first_message_content": "Bug report post body — initial forum-post message."
+        }
+      ]
+    }
+  ]
+}
