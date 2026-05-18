@@ -579,3 +579,63 @@ def _build_fully_matching_state(manifest: Manifest) -> ActualState:
 
 def _channel_name_for_thread(manifest: Manifest, thread: ManifestThread) -> str:
     return next(c.name for c in manifest.text_channels if c.id == thread.parent_channel_id)
+
+
+import re as re_  # noqa: E402
+
+from tests.provisioning._applier import reconcile_provision  # noqa: E402
+
+
+async def test_reconcile_provision_on_empty_guild(
+    mock_discord_for_state: aioresponses,
+) -> None:
+    """provision on empty guild → 1 text ch + 10 messages + 1 thread + 1 forum + 1 post."""
+    guild = "111"
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual_empty = ActualState(guild_id=guild, channels=(), messages_by_channel={})
+
+    # Mock the text channel creation:
+    mock_discord_for_state.post(
+        f"{DISCORD_API}/guilds/{guild}/channels",
+        payload={"id": "ch_text_id", "name": "general", "type": 0},
+    )
+    # 10 messages in text channel
+    for i in range(10):
+        mock_discord_for_state.post(
+            f"{DISCORD_API}/channels/ch_text_id/messages",
+            payload={"id": f"msg_id_{i}", "channel_id": "ch_text_id"},
+        )
+    # Thread creation off some message (use regex match for which message)
+    mock_discord_for_state.post(
+        re_.compile(r".*/channels/ch_text_id/messages/.+/threads$"),
+        payload={"id": "thread_id", "name": "Cool Thread", "type": 11, "parent_id": "ch_text_id"},
+    )
+    # First message in the thread
+    mock_discord_for_state.post(
+        f"{DISCORD_API}/channels/thread_id/messages",
+        payload={"id": "thread_first_msg_id", "channel_id": "thread_id"},
+    )
+    # Forum channel creation (separate POST to same endpoint as text channel)
+    mock_discord_for_state.post(
+        f"{DISCORD_API}/guilds/{guild}/channels",
+        payload={"id": "forum_id", "name": "Feedback Forum", "type": 15},
+    )
+    # Forum post
+    mock_discord_for_state.post(
+        f"{DISCORD_API}/channels/forum_id/threads",
+        payload={
+            "id": "post_id",
+            "name": "Bug Report",
+            "message": {"id": "post_first_msg_id"},
+        },
+    )
+
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        d = diff(manifest, actual_empty)
+        result = await reconcile_provision(
+            d, api, guild_id=guild, audit_reason="provision (issue #35)"
+        )
+
+    assert result.created_count >= 14  # 1 text + 10 msgs + 1 thread + 1 forum + 1 post

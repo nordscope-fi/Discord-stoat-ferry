@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from tests.provisioning._bot_api import BotApi, ProvisioningError
 
@@ -645,3 +645,172 @@ def _channel_has_first_message_marker(ch: ActualChannel, actual: ActualState) ->
     if not msgs:
         return False
     return "[ferry:" in msgs[0].content
+
+
+# ---- Reconciler: apply_op + reconcile_provision ----
+
+
+@dataclass(frozen=True)
+class ProvisionResult:
+    created_count: int
+    created_summary: tuple[str, ...]
+    skipped_count: int
+    failed_op_index: int | None
+
+
+class _ProvisionState:
+    """Mutable scratch-state threaded through apply_op as ops complete."""
+
+    def __init__(self, guild_id: str) -> None:
+        self.guild_id = guild_id
+        self.text_channel_discord_id: dict[str, str] = {}
+        self.forum_channel_discord_id: dict[str, str] = {}
+        self.message_discord_id: dict[str, str] = {}
+
+
+async def reconcile_provision(
+    d: Diff,
+    api: BotApi,
+    *,
+    guild_id: str,
+    audit_reason: str,
+) -> ProvisionResult:
+    """Apply create-ops in dependency order. Skips delete ops entirely.
+
+    On op failure: stops, returns partial result with failed_op_index set.
+    """
+    state = _ProvisionState(guild_id=guild_id)
+    created_lines: list[str] = []
+
+    sorted_ops = sorted(d.ops, key=_op_priority)
+
+    for idx, op in enumerate(sorted_ops):
+        try:
+            await apply_op(op, api, state, audit_reason=audit_reason)
+            created_lines.append(_op_summary(op, state))
+        except ProvisioningError:
+            return ProvisionResult(
+                created_count=len(created_lines),
+                created_summary=tuple(created_lines),
+                skipped_count=0,
+                failed_op_index=idx,
+            )
+
+    return ProvisionResult(
+        created_count=len(created_lines),
+        created_summary=tuple(created_lines),
+        skipped_count=0,
+        failed_op_index=None,
+    )
+
+
+def _op_priority(op: DiffOpT) -> int:
+    """Sort ops so parents come before children."""
+    match op:
+        case CreateTextChannelOp():
+            return 0
+        case CreateForumChannelOp():
+            return 1
+        case CreateMessageOp():
+            return 2
+        case CreateThreadOp():
+            return 3
+        case CreateForumPostOp():
+            return 4
+        case DeleteChannelOp():
+            return 100
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _op_summary(op: DiffOpT, state: _ProvisionState) -> str:
+    match op:
+        case CreateTextChannelOp(target=t):
+            sid = state.text_channel_discord_id.get(t.id, "?")
+            return f"created text channel #{t.name} ({sid})"
+        case CreateForumChannelOp(target=t):
+            sid = state.forum_channel_discord_id.get(t.id, "?")
+            return f"created forum channel #{t.name} ({sid})"
+        case CreateMessageOp(target=t):
+            return f"created message {t.id}"
+        case CreateThreadOp(target=t):
+            return f"created thread {t.name}"
+        case CreateForumPostOp(target=t):
+            return f"created forum post {t.name}"
+        case DeleteChannelOp(target=t):
+            return f"deleted channel #{t.name}"
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def apply_op(
+    op: DiffOpT,
+    api: BotApi,
+    state: _ProvisionState,
+    *,
+    audit_reason: str,
+) -> None:
+    """Execute one diff operation against Discord. Updates state with new IDs."""
+    match op:
+        case CreateTextChannelOp(target=t):
+            result = await api.create_channel(
+                state.guild_id,
+                name=t.name,
+                channel_type=0,
+                topic=f"[ferry-fixture] {t.topic_suffix}",
+                audit_reason=audit_reason,
+            )
+            state.text_channel_discord_id[t.id] = str(result["id"])
+        case CreateForumChannelOp(target=t):
+            result = await api.create_channel(
+                state.guild_id,
+                name=t.name,
+                channel_type=15,
+                topic=f"[ferry-fixture] {t.topic_suffix}",
+                audit_reason=audit_reason,
+            )
+            state.forum_channel_discord_id[t.id] = str(result["id"])
+        case CreateMessageOp(target=t, parent_manifest_channel_id=pmc, parent_discord_id=p):
+            parent_id = p if p is not None else state.text_channel_discord_id[pmc]
+            embed_dict = None
+            if t.embed is not None:
+                embed_dict = {
+                    "title": t.embed.title,
+                    "description": t.embed.description,
+                    "color": t.embed.color,
+                    "fields": [
+                        {"name": f.name, "value": f.value, "inline": f.inline}
+                        for f in t.embed.fields
+                    ],
+                }
+            result = await api.send_message(
+                parent_id,
+                content=f"{t.content} [ferry:{t.id}]",
+                embed=embed_dict,
+                audit_reason=audit_reason,
+            )
+            state.message_discord_id[t.id] = str(result["id"])
+        case CreateThreadOp(target=t, parent_discord_id=p, anchor_message_discord_id=a):
+            parent_id = p if p is not None else state.text_channel_discord_id[t.parent_channel_id]
+            anchor_id = a if a is not None else state.message_discord_id[t.anchor_message_id]
+            thread_result = await api.create_thread_from_message(
+                parent_id, anchor_id, name=t.name, audit_reason=audit_reason
+            )
+            await api.send_message(
+                str(thread_result["id"]),
+                content=f"{t.first_message_content} [ferry:{t.id}]",
+                embed=None,
+                audit_reason=audit_reason,
+            )
+        case CreateForumPostOp(target=t, parent_manifest_forum_id=pmf, parent_discord_id=p):
+            parent_id = p if p is not None else state.forum_channel_discord_id[pmf]
+            await api.create_forum_post(
+                parent_id,
+                name=t.name,
+                first_message_content=f"{t.first_message_content} [ferry:{t.id}]",
+                audit_reason=audit_reason,
+            )
+        case DeleteChannelOp(target=t):
+            await api.delete_channel(t.discord_id, audit_reason=audit_reason)
+        case _ as unreachable:
+            assert_never(unreachable)
