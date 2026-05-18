@@ -24,6 +24,8 @@ from tests.provisioning._applier import (
     fetch_actual_state,
     load_manifest,
     reconcile_provision,
+    reconcile_teardown,
+    reconcile_verify,
 )
 from tests.provisioning._bot_api import (
     BotApi,
@@ -160,6 +162,85 @@ async def _run_provision(
         except ProvisioningError as exc:
             click.echo(f"provisioning error: {exc}", err=True)
             sys.exit(1)
+
+
+@cli.command()
+@click.option("--guild-id", required=True, help="Guild to teardown.")
+@click.option("--manifest", "manifest_path", default=None)
+@click.option("--yes", is_flag=True, help="Skip interactive confirmation.")
+@click.option("--verbose", "-v", is_flag=True)
+def teardown(guild_id: str, manifest_path: str | None, yes: bool, verbose: bool) -> None:
+    """Delete every marker-carrying entity. Does NOT delete the guild itself."""
+    token = _require_token()
+    _setup_logging(token, verbose=verbose)
+    manifest = _load_manifest_or_exit(manifest_path)
+    asyncio.run(_run_teardown(token, guild_id, manifest, yes))
+
+
+async def _run_teardown(token: str, guild_id: str, manifest: Manifest, yes: bool) -> None:
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, token)
+        try:
+            actual = await fetch_actual_state(api, guild_id)
+            to_delete = [
+                ch
+                for ch in actual.channels
+                if ch.type in (0, 15) and ch.topic and ch.topic.startswith(manifest.marker)
+            ]
+            if not to_delete:
+                click.echo("nothing to delete — guild is clean of marker entities")
+                return
+            click.echo("the following channels will be deleted:")
+            for ch in to_delete:
+                click.echo(f"  #{ch.name} ({ch.discord_id})")
+            if not yes and not click.confirm("\nproceed?", default=False):
+                click.echo("aborted")
+                return
+            result = await reconcile_teardown(
+                actual, api, marker=manifest.marker, audit_reason="teardown (issue #35)"
+            )
+            click.echo(f"deleted {result.deleted_count} entities")
+        except ProvisioningAuthError as exc:
+            click.echo(f"auth error: {exc}", err=True)
+            sys.exit(2)
+        except ProvisioningError as exc:
+            click.echo(f"teardown error: {exc}", err=True)
+            sys.exit(1)
+
+
+@cli.command()
+@click.option("--guild-id", required=True)
+@click.option("--manifest", "manifest_path", default=None)
+@click.option("--verbose", "-v", is_flag=True)
+def verify(guild_id: str, manifest_path: str | None, verbose: bool) -> None:
+    """Compare manifest to live guild state; exit 0=match, 1=drift, 2=error."""
+    token = _require_token()
+    _setup_logging(token, verbose=verbose)
+    manifest = _load_manifest_or_exit(manifest_path)
+    asyncio.run(_run_verify(token, guild_id, manifest))
+
+
+async def _run_verify(token: str, guild_id: str, manifest: Manifest) -> None:
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, token)
+        try:
+            actual = await fetch_actual_state(api, guild_id)
+            d = diff(manifest, actual)
+            result = reconcile_verify(d)
+            if result.exit_code == 0:
+                click.echo("VERIFIED: manifest matches actual state")
+                sys.exit(0)
+            else:
+                click.echo("DRIFT DETECTED:", err=True)
+                for line in result.diff_lines:
+                    click.echo(f"  {line}", err=True)
+                sys.exit(1)
+        except ProvisioningAuthError as exc:
+            click.echo(f"auth error: {exc}", err=True)
+            sys.exit(2)
+        except ProvisioningError as exc:
+            click.echo(f"verify error: {exc}", err=True)
+            sys.exit(2)
 
 
 if __name__ == "__main__":
