@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.5] - 2026-05-18
+
+### Tooling
+
+- **`tests/provisioning/` test-server provisioning CLI shipped (issue #35 enabler)**. Standalone Click-based tool with `provision` / `teardown` / `verify` subcommands that hits Discord's REST API using a Bot token from `DISCORD_TEST_BOT_TOKEN`. Human-run only; the import firewall (`[tool.hatch.build.targets.wheel] packages = ["src/discord_ferry"]`) ensures the bot-auth write paths never ship in installable wheels. Architecture: three-layer (transport `_bot_api.py` → logic `_applier.py` → CLI `provision_test_server.py`). Reconciler uses a sealed `DiffOpT` discriminated union with `assert_never` exhaustiveness; per-op priority ordering ensures channels are created before messages/threads/posts depend on them. Verified end-to-end against a live Discord guild — the full six-step smoke test (dry-run → provision → verify-match → idempotent re-provision → teardown → verify-drift) passes cleanly. 61 hermetic unit tests run alongside the rest of the suite (mocked via aioresponses).
+
+### Bug Fixes
+
+- **`diff()` channel-name normalization** (caught by the live smoke test, not the mock-based unit tests). Discord lowercases and hyphenates channel names server-side, so a manifest entry `"Feedback Forum"` is stored as `"feedback-forum"`. The diff comparator previously matched by exact name and falsely reported the forum channel as missing. Fixed with `_normalize_channel_name` (lowercase + spaces→hyphens + strip non-`[a-z0-9_-]`) applied symmetrically on both sides of the lookup. Locked in by `test_diff_matches_discord_normalized_channel_names`.
+- **403 error message no longer leaks guild IDs**. The previous `url.split('/')[-2]` returned the guild snowflake for nested endpoints like `/api/v10/guilds/{id}/channels`, exposing a guild ID in the exception text. Now uses `url.removeprefix(DISCORD_API_BASE)` to keep only the relative path.
+- **`ProvisioningPermissionError` exits 2 across all CLI subcommands**. Previously a 403 fell through to the bare `ProvisioningError` handler and exited 1 (drift) instead of 2 (couldn't-determine), violating the documented 3-way exit-code contract in `tests/provisioning/README.md`. Permission errors are now handled explicitly alongside auth errors.
+- **`reconcile_teardown` no longer swallows auth/permission failures into `skipped_count`**. Previously a token revocation mid-teardown reported "deleted 0, skipped N" with exit 0, masking the failure. The function now re-raises `ProvisioningAuthError` and `ProvisioningPermissionError` so the CLI can surface them as exit 2. Other `ProvisioningError`s (5xx, network) are still treated as transient and counted in `skipped_count`. The CLI now also prints a warning when `skipped_count > 0` so operators have a clear retry hint.
+
 ## [2.2.4] - 2026-05-17
 
 ### Internal
