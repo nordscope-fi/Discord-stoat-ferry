@@ -441,3 +441,207 @@ def _parse_actual_message(raw: dict[str, Any], channel_id: str) -> ActualMessage
         content=raw.get("content", ""),
         embed=embed,
     )
+
+
+# ---- Reconciler diff ----
+
+
+def diff(manifest: Manifest, actual: ActualState) -> Diff:
+    """Compute the reconciler diff between desired manifest and actual state."""
+    ops: list[DiffOpT] = []
+    missing: list[str] = []
+    extra_marker: list[ActualChannel] = []
+    extra_foreign: list[ActualChannel] = []
+    mismatched_embeds: list[EmbedMismatch] = []
+
+    marker = manifest.marker
+
+    actual_text_channels = {
+        ch.name: ch
+        for ch in actual.channels
+        if ch.type == 0 and ch.topic and ch.topic.startswith(marker)
+    }
+    actual_forum_channels = {
+        ch.name: ch
+        for ch in actual.channels
+        if ch.type == 15 and ch.topic and ch.topic.startswith(marker)
+    }
+    actual_threads = {ch.name: ch for ch in actual.channels if ch.type == 11}
+
+    matched_actual_ids: set[str] = set()
+
+    # Text channels and their messages
+    for tc in manifest.text_channels:
+        actual_ch = actual_text_channels.get(tc.name)
+        if actual_ch is None:
+            missing.append(tc.id)
+            ops.append(CreateTextChannelOp(target=tc, reason="missing from guild"))
+            for msg in tc.messages:
+                ops.append(
+                    CreateMessageOp(
+                        target=msg,
+                        parent_manifest_channel_id=tc.id,
+                        reason="parent channel missing",
+                    )
+                )
+        else:
+            matched_actual_ids.add(actual_ch.discord_id)
+            actual_msgs = actual.messages_by_channel.get(actual_ch.discord_id, ())
+            actual_msg_by_marker_id: dict[str, ActualMessage] = {}
+            for am in actual_msgs:
+                for manifest_id in _extract_marker_ids(am.content):
+                    actual_msg_by_marker_id[manifest_id] = am
+            for msg in tc.messages:
+                if msg.id not in actual_msg_by_marker_id:
+                    missing.append(msg.id)
+                    ops.append(
+                        CreateMessageOp(
+                            target=msg,
+                            parent_manifest_channel_id=tc.id,
+                            parent_discord_id=actual_ch.discord_id,
+                            reason="missing marker in channel",
+                        )
+                    )
+                else:
+                    am = actual_msg_by_marker_id[msg.id]
+                    mismatch = _diff_embed(msg, am)
+                    if mismatch is not None:
+                        mismatched_embeds.append(mismatch)
+
+    # Threads
+    for thread in manifest.threads:
+        actual_t = actual_threads.get(thread.name)
+        if actual_t is None or not _thread_has_marker(actual_t, thread, actual):
+            missing.append(thread.id)
+            ops.append(CreateThreadOp(target=thread, reason="thread missing or no marker"))
+        else:
+            matched_actual_ids.add(actual_t.discord_id)
+
+    # Forum channels and posts
+    for fc in manifest.forum_channels:
+        actual_fc = actual_forum_channels.get(fc.name)
+        if actual_fc is None:
+            missing.append(fc.id)
+            ops.append(CreateForumChannelOp(target=fc, reason="missing from guild"))
+            for post in fc.posts:
+                ops.append(
+                    CreateForumPostOp(
+                        target=post,
+                        parent_manifest_forum_id=fc.id,
+                        reason="parent forum missing",
+                    )
+                )
+        else:
+            matched_actual_ids.add(actual_fc.discord_id)
+            for post in fc.posts:
+                actual_post = next(
+                    (
+                        c
+                        for c in actual.channels
+                        if c.parent_id == actual_fc.discord_id
+                        and c.name == post.name
+                        and _post_has_marker(c, post, actual)
+                    ),
+                    None,
+                )
+                if actual_post is None:
+                    missing.append(post.id)
+                    ops.append(
+                        CreateForumPostOp(
+                            target=post,
+                            parent_manifest_forum_id=fc.id,
+                            parent_discord_id=actual_fc.discord_id,
+                            reason="post missing or no marker",
+                        )
+                    )
+                else:
+                    matched_actual_ids.add(actual_post.discord_id)
+
+    # Extras
+    for ch in actual.channels:
+        if ch.discord_id in matched_actual_ids:
+            continue
+        is_marker = (ch.topic and ch.topic.startswith(marker)) or _channel_has_first_message_marker(
+            ch, actual
+        )
+        if is_marker:
+            extra_marker.append(ch)
+        elif ch.type != 11:
+            extra_foreign.append(ch)
+
+    return Diff(
+        ops=tuple(ops),
+        missing_entities=tuple(missing),
+        extra_marker_entities=tuple(extra_marker),
+        extra_foreign_entities=tuple(extra_foreign),
+        mismatched_embeds=tuple(mismatched_embeds),
+    )
+
+
+_MARKER_PATTERN = re.compile(r"\[ferry:([a-zA-Z0-9_-]+)\]")
+
+
+def _extract_marker_ids(content: str) -> list[str]:
+    """Pull out all `[ferry:msg-id-XXX]` manifest IDs from message content."""
+    return _MARKER_PATTERN.findall(content)
+
+
+def _diff_embed(manifest_msg: ManifestMessage, actual_msg: ActualMessage) -> EmbedMismatch | None:
+    if manifest_msg.embed is None and actual_msg.embed is None:
+        return None
+    if manifest_msg.embed is None or actual_msg.embed is None:
+        return EmbedMismatch(
+            manifest_message_id=manifest_msg.id,
+            reason="embed presence differs between manifest and actual",
+        )
+    me, ae = manifest_msg.embed, actual_msg.embed
+    if me.title != ae.title:
+        return EmbedMismatch(manifest_msg.id, f"title differs: {me.title!r} vs {ae.title!r}")
+    if me.description != ae.description:
+        return EmbedMismatch(manifest_msg.id, "description differs")
+    if me.color != ae.color:
+        return EmbedMismatch(manifest_msg.id, f"color differs: {me.color} vs {ae.color}")
+    if len(me.fields) != len(ae.fields):
+        return EmbedMismatch(
+            manifest_msg.id,
+            f"field count differs: expected {len(me.fields)}, got {len(ae.fields)}",
+        )
+    for i, (mf, af) in enumerate(zip(me.fields, ae.fields, strict=False)):
+        if mf.name != af.name:
+            return EmbedMismatch(
+                manifest_msg.id, f"field {i} name differs: {mf.name!r} vs {af.name!r}"
+            )
+        if mf.value != af.value:
+            return EmbedMismatch(manifest_msg.id, f"field {i} value differs")
+        if mf.inline != af.inline:
+            return EmbedMismatch(
+                manifest_msg.id,
+                f"field {i} inline differs: expected {mf.inline}, got {af.inline}",
+            )
+    return None
+
+
+def _thread_has_marker(
+    actual_t: ActualChannel, thread: ManifestThread, actual: ActualState
+) -> bool:
+    msgs = actual.messages_by_channel.get(actual_t.discord_id, ())
+    if not msgs:
+        return False
+    return f"[ferry:{thread.id}]" in msgs[0].content
+
+
+def _post_has_marker(
+    actual_post: ActualChannel, post: ManifestForumPost, actual: ActualState
+) -> bool:
+    msgs = actual.messages_by_channel.get(actual_post.discord_id, ())
+    if not msgs:
+        return False
+    return f"[ferry:{post.id}]" in msgs[0].content
+
+
+def _channel_has_first_message_marker(ch: ActualChannel, actual: ActualState) -> bool:
+    """Used to identify orphan threads/posts created by past provisions."""
+    msgs = actual.messages_by_channel.get(ch.discord_id, ())
+    if not msgs:
+        return False
+    return "[ferry:" in msgs[0].content

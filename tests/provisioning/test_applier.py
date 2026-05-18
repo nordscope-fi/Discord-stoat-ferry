@@ -362,3 +362,220 @@ async def test_fetch_actual_state_merges_active_and_archived_threads(
     assert len(state.channels) == 4
     thread_ids = {ch.discord_id for ch in state.channels if ch.type == 11}
     assert thread_ids == {"t1", "t2"}
+
+
+from tests.provisioning._applier import diff  # noqa: E402
+
+
+def test_diff_empty_actual_yields_create_ops_for_every_manifest_entity() -> None:
+    """Empty guild + manifest → ops to create everything."""
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = ActualState(guild_id="111", channels=(), messages_by_channel={})
+    d = diff(manifest, actual)
+    # Should have: 1 text channel + 10 messages + 1 thread + 1 forum channel + 1 forum post
+    create_ops = [o for o in d.ops if not isinstance(o, DeleteChannelOp)]
+    assert len(create_ops) == 14  # 1 + 10 + 1 + 1 + 1 = 14
+    text_ops = [o for o in d.ops if isinstance(o, CreateTextChannelOp)]
+    assert len(text_ops) == 1
+
+
+def test_diff_matching_state_yields_zero_ops() -> None:
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+    d = diff(manifest, actual)
+    assert d.ops == ()
+    assert d.missing_entities == ()
+    assert d.extra_marker_entities == ()
+    assert d.mismatched_embeds == ()
+
+
+def test_diff_extra_marker_channel_reported(tmp_path: Path) -> None:
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+    # Add an extra marker-carrying channel that isn't in the manifest:
+    extra = ActualChannel(
+        discord_id="999",
+        name="orphan",
+        type=0,
+        topic="[ferry-fixture] leftover",
+        parent_id=None,
+    )
+    actual = ActualState(
+        guild_id=actual.guild_id,
+        channels=actual.channels + (extra,),
+        messages_by_channel=actual.messages_by_channel,
+    )
+    d = diff(manifest, actual)
+    assert any(ch.discord_id == "999" for ch in d.extra_marker_entities)
+
+
+def test_diff_extra_foreign_channel_ignored() -> None:
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+    foreign = ActualChannel(
+        discord_id="888",
+        name="dev-chat",
+        type=0,
+        topic=None,  # no marker
+        parent_id=None,
+    )
+    actual = ActualState(
+        guild_id=actual.guild_id,
+        channels=actual.channels + (foreign,),
+        messages_by_channel=actual.messages_by_channel,
+    )
+    d = diff(manifest, actual)
+    assert d.extra_marker_entities == ()
+    assert any(ch.discord_id == "888" for ch in d.extra_foreign_entities)
+    assert d.ops == ()
+
+
+def test_diff_embed_field_text_drift_detected() -> None:
+    path = Path(__file__).parent / "fixture-spec.json"
+    manifest = load_manifest(path)
+    actual = _build_fully_matching_state(manifest)
+    # Find the embed message and corrupt its first field name
+    text_ch = next(c for c in actual.channels if c.name == "general")
+    msgs = list(actual.messages_by_channel[text_ch.discord_id])
+    embed_msg_idx = next(i for i, m in enumerate(msgs) if m.embed is not None)
+    bad = msgs[embed_msg_idx]
+    assert bad.embed is not None
+    new_fields = (ActualEmbedField(name="DRIFT", value="Value 1", inline=True),) + bad.embed.fields[
+        1:
+    ]
+    msgs[embed_msg_idx] = ActualMessage(
+        discord_id=bad.discord_id,
+        channel_discord_id=bad.channel_discord_id,
+        content=bad.content,
+        embed=ActualEmbed(
+            title=bad.embed.title,
+            description=bad.embed.description,
+            color=bad.embed.color,
+            fields=new_fields,
+        ),
+    )
+    new_msg_map = dict(actual.messages_by_channel)
+    new_msg_map[text_ch.discord_id] = tuple(msgs)
+    actual = ActualState(
+        guild_id=actual.guild_id,
+        channels=actual.channels,
+        messages_by_channel=new_msg_map,
+    )
+    d = diff(manifest, actual)
+    assert len(d.mismatched_embeds) == 1
+    assert (
+        "DRIFT" in d.mismatched_embeds[0].reason or "field" in d.mismatched_embeds[0].reason.lower()
+    )
+
+
+def _build_fully_matching_state(manifest: Manifest) -> ActualState:
+    """Construct an ActualState that perfectly mirrors the manifest."""
+    channels: list[ActualChannel] = []
+    messages_by_channel: dict[str, tuple[ActualMessage, ...]] = {}
+    snowflake = 1000
+    for tc in manifest.text_channels:
+        ch_id = str(snowflake)
+        snowflake += 1
+        channels.append(
+            ActualChannel(
+                discord_id=ch_id,
+                name=tc.name,
+                type=0,
+                topic=f"{manifest.marker} {tc.topic_suffix}",
+                parent_id=None,
+            )
+        )
+        msgs: list[ActualMessage] = []
+        for m in tc.messages:
+            embed: ActualEmbed | None = None
+            if m.embed is not None:
+                embed = ActualEmbed(
+                    title=m.embed.title,
+                    description=m.embed.description,
+                    color=m.embed.color,
+                    fields=tuple(
+                        ActualEmbedField(name=f.name, value=f.value, inline=f.inline)
+                        for f in m.embed.fields
+                    ),
+                )
+            msg_id = str(snowflake)
+            snowflake += 1
+            msgs.append(
+                ActualMessage(
+                    discord_id=msg_id,
+                    channel_discord_id=ch_id,
+                    content=f"{m.content} [ferry:{m.id}]",
+                    embed=embed,
+                )
+            )
+        messages_by_channel[ch_id] = tuple(msgs)
+    for t in manifest.threads:
+        parent_ch = next(c for c in channels if c.name == _channel_name_for_thread(manifest, t))
+        thread_id = str(snowflake)
+        snowflake += 1
+        channels.append(
+            ActualChannel(
+                discord_id=thread_id,
+                name=t.name,
+                type=11,
+                topic=None,
+                parent_id=parent_ch.discord_id,
+            )
+        )
+        first_id = str(snowflake)
+        snowflake += 1
+        messages_by_channel[thread_id] = (
+            ActualMessage(
+                discord_id=first_id,
+                channel_discord_id=thread_id,
+                content=f"{t.first_message_content} [ferry:{t.id}]",
+                embed=None,
+            ),
+        )
+    for fc in manifest.forum_channels:
+        forum_id = str(snowflake)
+        snowflake += 1
+        channels.append(
+            ActualChannel(
+                discord_id=forum_id,
+                name=fc.name,
+                type=15,
+                topic=f"{manifest.marker} {fc.topic_suffix}",
+                parent_id=None,
+            )
+        )
+        for post in fc.posts:
+            post_id = str(snowflake)
+            snowflake += 1
+            channels.append(
+                ActualChannel(
+                    discord_id=post_id,
+                    name=post.name,
+                    type=11,
+                    topic=None,
+                    parent_id=forum_id,
+                )
+            )
+            first_post_msg_id = str(snowflake)
+            snowflake += 1
+            messages_by_channel[post_id] = (
+                ActualMessage(
+                    discord_id=first_post_msg_id,
+                    channel_discord_id=post_id,
+                    content=f"{post.first_message_content} [ferry:{post.id}]",
+                    embed=None,
+                ),
+            )
+    return ActualState(
+        guild_id="111",
+        channels=tuple(channels),
+        messages_by_channel=messages_by_channel,
+    )
+
+
+def _channel_name_for_thread(manifest: Manifest, thread: ManifestThread) -> str:
+    return next(c.name for c in manifest.text_channels if c.id == thread.parent_channel_id)
