@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 DISCORD_API = "https://discord.com/api/v10"
 TOKEN = "test-bot-token"
+GUILD_ID = "987654321"
 
 
 def test_exception_hierarchy_is_self_contained() -> None:
@@ -208,3 +209,34 @@ def test_botapi_token_only_stored_in_underscore_token() -> None:
     """Regression guard: token must never be cached on any other attribute."""
     api = BotApi(session=None, token="abc123")  # type: ignore[arg-type]
     assert set(api.__dict__.keys()) == {"_session", "_token"}
+
+
+async def test_list_channels_returns_channel_objects(
+    mock_discord: aioresponses,
+) -> None:
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{GUILD_ID}/channels",
+        payload=[
+            {"id": "100", "name": "general", "type": 0, "topic": "[ferry-fixture] x"},
+            {"id": "101", "name": "Feedback Forum", "type": 15, "topic": "[ferry-fixture] y"},
+        ],
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.list_channels(GUILD_ID)
+    assert len(result) == 2
+    assert result[0]["name"] == "general"
+
+
+async def test_list_messages_uses_limit_query(mock_discord: aioresponses) -> None:
+    mock_discord.get(
+        f"{DISCORD_API}/channels/100/messages?limit=100",
+        payload=[
+            {"id": "m1", "content": "hello", "channel_id": "100"},
+        ],
+    )
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        result = await api.list_messages("100")
+    assert len(result) == 1
+    assert result[0]["id"] == "m1"

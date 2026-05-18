@@ -156,3 +156,25 @@ class BotApi:
             None,
         )
         return result  # type: ignore[return-value]
+
+    async def list_channels(self, guild_id: str) -> list[dict[str, Any]]:
+        """GET /guilds/{id}/channels — returns text+forum channels, NOT threads."""
+        result = await _request_with_retry(
+            self._session,
+            "GET",
+            f"{DISCORD_API_BASE}/guilds/{guild_id}/channels",
+            self._headers(),
+            None,
+        )
+        return result  # type: ignore[return-value]
+
+    async def list_messages(self, channel_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """GET /channels/{id}/messages?limit=N — paginated reads not modelled."""
+        result = await _request_with_retry(
+            self._session,
+            "GET",
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages?limit={limit}",
+            self._headers(),
+            None,
+        )
+        return result  # type: ignore[return-value]
