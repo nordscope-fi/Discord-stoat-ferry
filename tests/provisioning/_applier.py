@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from tests.provisioning._bot_api import ProvisioningError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 MARKER_SAFE_REGEX = re.compile(r"^[a-zA-Z0-9 \-\[\]:]+$")
@@ -241,3 +242,125 @@ def _validate_embed_inline_ratios(m: Manifest) -> None:
                 f"expected 3 inline / 2 non-inline fields; got "
                 f"{inline_count} inline / {non_inline_count} non-inline"
             )
+
+
+# ---- Actual state (fetched from Discord) ----
+
+
+@dataclass(frozen=True)
+class ActualEmbedField:
+    name: str
+    value: str
+    inline: bool
+
+
+@dataclass(frozen=True)
+class ActualEmbed:
+    title: str
+    description: str
+    color: int
+    fields: tuple[ActualEmbedField, ...]
+
+
+@dataclass(frozen=True)
+class ActualMessage:
+    discord_id: str
+    channel_discord_id: str
+    content: str
+    embed: ActualEmbed | None
+
+
+@dataclass(frozen=True)
+class ActualChannel:
+    discord_id: str
+    name: str
+    type: int  # 0=text, 15=forum, 11=public thread
+    topic: str | None
+    parent_id: str | None  # for threads: the parent text channel's snowflake
+
+
+@dataclass(frozen=True)
+class ActualState:
+    guild_id: str
+    channels: tuple[ActualChannel, ...]
+    messages_by_channel: Mapping[str, tuple[ActualMessage, ...]]
+
+
+# ---- Diff types: sealed discriminated union for mypy --strict ----
+# Note: no shared base/Protocol. The reconciler relies on the union type alias
+# `DiffOpT` for type narrowing via `match`. A Protocol with named fields would
+# be inert here — `match` dispatch doesn't trigger structural checks, and the
+# union alias is what apply_op annotates against. Each per-kind dataclass
+# carries `parent_discord_id` and `reason` as its own fields (consistency by
+# convention, enforced by code review rather than the type system).
+
+
+@dataclass(frozen=True)
+class CreateTextChannelOp:
+    target: ManifestTextChannel
+    parent_discord_id: str | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CreateForumChannelOp:
+    target: ManifestForumChannel
+    parent_discord_id: str | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CreateMessageOp:
+    target: ManifestMessage
+    parent_manifest_channel_id: str  # which manifest text channel (for state lookup)
+    parent_discord_id: str | None = None  # resolved by apply_op via state if None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CreateThreadOp:
+    target: ManifestThread
+    parent_discord_id: str | None = None  # text channel's Discord ID
+    anchor_message_discord_id: str | None = None  # resolved after messages created
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CreateForumPostOp:
+    target: ManifestForumPost
+    parent_manifest_forum_id: str  # which manifest forum channel (for state lookup)
+    parent_discord_id: str | None = None  # resolved by apply_op via state if None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class DeleteChannelOp:
+    target: ActualChannel
+    parent_discord_id: str | None = None  # always None
+    reason: str = ""
+
+
+# Type alias for any op (used in Diff.ops and apply_op):
+DiffOpT = (
+    CreateTextChannelOp
+    | CreateForumChannelOp
+    | CreateMessageOp
+    | CreateThreadOp
+    | CreateForumPostOp
+    | DeleteChannelOp
+)
+
+
+@dataclass(frozen=True)
+class EmbedMismatch:
+    manifest_message_id: str
+    reason: str  # e.g. "field 2 inline flag differs: expected False, got True"
+
+
+@dataclass(frozen=True)
+class Diff:
+    ops: tuple[DiffOpT, ...]
+    missing_entities: tuple[str, ...]  # manifest ids not present in actual
+    extra_marker_entities: tuple[ActualChannel, ...]  # actual+marker+not-in-manifest
+    extra_foreign_entities: tuple[ActualChannel, ...]  # actual+no-marker (informational)
+    mismatched_embeds: tuple[EmbedMismatch, ...]

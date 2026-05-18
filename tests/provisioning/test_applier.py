@@ -9,6 +9,19 @@ from typing import Any
 import pytest
 
 from tests.provisioning._applier import (
+    ActualChannel,
+    ActualEmbed,
+    ActualEmbedField,
+    ActualMessage,
+    ActualState,
+    CreateForumChannelOp,
+    CreateForumPostOp,
+    CreateMessageOp,
+    CreateTextChannelOp,
+    CreateThreadOp,
+    DeleteChannelOp,
+    Diff,
+    EmbedMismatch,
     Manifest,
     ManifestEmbed,
     ManifestEmbedField,
@@ -37,6 +50,20 @@ def test_public_dataclass_surface_is_importable() -> None:
         ManifestMessage,
         ManifestTextChannel,
         ManifestThread,
+        # ActualState + diff types (Task 12)
+        ActualChannel,
+        ActualEmbed,
+        ActualEmbedField,
+        ActualMessage,
+        ActualState,
+        CreateForumChannelOp,
+        CreateForumPostOp,
+        CreateMessageOp,
+        CreateTextChannelOp,
+        CreateThreadOp,
+        DeleteChannelOp,
+        Diff,
+        EmbedMismatch,
     ):
         assert isinstance(cls, type)
 
@@ -202,3 +229,38 @@ def test_committed_fixture_spec_loads() -> None:
     assert embed_msg.embed is not None
     inline = sum(1 for f in embed_msg.embed.fields if f.inline)
     assert inline == 3
+
+
+def test_actual_state_is_frozen_and_uses_mapping() -> None:
+    state = ActualState(
+        guild_id="111",
+        channels=(),
+        messages_by_channel={},
+    )
+    with pytest.raises(AttributeError):
+        state.guild_id = "222"  # type: ignore[misc]
+
+
+def test_diff_op_dataclasses_are_constructible() -> None:
+    """Per-kind dataclasses replace the single DiffOp for mypy --strict."""
+    msg = ManifestMessage(id="x", content="y")
+    op = CreateMessageOp(
+        target=msg,
+        parent_manifest_channel_id="ch-1",
+        parent_discord_id="100",
+        reason="missing",
+    )
+    assert op.target is msg
+    assert op.reason == "missing"
+    assert op.parent_manifest_channel_id == "ch-1"
+
+
+def test_empty_diff_is_no_op() -> None:
+    diff = Diff(
+        ops=(),
+        missing_entities=(),
+        extra_marker_entities=(),
+        extra_foreign_entities=(),
+        mismatched_embeds=(),
+    )
+    assert len(diff.ops) == 0
