@@ -315,3 +315,16 @@ class BotApi:
             self._headers(audit_reason),
             None,
         )
+
+
+def configure_aiohttp_logging(*, verbose: bool) -> None:
+    """In non-verbose mode, force aiohttp's internal loggers to WARNING.
+
+    Prevents accidental token surface in DEBUG output from aiohttp.client,
+    aiohttp.connector, etc. In verbose mode this is a no-op — caller has
+    opted in to seeing internal traces.
+    """
+    if verbose:
+        return
+    for name in ("aiohttp", "aiohttp.client", "aiohttp.connector", "aiohttp.access"):
+        logging.getLogger(name).setLevel(logging.WARNING)

@@ -402,3 +402,18 @@ async def test_delete_channel(mock_discord: aioresponses) -> None:
         api = BotApi(session, TOKEN)
         await api.delete_channel("100", audit_reason="teardown (issue #35)")
     # No assertion needed — successful return is the test
+
+
+from tests.provisioning._bot_api import configure_aiohttp_logging  # noqa: E402
+
+
+def test_configure_aiohttp_logging_sets_warning_in_default() -> None:
+    configure_aiohttp_logging(verbose=False)
+    for name in ("aiohttp", "aiohttp.client", "aiohttp.connector", "aiohttp.access"):
+        assert logging.getLogger(name).level >= logging.WARNING
+
+
+def test_configure_aiohttp_logging_allows_debug_in_verbose() -> None:
+    configure_aiohttp_logging(verbose=True)
+    # In verbose mode, we don't enforce a floor — caller's root level is used.
+    # No assertion needed; just confirm it doesn't raise.
