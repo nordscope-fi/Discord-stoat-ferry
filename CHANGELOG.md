@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.9] - 2026-05-19
+
+### Bug Fixes
+
+- **`reporter` fidelity score: reactions sub-score no longer inflates in partial state (closes #46)**. `generate_report` (`reporter.py:120`) and `generate_markdown_report` (`reporter.py:351`) both passed `reactions_total=len(state.pending_reactions)` to `compute_fidelity_score` — a denominator that's wrong in both terminal states. **Completed migration**: `pending_reactions` is drained → denominator is 0 → the function's `if reactions_total else 1.0` short-circuit silently returns 100%, hiding any reactions that failed. **Partial migration** (e.g. `reactions_applied=10`, `pending_reactions=[5 items]`): denominator is 5 → ratio is `10/5 = 200%`, inflating the overall score by up to 10 percentage points (the reactions weight). Both callsites now use the formula `state.reactions_applied + len(state.pending_reactions)`, matching what `stats.summarize_state` (added in v2.2.3) already does — so `ferry stats` and `migration_report.json`/`.md` agree on the reactions sub-score for the same state. Locked by `test_fidelity_reactions_partial_state_not_inflated` (asserts 60-70% for the 10/15 case) and `test_fidelity_reactions_completed_state_is_100_percent` (asserts the completed case now reaches 100% via the corrected formula, not the zero-denominator short-circuit). *Note: v2.2.3's CHANGELOG cross-referenced this fix as "#47" — the actual issue number is #46; #47 tracks the unrelated `state.errors` sanitization gap.*
+
 ## [2.2.8] - 2026-05-18
 
 ### Bug Fixes

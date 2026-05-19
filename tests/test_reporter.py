@@ -738,6 +738,44 @@ def test_fidelity_included_in_markdown_report(tmp_path: Path) -> None:
     assert "Attachments:" in content
 
 
+def test_fidelity_reactions_partial_state_not_inflated(tmp_path: Path) -> None:
+    """Partial migration: reactions sub-score reflects applied/(applied+pending), not >100%.
+
+    Regression for #46: previously reactions_total was len(pending_reactions) alone,
+    giving 10/5 = 200% for this state. Correct formula yields 10/15 ≈ 66.7%.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        reactions_applied=10,
+        pending_reactions=[{"channel_id": "c", "message_id": str(i)} for i in range(5)],
+    )
+    exports = [_make_export(message_count=0)]
+
+    report = generate_report(config, state, exports)
+    fidelity = report["fidelity"]
+    assert isinstance(fidelity, dict)
+    reactions = fidelity["reactions"]
+    assert isinstance(reactions, float)
+    assert 60.0 <= reactions <= 70.0, f"expected 60-70%, got {reactions}"
+
+
+def test_fidelity_reactions_completed_state_is_100_percent(tmp_path: Path) -> None:
+    """Completed migration: pending_reactions drained, reactions sub-score is 100%.
+
+    Regression for #46: previously this case relied on the zero-denominator
+    short-circuit (reactions_total=0 → ratio=1.0). Now it computes 200/200=1.0
+    via the corrected formula.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(reactions_applied=200, pending_reactions=[])
+    exports = [_make_export(message_count=0)]
+
+    report = generate_report(config, state, exports)
+    fidelity = report["fidelity"]
+    assert isinstance(fidelity, dict)
+    assert fidelity["reactions"] == 100.0
+
+
 def test_fidelity_rounding() -> None:
     """Fidelity scores are rounded to one decimal place."""
     score = compute_fidelity_score(
