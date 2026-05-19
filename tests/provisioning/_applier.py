@@ -475,9 +475,7 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
     # would collide if the manifest grew to include a thread + forum post with
     # the same name. Disambiguate by `(parent_id, name)` so the lookup in the
     # threads loop below targets the thread under its text-channel parent.
-    actual_threads = {
-        (ch.parent_id or "", ch.name): ch for ch in actual.channels if ch.type == 11
-    }
+    actual_threads = {(ch.parent_id or "", ch.name): ch for ch in actual.channels if ch.type == 11}
     # manifest text-channel ID → Discord channel snowflake; populated as we
     # match text channels so the threads loop can resolve parents by Discord ID.
     manifest_tc_id_to_discord_id: dict[str, str] = {}
