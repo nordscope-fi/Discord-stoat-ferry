@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from discord_ferry.core.security import SecureTokenStore, sanitize_for_display
+from discord_ferry.core.security import SecureTokenStore, safe_sanitize, sanitize_for_display
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,3 +152,48 @@ def test_sanitize_for_display_delegates_to_store() -> None:
     result = sanitize_for_display(text, store)
     assert "mytoken12345" not in result
     assert "****2345" in result
+
+
+# ---------------------------------------------------------------------------
+# safe_sanitize None-tolerant wrapper (used by state.errors.append callsites)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_sanitize_returns_text_unchanged_when_store_is_none() -> None:
+    """Test paths construct FerryConfig without a token_store; helper must no-op."""
+    assert safe_sanitize(None, "anything goes here") == "anything goes here"
+
+
+def test_safe_sanitize_masks_registered_tokens() -> None:
+    store = make_store(stoat="stoat_abc12345", discord="disc_xyz98765")
+    text = "stoat_abc12345 leaked alongside disc_xyz98765"
+    result = safe_sanitize(store, text)
+    assert "stoat_abc12345" not in result
+    assert "disc_xyz98765" not in result
+    assert "****2345" in result
+    assert "****8765" in result
+
+
+def test_safe_sanitize_at_state_errors_call_site() -> None:
+    """Regression for #47: a sanitized exception repr does not leak the raw token.
+
+    Mirrors the wrapping pattern used in migrator/{emoji,reactions,pins,messages}.py
+    and core/engine.py. If a Stoat/Discord/Autumn aiohttp exception's repr() ever
+    contains a token (e.g. token-in-URL leak from a misconfigured HTTP library),
+    the helper masks it before it lands in state.errors.
+    """
+    store = make_store(stoat="stoat_secret_token_value")
+    state_errors: list[dict[str, str]] = []
+    try:
+        raise RuntimeError("401 at https://api.test/?token=stoat_secret_token_value")
+    except Exception as exc:  # noqa: BLE001
+        state_errors.append(
+            {
+                "phase": "messages",
+                "type": "phase_failed",
+                "message": safe_sanitize(store, str(exc)),
+            }
+        )
+    last = state_errors[-1]["message"]
+    assert "stoat_secret_token_value" not in last
+    assert "****alue" in last

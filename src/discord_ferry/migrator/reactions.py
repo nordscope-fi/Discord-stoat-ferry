@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_add_reaction, get_session
 
 if TYPE_CHECKING:
@@ -113,8 +114,9 @@ async def run_reactions(
                     {
                         "phase": "reactions",
                         "type": "reaction_add_failed",
-                        "message": (
-                            f"Failed to add reaction {emoji} to message {message_id}: {exc}"
+                        "message": safe_sanitize(
+                            config.token_store,
+                            f"Failed to add reaction {emoji} to message {message_id}: {exc}",
                         ),
                     }
                 )

@@ -13,6 +13,7 @@ import aiohttp
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
+from discord_ferry.core.security import safe_sanitize
 from discord_ferry.discord import (
     fetch_and_translate_guild_metadata,
     load_discord_metadata,
@@ -596,17 +597,18 @@ async def _run_phases(
             )
             return
         except Exception as e:
-            state.errors.append({"phase": phase_name, "type": "phase_failed", "error": str(e)})
+            safe_exc = safe_sanitize(config.token_store, str(e))
+            state.errors.append({"phase": phase_name, "type": "phase_failed", "error": safe_exc})
             save_state(state, config.output_dir)
             on_event(
                 MigrationEvent(
                     phase=phase_name,
                     status="error",
-                    message=f"Error in {phase_name}: {e}",
-                    detail={"error": str(e)},
+                    message=f"Error in {phase_name}: {safe_exc}",
+                    detail={"error": safe_exc},
                 )
             )
-            raise MigrationError(f"Phase {phase_name} failed: {e}") from e
+            raise MigrationError(f"Phase {phase_name} failed: {safe_exc}") from e
 
         on_event(
             MigrationEvent(phase=phase_name, status="completed", message=f"Completed {phase_name}")

@@ -60,3 +60,16 @@ class SecureTokenStore:
 def sanitize_for_display(text: str, token_store: SecureTokenStore) -> str:
     """Convenience wrapper around :meth:`SecureTokenStore.sanitize`."""
     return token_store.sanitize(text)
+
+
+def safe_sanitize(token_store: SecureTokenStore | None, text: str) -> str:
+    """Sanitize *text*, returning it unchanged when *token_store* is ``None``.
+
+    Use at every point where an error/warning message containing a raw
+    exception ``repr()`` may be persisted (``state.errors``, event payloads,
+    on-disk logs). The ``None`` branch keeps test paths working without
+    requiring every test to construct a SecureTokenStore.
+    """
+    if token_store is None:
+        return text
+    return token_store.sanitize(text)
