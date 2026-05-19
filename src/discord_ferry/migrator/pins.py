@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_pin_message, get_session
 
 if TYPE_CHECKING:
@@ -84,8 +85,9 @@ async def run_pins(
                     {
                         "phase": "pins",
                         "type": "pin_failed",
-                        "message": (
-                            f"Failed to pin message {message_id} in channel {channel_id}: {exc}"
+                        "message": safe_sanitize(
+                            config.token_store,
+                            f"Failed to pin message {message_id} in channel {channel_id}: {exc}",
                         ),
                     }
                 )

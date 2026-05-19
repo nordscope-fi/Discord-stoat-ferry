@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_create_emoji, get_session
 from discord_ferry.migrator.sanitize import sanitize_emoji_name
 from discord_ferry.parser.dce_parser import stream_messages
@@ -297,7 +298,10 @@ async def run_emoji(
                     {
                         "phase": "emoji",
                         "type": "emoji_create_failed",
-                        "message": f"Failed to create emoji :{name}: — {exc}",
+                        "message": safe_sanitize(
+                            config.token_store,
+                            f"Failed to create emoji :{name}: — {exc}",
+                        ),
                     }
                 )
                 on_event(

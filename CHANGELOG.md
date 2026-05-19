@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.10] - 2026-05-19
+
+### Security
+
+- **`state.errors.append` callsites now sanitize messages through the token store (closes #47)**. v2.0.1 wired `SecureTokenStore` and added `_safe_error` / `sanitize_for_display` helpers, but a coverage audit during v2.2.0's ship review found five `state.errors.append` callsites that interpolated raw exception `repr()`s without going through any sanitizer: `migrator/emoji.py:296`, `migrator/reactions.py:112`, `migrator/pins.py:83`, `migrator/messages.py:382`, and `core/engine.py:599`. If a Stoat/Discord/Autumn aiohttp exception's `repr()` ever contained a token value (token-in-URL leak from a misconfigured HTTP library, 401 body echo, etc.) it landed in `state.json` unredacted — visible via `cat state.json`, `ferry stats`'s `last_error` 80-char preview (added in v2.2.3), and `reporter.generate_markdown_report`'s `### Errors` section. The exposure pre-dated `ferry stats`; that command surfaced it more discoverably without creating new ingress. Project rule `.claude/rules/security.md` ("Never log tokens... in log output, error messages, or state files") was violated by construction at all five sites.
+- **Fix**: promoted `_safe_error` from `migrator/messages.py` (private, used at one site) to `core/security.py:safe_sanitize(token_store, text)` — a `None`-tolerant wrapper around `SecureTokenStore.sanitize` so test paths without a registered store don't have to thread a fake one through. All five callsites now wrap their `"message"` (or `"error"`) field through `safe_sanitize(config.token_store, ...)`. The `core/engine.py` site is the trickiest: the same `str(e)` interpolation also flowed into the wrapped `MigrationError`, the `MigrationEvent.message`, and the event `detail`'s `error` — all four are now sanitized via a single `safe_exc` local, since partial sanitization would still leak via the event log panel or the propagated exception.
+- **Locked by** three regression tests in `tests/test_security.py`: `test_safe_sanitize_returns_text_unchanged_when_store_is_none` (no-op without store, so test paths keep working), `test_safe_sanitize_masks_registered_tokens` (multi-token replacement), and `test_safe_sanitize_at_state_errors_call_site` (end-to-end: synthetic token in a `RuntimeError`'s URL → masked in the resulting `state.errors[-1]["message"]`).
+- **Acceptance**: `grep -n "state.errors.append" src/` shows all five sites; manual audit confirms each goes through `safe_sanitize` (4 migrator sites directly in the `"message"` value, 1 engine site via the shared `safe_exc` local). *Note: v2.2.3's CHANGELOG cross-referenced this fix as "#46" — the actual issue number is #47; #46 was the unrelated reporter fidelity bug fixed in v2.2.9.*
+
 ## [2.2.9] - 2026-05-19
 
 ### Bug Fixes

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
@@ -37,13 +38,6 @@ if TYPE_CHECKING:
     from discord_ferry.state import MigrationState
 
 _THREAD_STRATEGIES = frozenset({"flatten", "merge", "archive"})
-
-
-def _safe_error(config: FerryConfig, text: str) -> str:
-    """Sanitize an error/warning string, stripping any token values."""
-    if config.token_store is not None:
-        return config.token_store.sanitize(text)
-    return text
 
 
 logger = logging.getLogger(__name__)
@@ -383,7 +377,10 @@ async def run_messages(
                     {
                         "phase": "messages",
                         "type": "channel_worker_failed",
-                        "message": (f"Channel {export.channel.name!r} worker failed: {result}"),
+                        "message": safe_sanitize(
+                            config.token_store,
+                            f"Channel {export.channel.name!r} worker failed: {result}",
+                        ),
                     }
                 )
                 on_event(
@@ -1092,7 +1089,7 @@ async def _process_message(
                     )
 
     except Exception as exc:  # noqa: BLE001
-        safe_exc = _safe_error(config, str(exc))
+        safe_exc = safe_sanitize(config.token_store, str(exc))
         acc_errors.append(
             {
                 "phase": "messages",
