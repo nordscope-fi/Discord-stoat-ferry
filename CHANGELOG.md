@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.7] - 2026-05-18
+
+### Bug Fixes
+
+- **Null-field collapse extended across the remaining parser call sites.** v2.2.6 (PR #51) fixed the `str(raw.get(K, default))` → `"None"` pattern in `_parse_channel` and `_parse_message`'s reference block — the four fields exposed by the new captured fixtures. The same pattern remained in seven other parsing sites (`_parse_export` `exportedAt`, `_parse_guild` `iconUrl`, `_parse_author` `discriminator`/`nickname`/`avatarUrl`, the inline `DCEEmoji` construction in `_parse_reaction` for `id`/`name`/`imageUrl`). Each of those produced the truthy 4-char string `"None"` when DCE serialized a present-but-null value — Pomelo-era users with no discriminator/nickname/avatar, guilds with no icon, and unicode emojis with no ID or image URL. Fixed by switching every site to the `str(raw.get(K) or default)` pattern, preserving the existing defaults (`""` everywhere except `discriminator`'s `"0000"`). Locked by three new unit tests against the private parse functions: `test_parse_guild_null_icon_url_collapses`, `test_parse_author_null_fields_collapse_to_defaults`, `test_parse_reaction_unicode_emoji_null_id` (the last verifies the unicode-emoji case end-to-end since unicode emojis natively emit `null` for both `id` and `imageUrl`).
+
 ## [2.2.6] - 2026-05-18
 
 ### Tests
