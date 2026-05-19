@@ -1,0 +1,418 @@
+{
+  "guild": {
+    "id": "1505988963628879902",
+    "name": "Discord Ferry Test",
+    "iconUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/0-eb806f2bcf037a33.png"
+  },
+  "channel": {
+    "id": "1506019498094891120",
+    "type": "GuildTextChat",
+    "categoryId": null,
+    "category": null,
+    "name": "general",
+    "topic": "[ferry-fixture] primary test channel for DCE fixture capture"
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2026-05-18T22:59:04.974175+03:00",
+  "messages": [
+    {
+      "id": "1506019502616477787",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:49.913+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Hello, this is message 1 of the test fixture. [ferry:msg-001]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019504243736617",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:50.301+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Plain text message 2 — used for parser baseline. [ferry:msg-002]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019505778987190",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:50.667+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message anchoring the thread reply chain. [ferry:msg-thread-anchor]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019507624218804",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:51.107+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message 4 — plain text continuation. [ferry:msg-004]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019508807270510",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:51.389+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message 5 — plain text continuation. [ferry:msg-005]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019510078144636",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:51.692+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message 6 — plain text continuation. [ferry:msg-006]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019511298424915",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:51.983+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message 7 — plain text continuation. [ferry:msg-007]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019516231192736",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:53.159+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message 8 — plain text continuation. [ferry:msg-008]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019520622362745",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:54.206+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message 9 — plain text continuation. [ferry:msg-009]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019525009739841",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:55.252+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message with rich embed (inline+non-inline field mix). [ferry:msg-embed]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [
+        {
+          "title": "Embed title",
+          "url": null,
+          "timestamp": null,
+          "description": "Embed description testing mixed inline fields.",
+          "color": "#58B9FF",
+          "images": [],
+          "fields": [
+            {
+              "name": "Inline 1",
+              "value": "Value 1",
+              "isInline": true
+            },
+            {
+              "name": "Inline 2",
+              "value": "Value 2",
+              "isInline": true
+            },
+            {
+              "name": "Inline 3",
+              "value": "Value 3",
+              "isInline": true
+            },
+            {
+              "name": "Full-width 1",
+              "value": "Value 4",
+              "isInline": false
+            },
+            {
+              "name": "Full-width 2",
+              "value": "Value 5",
+              "isInline": false
+            }
+          ],
+          "inlineEmojis": []
+        }
+      ],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019526855360598",
+      "type": "ThreadCreated",
+      "timestamp": "2026-05-18T22:43:55.692+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Started a thread.",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general [1506019498094891120].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": {
+        "type": "Default",
+        "messageId": null,
+        "channelId": "1506019505778987190",
+        "guildId": "1505988963628879902"
+      },
+      "inlineEmojis": []
+    }
+  ],
+  "messageCount": 11
+}

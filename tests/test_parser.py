@@ -3,7 +3,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from discord_ferry.parser.dce_parser import (
+    _coerce_channel_type,
     _infer_thread_info,
     check_cdn_url_expiry,
     parse_export_directory,
@@ -160,6 +163,42 @@ def test_parse_bot_author(fixtures_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Channel-type coercion — _coerce_channel_type
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_channel_type_int_passthrough() -> None:
+    """Pre-2.47 integer channel types pass through unchanged."""
+    assert _coerce_channel_type(0) == 0
+    assert _coerce_channel_type(11) == 11
+
+
+def test_coerce_channel_type_dce_2_47_strings() -> None:
+    """DCE 2.47.1 enum strings map to Discord-canonical integer codes."""
+    assert _coerce_channel_type("GuildTextChat") == 0
+    assert _coerce_channel_type("GuildPublicThread") == 11
+    assert _coerce_channel_type("GuildForum") == 15
+
+
+def test_coerce_channel_type_digit_string() -> None:
+    """Quoted-int channel types from legacy serializers cast through."""
+    assert _coerce_channel_type("0") == 0
+    assert _coerce_channel_type("11") == 11
+
+
+def test_coerce_channel_type_none_raises() -> None:
+    """`None` is neither int nor str — must raise at the parse boundary."""
+    with pytest.raises(ValueError, match="Unrecognized DCE channel type"):
+        _coerce_channel_type(None)
+
+
+def test_coerce_channel_type_unknown_raises() -> None:
+    """An unrecognized channel-type string fails loudly at parse boundary."""
+    with pytest.raises(ValueError, match="Unrecognized DCE channel type"):
+        _coerce_channel_type("GuildUnobtainium")
+
+
+# ---------------------------------------------------------------------------
 # Thread inference — _infer_thread_info
 # ---------------------------------------------------------------------------
 
@@ -196,8 +235,10 @@ def test_infer_thread_info_forum() -> None:
 def test_parse_export_directory(fixtures_dir: Path) -> None:
     """Directory parse returns one DCEExport per valid JSON file."""
     exports = parse_export_directory(fixtures_dir)
-    # All 5 fixture files are valid DCE JSON
-    assert len(exports) == 5
+    # 6 valid DCE JSON files: simple_channel, edge_cases, markdown_rendered,
+    # plus the three real DCE captures (general, Cool Thread, Bug Report).
+    # rollback_state.json is JSON but not DCE-shaped and is silently skipped.
+    assert len(exports) == 6
     assert all(isinstance(e, DCEExport) for e in exports)
 
 
@@ -219,8 +260,8 @@ def test_parse_export_directory_skips_invalid(fixtures_dir: Path, tmp_path: Path
     (temp_dir / "also_bad.json").write_text("this is not json at all{{{")
 
     exports = parse_export_directory(temp_dir)
-    # Still 5 valid exports, bad files are silently skipped
-    assert len(exports) == 5
+    # Still 6 valid exports, bad files are silently skipped
+    assert len(exports) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +272,7 @@ def test_parse_export_directory_skips_invalid(fixtures_dir: Path, tmp_path: Path
 def test_thread_export_detected(fixtures_dir: Path) -> None:
     """Thread fixture file is parsed with is_thread=True."""
     export = parse_single_export(
-        fixtures_dir / "Test Server - general - Cool Thread [888888888888888888].json"
+        fixtures_dir / "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
     )
     assert export.is_thread is True
 
@@ -239,7 +280,7 @@ def test_thread_export_detected(fixtures_dir: Path) -> None:
 def test_thread_parent_name(fixtures_dir: Path) -> None:
     """Thread fixture has parent_channel_name='general'."""
     export = parse_single_export(
-        fixtures_dir / "Test Server - general - Cool Thread [888888888888888888].json"
+        fixtures_dir / "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
     )
     assert export.parent_channel_name == "general"
 
@@ -247,10 +288,40 @@ def test_thread_parent_name(fixtures_dir: Path) -> None:
 def test_forum_export_detected(fixtures_dir: Path) -> None:
     """Forum thread fixture is also parsed with is_thread=True."""
     export = parse_single_export(
-        fixtures_dir / "Test Server - Feedback Forum - Bug Report [999999999999999999].json"
+        fixtures_dir / "Discord Ferry Test - feedback-forum - Bug Report [1506019530294562938].json"
     )
     assert export.is_thread is True
-    assert export.parent_channel_name == "Feedback Forum"
+    # Discord normalizes forum-channel names (lowercase + hyphenated), which
+    # propagates to DCE's filename template and the parsed parent name.
+    assert export.parent_channel_name == "feedback-forum"
+
+
+def test_null_json_fields_collapse_to_empty_string(fixtures_dir: Path) -> None:
+    """DCE emits `null` for absent categoryId/category/topic and for messageId
+    on `ThreadCreated` system messages. `dict.get(K, default)` only returns
+    the default when the key is missing — for a present-but-null key it
+    returns Python `None`, which `str()` would coerce to the truthy string
+    `"None"`. That string slips past downstream truthy guards (e.g.
+    structure.py's `if cat_id`), causing phantom category creation. Lock the
+    null-collapse behavior here against the real captures that exposed it.
+    """
+    general = parse_single_export(
+        fixtures_dir / "Discord Ferry Test - general [1506019498094891120].json"
+    )
+    # General has no category in the manifest; both channel fields are null.
+    assert general.channel.category_id == ""
+    assert general.channel.category == ""
+
+    # The ThreadCreated system message has reference.messageId == null.
+    thread_created = next(m for m in general.messages if m.type == "ThreadCreated")
+    assert thread_created.reference is not None
+    assert thread_created.reference.message_id == ""
+
+    # Threads carry no topic; null collapses to "" rather than "None".
+    cool_thread = parse_single_export(
+        fixtures_dir / "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
+    )
+    assert cool_thread.channel.topic == ""
 
 
 # ---------------------------------------------------------------------------

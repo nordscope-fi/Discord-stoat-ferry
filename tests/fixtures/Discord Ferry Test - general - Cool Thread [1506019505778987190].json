@@ -1,0 +1,93 @@
+{
+  "guild": {
+    "id": "1505988963628879902",
+    "name": "Discord Ferry Test",
+    "iconUrl": "Discord Ferry Test - general - Cool Thread [1506019505778987190].json_Files/0-eb806f2bcf037a33.png"
+  },
+  "channel": {
+    "id": "1506019505778987190",
+    "type": "GuildPublicThread",
+    "categoryId": "1506019498094891120",
+    "category": "general",
+    "name": "Cool Thread",
+    "topic": null
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2026-05-18T22:59:09.668994+03:00",
+  "messages": [
+    {
+      "id": "1506019526855360593",
+      "type": "21",
+      "timestamp": "2026-05-18T22:43:55.692+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general - Cool Thread [1506019505778987190].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": {
+        "type": "Default",
+        "messageId": "1506019505778987190",
+        "channelId": "1506019498094891120",
+        "guildId": "1505988963628879902"
+      },
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019529476800745",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:56.317+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "First reply in the thread. [ferry:thread-cool]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general - Cool Thread [1506019505778987190].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    }
+  ],
+  "messageCount": 2
+}
