@@ -471,7 +471,14 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
         for ch in actual.channels
         if ch.type == 15 and ch.topic and ch.topic.startswith(marker)
     }
-    actual_threads = {ch.name: ch for ch in actual.channels if ch.type == 11}
+    # Threads and forum posts both have Discord type 11. Keying by name alone
+    # would collide if the manifest grew to include a thread + forum post with
+    # the same name. Disambiguate by `(parent_id, name)` so the lookup in the
+    # threads loop below targets the thread under its text-channel parent.
+    actual_threads = {(ch.parent_id or "", ch.name): ch for ch in actual.channels if ch.type == 11}
+    # manifest text-channel ID → Discord channel snowflake; populated as we
+    # match text channels so the threads loop can resolve parents by Discord ID.
+    manifest_tc_id_to_discord_id: dict[str, str] = {}
 
     matched_actual_ids: set[str] = set()
 
@@ -491,6 +498,7 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
                 )
         else:
             matched_actual_ids.add(actual_ch.discord_id)
+            manifest_tc_id_to_discord_id[tc.id] = actual_ch.discord_id
             actual_msgs = actual.messages_by_channel.get(actual_ch.discord_id, ())
             actual_msg_by_marker_id: dict[str, ActualMessage] = {}
             for am in actual_msgs:
@@ -515,7 +523,8 @@ def diff(manifest: Manifest, actual: ActualState) -> Diff:
 
     # Threads
     for thread in manifest.threads:
-        actual_t = actual_threads.get(thread.name)
+        parent_discord_id = manifest_tc_id_to_discord_id.get(thread.parent_channel_id, "")
+        actual_t = actual_threads.get((parent_discord_id, thread.name))
         if actual_t is None or not _thread_has_marker(actual_t, thread, actual):
             missing.append(thread.id)
             ops.append(CreateThreadOp(target=thread, reason="thread missing or no marker"))
