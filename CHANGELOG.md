@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Security
 
 - **Upgraded `aiohttp` 3.13.5 → 3.14.0 (closes Dependabot #22, #23)**. Two medium-severity advisories affect every `aiohttp < 3.14.0`: GHSA-jg22-mg44-37j8 (deserialization of untrusted data) and GHSA-hg6j-4rv6-33pg (cross-origin redirect leaks per-request cookies). Ferry ships `aiohttp` inside the PyInstaller binary and uses it for all Stoat/Autumn/Discord HTTP, so the patched runtime ships to users. The Dependabot bump (PR #58) was correct but could not merge on its own — see the test-harness fix below.
+- **Upgraded `starlette` 1.0.0 → 1.2.1 (closes Dependabot #24)**. GHSA-86qp-5c8j-p5mr (medium): `starlette ≤ 1.0.0` is missing Host-header validation, which poisons `request.url.path` and can bypass path-based security checks. `starlette` is a transitive dependency (via `nicegui` and `fastapi`); both declare it without a version constraint, so the upgrade resolved cleanly to the latest `1.2.1` — past the `1.0.1` patch floor — with no other package churn in `uv.lock`. Full suite passes on the upgraded resolve.
 
 ### Bug Fixes
 
