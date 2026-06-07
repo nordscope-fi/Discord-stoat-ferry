@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.11] - 2026-06-07
+
+### Security
+
+- **Upgraded `aiohttp` 3.13.5 → 3.14.0 (closes Dependabot #22, #23)**. Two medium-severity advisories affect every `aiohttp < 3.14.0`: GHSA-jg22-mg44-37j8 (deserialization of untrusted data) and GHSA-hg6j-4rv6-33pg (cross-origin redirect leaks per-request cookies). Ferry ships `aiohttp` inside the PyInstaller binary and uses it for all Stoat/Autumn/Discord HTTP, so the patched runtime ships to users. The Dependabot bump (PR #58) was correct but could not merge on its own — see the test-harness fix below.
+
+### Bug Fixes
+
+- **Test harness: aiohttp 3.14 / aioresponses 0.7.8 compatibility shim (`tests/conftest.py`)**. aiohttp 3.14 made `stream_writer` a *required* keyword-only argument of `ClientResponse.__init__`. aioresponses 0.7.8 builds its mock responses by calling that constructor directly without it, so under 3.14 every mocked HTTP call raised `TypeError: ClientResponse.__init__() missing 1 required keyword-only argument: 'stream_writer'` at `aioresponses/core.py:172` — collapsing the suite from 925 green to a mass failure (`test_api`, `test_autumn`, `test_connect`, `test_discord_client`, `provisioning/*` all red). This was purely a *mock*-construction incompatibility; Ferry's own runtime use of aiohttp 3.14 is unaffected. The upstream fix ([aioresponses#288](https://github.com/pnuckowski/aioresponses/pull/288)) is unmerged/unreleased (latest release is 0.7.8), so `conftest.py` carries an equivalent: a `setdefault("stream_writer", Mock(output_size=0))` wrapper around `ClientResponse.__init__`, guarded by an `inspect.signature` check so it is a no-op on `aiohttp < 3.14` and inert once aioresponses ships the fix. A `REMOVE THIS` marker ties the shim to the upstream PR for clean removal. Full suite restored to **925 passed**.
+
 ## [2.2.10] - 2026-05-19
 
 ### Security
