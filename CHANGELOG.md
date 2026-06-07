@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Internal
+
+- **Removed dead `_patch_checksums` test helper** (`tests/test_exporter_manager.py`). It was defined but never called (every `TestVerifyDceChecksum` test inlines its own `patch("importlib.resources.files")`), and was broken anyway — it built a `_Ctx` context manager then ignored it and returned a fresh, unconfigured patcher, papered over with `# type: ignore[return]`. No behavior change; suite stays at 926 passed.
+
 ## [2.2.12] - 2026-06-07
 
 ### Security
