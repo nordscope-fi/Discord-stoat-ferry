@@ -338,20 +338,25 @@ class TestVerifyDceChecksum:
             with pytest.raises(DCENotFoundError, match="hash mismatch"):
                 _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
 
-    def test_dce_checksum_empty_hash_skips(self) -> None:
-        """Empty string in checksums skips verification without error."""
+    def test_dce_checksum_empty_hash_raises(self) -> None:
+        """Empty string in checksums hard-fails (issue #37 phase 2)."""
+        from discord_ferry.errors import DCENotFoundError
+
         zip_data = b"fake-zip-content"
         checksums_json = _checksums_json("2.46.1", "linux-x64", "")
 
         with patch("importlib.resources.files") as mock_files:
             mock_ref = mock_files.return_value.joinpath.return_value
             mock_ref.read_text.return_value = checksums_json
-            # Should not raise — empty hash means skip
-            _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+            # Empty hash is no longer a silent skip — refuse the unverified binary.
+            with pytest.raises(DCENotFoundError, match="No SHA-256 hash is pinned"):
+                _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
 
-    def test_dce_checksum_missing_version_skips(self) -> None:
-        """Version not present in checksums file skips verification without error."""
+    def test_dce_checksum_missing_version_raises(self) -> None:
+        """Version not present in checksums file hard-fails (issue #37 phase 2)."""
         import json
+
+        from discord_ferry.errors import DCENotFoundError
 
         zip_data = b"fake-zip-content"
         # Only 2.99.0 is in the file, not 2.46.1
@@ -360,8 +365,27 @@ class TestVerifyDceChecksum:
         with patch("importlib.resources.files") as mock_files:
             mock_ref = mock_files.return_value.joinpath.return_value
             mock_ref.read_text.return_value = checksums_json
-            # Should not raise — version not found means skip
-            _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+            with pytest.raises(DCENotFoundError, match="No SHA-256 hash is pinned"):
+                _verify_dce_checksum(zip_data, "2.46.1", "linux-x64")
+
+    def test_dce_checksum_unpinned_platform_raises(self) -> None:
+        """A platform with no pinned hash hard-fails instead of silently passing.
+
+        This is the exact hole issue #37 closes: before phase 2, an unpinned
+        platform key (e.g. a hypothetical 'win-arm64') silently skipped
+        verification, shipping an unverified binary with no signal.
+        """
+        from discord_ferry.errors import DCENotFoundError
+
+        zip_data = b"fake-zip-content"
+        # Hash pinned for linux-x64 only; the synthetic platform is absent.
+        checksums_json = _checksums_json("2.46.1", "linux-x64", "a" * 64)
+
+        with patch("importlib.resources.files") as mock_files:
+            mock_ref = mock_files.return_value.joinpath.return_value
+            mock_ref.read_text.return_value = checksums_json
+            with pytest.raises(DCENotFoundError, match="win-arm64"):
+                _verify_dce_checksum(zip_data, "2.46.1", "win-arm64")
 
 
 class TestDceChecksumsJson:

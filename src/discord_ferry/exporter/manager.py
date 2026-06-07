@@ -51,8 +51,11 @@ def _get_platform_key() -> str | None:
 def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> None:
     """Verify DCE binary SHA-256 hash against pinned checksums.
 
-    Silently skips if no checksums file is present or no hash is pinned for
-    the given version/platform combination.
+    Hard-fails (raises) if no hash is pinned for the given version/platform —
+    refusing to use an unverified binary closes the silent-skip hole that left
+    ARM platforms unverified for years (issue #37). Still skips only when the
+    bundled checksums file itself is absent (a packaging edge, not a platform
+    coverage gap).
 
     Args:
         zip_data: Raw bytes of the downloaded zip archive.
@@ -61,7 +64,8 @@ def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> No
             (e.g. "win-x64", "linux-x64", "osx-x64").
 
     Raises:
-        DCENotFoundError: If the computed hash does not match the pinned hash.
+        DCENotFoundError: If the computed hash does not match the pinned hash,
+            or if no hash is pinned for this version/platform.
     """
     try:
         import importlib.resources as pkg_resources
@@ -74,7 +78,12 @@ def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> No
     checksums = _json.loads(checksums_text)
     expected = checksums.get(version, {}).get(platform_key, "")
     if not expected:
-        return  # No hash pinned for this version/platform — skip
+        raise DCENotFoundError(
+            f"No SHA-256 hash is pinned for platform '{platform_key}' (DCE {version}). "
+            "Refusing to use an unverified DCE binary. This platform may be new or "
+            "unsupported — please file a bug to add its hash. To bypass at your own "
+            "risk, pass --skip-dce-verify (CLI) or skip_verify=True (API)."
+        )
 
     sha256 = hashlib.sha256(zip_data).hexdigest()
     if sha256 != expected:
@@ -217,8 +226,17 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
 
     if not skip_verify:
         platform_key = _get_platform_key()
-        if platform_key is not None:
-            _verify_dce_checksum(data, DCE_VERSION, platform_key)
+        if platform_key is None:
+            # Unreachable in practice — _get_asset_name() above already raises
+            # for any platform absent from _PLATFORM_MAP — but fail closed rather
+            # than silently skip verification if that ordering ever changes
+            # (issue #37: no unverified binaries, structurally).
+            raise DCENotFoundError(
+                "Cannot verify the DCE binary: unrecognized platform. "
+                "To bypass at your own risk, pass --skip-dce-verify (CLI) "
+                "or skip_verify=True (API)."
+            )
+        _verify_dce_checksum(data, DCE_VERSION, platform_key)
 
     dce_dir.mkdir(parents=True, exist_ok=True)
     try:

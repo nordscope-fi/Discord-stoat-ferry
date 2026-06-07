@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.2.12] - 2026-06-07
+
+### Security
+
+- **DCE checksum verification now hard-fails on an unpinned platform (closes #37, phase 2)**. `_verify_dce_checksum` (`exporter/manager.py`) previously returned silently when no SHA-256 hash was pinned for the requested version/platform — the exact silent-skip behavior that left `osx-arm64` and `linux-arm64` downloading **unverified** DCE binaries for years (phase 1, v2.1.5, pinned the missing ARM hashes; this phase closes the hole structurally). It now raises `DCENotFoundError` naming the platform, refusing to use an unverified binary, and pointing at the escape hatches (`--skip-dce-verify` CLI / `skip_verify=True` API) plus a request to file a bug to add the hash. **Behavior change (latent breaking):** if a future contributor adds a platform to `_PLATFORM_MAP` without pinning its hash, Ferry now errors on that platform until the hash is added — instead of silently shipping an unverified binary. All five currently-supported platforms (`win-x64`, `linux-x64`, `osx-x64`, `osx-arm64`, `linux-arm64`) are pinned, so **no supported user is affected**; the existing `test_dce_checksums_json_covers_all_supported_platforms` regression guard keeps it that way. The missing-*checksums-file* path remains a skip (the file is bundled via `importlib.resources`; its absence is a packaging edge, not a platform-coverage gap). Locked by three tests in `tests/test_exporter_manager.py`: `test_dce_checksum_empty_hash_raises`, `test_dce_checksum_missing_version_raises`, and `test_dce_checksum_unpinned_platform_raises` (synthetic `win-arm64`). Deferred since v2.1.5 (PR #42) for soak time, now satisfied.
+
 ## [2.2.10] - 2026-05-19
 
 ### Security
