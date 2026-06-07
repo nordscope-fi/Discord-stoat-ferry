@@ -293,22 +293,6 @@ def _checksums_json(version: str, platform_key: str, sha256: str) -> str:
     return json.dumps({version: {platform_key: sha256}})
 
 
-def _patch_checksums(checksums_json: str):  # type: ignore[return]
-    """Context manager: patch importlib.resources.files to return checksums_json."""
-    mock_files = patch("importlib.resources.files")
-
-    class _Ctx:
-        def __enter__(self) -> None:
-            self._patcher = mock_files.__enter__()
-            mock_ref = self._patcher.return_value.joinpath.return_value
-            mock_ref.read_text.return_value = checksums_json
-
-        def __exit__(self, *args: object) -> None:
-            mock_files.__exit__(*args)
-
-    return patch("importlib.resources.files")
-
-
 class TestVerifyDceChecksum:
     def test_dce_checksum_verification_passes(self) -> None:
         """Matching hash produces no error."""
