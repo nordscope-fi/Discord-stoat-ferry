@@ -388,6 +388,10 @@ async def run_roles(
     # Filter out the @everyone role.
     roles_to_create = [r for r in unique_roles if r.id != guild_id]
 
+    # Incremental: capture which roles already exist BEFORE the creation loop
+    # populates role_map, so the create/attributes/perms passes can skip them.
+    pre_existing_role_ids = set(state.role_map)
+
     if config.dry_run:
         for role in roles_to_create:
             state.role_map[role.id] = f"dry-role-{role.id}"
@@ -402,6 +406,8 @@ async def run_roles(
 
     async with get_session(config) as session:
         for idx, role in enumerate(roles_to_create, start=1):
+            if role.id in pre_existing_role_ids:
+                continue
             result = await api_create_role(
                 session,
                 config.stoat_url,
@@ -451,6 +457,8 @@ async def run_roles(
     ranked_roles = sorted(roles_to_create, key=lambda r: r.position)
     async with get_session(config) as session:
         for role in ranked_roles:
+            if role.id in pre_existing_role_ids:
+                continue
             rank_role_id = state.role_map.get(role.id)
             if not rank_role_id:
                 continue
@@ -499,6 +507,8 @@ async def run_roles(
     if discord_metadata and not config.dry_run:
         async with get_session(config) as session:
             for role in roles_to_create:
+                if role.id in pre_existing_role_ids:
+                    continue
                 stoat_role_id_or_none = state.role_map.get(role.id)
                 if not stoat_role_id_or_none:
                     continue
