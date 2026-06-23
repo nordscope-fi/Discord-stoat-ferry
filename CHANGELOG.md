@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.4.1] - 2026-06-23
+
+### Security
+
+- **Cleared all 14 open Dependabot alerts via three lockfile bumps** (no application code affected; all alerts were in `uv.lock`):
+  - **aiohttp 3.14.0 → 3.14.1** (8 alerts). Ferry uses aiohttp as an HTTP *client*, so the server-side advisories (HTTP-parser `max_line_size` bypass, pipelined-request queue, websocket frame limits, `client_max_size`) do not apply; the client-side ones (DigestAuth cross-origin redirect credential leak GHSA-hpj7-wq8m-9hgp, cookie-jar domain promotion GHSA-2fqr-mr3j-6wp8, TLS hostname-override on connection reuse GHSA-4m7w-qmgq-4wj5) are patched. The `aioresponses` `stream_writer` shim in `conftest.py` is version-conditional and unaffected.
+  - **starlette 1.2.1 → 1.3.1** (2 alerts, incl. HIGH GHSA-82w8-qh3p-5jfq — `request.form()` size limits silently ignored). Transitive via NiceGUI→FastAPI; powers the local-only GUI web server.
+  - **python-multipart 0.0.28 → 0.0.32** (4 alerts, incl. HIGH GHSA-5rvq-cxj2-64vf — quadratic-time querystring parsing). Transitive via NiceGUI.
+  Full suite green on the upgraded resolve.
+
 ## [2.4.0] - 2026-06-23
 
 ### Added
