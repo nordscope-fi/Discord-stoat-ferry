@@ -22,7 +22,7 @@ TAG_SIZE_LIMITS: dict[str, int] = {
     "attachments": 20 * 1024 * 1024,
     "avatars": 4 * 1024 * 1024,
     "backgrounds": 6 * 1024 * 1024,
-    "icons": 2560 * 1024,
+    "icons": 2_500_000,  # Autumn enforces a flat 2.5MB (stoatchat Revolt.toml), not 2560*1024
     "banners": 6 * 1024 * 1024,
     "emojis": 500 * 1024,
 }

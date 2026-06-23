@@ -182,6 +182,7 @@ def generate_report(
         discord_meta=discord_meta,
     )
     report["checklist"] = checklist
+    report["invite"] = {"code": state.invite_code, "url": state.invite_url}
 
     _write_report(config.output_dir, report)
 
@@ -285,12 +286,16 @@ def _build_checklist(
         )
 
     # Final items
-    items.append(
-        {
-            "task": "Invite members to the new Stoat server",
-            "status": "todo",
-        }
-    )
+    if state.invite_code:
+        invite_target = state.invite_url or state.invite_code
+        items.append({"task": f"Invite members using: {invite_target}", "status": "todo"})
+    else:
+        items.append(
+            {
+                "task": "Invite members to the new Stoat server",
+                "status": "todo",
+            }
+        )
 
     return items
 
@@ -371,6 +376,10 @@ def generate_markdown_report(
     lines.append(f"| Reactions applied | {state.reactions_applied} |")
     lines.append(f"| Pins restored | {state.pins_applied} |")
     lines.append("")
+
+    if state.invite_code:
+        lines.append("\n## Invite\n")
+        lines.append(f"- {state.invite_url or state.invite_code}\n")
 
     lines.append("## Errors\n")
     if state.failed_messages:

@@ -43,6 +43,9 @@ class FerryConfig:
     min_thread_messages: int = 0
     validate_after: bool = False
     force: bool = False
+    # Post-migration invite generation (S4).
+    create_invite: bool = True
+    invite_channel_id: str | None = None
     max_concurrent_requests: int = 5
     max_concurrent_channels: int = 3
 

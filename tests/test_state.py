@@ -1,5 +1,6 @@
 """Tests for migration state persistence."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -507,3 +508,21 @@ def test_rollback_progress_none_serializes_as_null(tmp_path: Path) -> None:
 
     assert "rollback_progress" in raw
     assert raw["rollback_progress"] is None
+
+
+def test_invite_fields_roundtrip(tmp_path: Path) -> None:
+    """invite_code/invite_url survive save/load."""
+    state = MigrationState(invite_code="inv_R", invite_url="https://app/invite/inv_R")
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.invite_code == "inv_R"
+    assert loaded.invite_url == "https://app/invite/inv_R"
+
+
+def test_invite_fields_default_when_absent(tmp_path: Path) -> None:
+    """Old state.json without invite fields loads with empty defaults."""
+    minimal = {"stoat_server_id": "s", "current_phase": "report"}
+    (tmp_path / "state.json").write_text(json.dumps(minimal), encoding="utf-8")
+    loaded = load_state(tmp_path)
+    assert loaded.invite_code == ""
+    assert loaded.invite_url == ""

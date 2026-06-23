@@ -144,6 +144,11 @@ class MigrationState:
     # the entity maps above are never mutated by rollback.
     rollback_progress: RollbackProgress | None = None
 
+    # Post-migration invite (S4). invite_code is the bare code; invite_url is the
+    # best-effort full link ("" when the frontend base couldn't be discovered).
+    invite_code: str = ""
+    invite_url: str = ""
+
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
     """Save migration state to state.json using atomic write.
@@ -257,6 +262,8 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "replies_linked": state.replies_linked,
         "replies_total": state.replies_total,
         "rollback_progress": rp_data,
+        "invite_code": state.invite_code,
+        "invite_url": state.invite_url,
     }
 
 
@@ -320,6 +327,8 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             replies_linked=data.get("replies_linked", 0),
             replies_total=data.get("replies_total", 0),
             rollback_progress=rollback_progress,
+            invite_code=data.get("invite_code", ""),
+            invite_url=data.get("invite_url", ""),
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e

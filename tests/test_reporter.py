@@ -789,3 +789,18 @@ def test_fidelity_rounding() -> None:
     #         = (2/3)*0.65 + 0.35 ≈ 0.7833 → 78.3
     assert score["overall"] == 78.3
     assert score["messages"] == round((2 / 3) * 100, 1)
+
+
+def test_report_includes_invite_block(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    state = MigrationState(invite_code="inv_X", invite_url="https://app.test/invite/inv_X")
+    report = generate_report(config, state, exports=[])
+    assert report["invite"]["code"] == "inv_X"
+    assert report["invite"]["url"] == "https://app.test/invite/inv_X"
+
+
+def test_report_omits_invite_when_absent(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    report = generate_report(config, state, exports=[])
+    assert not report.get("invite", {}).get("code")

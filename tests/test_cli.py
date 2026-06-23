@@ -693,3 +693,56 @@ def test_rollback_tracker_renders_suspect_columns() -> None:
     assert "not-a-ulid-id-here" in out
     # --yes mode releases the gate.
     assert pause.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Probe subcommand (T6) + create-invite flag wiring (T9)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_requires_credentials(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["probe", "--test-server-id", "srv1"], catch_exceptions=False)
+    assert result.exit_code == 1
+    assert "--stoat-url is required" in result.output
+
+
+def test_probe_requires_test_server_id(runner: CliRunner) -> None:
+    result = runner.invoke(
+        main, ["probe", "--stoat-url", "https://api.test", "--token", "t"], catch_exceptions=False
+    )
+    assert result.exit_code != 0  # Click flags the missing required option
+
+
+def test_no_create_invite_flag_threads_to_config(runner: CliRunner) -> None:
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            [
+                "migrate",
+                "--export-dir",
+                FIXTURES_DIR,
+                "--stoat-url",
+                "u",
+                "--token",
+                "t",
+                "--no-create-invite",
+                "--yes",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.create_invite is False
+
+
+def test_create_invite_default_true(runner: CliRunner) -> None:
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        runner.invoke(
+            main,
+            ["migrate", "--export-dir", FIXTURES_DIR, "--stoat-url", "u", "--token", "t", "--yes"],
+            catch_exceptions=False,
+        )
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.create_invite is True
