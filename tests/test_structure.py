@@ -1124,6 +1124,46 @@ async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
     assert state.native_fidelity_counts == {"slowmode": 1, "user_limit": 1}
 
 
+async def test_channel_slowmode_clamped_above_max(tmp_path: Path) -> None:
+    """Slowmode > 21600 is clamped to 21600 and a slowmode_clamped warning is logged."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "txt1": ChannelMeta(nsfw=False, slowmode=30000),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [_make_export(channel_id="txt1", channel_name="slow-chat", category_id="")]
+
+    edit_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-txt1", "name": "slow-chat"},
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-txt1",
+            payload={"_id": "stoat-txt1"},
+            callback=lambda url, **kwargs: edit_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(edit_bodies) == 1
+    assert edit_bodies[0].get("slowmode") == 21600
+    assert any(w.get("type") == "slowmode_clamped" for w in state.warnings)
+
+
 async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
     """A voice channel that falls back to text (Bug #194) skips the voice PATCH.
 
