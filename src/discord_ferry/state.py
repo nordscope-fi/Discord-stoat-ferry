@@ -267,6 +267,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "rollback_progress": rp_data,
         "invite_code": state.invite_code,
         "invite_url": state.invite_url,
+        "native_fidelity_counts": state.native_fidelity_counts,
     }
 
 
@@ -332,6 +333,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             rollback_progress=rollback_progress,
             invite_code=data.get("invite_code", ""),
             invite_url=data.get("invite_url", ""),
+            native_fidelity_counts=data.get("native_fidelity_counts", {}),
         )
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e
