@@ -369,3 +369,29 @@ async def test_download_role_icon_none_on_404():
             from discord_ferry.discord.client import download_role_icon
 
             assert await download_role_icon(s, "r1", "hash") is None
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_none_when_oversize(monkeypatch):
+    # Patch the limit down so a small body exercises the oversize branch without
+    # streaming a multi-MB body through aioresponses (which trips an internal
+    # parser assertion on aiohttp 3.14).
+    from discord_ferry.discord import client as discord_client
+
+    monkeypatch.setattr(discord_client, "_ROLE_ICON_MAX_BYTES", 4)
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, body=b"toobig", status=200)
+        async with aiohttp.ClientSession() as s:
+            assert await discord_client.download_role_icon(s, "r1", "hash") is None
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_none_on_client_error():
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, exception=aiohttp.ClientError())
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.discord.client import download_role_icon
+
+            assert await download_role_icon(s, "r1", "hash") is None
