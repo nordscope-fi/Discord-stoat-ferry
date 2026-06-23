@@ -779,27 +779,6 @@ async def test_run_channels_category_without_position_sorts_last(tmp_path: Path)
     assert titles == ["Alpha", "Zeta"]
 
 
-async def test_run_channels_records_text_channel_ids(tmp_path: Path) -> None:
-    """CHANNELS records created top-level Text channel IDs (not voice/threads)."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    exports = [
-        _make_export(channel_id="t1", channel_name="general", channel_type=0, category_id=""),
-        _make_export(channel_id="v1", channel_name="Voice", channel_type=2, category_id=""),
-    ]
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-t1", "name": "general"})
-        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-v1", "name": "Voice"})
-
-        await run_channels(config, state, exports, events.append)
-
-    assert "sc-t1" in state.text_channel_ids
-    assert "sc-v1" not in state.text_channel_ids
-
-
 async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
     """CHANNELS phase creates each channel only once even if the same ID appears twice."""
     events: list[MigrationEvent] = []

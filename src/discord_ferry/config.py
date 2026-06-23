@@ -23,9 +23,6 @@ class FerryConfig:
     token: str = field(repr=False)
     server_id: str | None = None
     server_name: str | None = None
-    # Web-app base URL for invite links ({app}/invite/{code}). If None, derived
-    # from stoat_url by stripping a trailing /api (S4).
-    app_url: str | None = None
     dry_run: bool = False
     skip_messages: bool = False
     skip_emoji: bool = False

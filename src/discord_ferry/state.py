@@ -85,11 +85,6 @@ class MigrationState:
     stoat_server_id: str = ""
     autumn_url: str = ""
 
-    # End-of-run invite (S4): persisted so resume does not re-mint (non-idempotent).
-    stoat_invite_code: str = ""
-    # Text channel IDs in creation order — reliable invite target (S4).
-    text_channel_ids: list[str] = field(default_factory=list)
-
     # Resume tracking
     current_phase: str = ""
     completed_channel_ids: set[str] = field(default_factory=set)
@@ -236,8 +231,6 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "errors": state.errors,
         "warnings": state.warnings,
         "stoat_server_id": state.stoat_server_id,
-        "stoat_invite_code": state.stoat_invite_code,
-        "text_channel_ids": state.text_channel_ids,
         "autumn_url": state.autumn_url,
         "current_phase": state.current_phase,
         "completed_channel_ids": list(state.completed_channel_ids),
@@ -301,8 +294,6 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             errors=data.get("errors", []),
             warnings=data.get("warnings", []),
             stoat_server_id=data.get("stoat_server_id", ""),
-            stoat_invite_code=data.get("stoat_invite_code", ""),
-            text_channel_ids=data.get("text_channel_ids", []),
             autumn_url=data.get("autumn_url", ""),
             current_phase=data.get("current_phase", ""),
             completed_channel_ids=set(data.get("completed_channel_ids", [])),

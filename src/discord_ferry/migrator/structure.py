@@ -778,7 +778,7 @@ async def run_channels(
     forum_channel_info: dict[str, list[tuple[str, str, int]]] = {}
 
     async with get_session(config) as session:
-        for idx, (channel, stoat_type, unique_name, discord_cat_id, is_thread) in enumerate(
+        for idx, (channel, stoat_type, unique_name, discord_cat_id, _is_thread) in enumerate(
             channels_to_create, start=1
         ):
             ch: DCEChannel = channel
@@ -834,10 +834,6 @@ async def run_channels(
                     raise
 
             state.channel_map[ch.id] = stoat_channel_id
-
-            # Record top-level Text channels for reliable invite targeting (S4).
-            if stoat_type == "Text" and not is_thread:
-                state.text_channel_ids.append(stoat_channel_id)
 
             # Track forum post info for index channel generation.
             if discord_cat_id.startswith("forum-"):

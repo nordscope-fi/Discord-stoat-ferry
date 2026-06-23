@@ -9,26 +9,9 @@ from discord_ferry.state import (
     MigrationState,
     RollbackFailure,
     RollbackProgress,
-    _dict_to_state,
-    _state_to_dict,
     load_state,
     save_state,
 )
-
-
-def test_state_roundtrip_invite_and_text_channels() -> None:
-    state = MigrationState()
-    state.stoat_invite_code = "abc123"
-    state.text_channel_ids = ["t1", "t2"]
-    restored = _dict_to_state(_state_to_dict(state))
-    assert restored.stoat_invite_code == "abc123"
-    assert restored.text_channel_ids == ["t1", "t2"]
-
-
-def test_state_legacy_dict_defaults() -> None:
-    restored = _dict_to_state({})
-    assert restored.stoat_invite_code == ""
-    assert restored.text_channel_ids == []
 
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:

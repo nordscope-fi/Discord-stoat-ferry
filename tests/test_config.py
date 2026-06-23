@@ -13,12 +13,6 @@ def test_default_discord_fields_are_none():
     assert cfg.skip_export is False
 
 
-def test_config_app_url_optional_defaults_none():
-    """app_url defaults to None (invite URL derived from stoat_url when unset)."""
-    cfg = FerryConfig(export_dir=Path("."), stoat_url="https://h/api", token="t")
-    assert cfg.app_url is None
-
-
 def test_discord_token_not_in_repr():
     """discord_token must be excluded from repr (security)."""
     cfg = FerryConfig(
