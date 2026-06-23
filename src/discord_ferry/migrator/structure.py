@@ -553,6 +553,13 @@ async def run_roles(
                 "message": "Role hoist skipped: Discord metadata unavailable.",
             }
         )
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "role_icon_skipped",
+                "message": "Role icons skipped: Discord metadata unavailable.",
+            }
+        )
 
     # Third pass: apply translated permissions from Discord metadata (reuse the load).
     if discord_metadata and not config.dry_run:
@@ -1152,6 +1159,33 @@ async def run_channels(
                 state.stoat_server_id,
                 all_categories,
             )
+
+    # S5: graceful-degrade — slowmode/user_limit need Discord metadata.
+    if discord_metadata is None:
+        on_event(
+            MigrationEvent(
+                phase="channels",
+                status="warning",
+                message=(
+                    "Slowmode / voice user-limit not migrated "
+                    "(no Discord metadata — discord_token required)."
+                ),
+            )
+        )
+        state.warnings.append(
+            {
+                "phase": "channels",
+                "type": "slowmode_skipped",
+                "message": "Slowmode skipped: Discord metadata unavailable.",
+            }
+        )
+        state.warnings.append(
+            {
+                "phase": "channels",
+                "type": "user_limit_skipped",
+                "message": "Voice user-limit skipped: Discord metadata unavailable.",
+            }
+        )
 
     on_event(
         MigrationEvent(

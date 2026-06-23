@@ -432,6 +432,53 @@ async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
     assert any(w.get("type") == "hoist_skipped" for w in state.warnings)
 
 
+async def test_batch2_fields_skip_without_metadata(tmp_path: Path) -> None:
+    """S5 graceful-degrade: channels + roles emit batch-2 skip warnings without metadata.
+
+    With no discord_metadata.json present, run_channels and run_roles must complete
+    (populating channel_map/role_map) and emit one-time skip warnings for the batch-2
+    fields: slowmode_skipped, user_limit_skipped (channels) and role_icon_skipped (roles).
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [
+        _make_export(
+            channel_id="ch1",
+            channel_name="general",
+            category_id="",
+            messages=[_make_message("m1", roles=[role])],
+        )
+    ]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "general"},
+        )
+
+        await run_roles(config, state, exports, events.append)
+        await run_channels(config, state, exports, events.append)
+
+    # Migration completed: maps populated.
+    assert state.role_map.get("r1") == "stoat-r1"
+    assert state.channel_map.get("ch1") == "stoat-ch1"
+
+    warning_types = [w.get("type") for w in state.warnings]
+    assert "role_icon_skipped" in warning_types
+    assert "slowmode_skipped" in warning_types
+    assert "user_limit_skipped" in warning_types
+    # v2.3.0 hoist_skipped still fires alongside the new role_icon_skipped.
+    assert "hoist_skipped" in warning_types
+    # One-time warnings, not per-item.
+    assert warning_types.count("slowmode_skipped") == 1
+    assert warning_types.count("user_limit_skipped") == 1
+    assert warning_types.count("role_icon_skipped") == 1
+
+
 async def test_run_roles_image_icon_uploaded_and_folded(tmp_path: Path) -> None:
     """ROLES downloads an image role icon, uploads to Autumn, folds icon into edit."""
     events: list[MigrationEvent] = []
