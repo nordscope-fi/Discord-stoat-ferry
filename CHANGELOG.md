@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.3.0] - 2026-06-23
+
+### Added
+
+- **Role hoisting is now migrated (S1)**. Discord's per-role `hoist` flag (which displays a role as a separate member-list group) was previously dropped — every migrated role collapsed into the default list. `fetch_and_translate_guild_metadata` (`discord/__init__.py`) now captures `hoist` (and `position`) into a new `RoleMeta` carrier on `DiscordMetadata`, and `run_roles` (`migrator/structure.py`) applies it. The former rank-only second pass became an **attributes pass** that folds `rank` and `hoist` into a single `api_edit_role` call per role, so hoist is applied even for roles with no colour and position 0 — and with **no extra API calls** versus before. `mentionable` is intentionally not migrated (no Stoat equivalent). Requires `discord_token`; without it, hoist is skipped with one warning (`hoist_skipped`). Locked by `test_run_roles_applies_hoist_when_metadata_present` and `test_run_roles_hoist_skipped_without_metadata`.
+- **Server description and NSFW flag are now migrated (S2)**. Both are native Stoat fields that were never read from the source guild. `fetch_and_translate_guild_metadata` now captures `guild_description` and `guild_nsfw`, and `run_server` applies them via the existing `api_edit_server` PATCH (description sent only when non-empty). Skipped with one warning (`server_meta_skipped`) when Discord metadata is unavailable. Locked by `test_run_server_applies_description_and_nsfw`, `test_run_server_omits_empty_description`, and `test_run_server_meta_skipped_without_metadata`.
+- **Categories are now ordered by their Discord position (S3)**. Categories previously rendered in DCE export-iteration order (effectively arbitrary). The authoritative second `api_upsert_categories` call in `run_channels` now sorts the categories array by each category's captured Discord `position` (new `DiscordMetadata.category_positions`, populated only from type-4 GUILD_CATEGORY channels). Forum-derived categories — keyed in `category_map` by a non-Discord forum key and thus without a position — sort to the end with a stable title tie-break. Falls back to the prior order when metadata is absent. Locked by `test_run_channels_orders_categories_by_discord_position` and `test_run_channels_category_without_position_sorts_last`.
+
+### Changed
+
+- **`DiscordChannel` now parses the channel `position` field** (`discord/models.py`, `discord/client.py`), previously discarded — needed for category ordering above.
+
+### Internal
+
+- **Extracted `_stoat_channel_type(int) -> str`** in `migrator/structure.py` as the single source of truth for the Discord-type → Stoat-type mapping (type 2 → Voice, else Text), replacing the inline match in `run_channels`.
+- All three new metadata fields round-trip through `discord_metadata.json` with `.get()`-defaulted decodes, so pre-upgrade metadata files load forward-compatibly and trigger the graceful-skip path. Locked by a deep-equality round-trip test in `tests/test_metadata.py`.
+- The **end-of-run server invite** (S4) originally scoped alongside these features was dropped from this release: `api_create_invite` belongs to the in-progress probe-and-invites feature, so invite generation will ship there rather than be duplicated here.
+
 ## [Unreleased]
 
 ### Internal

@@ -24,6 +24,14 @@ class RoleOverride:
 
 
 @dataclass
+class RoleMeta:
+    """Per-role Discord attributes not carried by the DCE export."""
+
+    hoist: bool = False
+    position: int = 0
+
+
+@dataclass
 class ChannelMeta:
     """Per-channel metadata fetched from Discord API, translated to Stoat bit space."""
 
@@ -43,6 +51,10 @@ class DiscordMetadata:
     channel_metadata: dict[str, ChannelMeta]
     user_override_channels: list[dict[str, object]] = field(default_factory=list)
     banner_hash: str = ""
+    role_metadata: dict[str, RoleMeta] = field(default_factory=dict)
+    category_positions: dict[str, int] = field(default_factory=dict)
+    guild_description: str = ""
+    guild_nsfw: bool = False
 
 
 def save_discord_metadata(meta: DiscordMetadata, output_dir: Path) -> None:
@@ -75,6 +87,12 @@ def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
         "channel_metadata": {k: _channel_meta_to_dict(v) for k, v in meta.channel_metadata.items()},
         "user_override_channels": meta.user_override_channels,
         "banner_hash": meta.banner_hash,
+        "role_metadata": {
+            k: {"hoist": v.hoist, "position": v.position} for k, v in meta.role_metadata.items()
+        },
+        "category_positions": meta.category_positions,
+        "guild_description": meta.guild_description,
+        "guild_nsfw": meta.guild_nsfw,
     }
 
 
@@ -110,6 +128,13 @@ def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
         },
         user_override_channels=data.get("user_override_channels", []),
         banner_hash=data.get("banner_hash", ""),
+        role_metadata={
+            k: RoleMeta(hoist=v.get("hoist", False), position=v.get("position", 0))
+            for k, v in data.get("role_metadata", {}).items()
+        },
+        category_positions=data.get("category_positions", {}),
+        guild_description=data.get("guild_description", ""),
+        guild_nsfw=data.get("guild_nsfw", False),
     )
 
 

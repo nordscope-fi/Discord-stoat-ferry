@@ -86,6 +86,19 @@ def _generate_category_id() -> str:
     return uuid.uuid4().hex[:26]
 
 
+def _stoat_channel_type(channel_type: int) -> str:
+    """Map a Discord channel type int to a Stoat channel type string.
+
+    Discord type 2 is a voice channel; everything else (text, announcement,
+    threads, forum, media) maps to a Stoat Text channel.
+    """
+    match channel_type:
+        case 2:
+            return "Voice"
+        case _:
+            return "Text"
+
+
 async def run_server(
     config: FerryConfig,
     state: MigrationState,
@@ -250,6 +263,43 @@ async def run_server(
                     }
                 )
 
+        # Apply server description + NSFW flag from Discord metadata (S2).
+        if discord_meta is not None:
+            server_kwargs: dict[str, Any] = {"nsfw": discord_meta.guild_nsfw}
+            if discord_meta.guild_description:
+                server_kwargs["description"] = discord_meta.guild_description
+            try:
+                await api_edit_server(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    state.stoat_server_id,
+                    **server_kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": "server",
+                        "type": "server_meta_failed",
+                        "message": f"Failed to set server description/NSFW: {exc}",
+                    }
+                )
+        else:
+            on_event(
+                MigrationEvent(
+                    phase="server",
+                    status="warning",
+                    message="Server description/NSFW not migrated (discord_token required).",
+                )
+            )
+            state.warnings.append(
+                {
+                    "phase": "server",
+                    "type": "server_meta_skipped",
+                    "message": "Server description/NSFW skipped: Discord metadata unavailable.",
+                }
+            )
+
         # Bootstrap minimum permissions on the server's default role.
         try:
             await api_edit_server(
@@ -384,12 +434,23 @@ async def run_roles(
                 )
             )
 
-    # Second pass: set role rank from DCE position (best-effort).
+    # Second pass: set role attributes (rank from DCE position; hoist from Discord
+    # metadata). Both fold into a single api_edit_role call per role when present.
+    discord_metadata = load_discord_metadata(config.output_dir)
+    role_meta = discord_metadata.role_metadata if discord_metadata else {}
     ranked_roles = sorted(roles_to_create, key=lambda r: r.position)
     async with get_session(config) as session:
         for role in ranked_roles:
             rank_role_id = state.role_map.get(role.id)
-            if not rank_role_id or role.position == 0:
+            if not rank_role_id:
+                continue
+            edit_kwargs: dict[str, Any] = {}
+            if role.position != 0:
+                edit_kwargs["rank"] = role.position
+            rm = role_meta.get(role.id)
+            if rm is not None:
+                edit_kwargs["hoist"] = rm.hoist
+            if not edit_kwargs:
                 continue
             try:
                 await api_edit_role(
@@ -398,19 +459,33 @@ async def run_roles(
                     config.token,
                     state.stoat_server_id,
                     rank_role_id,
-                    rank=role.position,
+                    **edit_kwargs,
                 )
             except Exception as exc:  # noqa: BLE001
                 state.warnings.append(
                     {
                         "phase": "roles",
-                        "type": "role_rank_failed",
-                        "message": (f"Failed to set rank for role '{role.name}': {exc}"),
+                        "type": "role_attributes_failed",
+                        "message": (f"Failed to set attributes for role '{role.name}': {exc}"),
                     }
                 )
+    if discord_metadata is None:
+        on_event(
+            MigrationEvent(
+                phase="roles",
+                status="warning",
+                message="Role hoist not migrated (no Discord metadata — discord_token required).",
+            )
+        )
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "hoist_skipped",
+                "message": "Role hoist skipped: Discord metadata unavailable.",
+            }
+        )
 
-    # Third pass: apply translated permissions from Discord metadata.
-    discord_metadata = load_discord_metadata(config.output_dir)
+    # Third pass: apply translated permissions from Discord metadata (reuse the load).
     if discord_metadata and not config.dry_run:
         async with get_session(config) as session:
             for role in roles_to_create:
@@ -598,14 +673,7 @@ async def run_channels(
         seen_channel_ids.add(channel.id)
 
         # Map Discord channel type to Stoat type string.
-        stoat_type: str | None
-        match channel.type:
-            case 2:
-                stoat_type = "Voice"
-            case 0 | 5 | 11 | 12 | 15 | 16:
-                stoat_type = "Text"
-            case _:
-                stoat_type = "Text"
+        stoat_type: str | None = _stoat_channel_type(channel.type)
 
         # Build channel name; prefix with parent name for threads.
         ch_name = channel.name
@@ -945,6 +1013,20 @@ async def run_channels(
                         "channels": category_channels.get(stoat_cat_id, []),
                     }
                 )
+
+            # Order categories by Discord position (S3). Forum-derived categories
+            # (keyed in category_map by a non-Discord forum key) have no position
+            # and sort to the end with a stable title tie-break.
+            positions = discord_metadata.category_positions if discord_metadata else {}
+            inverse_category_map = {v: k for k, v in state.category_map.items()}
+            position_sentinel = 1_000_000
+
+            def _category_sort_key(entry: dict[str, Any]) -> tuple[int, str]:
+                discord_cat_id = inverse_category_map.get(str(entry["id"]), "")
+                pos = positions.get(discord_cat_id, position_sentinel)
+                return (pos, str(entry["title"]))
+
+            all_categories.sort(key=_category_sort_key)
 
             await api_upsert_categories(
                 session,

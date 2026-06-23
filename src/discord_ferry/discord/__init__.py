@@ -10,6 +10,7 @@ from discord_ferry.discord.metadata import (
     ChannelMeta,
     DiscordMetadata,
     PermissionPair,
+    RoleMeta,
     RoleOverride,
     load_discord_metadata,
     save_discord_metadata,
@@ -42,6 +43,11 @@ async def fetch_and_translate_guild_metadata(
     """
     guild_data = await fetch_guild(session, token, guild_id)
     banner_hash = str(guild_data.get("banner") or "")
+    guild_description = str(guild_data.get("description") or "")
+    # Discord nsfw_level is a classification enum, not a boolean:
+    # 0=DEFAULT, 1=EXPLICIT, 2=SAFE, 3=AGE_RESTRICTED. Only EXPLICIT and
+    # AGE_RESTRICTED denote an NSFW server (SAFE must NOT be flagged).
+    guild_nsfw = guild_data.get("nsfw_level", 0) in (1, 3)
 
     roles = await fetch_guild_roles(session, token, guild_id)
     channels = await fetch_guild_channels(session, token, guild_id)
@@ -49,6 +55,7 @@ async def fetch_and_translate_guild_metadata(
     # Identify @everyone role (id == guild_id) → server default permissions
     server_default = 0
     role_permissions: dict[str, PermissionPair] = {}
+    role_metadata: dict[str, RoleMeta] = {}
     for role in roles:
         if role.id == guild_id:
             server_default = translate_permissions(role.permissions)
@@ -57,11 +64,15 @@ async def fetch_and_translate_guild_metadata(
             continue
         translated = translate_permissions(role.permissions)
         role_permissions[role.id] = PermissionPair(allow=translated, deny=0)
+        role_metadata[role.id] = RoleMeta(hoist=role.hoist, position=role.position)
 
     # Build channel metadata (filter user overrides, translate permissions)
     channel_metadata: dict[str, ChannelMeta] = {}
+    category_positions: dict[str, int] = {}
     user_override_channels: list[dict[str, object]] = []
     for channel in channels:
+        if channel.type == 4:  # GUILD_CATEGORY — capture position for ordering
+            category_positions[channel.id] = channel.position
         default_override: PermissionPair | None = None
         role_overrides: list[RoleOverride] = []
         user_override_count = 0
@@ -104,4 +115,8 @@ async def fetch_and_translate_guild_metadata(
         channel_metadata=channel_metadata,
         user_override_channels=user_override_channels,
         banner_hash=banner_hash,
+        role_metadata=role_metadata,
+        category_positions=category_positions,
+        guild_description=guild_description,
+        guild_nsfw=guild_nsfw,
     )

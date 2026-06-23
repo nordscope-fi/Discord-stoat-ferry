@@ -34,4 +34,5 @@ class DiscordChannel:
     name: str
     type: int
     nsfw: bool = False
+    position: int = 0
     permission_overwrites: list[PermissionOverwrite] = field(default_factory=list)
