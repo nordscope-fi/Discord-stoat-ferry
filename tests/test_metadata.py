@@ -384,3 +384,43 @@ async def test_no_banner_hash() -> None:
             meta = await fetch_and_translate_guild_metadata(session, "test-token", guild_id)
 
     assert meta.banner_hash == ""
+
+
+from discord_ferry.discord.metadata import (  # noqa: E402
+    _dict_to_meta,
+    _meta_to_dict,
+)
+
+
+def test_batch2_fields_round_trip():
+    meta = DiscordMetadata(
+        guild_id="g1",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "c1": ChannelMeta(nsfw=False, slowmode=30, user_limit=5),
+        },
+        role_metadata={"r1": RoleMeta(hoist=True, position=3, icon_hash="abc", unicode_emoji="")},
+    )
+    restored = _dict_to_meta(_meta_to_dict(meta))
+    assert restored.channel_metadata["c1"].slowmode == 30
+    assert restored.channel_metadata["c1"].user_limit == 5
+    assert restored.role_metadata["r1"].icon_hash == "abc"
+    assert restored.role_metadata["r1"].unicode_emoji == ""
+
+
+def test_batch2_fields_default_on_legacy_json():
+    # Legacy metadata without the new keys loads with zero/empty defaults.
+    legacy = {
+        "guild_id": "g",
+        "fetched_at": "t",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {"c1": {"nsfw": False}},
+        "role_metadata": {"r1": {"hoist": False, "position": 0}},
+    }
+    restored = _dict_to_meta(legacy)
+    assert restored.channel_metadata["c1"].slowmode == 0
+    assert restored.channel_metadata["c1"].user_limit == 0
+    assert restored.role_metadata["r1"].icon_hash == ""

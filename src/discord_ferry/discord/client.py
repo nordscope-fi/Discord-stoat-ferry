@@ -174,5 +174,7 @@ def _parse_channel(data: dict[str, Any]) -> DiscordChannel:
         type=data["type"],
         nsfw=data.get("nsfw", False),
         position=data.get("position", 0),
+        rate_limit_per_user=data.get("rate_limit_per_user", 0),
+        user_limit=data.get("user_limit", 0),
         permission_overwrites=overwrites,
     )
