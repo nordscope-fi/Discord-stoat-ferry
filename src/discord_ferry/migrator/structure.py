@@ -592,6 +592,10 @@ async def run_categories(
             seen_cat_ids.add(cat_id)
             unique_categories.append((cat_id, cat_name))
 
+    # Snapshot already-mapped categories BEFORE mutation so incremental re-runs
+    # reuse carried Stoat IDs and can detect whether anything is genuinely new.
+    pre_existing_category_ids = set(state.category_map)
+
     if config.dry_run:
         for discord_cat_id, _cat_name in unique_categories:
             state.category_map[discord_cat_id] = f"dry-cat-{discord_cat_id}"
@@ -607,8 +611,9 @@ async def run_categories(
     async with get_session(config) as session:
         stoat_categories: list[dict[str, Any]] = []
         for idx, (discord_cat_id, cat_name) in enumerate(unique_categories, start=1):
-            stoat_cat_id = _generate_category_id()
+            stoat_cat_id = state.category_map.get(discord_cat_id) or _generate_category_id()
             state.category_map[discord_cat_id] = stoat_cat_id
+            state.category_names[discord_cat_id] = cat_name
             stoat_categories.append(
                 {
                     "id": stoat_cat_id,
@@ -627,7 +632,11 @@ async def run_categories(
                 )
             )
 
-        if stoat_categories:
+        # Suppress this transient upsert when no category is genuinely new: it
+        # would set empty channels arrays and orphan carried channels until the
+        # CHANNELS phase re-PATCHes. run_channels owns the authoritative upsert.
+        any_new_category = any(cid not in pre_existing_category_ids for cid, _ in unique_categories)
+        if stoat_categories and any_new_category:
             await api_upsert_categories(
                 session,
                 config.stoat_url,
@@ -663,6 +672,11 @@ async def run_channels(
         MigrationError: If any API call fails unrecoverably.
     """
     discord_metadata = load_discord_metadata(config.output_dir)
+
+    # Snapshot already-mapped channels BEFORE the dedup scan so incremental
+    # re-runs reuse carried Stoat IDs (no re-create) and the truncation budget
+    # can exclude carried channels.
+    pre_existing_channel_ids = set(state.channel_map)
 
     # Deduplicate exports by channel ID and skip category channels (type 4).
     seen_channel_ids: set[str] = set()
@@ -721,29 +735,35 @@ async def run_channels(
 
     # Reserve channel slots for forum index channels (one per forum category).
     index_channel_slots = len(forum_categories) if forum_categories else 0
-    effective_max = config.max_channels - index_channel_slots
 
-    if len(channels_to_create) > effective_max:
-        overflow = len(channels_to_create) - effective_max
+    # Incremental: carried channels (already in channel_map) are never re-created
+    # and never dropped. Only NEW channels are subject to the truncation budget.
+    carried_candidates = [t for t in channels_to_create if t[0].id in pre_existing_channel_ids]
+    new_candidates = [t for t in channels_to_create if t[0].id not in pre_existing_channel_ids]
+    new_budget = max(0, config.max_channels - index_channel_slots - len(carried_candidates))
+
+    if len(new_candidates) > new_budget:
+        overflow = len(new_candidates) - new_budget
         # Sort: main channels first (False < True), then threads by message_count
         # descending so higher-traffic threads survive truncation.
         export_by_ch = {exp.channel.id: exp for exp in exports}
-        channels_to_create.sort(
+        new_candidates.sort(
             key=lambda t: (
                 t[4],  # is_thread: False (main) before True (thread)
                 -(export_by_ch[t[0].id].message_count if t[0].id in export_by_ch else 0),
             )
         )
-        dropped = channels_to_create[effective_max:]
-        channels_to_create = channels_to_create[:effective_max]
+        dropped = new_candidates[new_budget:]
+        new_candidates = new_candidates[:new_budget]
         dropped_names = [entry[2] for entry in dropped]
         on_event(
             MigrationEvent(
                 phase="channels",
                 status="warning",
                 message=(
-                    f"Total channels ({effective_max + overflow}) exceeds Stoat limit "
-                    f"of {config.max_channels}. Dropped {overflow} channel(s): "
+                    f"Total channels ({len(carried_candidates) + new_budget + overflow}) "
+                    f"exceeds Stoat limit of {config.max_channels}. "
+                    f"Dropped {overflow} channel(s): "
                     f"{', '.join(dropped_names[:10])}"
                     f"{'...' if len(dropped_names) > 10 else ''}"
                 ),
@@ -760,11 +780,16 @@ async def run_channels(
             }
         )
 
+    channels_to_create = carried_candidates + new_candidates
+
     # Create forum-derived categories (before dry_run check so they get mapped).
     if forum_categories and not config.dry_run:
         for forum_key, forum_name in forum_categories.items():
-            stoat_forum_id = _generate_category_id()
+            # Incremental: reuse the carried Stoat category id (no new id) so the
+            # forum category and its channels are not orphaned on re-run.
+            stoat_forum_id = state.category_map.get(forum_key) or _generate_category_id()
             state.category_map[forum_key] = stoat_forum_id
+            state.category_names[forum_key] = forum_name
             state.forum_category_names[forum_key] = forum_name  # S15: track for REPORT rebuild
             on_event(
                 MigrationEvent(
@@ -808,54 +833,104 @@ async def run_channels(
             nsfw = ch_meta.nsfw if ch_meta else False
 
             stoat_channel_id: str
-            try:
-                result = await api_create_channel(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    state.stoat_server_id,
-                    name=unique_name,
-                    channel_type=stoat_type,
-                    description=description,
-                    nsfw=nsfw,
-                )
-                stoat_channel_id = result["_id"]
-            except MigrationError as exc:
-                if stoat_type == "Voice":
-                    # Voice channels may fail (Bug #194) — retry as text.
-                    state.warnings.append(
-                        {
-                            "phase": "channels",
-                            "type": "voice_channel_bug",
-                            "message": (
-                                f"Voice channel '{unique_name}' failed, retrying as text: {exc}"
-                            ),
-                        }
-                    )
-                    on_event(
-                        MigrationEvent(
-                            phase="channels",
-                            status="warning",
-                            message=f"Voice channel '{unique_name}' failed, retrying as text",
-                        )
-                    )
+            if ch.id in pre_existing_channel_ids:
+                # Incremental: reuse the carried Stoat channel id — no create, no
+                # permission overrides (already applied on the original run).
+                stoat_channel_id = state.channel_map[ch.id]
+            else:
+                try:
                     result = await api_create_channel(
                         session,
                         config.stoat_url,
                         config.token,
                         state.stoat_server_id,
                         name=unique_name,
-                        channel_type="Text",
+                        channel_type=stoat_type,
                         description=description,
                         nsfw=nsfw,
                     )
                     stoat_channel_id = result["_id"]
-                else:
-                    raise
+                except MigrationError as exc:
+                    if stoat_type == "Voice":
+                        # Voice channels may fail (Bug #194) — retry as text.
+                        state.warnings.append(
+                            {
+                                "phase": "channels",
+                                "type": "voice_channel_bug",
+                                "message": (
+                                    f"Voice channel '{unique_name}' failed, retrying as text: {exc}"
+                                ),
+                            }
+                        )
+                        on_event(
+                            MigrationEvent(
+                                phase="channels",
+                                status="warning",
+                                message=f"Voice channel '{unique_name}' failed, retrying as text",
+                            )
+                        )
+                        result = await api_create_channel(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            state.stoat_server_id,
+                            name=unique_name,
+                            channel_type="Text",
+                            description=description,
+                            nsfw=nsfw,
+                        )
+                        stoat_channel_id = result["_id"]
+                    else:
+                        raise
 
-            state.channel_map[ch.id] = stoat_channel_id
+                state.channel_map[ch.id] = stoat_channel_id
 
-            # Track forum post info for index channel generation.
+                # Apply channel permission overrides from Discord metadata.
+                if ch_meta and not config.dry_run:
+                    if ch_meta.default_override:
+                        try:
+                            await api_set_channel_default_permissions(
+                                session,
+                                config.stoat_url,
+                                config.token,
+                                stoat_channel_id,
+                                allow=ch_meta.default_override.allow,
+                                deny=ch_meta.default_override.deny,
+                            )
+                            await asyncio.sleep(config.upload_delay)
+                        except Exception as exc:  # noqa: BLE001
+                            state.warnings.append(
+                                {
+                                    "phase": "channels",
+                                    "type": "channel_default_perm_failed",
+                                    "message": f"Default override for '{unique_name}': {exc}",
+                                }
+                            )
+                    for ow in ch_meta.role_overrides:
+                        stoat_role_id = state.role_map.get(ow.discord_role_id)
+                        if stoat_role_id:
+                            try:
+                                await api_set_channel_role_permissions(
+                                    session,
+                                    config.stoat_url,
+                                    config.token,
+                                    stoat_channel_id,
+                                    stoat_role_id,
+                                    allow=ow.allow,
+                                    deny=ow.deny,
+                                )
+                                await asyncio.sleep(config.upload_delay)
+                            except Exception as exc:  # noqa: BLE001
+                                state.warnings.append(
+                                    {
+                                        "phase": "channels",
+                                        "type": "channel_role_perm_failed",
+                                        "message": f"Role override for '{unique_name}': {exc}",
+                                    }
+                                )
+
+            # Forum tracking + category membership run for BOTH carried and new
+            # channels so the authoritative upsert never orphans a carried channel.
             if discord_cat_id.startswith("forum-"):
                 exp = export_by_channel.get(ch.id)
                 msg_count = exp.message_count if exp else 0
@@ -863,51 +938,9 @@ async def run_channels(
                     (stoat_channel_id, unique_name, msg_count)
                 )
                 # S15: Track discord channel membership for REPORT phase rebuild.
-                state.forum_channel_members.setdefault(discord_cat_id, []).append(ch.id)
-
-            # Apply channel permission overrides from Discord metadata.
-            if ch_meta and not config.dry_run:
-                if ch_meta.default_override:
-                    try:
-                        await api_set_channel_default_permissions(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            stoat_channel_id,
-                            allow=ch_meta.default_override.allow,
-                            deny=ch_meta.default_override.deny,
-                        )
-                        await asyncio.sleep(config.upload_delay)
-                    except Exception as exc:  # noqa: BLE001
-                        state.warnings.append(
-                            {
-                                "phase": "channels",
-                                "type": "channel_default_perm_failed",
-                                "message": f"Default override for '{unique_name}': {exc}",
-                            }
-                        )
-                for ow in ch_meta.role_overrides:
-                    stoat_role_id = state.role_map.get(ow.discord_role_id)
-                    if stoat_role_id:
-                        try:
-                            await api_set_channel_role_permissions(
-                                session,
-                                config.stoat_url,
-                                config.token,
-                                stoat_channel_id,
-                                stoat_role_id,
-                                allow=ow.allow,
-                                deny=ow.deny,
-                            )
-                            await asyncio.sleep(config.upload_delay)
-                        except Exception as exc:  # noqa: BLE001
-                            state.warnings.append(
-                                {
-                                    "phase": "channels",
-                                    "type": "channel_role_perm_failed",
-                                    "message": f"Role override for '{unique_name}': {exc}",
-                                }
-                            )
+                # Guard against double-append on incremental re-runs.
+                if ch.id not in state.forum_channel_members.get(discord_cat_id, []):
+                    state.forum_channel_members.setdefault(discord_cat_id, []).append(ch.id)
 
             # Track which Stoat category this channel belongs to.
             if discord_cat_id and discord_cat_id in state.category_map:
@@ -928,6 +961,15 @@ async def run_channels(
         for forum_key, forum_name in forum_categories.items():
             forum_cat_stoat_id = state.category_map.get(forum_key)
             if not forum_cat_stoat_id:
+                continue
+
+            # Incremental: a carried forum-index channel is reused verbatim — no
+            # create, no index message, no pin. Re-attach it at position 0.
+            index_key = f"forum-index-{forum_key}"
+            if index_key in pre_existing_channel_ids:
+                category_channels.setdefault(forum_cat_stoat_id, []).insert(
+                    0, state.channel_map[index_key]
+                )
                 continue
             try:
                 index_name = make_unique_channel_name(f"{forum_name}-index", existing_names)
@@ -1008,9 +1050,10 @@ async def run_channels(
                 )
 
         # Assign channels to categories via a single PATCH.
-        # This replaces the categories array set by run_categories(). Safe because
-        # cat_titles is built from state.category_map (all categories) and every
-        # category has at least one channel (DCE only exports non-empty categories).
+        # This replaces the categories array set by run_categories(). The upsert is
+        # full-replace, so it must enumerate EVERY category in state.category_map
+        # (carried + new) — a carried-only category absent from this run's (partial)
+        # export would otherwise be dropped and its channels orphaned (I-NEW-2).
         if category_channels:
             cat_titles: dict[str, str] = {}
             for export in exports:
@@ -1022,6 +1065,37 @@ async def run_channels(
                 stoat_forum_cat_id = state.category_map.get(forum_key)
                 if stoat_forum_cat_id:
                     cat_titles[stoat_forum_cat_id] = truncate_name(forum_name)
+
+            # Backfill titles for every carried category not seen in this export,
+            # sourced from state.category_names (I-NEW-2). Without this a carried-only
+            # category would have no title in the full-replace payload.
+            for discord_cat_id, stoat_cat_id in state.category_map.items():
+                if stoat_cat_id not in cat_titles:
+                    cat_titles[stoat_cat_id] = truncate_name(
+                        state.category_names.get(discord_cat_id, "Category")
+                    )
+
+            # Re-attach carried channels that this run did not place into any
+            # category (their category is absent from a partial re-export). They are
+            # distributed to carried-only categories (those with no channels recorded
+            # this run) so the full-replace upsert does not orphan them. Membership is
+            # not persisted, so with multiple carried-only categories the partition is
+            # best-effort; in the common case (DCE re-exports full structure, or a
+            # single carried-only category) it is exact.
+            placed_channel_ids = {cid for ids in category_channels.values() for cid in ids}
+            unplaced_carried = [
+                stoat_ch_id
+                for ch_id, stoat_ch_id in state.channel_map.items()
+                if not ch_id.startswith("forum-index-") and stoat_ch_id not in placed_channel_ids
+            ]
+            if unplaced_carried:
+                carried_only_cats = [
+                    state.category_map[discord_cat_id]
+                    for discord_cat_id in state.category_map
+                    if state.category_map[discord_cat_id] not in category_channels
+                ]
+                for stoat_cat_id in carried_only_cats:
+                    category_channels.setdefault(stoat_cat_id, []).extend(unplaced_carried)
 
             # Build the full categories array.
             all_categories: list[dict[str, Any]] = []

@@ -1,4 +1,9 @@
-"""Tests for incremental-mode structure phase behaviour (SC-3, SC-4, SC-5, SC-11, SC-12)."""
+"""Tests for incremental-mode structure phase behaviour.
+
+Role/server scenarios: SC-3, SC-4 (role), SC-5, SC-11, SC-12.
+Category/channel idempotency scenarios (Task 3): SC-1, SC-2, SC-4 (channel),
+SC-6, SC-7, SC-9.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,12 @@ from discord_ferry.discord.metadata import (
     save_discord_metadata,
 )
 from discord_ferry.errors import MigrationError
-from discord_ferry.migrator.structure import run_roles, run_server
+from discord_ferry.migrator.structure import (
+    run_categories,
+    run_channels,
+    run_roles,
+    run_server,
+)
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
@@ -330,3 +340,389 @@ async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
     assert len(edit_calls) >= 2, (
         f"Expected >= 2 attribute edits on fresh run, got {len(edit_calls)}"
     )
+
+
+# ===========================================================================
+# Task 3: run_categories + run_channels map-aware idempotency
+# ===========================================================================
+
+
+def _make_forum_export(
+    channel_id: str,
+    channel_name: str,
+    parent_channel_name: str,
+    message_count: int = 0,
+) -> DCEExport:
+    """Build a forum-thread export (type 15) keyed under a parent forum."""
+    return _make_export(
+        channel_id=channel_id,
+        channel_name=channel_name,
+        channel_type=15,
+        is_thread=True,
+        parent_channel_name=parent_channel_name,
+        category_id="cat1",
+        category="General",
+        message_count=message_count,
+    )
+
+
+# ---------------------------------------------------------------------------
+# SC-1: Unchanged-export re-run creates zero structure
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_unchanged_export_creates_zero_structure(tmp_path: Path) -> None:
+    """SC-1: re-running run_categories + run_channels with carried maps → 0 creates.
+
+    No POST endpoints are registered; the only registered endpoint is the
+    authoritative PATCH /servers/srv1. On the unfixed code, the create loop fires
+    POST /servers/srv1/channels (and the categories phase PATCHes a transient
+    array), so the test fails. After the fix, the maps are reused verbatim.
+    """
+    exports = [
+        _make_export(
+            channel_id="ch1", channel_name="general", category_id="cat1", category="General"
+        ),
+        _make_export(
+            channel_id="ch2", channel_name="random", category_id="cat1", category="General"
+        ),
+    ]
+
+    prior_category_map = {"cat1": "stoat-cat1"}
+    prior_channel_map = {"ch1": "stoat-ch1", "ch2": "stoat-ch2"}
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map=dict(prior_category_map),
+        channel_map=dict(prior_channel_map),
+        category_names={"cat1": "General"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+
+    create_calls: list[object] = []
+
+    with aioresponses() as m:
+        # Create endpoints registered ONLY to count — any call means a regression.
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            repeat=True,
+            callback=lambda url, **kw: create_calls.append(url),  # type: ignore[misc]
+        )
+        # The channels phase still issues an authoritative full-replace PATCH.
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+
+        await run_categories(config, state, exports, lambda e: None)
+        await run_channels(config, state, exports, lambda e: None)
+
+    assert create_calls == [], f"Expected 0 channel creates, got {len(create_calls)}"
+    assert state.category_map == prior_category_map
+    assert state.channel_map == prior_channel_map
+
+
+# ---------------------------------------------------------------------------
+# SC-2: Existing channels stay attached to their categories
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_keeps_existing_channels_attached_to_categories(tmp_path: Path) -> None:
+    """SC-2: re-run upsert still lists carried channels under their category.
+
+    Guards against a naive ``continue`` that would skip the category-membership
+    recording for carried channels, orphaning them in the full-replace PATCH.
+    """
+    exports = [
+        _make_export(
+            channel_id="ch1", channel_name="general", category_id="cat1", category="General"
+        ),
+        _make_export(
+            channel_id="ch2", channel_name="random", category_id="cat1", category="General"
+        ),
+    ]
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"cat1": "stoat-cat1"},
+        channel_map={"ch1": "stoat-ch1", "ch2": "stoat-ch2"},
+        category_names={"cat1": "General"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", repeat=True)
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_channels(config, state, exports, lambda e: None)
+
+    # The authoritative upsert is the last PATCH body.
+    assert patch_bodies, "Expected an api_upsert_categories PATCH"
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    # Every category present in the map must be present in the payload.
+    for stoat_cat_id in state.category_map.values():
+        assert stoat_cat_id in by_id, f"Category {stoat_cat_id} orphaned from upsert"
+    # The carried channels must still be attached to cat1.
+    cat1_channels = by_id["stoat-cat1"]["channels"]  # type: ignore[index]
+    assert set(cat1_channels) == {"stoat-ch1", "stoat-ch2"}
+
+
+# ---------------------------------------------------------------------------
+# SC-4: New structure since prior run IS created (full delta)
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_creates_only_new_channel_and_category(tmp_path: Path) -> None:
+    """SC-4: prior maps cover all-but-one channel + category; export adds new ones.
+
+    Exactly the new channel is created (1 POST), the new category is generated,
+    existing ones skipped, and the new channel is attached to its category.
+    """
+    exports = [
+        _make_export(
+            channel_id="ch1", channel_name="general", category_id="cat1", category="General"
+        ),
+        _make_export(
+            channel_id="ch2", channel_name="announcements", category_id="cat2", category="News"
+        ),
+    ]
+    # Prior: cat1/ch1 mapped; cat2 + ch2 are new this run.
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"cat1": "stoat-cat1"},
+        channel_map={"ch1": "stoat-ch1"},
+        category_names={"cat1": "General"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+
+    create_calls: list[object] = []
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch2", "name": "announcements"},
+            repeat=True,
+            callback=lambda url, **kw: create_calls.append(url),  # type: ignore[misc]
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_categories(config, state, exports, lambda e: None)
+        await run_channels(config, state, exports, lambda e: None)
+
+    # Exactly one channel created (ch2); ch1 reused.
+    assert len(create_calls) == 1, f"Expected exactly 1 channel create, got {len(create_calls)}"
+    assert state.channel_map["ch1"] == "stoat-ch1"
+    assert state.channel_map["ch2"] == "stoat-ch2"
+    # New category generated.
+    assert "cat2" in state.category_map
+    # New channel attached to its (new) category in the final upsert.
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    new_cat_id = state.category_map["cat2"]
+    assert new_cat_id in by_id
+    assert "stoat-ch2" in by_id[new_cat_id]["channels"]  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# SC-6: Channels near --max-channels are not dropped on re-run
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_carried_channels_not_dropped_near_max(tmp_path: Path) -> None:
+    """SC-6: 5 carried channels with max_channels=5 + 1 new → carried survive, new dropped.
+
+    The truncation budget excludes carried channels:
+    ``new_budget = max(0, max_channels - index_slots - len(carried))`` = 0 here,
+    so the one new channel is dropped (with a warning) and all 5 carried pass
+    through. On the unfixed code, the 6 candidates are sorted/sliced to 5 and a
+    carried channel is dropped.
+    """
+    exports = []
+    for i in range(5):
+        exports.append(
+            _make_export(channel_id=f"ch{i}", channel_name=f"channel-{i}", category_id="")
+        )
+    # One brand-new channel beyond the prior 5.
+    exports.append(_make_export(channel_id="new1", channel_name="new-channel", category_id=""))
+
+    prior_channel_map = {f"ch{i}": f"stoat-ch{i}" for i in range(5)}
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map=dict(prior_channel_map),
+    )
+    config = _make_config(tmp_path, incremental=True, max_channels=5)
+
+    create_calls: list[object] = []
+    warnings_seen: list[str] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            repeat=True,
+            callback=lambda url, **kw: create_calls.append(url),  # type: ignore[misc]
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+
+        await run_channels(
+            config,
+            state,
+            exports,
+            lambda e: warnings_seen.append(e.message) if e.status == "warning" else None,
+        )
+
+    # All 5 carried channels survive (no create, still in map).
+    for i in range(5):
+        assert f"ch{i}" in state.channel_map
+        assert state.channel_map[f"ch{i}"] == f"stoat-ch{i}"
+    # The new channel is dropped (budget 0) and not created.
+    assert create_calls == [], f"Expected 0 creates (new channel over budget), got {create_calls}"
+    assert "new1" not in state.channel_map
+    assert any("new-channel" in w for w in warnings_seen), (
+        "Expected a drop warning for the new channel"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SC-7: Partial re-export — carried-only category not dropped/orphaned
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_partial_export_keeps_carried_only_category(tmp_path: Path) -> None:
+    """SC-7: category C is carried but absent from the (partial) current export.
+
+    The full-replace upsert must still include C with its carried channels +
+    a title, sourced from ``state.category_names`` (I-NEW-2). Otherwise C's
+    channels are orphaned.
+    """
+    # Current export contains ONLY a new channel in a different category (cat2).
+    exports = [
+        _make_export(
+            channel_id="new1", channel_name="newchan", category_id="cat2", category="Fresh"
+        ),
+    ]
+    # Prior: category C (cat1) with two carried channels; cat2 not yet mapped.
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"cat1": "stoat-cat1"},
+        channel_map={"ch1": "stoat-ch1", "ch2": "stoat-ch2"},
+        category_names={"cat1": "General"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-new1", "name": "newchan"},
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_categories(config, state, exports, lambda e: None)
+        await run_channels(config, state, exports, lambda e: None)
+
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    # Carried-only category C must still be present, titled, with its channels.
+    assert "stoat-cat1" in by_id, "Carried-only category orphaned from upsert"
+    assert by_id["stoat-cat1"]["title"] == "General"  # type: ignore[index]
+    assert set(by_id["stoat-cat1"]["channels"]) == {"stoat-ch1", "stoat-ch2"}  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# SC-9: 2nd run over a forum export does NOT re-create the forum-index channel
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_forum_index_channel_not_recreated(tmp_path: Path) -> None:
+    """SC-9: forum-index channel is reused (no create, no pin, no index message).
+
+    Prior state carries the forum category, the forum post channel, the
+    forum-index channel, and forum_channel_members. On re-run, run_channels must
+    NOT POST a new index channel nor send/pin a new index message; it reuses the
+    carried index channel and re-attaches it at position 0.
+    """
+    exports = [
+        _make_forum_export(
+            channel_id="fp1",
+            channel_name="first-post",
+            parent_channel_name="my-forum",
+            message_count=42,
+        ),
+    ]
+    forum_key = "forum-my-forum"
+    index_key = f"forum-index-{forum_key}"
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={forum_key: "stoat-forumcat"},
+        channel_map={"fp1": "stoat-fp1", index_key: "stoat-idx1"},
+        forum_category_names={forum_key: "my-forum"},
+        forum_channel_members={forum_key: ["fp1"]},
+    )
+    config = _make_config(tmp_path, incremental=True)
+
+    create_calls: list[object] = []
+    send_calls: list[object] = []
+    pin_calls: list[object] = []
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            repeat=True,
+            callback=lambda url, **kw: create_calls.append(url),  # type: ignore[misc]
+        )
+        # Index-message send + pin would only fire if the index were re-created.
+        m.post(
+            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            repeat=True,
+            callback=lambda url, **kw: send_calls.append(url),  # type: ignore[misc]
+        )
+        m.put(
+            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
+            repeat=True,
+            callback=lambda url, **kw: pin_calls.append(url),  # type: ignore[misc]
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_channels(config, state, exports, lambda e: None)
+
+    assert create_calls == [], f"Expected 0 channel creates on forum re-run, got {create_calls}"
+    assert send_calls == [], "Expected 0 forum-index messages on re-run"
+    assert pin_calls == [], "Expected 0 forum-index pins on re-run"
+    # forum_channel_members must NOT double-append fp1.
+    assert state.forum_channel_members[forum_key] == ["fp1"]
+    # The carried index channel is re-attached at position 0 of the forum category.
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    forum_channels = by_id["stoat-forumcat"]["channels"]  # type: ignore[index]
+    assert forum_channels[0] == "stoat-idx1", "Carried index channel not re-attached at top"
+    assert "stoat-fp1" in forum_channels
