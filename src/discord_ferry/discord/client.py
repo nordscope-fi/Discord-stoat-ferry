@@ -146,6 +146,31 @@ async def _discord_get_object(
     raise MigrationError(f"Discord API request failed after {_MAX_RETRIES} retries")
 
 
+_ROLE_ICON_MAX_BYTES = 2_500_000  # Autumn "icons" tag limit (stoatchat Revolt.toml)
+
+
+async def download_role_icon(
+    session: aiohttp.ClientSession, role_id: str, icon_hash: str
+) -> bytes | None:
+    """Download a Discord role icon PNG from the CDN.
+
+    Returns the image bytes, or ``None`` on any non-200 status, network error,
+    or when the image exceeds the Autumn icons limit. The CDN URL is public
+    (no token) — safe to log.
+    """
+    url = f"https://cdn.discordapp.com/role-icons/{role_id}/{icon_hash}.png"
+    try:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.read()
+            if len(data) > _ROLE_ICON_MAX_BYTES:
+                return None
+            return data
+    except aiohttp.ClientError:
+        return None
+
+
 def _parse_role(data: dict[str, Any]) -> DiscordRole:
     return DiscordRole(
         id=str(data["id"]),

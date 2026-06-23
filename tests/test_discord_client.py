@@ -346,3 +346,26 @@ async def test_capture_batch2_fields(mock_discord: aioresponses) -> None:
     assert meta.channel_metadata["301"].user_limit == 5
     assert meta.role_metadata["200"].icon_hash == "iconhash123"
     assert meta.role_metadata["200"].unicode_emoji == ""
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_returns_bytes():
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, body=b"\x89PNG-data", status=200)
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.discord.client import download_role_icon
+
+            data = await download_role_icon(s, "r1", "hash")
+    assert data == b"\x89PNG-data"
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_none_on_404():
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, status=404)
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.discord.client import download_role_icon
+
+            assert await download_role_icon(s, "r1", "hash") is None
