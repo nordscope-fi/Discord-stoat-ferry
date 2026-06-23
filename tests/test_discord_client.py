@@ -212,3 +212,63 @@ async def test_fetch_and_translate_metadata(mock_discord: aioresponses) -> None:
 
     # Channel without @everyone override has no default_override
     assert meta.channel_metadata["ch2"].default_override is None
+
+
+async def test_fetch_captures_hoist_position_desc_nsfw(mock_discord: aioresponses) -> None:
+    """Capture role hoist/position, category position, and guild description/nsfw."""
+    guild_id = "100"
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}",
+        payload={
+            "id": guild_id,
+            "name": "T",
+            "description": "Hello",
+            "nsfw_level": 1,
+            "banner": None,
+        },
+    )
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}/roles",
+        payload=[
+            {
+                "id": guild_id,
+                "name": "@everyone",
+                "permissions": "0",
+                "position": 0,
+                "color": 0,
+                "hoist": False,
+                "managed": False,
+            },
+            {
+                "id": "role-x",
+                "name": "Mods",
+                "permissions": "0",
+                "position": 3,
+                "color": 0,
+                "hoist": True,
+                "managed": False,
+            },
+        ],
+    )
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}/channels",
+        payload=[
+            {"id": "cat-1", "name": "INFO", "type": 4, "position": 2, "permission_overwrites": []},
+            {
+                "id": "txt-1",
+                "name": "general",
+                "type": 0,
+                "position": 0,
+                "permission_overwrites": [],
+            },
+        ],
+    )
+    async with aiohttp.ClientSession() as session:
+        meta = await fetch_and_translate_guild_metadata(session, TOKEN, guild_id)
+
+    assert meta.role_metadata["role-x"].hoist is True
+    assert meta.role_metadata["role-x"].position == 3
+    assert guild_id not in meta.role_metadata  # @everyone excluded
+    assert meta.category_positions == {"cat-1": 2}  # only type-4 captured
+    assert meta.guild_description == "Hello"
+    assert meta.guild_nsfw is True
