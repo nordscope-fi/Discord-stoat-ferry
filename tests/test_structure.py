@@ -11,6 +11,7 @@ from discord_ferry.discord.metadata import (
     ChannelMeta,
     DiscordMetadata,
     PermissionPair,
+    RoleMeta,
     RoleOverride,
     save_discord_metadata,
 )
@@ -133,6 +134,95 @@ async def test_run_server_creates_server(tmp_path: Path) -> None:
     assert state.stoat_server_id == "srv1"
     messages = _collect_events(events)
     assert any("srv1" in msg for msg in messages)
+
+
+async def test_run_server_applies_description_and_nsfw(tmp_path: Path) -> None:
+    """SERVER applies guild description + NSFW from Discord metadata."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    exports = [_make_export()]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        guild_description="A cosy server",
+        guild_nsfw=True,
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_server(config, state, exports, events.append)
+
+    assert any(b.get("description") == "A cosy server" for b in patch_bodies)
+    assert any(b.get("nsfw") is True for b in patch_bodies)
+
+
+async def test_run_server_omits_empty_description(tmp_path: Path) -> None:
+    """SERVER does not send an empty description."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    exports = [_make_export()]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        guild_description="",
+        guild_nsfw=False,
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_server(config, state, exports, events.append)
+
+    assert all("description" not in b for b in patch_bodies)
+
+
+async def test_run_server_meta_skipped_without_metadata(tmp_path: Path) -> None:
+    """SERVER warns when no Discord metadata is available for description/NSFW."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    exports = [_make_export()]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
+
+        await run_server(config, state, exports, events.append)
+
+    assert any(w.get("type") == "server_meta_skipped" for w in state.warnings)
 
 
 async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
@@ -283,6 +373,61 @@ async def test_run_roles_skips_everyone(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert state.role_map == {}
+
+
+async def test_run_roles_applies_hoist_when_metadata_present(tmp_path: Path) -> None:
+    """ROLES sends hoist even for a role with no colour and position 0."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Mods")  # no colour, position defaults to 0
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0)},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert any(body.get("hoist") is True for body in patch_bodies)
+
+
+async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
+    """ROLES emits a hoist-skipped warning when no Discord metadata is present."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+
+        await run_roles(config, state, exports, events.append)
+
+    assert any(w.get("type") == "hoist_skipped" for w in state.warnings)
 
 
 async def test_run_roles_truncates_long_name(tmp_path: Path) -> None:
