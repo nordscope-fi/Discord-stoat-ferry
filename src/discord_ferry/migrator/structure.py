@@ -128,15 +128,25 @@ async def run_server(
         return
 
     async with get_session(config) as session:
-        if config.server_id:
-            # Use an existing server — verify it exists.
-            await api_fetch_server(session, config.stoat_url, config.token, config.server_id)
-            state.stoat_server_id = config.server_id
+        # Reuse an explicit --server-id OR a server_id carried from a prior
+        # incremental run (FerryConfig is frozen, so reuse is resolved here).
+        effective_server_id = config.server_id or state.stoat_server_id
+        if effective_server_id:
+            # Verify it still exists. api_fetch_server raises MigrationError on 404.
+            try:
+                await api_fetch_server(session, config.stoat_url, config.token, effective_server_id)
+            except MigrationError as exc:
+                raise MigrationError(
+                    f"Prior Stoat server '{effective_server_id}' was not found "
+                    f"({exc}). It may have been deleted — start a fresh migration "
+                    f"(omit --incremental)."
+                ) from exc
+            state.stoat_server_id = effective_server_id
             on_event(
                 MigrationEvent(
                     phase="server",
                     status="progress",
-                    message=f"Using existing server {config.server_id}",
+                    message=f"Using existing server {effective_server_id}",
                 )
             )
         else:
