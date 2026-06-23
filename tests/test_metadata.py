@@ -1,5 +1,6 @@
 """Tests for Discord metadata persistence."""
 
+import json
 from pathlib import Path
 
 import aiohttp
@@ -9,10 +10,46 @@ from discord_ferry.discord.metadata import (
     ChannelMeta,
     DiscordMetadata,
     PermissionPair,
+    RoleMeta,
     RoleOverride,
     load_discord_metadata,
     save_discord_metadata,
 )
+
+
+def test_metadata_roundtrip_preserves_new_fields(tmp_path: Path) -> None:
+    meta = DiscordMetadata(
+        guild_id="123",
+        fetched_at="2026-06-23T00:00:00+00:00",
+        server_default_permissions=7,
+        role_permissions={"role-a": PermissionPair(allow=1, deny=2)},
+        channel_metadata={"chan-a": ChannelMeta(nsfw=True)},
+        role_metadata={"role-a": RoleMeta(hoist=True, position=5)},
+        category_positions={"cat-a": 3, "cat-b": 0},
+        guild_description="A server",
+        guild_nsfw=True,
+    )
+    save_discord_metadata(meta, tmp_path)
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded == meta
+
+
+def test_metadata_legacy_file_loads_with_defaults(tmp_path: Path) -> None:
+    # A pre-upgrade discord_metadata.json without the new keys must load.
+    legacy = {
+        "guild_id": "123",
+        "fetched_at": "2026-06-23T00:00:00+00:00",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {},
+    }
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(legacy))
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded.role_metadata == {}
+    assert loaded.category_positions == {}
+    assert loaded.guild_description == ""
+    assert loaded.guild_nsfw is False
 
 
 def test_save_load_roundtrip(tmp_path: Path) -> None:
