@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.4.0] - 2026-06-23
+
+### Added
+
+- **`probe` CLI subcommand — live-instance diagnostics**. `discord-ferry probe --test-server-id <id>` runs four read-mostly checks against a live Stoat instance and renders a Rich table (or `--json`): Autumn per-tag size limits vs. our assumptions, voice Bug #194 detection (this Revolt fork has no VoiceChannel variant — judged on the presence of a `voice` field, not the discriminator), webhook availability (judged on EXECUTE, which is mounted only when `features.webhooks_enabled` is true — default off), and rate-limit header capture. Every entity created under the throwaway test server is torn down in a `finally` block (capture-id-before-raise), and the probe never constructs or writes a `MigrationState`. New module `migrator/probe.py` (`run_probe`, `ProbeReport`).
+- **Post-migration invite generation (S4)**. The migration now mints an invite to the new Stoat server during the REPORT phase and surfaces it in the CLI summary, `migration_report.json` (`invite` block), the markdown report (`## Invite`), and the post-migration checklist. Controlled by `--create-invite/--no-create-invite` (default on) and `--invite-channel-id`. `_select_invite_channel` picks a Text channel, excluding voice (Discord type 2), threads, and synthetic forum-index channels; forums (15/16 → Stoat Text) are eligible. The invite URL is built best-effort from the instance root's `app` field (bare code otherwise). Non-fatal on error (migration is already complete → warning, never raises), idempotent via an `invite_code` guard in both the engine caller and `_generate_invite`, and carried forward on incremental re-runs so resumes never re-mint. New `MigrationState.invite_code`/`invite_url` (serialised, forward-compatible). Failure warnings are sanitised through the token store before reaching `state.json`.
+
+### Internal
+
+- **Four probe-support API wrappers + `_headers(token: str | None)` widening** (`migrator/api.py`): `api_create_invite`, `api_create_webhook`, `api_fetch_channel`, `api_delete_webhook`, and an auth-leak-safe `api_execute_webhook` that passes `token=None` so the user's `x-session-token` is never sent to the URL-token-authenticated webhook-execute endpoint. Webhook wrappers are **probe-only** — webhook-based message posting is deliberately out of scope.
+
+### Fixed
+
+- **`icons` Autumn size limit corrected to 2_500_000** (`uploader/autumn.py`). Source check against stoatchat `Revolt.toml` (`features.limits.default.file_upload_size_limit`) shows a flat 2.5 MB, not the `2560 * 1024 = 2_621_440` we previously enforced — an icon between those sizes would pass our pre-check then be rejected by Autumn.
+
 ## [2.3.0] - 2026-06-23
 
 ### Added

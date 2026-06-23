@@ -174,3 +174,10 @@ async def test_upload_with_cache_miss(tmp_path: Path, mock_aiohttp: aioresponses
 
     assert result == "new_file_id"
     assert cache[str(file)] == "new_file_id"
+
+
+def test_icons_limit_matches_stoat_autumn_config() -> None:
+    """Autumn enforces a flat 2_500_000 for icons (Revolt.toml), not 2560*1024."""
+    from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
+
+    assert TAG_SIZE_LIMITS["icons"] == 2_500_000
