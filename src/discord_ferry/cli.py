@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import textwrap
 from collections.abc import Callable
@@ -21,7 +22,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
-from discord_ferry.state import load_state
+from discord_ferry.state import MigrationState, load_state
 from discord_ferry.stats import summarize_state
 
 if TYPE_CHECKING:
@@ -382,6 +383,12 @@ _common_options = [
     ),
     click.option("--server-id", default=None, help="Use existing Stoat server"),
     click.option("--server-name", default=None, help="Name for new server"),
+    click.option(
+        "--create-invite/--no-create-invite",
+        default=True,
+        help="Generate an invite to the migrated server (default on)",
+    ),
+    click.option("--invite-channel-id", default=None, help="Discord channel id to invite to"),
     click.option("--skip-messages", is_flag=True, help="Structure only"),
     click.option("--skip-emoji", is_flag=True, help="Skip emoji upload"),
     click.option("--skip-reactions", is_flag=True, help="Skip reactions"),
@@ -508,6 +515,8 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         thread_strategy=kwargs.get("thread_strategy", "flatten"),
         cleanup_orphans=kwargs.get("cleanup_orphans", False),
         force_unlock=kwargs.get("force_unlock", False),
+        create_invite=kwargs.get("create_invite", True),
+        invite_channel_id=kwargs.get("invite_channel_id"),
     )
 
 
@@ -553,9 +562,10 @@ def migrate(**kwargs: Any) -> None:
 
     console.print("[bold]Discord Ferry[/] — starting migration\n")
 
+    final_state: MigrationState | None = None
     try:
         with tracker.start_live():
-            asyncio.run(run_migration(config, on_event=tracker.on_event))
+            final_state = asyncio.run(run_migration(config, on_event=tracker.on_event))
     except MigrationError as exc:
         console.print(f"\n[bold red]Migration failed:[/] {exc}")
         sys.exit(1)
@@ -567,6 +577,10 @@ def migrate(**kwargs: Any) -> None:
     if not config.verbose and tracker.warning_count > 0:
         console.print(
             f"[dim]{tracker.warning_count} warning(s) suppressed — run with -v to see details[/]"
+        )
+    if final_state and (final_state.invite_url or final_state.invite_code):
+        console.print(
+            f"\n[bold green]Invite:[/] {final_state.invite_url or final_state.invite_code}"
         )
 
 
@@ -1103,6 +1117,49 @@ def rollback_cmd(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/] State saved — re-run to resume.")
         sys.exit(130)
+
+
+@main.command(name="probe")
+@click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
+@click.option("--token", envvar="STOAT_TOKEN", default=None, help="Stoat user token")
+@click.option("--test-server-id", required=True, help="Throwaway server for probe entities")
+@click.option("--deep", is_flag=True, default=False, help="Probe Autumn size boundaries by upload")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def probe_cmd(
+    stoat_url: str | None,
+    token: str | None,
+    test_server_id: str,
+    deep: bool,
+    as_json: bool,
+    verbose: bool,
+) -> None:
+    """Probe a live Stoat instance for Autumn limits, rate window, voice Bug #194, webhooks."""
+    load_dotenv()
+    if not stoat_url:
+        console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
+        sys.exit(1)
+    if not token:
+        console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
+        sys.exit(1)
+
+    from discord_ferry.migrator.probe import run_probe
+
+    report = asyncio.run(run_probe(stoat_url, token, test_server_id, lambda _e: None, deep=deep))
+
+    if as_json:
+        payload = {c.name: {"status": c.status, "detail": c.detail} for c in report.checks}
+        console.print(json.dumps(payload))
+        return
+
+    table = Table(title="Stoat Probe Results")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for c in report.checks:
+        colour = {"ok": "green", "warn": "yellow", "fail": "red"}.get(c.status, "white")
+        table.add_row(c.name, f"[{colour}]{c.status}[/]", c.detail)
+    console.print(table)
 
 
 if __name__ == "__main__":

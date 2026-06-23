@@ -11,7 +11,7 @@ from aioresponses import aioresponses
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, PhaseFunction, run_migration, run_retry_failed
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.parser.models import DCEExport
+from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
 from discord_ferry.state import FailedMessage, MigrationState
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -1525,3 +1525,99 @@ async def test_migration_lock_overrides_expired_lock(tmp_path: Path) -> None:
     assert result is True
     lock_warnings = [w for w in state.warnings if w.get("type") == "lock_expired"]
     assert len(lock_warnings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Post-migration invite generation (T8)
+# ---------------------------------------------------------------------------
+
+from discord_ferry.core.engine import _generate_invite, _select_invite_channel  # noqa: E402
+
+
+def _text_channel_export(channel_id: str, ch_type: int = 0, is_thread: bool = False) -> DCEExport:
+    return DCEExport(
+        guild=DCEGuild(id="g", name="G"),
+        channel=DCEChannel(id=channel_id, type=ch_type, name=f"c-{channel_id}"),
+        messages=[],
+        message_count=0,
+        is_thread=is_thread,
+    )
+
+
+def _exports_with_text_channel(channel_id: str) -> list[DCEExport]:
+    return [_text_channel_export(channel_id, ch_type=0)]
+
+
+def _exports_voice_and_forum(voice_id: str, forum_id: str) -> list[DCEExport]:
+    return [
+        _text_channel_export(voice_id, ch_type=2),
+        _text_channel_export(forum_id, ch_type=15),
+    ]
+
+
+def _exports_voice_only(voice_id: str) -> list[DCEExport]:
+    return [_text_channel_export(voice_id, ch_type=2)]
+
+
+async def test_generate_invite_happy(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, create_invite=True)
+    state = MigrationState(stoat_server_id="srv1", channel_map={"d_ch": "s_ch"})
+    exports = _exports_with_text_channel("d_ch")
+    with aioresponses() as m:
+        m.get("https://api.test/", payload={"app": "https://app.test", "features": {}})
+        m.post("https://api.test/channels/s_ch/invites", payload={"_id": "inv_X"})
+        await _generate_invite(config, state, exports, lambda _e: None)
+    assert state.invite_code == "inv_X"
+    assert state.invite_url == "https://app.test/invite/inv_X"
+
+
+async def test_generate_invite_bare_code_when_no_app(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, create_invite=True)
+    state = MigrationState(stoat_server_id="srv1", channel_map={"d_ch": "s_ch"})
+    exports = _exports_with_text_channel("d_ch")
+    with aioresponses() as m:
+        m.get("https://api.test/", payload={"features": {}})  # no "app"
+        m.post("https://api.test/channels/s_ch/invites", payload={"_id": "inv_Y"})
+        await _generate_invite(config, state, exports, lambda _e: None)
+    assert state.invite_code == "inv_Y"
+    assert state.invite_url == ""
+
+
+async def test_generate_invite_idempotent(tmp_path: Path) -> None:
+    """An already-populated invite_code → no POST (SC-15). The internal guard
+    short-circuits, so no aioresponses mock is registered (a POST would raise)."""
+    config = _make_config(tmp_path, create_invite=True)
+    state = MigrationState(
+        stoat_server_id="srv1", channel_map={"d_ch": "s_ch"}, invite_code="inv_done"
+    )
+    exports = _exports_with_text_channel("d_ch")
+    with aioresponses():
+        # No invite mock registered — if a POST fires, aioresponses raises.
+        await _generate_invite(config, state, exports, lambda _e: None)
+    assert state.invite_code == "inv_done"
+
+
+async def test_generate_invite_failure_non_fatal(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, create_invite=True)
+    state = MigrationState(stoat_server_id="srv1", channel_map={"d_ch": "s_ch"})
+    exports = _exports_with_text_channel("d_ch")
+    with aioresponses() as m:
+        m.get("https://api.test/", payload={"app": "https://app.test"})
+        m.post("https://api.test/channels/s_ch/invites", status=500, repeat=True)
+        await _generate_invite(config, state, exports, lambda _e: None)  # must not raise
+    assert state.invite_code == ""
+    assert any(w.get("type") == "invite_failed" for w in state.warnings)
+
+
+def test_select_invite_channel_prefers_forum_over_voice(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    state = MigrationState(channel_map={"d_voice": "s_voice", "d_forum": "s_forum"})
+    exports = _exports_voice_and_forum("d_voice", "d_forum")
+    assert _select_invite_channel(config, state, exports) == "s_forum"
+
+
+def test_select_invite_channel_none_when_only_voice(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    state = MigrationState(channel_map={"d_voice": "s_voice"})
+    exports = _exports_voice_only("d_voice")
+    assert _select_invite_channel(config, state, exports) is None

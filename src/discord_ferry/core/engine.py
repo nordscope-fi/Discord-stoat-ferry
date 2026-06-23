@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import socket
 from collections.abc import Callable, Coroutine
@@ -28,6 +29,7 @@ from discord_ferry.exporter import (
     validate_discord_token,
 )
 from discord_ferry.migrator.api import (
+    api_create_invite,
     api_delete_channel,
     api_delete_emoji,
     api_delete_role,
@@ -168,6 +170,8 @@ async def run_migration(
             state.message_map = dict(prior.message_map)
             state.stoat_server_id = prior.stoat_server_id
             state.autumn_url = prior.autumn_url
+            state.invite_code = prior.invite_code
+            state.invite_url = prior.invite_url
             # Carry over cumulative counters
             state.attachments_uploaded = prior.attachments_uploaded
             state.attachments_skipped = prior.attachments_skipped
@@ -457,6 +461,15 @@ async def run_migration(
                 message=f"Found {len(orphans)} orphaned uploads",
             )
         )
+
+    # S4: Post-migration invite (folds into REPORT; non-idempotent → guard on invite_code).
+    if (
+        config.create_invite
+        and not config.dry_run
+        and state.stoat_server_id
+        and not state.invite_code
+    ):
+        await _generate_invite(config, state, exports, on_event)
 
     generate_report(config, state, exports)
     generate_markdown_report(config, state, exports)
@@ -969,6 +982,87 @@ async def run_retry_failed(
 # ---------------------------------------------------------------------------
 # Rollback engine (issue #10)
 # ---------------------------------------------------------------------------
+
+
+def _select_invite_channel(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+) -> str | None:
+    """Pick a Stoat Text channel to invite to.
+
+    Excludes voice (Discord type 2), threads, and synthetic forum-index channels.
+    Forums (15/16 → Stoat Text) are valid. Prefers ``config.invite_channel_id``
+    when it maps to an eligible channel. Returns a Stoat channel id, or None.
+    """
+
+    def _eligible(discord_id: str, ch_type: int, is_thread: bool) -> str | None:
+        if ch_type == 2 or is_thread or discord_id.startswith("forum-index-"):
+            return None
+        return state.channel_map.get(discord_id)
+
+    # Preferred override.
+    if config.invite_channel_id:
+        for export in exports:
+            if export.channel.id == config.invite_channel_id:
+                chosen = _eligible(export.channel.id, export.channel.type, export.is_thread)
+                if chosen:
+                    return chosen
+
+    # First eligible by deterministic channel.id order.
+    for export in sorted(exports, key=lambda e: e.channel.id):
+        chosen = _eligible(export.channel.id, export.channel.type, export.is_thread)
+        if chosen:
+            return chosen
+    return None
+
+
+async def _generate_invite(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> None:
+    """Mint a post-migration invite and store it on state (non-fatal on error).
+
+    The engine caller also guards on ``not state.invite_code``; this internal
+    guard makes the helper idempotent on its own (non-idempotent API).
+    """
+    if state.invite_code:
+        return
+    channel_id = _select_invite_channel(config, state, exports)
+    if channel_id is None:
+        state.warnings.append(
+            {
+                "phase": "report",
+                "type": "invite_no_channel",
+                "message": "No eligible text channel for invite",
+            }
+        )
+        return
+    try:
+        async with get_session(config) as session:
+            result = await api_create_invite(session, config.stoat_url, config.token, channel_id)
+            code = result.get("_id") or result.get("code") or ""
+            state.invite_code = code
+            # Best-effort URL: our own root GET (connect's discover parses only autumn).
+            if code:
+                with contextlib.suppress(Exception):
+                    async with session.get(f"{config.stoat_url.rstrip('/')}/") as resp:
+                        root = await resp.json() if resp.status == 200 else {}
+                    app = root.get("app")
+                    if isinstance(app, str) and app:
+                        state.invite_url = f"{app.rstrip('/')}/invite/{code}"
+    except Exception as exc:  # noqa: BLE001 — invite is non-fatal
+        # Sanitize through the token store before persisting to state.json (security.md).
+        message = safe_sanitize(config.token_store, f"Invite generation failed: {exc}")
+        state.warnings.append(
+            {
+                "phase": "report",
+                "type": "invite_failed",
+                "message": message,
+            }
+        )
 
 
 _HTTP_STATUS_RE = re.compile(r"(?:API error|after \d+ retries:)\s*(\d{3})")
