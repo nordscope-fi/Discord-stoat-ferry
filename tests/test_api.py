@@ -13,18 +13,24 @@ from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import (
     _api_request,
     _circuit_state,
+    _headers,
     _reset_circuit_state,
     _reset_rate_state,
     api_add_reaction,
     api_create_channel,
     api_create_emoji,
+    api_create_invite,
     api_create_role,
     api_create_server,
+    api_create_webhook,
     api_delete_channel,
     api_delete_emoji,
     api_delete_role,
+    api_delete_webhook,
     api_edit_role,
     api_edit_server,
+    api_execute_webhook,
+    api_fetch_channel,
     api_fetch_server,
     api_pin_message,
     api_send_message,
@@ -58,6 +64,125 @@ def _clean_circuit() -> None:  # type: ignore[misc]
     _reset_circuit_state()
     _reset_rate_state()
     _api_mod._request_semaphore = None
+
+
+# ---------------------------------------------------------------------------
+# _headers — auth header construction (Task 1)
+# ---------------------------------------------------------------------------
+
+
+def test_headers_with_token_includes_session_token() -> None:
+    """A real token yields the x-session-token header (regression guard)."""
+    h = _headers(TOKEN)
+    assert h["x-session-token"] == TOKEN
+    assert h["Content-Type"] == "application/json"
+
+
+def test_headers_none_omits_session_token() -> None:
+    """token=None produces headers WITHOUT x-session-token (auth-less webhook path)."""
+    h = _headers(None)
+    assert "x-session-token" not in h
+    assert h["Content-Type"] == "application/json"
+
+
+# ---------------------------------------------------------------------------
+# api_create_invite (Task 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_api_create_invite_reads_id(mock_aiohttp: aioresponses) -> None:
+    """POST /channels/{id}/invites returns the invite; code read from _id."""
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/invites", payload={"_id": "inv_AB", "type": "Server"}
+    )
+    async with aiohttp.ClientSession() as session:
+        result = await api_create_invite(session, BASE_URL, TOKEN, "ch1")
+    assert result["_id"] == "inv_AB"
+
+
+async def test_api_create_invite_reads_code_fallback(mock_aiohttp: aioresponses) -> None:
+    """Some responses carry `code` instead of `_id`; both must be accessible."""
+    mock_aiohttp.post(f"{BASE_URL}/channels/ch1/invites", payload={"code": "inv_CD"})
+    async with aiohttp.ClientSession() as session:
+        result = await api_create_invite(session, BASE_URL, TOKEN, "ch1")
+    assert result.get("_id", result.get("code")) == "inv_CD"
+
+
+# ---------------------------------------------------------------------------
+# Webhook + channel-fetch wrappers (Task 3, probe-support)
+# ---------------------------------------------------------------------------
+
+
+async def test_api_create_webhook_reads_id_and_token(mock_aiohttp: aioresponses) -> None:
+    """Webhook id comes from `id` (NOT _id); token from `token`."""
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/webhooks",
+        payload={"id": "wh1", "token": "tok_w", "name": "Discord Ferry"},
+    )
+    async with aiohttp.ClientSession() as session:
+        result = await api_create_webhook(session, BASE_URL, TOKEN, "ch1", name="Discord Ferry")
+    assert result["id"] == "wh1"
+    assert result["token"] == "tok_w"
+
+
+async def test_api_fetch_channel_returns_type(mock_aiohttp: aioresponses) -> None:
+    """GET /channels/{id} returns the channel object (used for Bug #194 check)."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/ch_tmp", payload={"_id": "ch_tmp", "channel_type": "Text"}
+    )
+    async with aiohttp.ClientSession() as session:
+        result = await api_fetch_channel(session, BASE_URL, TOKEN, "ch_tmp")
+    assert result["channel_type"] == "Text"
+
+
+async def test_api_delete_webhook_404_ok(mock_aiohttp: aioresponses) -> None:
+    """DELETE /webhooks/{id} treats 404 as success (idempotent teardown)."""
+    mock_aiohttp.delete(f"{BASE_URL}/webhooks/wh1", status=404)
+    async with aiohttp.ClientSession() as session:
+        await api_delete_webhook(session, BASE_URL, TOKEN, "wh1")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# api_execute_webhook — auth-leak-safe (Task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_api_execute_webhook_sends_no_session_token(mock_aiohttp: aioresponses) -> None:
+    """Execute auths via the URL token only — NO x-session-token; Idempotency-Key passes through."""
+    captured: dict[str, str] = {}
+
+    def cap(url: object, **kwargs: object) -> None:
+        captured.update(kwargs.get("headers") or {})  # type: ignore[arg-type]
+
+    mock_aiohttp.post(f"{BASE_URL}/webhooks/wh1/tok_w", payload={"_id": "m1"}, callback=cap)
+    async with aiohttp.ClientSession() as session:
+        await api_execute_webhook(
+            session, BASE_URL, "wh1", "tok_w", content="hi", idempotency_key="k1"
+        )
+    assert "x-session-token" not in captured
+    assert captured.get("Idempotency-Key") == "k1"
+
+
+async def test_api_send_message_still_authenticated(mock_aiohttp: aioresponses) -> None:
+    """Auth regression: ordinary sends MUST still carry x-session-token."""
+    captured: dict[str, str] = {}
+
+    def cap(url: object, **kwargs: object) -> None:
+        captured.update(kwargs.get("headers") or {})  # type: ignore[arg-type]
+
+    mock_aiohttp.post(f"{BASE_URL}/channels/ch1/messages", payload={"_id": "m1"}, callback=cap)
+    async with aiohttp.ClientSession() as session:
+        await api_send_message(session, BASE_URL, TOKEN, "ch1", content="hi")
+    assert captured.get("x-session-token") == TOKEN
+
+
+async def test_api_execute_webhook_retries_429(mock_aiohttp: aioresponses) -> None:
+    """A 429 (retry_after in ms) is retried; the second attempt succeeds."""
+    mock_aiohttp.post(f"{BASE_URL}/webhooks/wh1/tok_w", status=429, payload={"retry_after": 50})
+    mock_aiohttp.post(f"{BASE_URL}/webhooks/wh1/tok_w", payload={"_id": "m9"})
+    async with aiohttp.ClientSession() as session:
+        result = await api_execute_webhook(session, BASE_URL, "wh1", "tok_w", content="hi")
+    assert result["_id"] == "m9"
 
 
 @pytest.fixture

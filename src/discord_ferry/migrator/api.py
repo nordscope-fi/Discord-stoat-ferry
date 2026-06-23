@@ -76,15 +76,18 @@ async def get_session(config: FerryConfig) -> AsyncIterator[aiohttp.ClientSessio
             yield session
 
 
-def _headers(token: str) -> dict[str, str]:
-    return {"x-session-token": token, "Content-Type": "application/json"}
+def _headers(token: str | None) -> dict[str, str]:
+    h: dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        h["x-session-token"] = token
+    return h
 
 
 async def _api_request(
     session: aiohttp.ClientSession,
     method: str,
     url: str,
-    token: str,
+    token: str | None,
     json_data: dict[str, Any] | None = None,
     *,
     extra_headers: dict[str, str] | None = None,
@@ -100,7 +103,8 @@ async def _api_request(
         session: An active aiohttp ClientSession.
         method: HTTP method string (GET, POST, PATCH, etc.).
         url: Full URL for the request.
-        token: Stoat session token for the x-session-token header.
+        token: Stoat session token for the x-session-token header, or None to
+            omit it entirely (auth-less webhook-execute path).
         json_data: Optional JSON body. Not sent for GET requests.
         extra_headers: Additional HTTP headers to merge into the request.
         expected_404_ok: When True, a 404 response is treated as functional
@@ -141,7 +145,7 @@ async def _api_request_inner(
     session: aiohttp.ClientSession,
     method: str,
     url: str,
-    token: str,
+    token: str | None,
     json_data: dict[str, Any] | None = None,
     *,
     extra_headers: dict[str, str] | None = None,
@@ -293,6 +297,112 @@ async def api_edit_server(
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}"
     return await _api_request(session, "PATCH", url, token, kwargs)
+
+
+async def api_create_invite(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+) -> dict[str, Any]:
+    """Create an invite to a channel.
+
+    Uses ``POST /channels/{channel_id}/invites``. Backend requires a TextChannel,
+    a non-bot caller, and the ``InviteOthers`` permission. The invite code is
+    returned as the ``_id`` field (read ``result.get("_id") or result.get("code")``).
+    Not idempotent — each call mints a new invite.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/invites"
+    return await _api_request(session, "POST", url, token, {})
+
+
+# ---------------------------------------------------------------------------
+# Webhook wrappers — PROBE-ONLY. Never called from the message-send path
+# (feature C / webhook message-posting is OUT of scope). See migrator/probe.py.
+# ---------------------------------------------------------------------------
+
+
+async def api_create_webhook(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+    *,
+    name: str,
+    avatar: str | None = None,
+) -> dict[str, Any]:
+    """Create a channel webhook (probe-only).
+
+    ``POST /channels/{channel_id}/webhooks``. Requires ``ManageWebhooks`` on a
+    TextChannel/Group. Response ``id`` is the webhook id (Ulid, NOT ``_id``);
+    ``token`` is the execute secret.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/webhooks"
+    data: dict[str, Any] = {"name": name}
+    if avatar is not None:
+        data["avatar"] = avatar
+    return await _api_request(session, "POST", url, token, data)
+
+
+async def api_fetch_channel(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+) -> dict[str, Any]:
+    """Fetch a channel object by id (GET /channels/{id}).
+
+    Used by the probe to read back the actual ``channel_type`` / ``voice`` field
+    after a create (voice Bug #194 detection).
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
+    return await _api_request(session, "GET", url, token)
+
+
+async def api_delete_webhook(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    webhook_id: str,
+) -> None:
+    """Delete a webhook (DELETE /webhooks/{id}); 404 treated as success."""
+    url = f"{stoat_url.rstrip('/')}/webhooks/{webhook_id}"
+    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+
+
+async def api_execute_webhook(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    webhook_id: str,
+    webhook_token: str,
+    *,
+    content: str | None = None,
+    attachments: list[str] | None = None,
+    embeds: list[dict[str, Any]] | None = None,
+    masquerade: dict[str, str | None] | None = None,
+    replies: list[dict[str, Any]] | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Execute a webhook (probe-only): POST /webhooks/{id}/{token}.
+
+    The URL token authenticates — the request MUST NOT carry ``x-session-token``
+    (passed via ``token=None`` to ``_api_request``). Body mirrors
+    ``api_send_message``'s ``DataMessageSend`` shape.
+    """
+    url = f"{stoat_url.rstrip('/')}/webhooks/{webhook_id}/{webhook_token}"
+    data: dict[str, Any] = {}
+    if content is not None:
+        data["content"] = content
+    if attachments is not None:
+        data["attachments"] = attachments
+    if embeds is not None:
+        data["embeds"] = embeds
+    if masquerade is not None:
+        data["masquerade"] = masquerade
+    if replies is not None:
+        data["replies"] = replies
+    extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+    return await _api_request(session, "POST", url, token=None, json_data=data, extra_headers=extra)
 
 
 async def api_create_role(
