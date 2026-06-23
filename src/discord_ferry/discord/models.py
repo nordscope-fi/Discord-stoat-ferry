@@ -24,6 +24,8 @@ class DiscordRole:
     color: int = 0
     hoist: bool = False
     managed: bool = False
+    icon: str = ""
+    unicode_emoji: str = ""
 
 
 @dataclass

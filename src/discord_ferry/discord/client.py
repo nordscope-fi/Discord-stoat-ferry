@@ -155,6 +155,8 @@ def _parse_role(data: dict[str, Any]) -> DiscordRole:
         color=data.get("color", 0),
         hoist=data.get("hoist", False),
         managed=data.get("managed", False),
+        icon=str(data.get("icon") or ""),
+        unicode_emoji=str(data.get("unicode_emoji") or ""),
     )
 
 
