@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.4.2] - 2026-06-23
+
+### Fixed
+
+- **Resume no longer crashes after a validated migration** (`core/engine.py`). When `validate_after` is enabled, `run_migration` persists `current_phase="validate_migration"` — a terminal phase that is not in `PHASE_ORDER`. A subsequent `--resume` called `PHASE_ORDER.index(state.current_phase)` in `_run_phases` with no membership check, raising `ValueError: 'validate_migration' is not in list` before any phase ran, aborting the resume entirely. The resume guard now treats any `current_phase` outside `PHASE_ORDER` as "all runnable phases complete" (`current_idx = len(PHASE_ORDER)`), so resume correctly skips the finished pipeline instead of crashing. Locked by `test_run_migration_resume_after_validate_does_not_crash`.
+- **GUI progress bar no longer crashes on the post-migration validation event** (`gui.py`). The migration progress handler called `PHASE_ORDER.index(event.phase)` on every non-`report` `completed` event, but the engine emits a `phase="validate_migration"` completed event when post-migration validation passes — a value not in `PHASE_ORDER`, raising `ValueError` inside the event handler. Extracted a `_phase_progress(phase)` helper that returns `None` for post-pipeline phases; the handler skips the progress-bar update for them. Locked by `test_phase_progress_pipeline_phases` and `test_phase_progress_post_pipeline_phase_is_none`.
+
+### Security
+
+- **`dce_checksums.json` is now bundled into the frozen binary** (`ferry.spec`). The PyInstaller spec bundled only `templates/*.json`, so the shipped binary lacked the pinned DCE hashes. `exporter/manager._verify_dce_checksum` reads them via `importlib.resources`, and its `except (FileNotFoundError, ModuleNotFoundError): return` clause then **silently skipped** checksum verification — defeating the supply-chain hard-fail gate from v2.2.12, but only in the packaged app (source-run tests always had the file, so the suite never caught it). Added `("src/discord_ferry/dce_checksums.json", "discord_ferry")` to `all_datas`. Locked by `test_ferry_spec_bundles_dce_checksums`.
+
 ## [2.4.1] - 2026-06-23
 
 ### Security

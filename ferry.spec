@@ -40,6 +40,10 @@ ferry_imports = collect_submodules("discord_ferry")
 
 all_datas = nicegui_datas + aiohttp_datas + webview_datas + [
     ("src/discord_ferry/templates/*.json", "discord_ferry/templates"),
+    # Pinned DCE SHA-256 hashes — MUST be bundled, otherwise exporter/manager.py
+    # silently skips checksum verification in the frozen binary (the supply-chain
+    # security gate from v2.2.12 would be defeated only in the shipped app).
+    ("src/discord_ferry/dce_checksums.json", "discord_ferry"),
 ]
 all_binaries = nicegui_bins + aiohttp_bins + webview_bins
 all_hiddenimports = (

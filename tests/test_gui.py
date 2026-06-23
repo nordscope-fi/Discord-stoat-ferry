@@ -56,6 +56,26 @@ def test_msgs_per_hour_zero() -> None:
     assert _msgs_per_hour(0) == 0
 
 
+def test_phase_progress_pipeline_phases() -> None:
+    """Pipeline phases map to a fraction in (0, 1]."""
+    from discord_ferry.core.engine import PHASE_ORDER
+    from discord_ferry.gui import _phase_progress
+
+    assert _phase_progress("export") == pytest.approx(1 / len(PHASE_ORDER))
+    assert _phase_progress("report") == pytest.approx(1.0)
+
+
+def test_phase_progress_post_pipeline_phase_is_none() -> None:
+    """Terminal phases outside PHASE_ORDER must return None, not crash .index().
+
+    Regression: the engine emits phase="validate_migration" events, and the GUI's
+    progress handler called PHASE_ORDER.index(event.phase) -> ValueError.
+    """
+    from discord_ferry.gui import _phase_progress
+
+    assert _phase_progress("validate_migration") is None
+
+
 def test_step_labels_include_export() -> None:
     """Step labels include the Export step."""
     from discord_ferry.gui import _STEP_LABELS

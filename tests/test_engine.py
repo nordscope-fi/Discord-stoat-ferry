@@ -165,6 +165,33 @@ async def test_run_migration_resume_skips_completed(tmp_path: Path) -> None:
         assert any(e.status == "skipped" for e in phase_events), f"{phase} should be skipped"
 
 
+async def test_run_migration_resume_after_validate_does_not_crash(tmp_path: Path) -> None:
+    """Resume must not crash when current_phase is a terminal value outside PHASE_ORDER.
+
+    Regression: run_migration persists current_phase="validate_migration" when
+    validate_after is set and a stoat_server_id exists. A later --resume then called
+    PHASE_ORDER.index("validate_migration") -> ValueError before any phase ran. A
+    terminal phase means the whole pipeline already completed, so every runnable phase
+    should be skipped rather than crashing.
+    """
+    from discord_ferry.state import save_state
+
+    prior_state = MigrationState(
+        current_phase="validate_migration", started_at="2024-01-01T00:00:00+00:00"
+    )
+    save_state(prior_state, tmp_path)
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, resume=True)
+    # Must not raise ValueError("'validate_migration' is not in list").
+    await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    # Terminal current_phase => all runnable pipeline phases are already complete.
+    for phase in ["connect", "server", "roles", "categories", "channels", "messages"]:
+        phase_events = [e for e in events if e.phase == phase]
+        assert any(e.status == "skipped" for e in phase_events), f"{phase} should be skipped"
+
+
 async def test_run_migration_phase_error(tmp_path: Path) -> None:
     """Engine catches phase exceptions and raises MigrationError."""
     from discord_ferry.errors import MigrationError
