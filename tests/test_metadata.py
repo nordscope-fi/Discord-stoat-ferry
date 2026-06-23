@@ -12,6 +12,8 @@ from discord_ferry.discord.metadata import (
     PermissionPair,
     RoleMeta,
     RoleOverride,
+    _dict_to_meta,
+    _meta_to_dict,
     load_discord_metadata,
     save_discord_metadata,
 )
@@ -384,12 +386,6 @@ async def test_no_banner_hash() -> None:
             meta = await fetch_and_translate_guild_metadata(session, "test-token", guild_id)
 
     assert meta.banner_hash == ""
-
-
-from discord_ferry.discord.metadata import (  # noqa: E402
-    _dict_to_meta,
-    _meta_to_dict,
-)
 
 
 def test_batch2_fields_round_trip():
