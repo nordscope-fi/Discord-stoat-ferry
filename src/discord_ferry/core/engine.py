@@ -568,7 +568,15 @@ async def _run_phases(
         # Check resume: skip phases that precede current_phase
         if config.resume and state.current_phase:
             phase_idx = PHASE_ORDER.index(phase_name)
-            current_idx = PHASE_ORDER.index(state.current_phase)
+            # current_phase may hold a terminal/post-pipeline value (e.g.
+            # "validate_migration") that is not in PHASE_ORDER; treat any such
+            # value as "all runnable phases complete" instead of crashing with
+            # ValueError from .index().
+            current_idx = (
+                PHASE_ORDER.index(state.current_phase)
+                if state.current_phase in PHASE_ORDER
+                else len(PHASE_ORDER)
+            )
             if phase_idx < current_idx:
                 on_event(
                     MigrationEvent(

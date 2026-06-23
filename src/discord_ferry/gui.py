@@ -126,6 +126,18 @@ def _msgs_per_hour(rate_limit: float) -> int:
     return int(3600 / rate_limit)
 
 
+def _phase_progress(phase: str) -> float | None:
+    """Progress-bar fraction in (0, 1] for a pipeline phase, or None if it has no slot.
+
+    Post-pipeline phases such as "validate_migration" are not in PHASE_ORDER and must
+    not be passed to PHASE_ORDER.index() (which raises ValueError); callers skip the
+    progress update when this returns None.
+    """
+    if phase not in PHASE_ORDER:
+        return None
+    return (PHASE_ORDER.index(phase) + 1) / len(PHASE_ORDER)
+
+
 def _compute_summary(exports: list[DCEExport]) -> dict[str, int | str]:
     """Compute summary counts from a list of exports."""
     total_messages = sum(e.message_count for e in exports)
@@ -1263,7 +1275,12 @@ def migrate_page() -> None:
                     # Final completion — switch UI
                     _on_migration_complete()
                 else:
-                    progress_bar.set_value((PHASE_ORDER.index(event.phase) + 1) / len(PHASE_ORDER))
+                    # Post-pipeline phases (e.g. "validate_migration") have no
+                    # progress slot; _phase_progress returns None for them rather
+                    # than crashing on PHASE_ORDER.index().
+                    frac = _phase_progress(event.phase)
+                    if frac is not None:
+                        progress_bar.set_value(frac)
             case "confirm":
                 if event.detail:
                     _show_review_dialog(event.detail)
