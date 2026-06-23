@@ -44,7 +44,10 @@ async def fetch_and_translate_guild_metadata(
     guild_data = await fetch_guild(session, token, guild_id)
     banner_hash = str(guild_data.get("banner") or "")
     guild_description = str(guild_data.get("description") or "")
-    guild_nsfw = bool(guild_data.get("nsfw_level", 0))
+    # Discord nsfw_level is a classification enum, not a boolean:
+    # 0=DEFAULT, 1=EXPLICIT, 2=SAFE, 3=AGE_RESTRICTED. Only EXPLICIT and
+    # AGE_RESTRICTED denote an NSFW server (SAFE must NOT be flagged).
+    guild_nsfw = guild_data.get("nsfw_level", 0) in (1, 3)
 
     roles = await fetch_guild_roles(session, token, guild_id)
     channels = await fetch_guild_channels(session, token, guild_id)

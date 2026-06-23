@@ -271,4 +271,24 @@ async def test_fetch_captures_hoist_position_desc_nsfw(mock_discord: aioresponse
     assert guild_id not in meta.role_metadata  # @everyone excluded
     assert meta.category_positions == {"cat-1": 2}  # only type-4 captured
     assert meta.guild_description == "Hello"
-    assert meta.guild_nsfw is True
+    assert meta.guild_nsfw is True  # nsfw_level 1 (EXPLICIT) → NSFW
+
+
+@pytest.mark.parametrize(
+    ("nsfw_level", "expected"),
+    [(0, False), (1, True), (2, False), (3, True)],  # SAFE (2) must NOT flag NSFW
+)
+async def test_fetch_guild_nsfw_level_mapping(
+    mock_discord: aioresponses, nsfw_level: int, expected: bool
+) -> None:
+    """Only EXPLICIT (1) and AGE_RESTRICTED (3) map to guild_nsfw=True."""
+    guild_id = "200"
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}",
+        payload={"id": guild_id, "name": "T", "nsfw_level": nsfw_level, "banner": None},
+    )
+    mock_discord.get(f"{DISCORD_API}/guilds/{guild_id}/roles", payload=[])
+    mock_discord.get(f"{DISCORD_API}/guilds/{guild_id}/channels", payload=[])
+    async with aiohttp.ClientSession() as session:
+        meta = await fetch_and_translate_guild_metadata(session, TOKEN, guild_id)
+    assert meta.guild_nsfw is expected
