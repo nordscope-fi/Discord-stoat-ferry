@@ -74,6 +74,12 @@ def test_report_includes_native_fidelity(tmp_path: Path) -> None:
     assert isinstance(native_fidelity, dict)
     assert native_fidelity["slowmode"] == 1
 
+    # The markdown report carries a matching ## Native Fidelity section.
+    generate_markdown_report(config, state, exports)
+    md = (tmp_path / "migration_report.md").read_text()
+    assert "## Native Fidelity" in md
+    assert "Slowmode set on 1 channel(s)" in md
+
 
 def test_generate_report_summary_keys(tmp_path: Path) -> None:
     """Summary dict contains all required keys."""

@@ -1008,6 +1008,7 @@ def migrate_page() -> None:
                 ui.label("Migration Complete").classes("text-xl font-bold text-green-600")
                 ui.label("").classes("text-sm text-gray-500").bind_text_from(errors_label, "text")
                 native_fidelity_label = ui.label("").classes("text-sm text-gray-500")
+                native_fidelity_label.set_visibility(False)
                 with ui.row().classes("gap-2 mt-2"):
                     open_report_btn = ui.button(
                         "Open Report", on_click=lambda: _open_report()
@@ -1307,6 +1308,7 @@ def migrate_page() -> None:
                 report = json.loads(report_file.read_text(encoding="utf-8"))
                 nf = report.get("native_fidelity") or {}
                 if nf:
+                    native_fidelity_label.set_visibility(True)
                     native_fidelity_label.set_text(
                         f"Native fidelity: slowmode={nf.get('slowmode', 0)}, "
                         f"user_limit={nf.get('user_limit', 0)}, "

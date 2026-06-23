@@ -585,7 +585,7 @@ def migrate(**kwargs: Any) -> None:
     if final_state and final_state.native_fidelity_counts:
         nf = final_state.native_fidelity_counts
         console.print(
-            f"[green]Native fidelity:[/] "
+            f"\n[green]Native fidelity:[/] "
             f"slowmode={nf.get('slowmode', 0)}, "
             f"user_limit={nf.get('user_limit', 0)}, "
             f"role_icons={nf.get('role_icons', 0)}"
