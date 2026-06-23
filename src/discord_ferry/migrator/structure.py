@@ -15,6 +15,7 @@ from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
     api_create_server,
+    api_edit_channel,
     api_edit_role,
     api_edit_server,
     api_fetch_server,
@@ -788,6 +789,7 @@ async def run_channels(
             nsfw = ch_meta.nsfw if ch_meta else False
 
             stoat_channel_id: str
+            created_as_voice = stoat_type == "Voice"
             try:
                 result = await api_create_channel(
                     session,
@@ -802,6 +804,7 @@ async def run_channels(
                 stoat_channel_id = result["_id"]
             except MigrationError as exc:
                 if stoat_type == "Voice":
+                    created_as_voice = False
                     # Voice channels may fail (Bug #194) — retry as text.
                     state.warnings.append(
                         {
@@ -834,6 +837,52 @@ async def run_channels(
                     raise
 
             state.channel_map[ch.id] = stoat_channel_id
+
+            # S1/S2 (native-fidelity batch 2): apply slowmode + voice user_limit.
+            if ch_meta is not None:
+                edit_kwargs: dict[str, Any] = {}
+                if ch_meta.slowmode > 0:
+                    if ch_meta.slowmode > 21600:
+                        state.warnings.append(
+                            {
+                                "phase": "channels",
+                                "type": "slowmode_clamped",
+                                "message": (
+                                    f"Slowmode for '{unique_name}' clamped to 21600s "
+                                    f"(was {ch_meta.slowmode})."
+                                ),
+                            }
+                        )
+                    edit_kwargs["slowmode"] = min(ch_meta.slowmode, 21600)
+                if created_as_voice and ch_meta.user_limit >= 1:
+                    edit_kwargs["voice"] = {"max_users": ch_meta.user_limit}
+                if edit_kwargs:
+                    try:
+                        await api_edit_channel(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            stoat_channel_id,
+                            **edit_kwargs,
+                        )
+                        if "slowmode" in edit_kwargs:
+                            state.native_fidelity_counts["slowmode"] = (
+                                state.native_fidelity_counts.get("slowmode", 0) + 1
+                            )
+                        if "voice" in edit_kwargs:
+                            state.native_fidelity_counts["user_limit"] = (
+                                state.native_fidelity_counts.get("user_limit", 0) + 1
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        state.warnings.append(
+                            {
+                                "phase": "channels",
+                                "type": "channel_attributes_failed",
+                                "message": (
+                                    f"Failed to set attributes for channel '{unique_name}': {exc}"
+                                ),
+                            }
+                        )
 
             # Track forum post info for index channel generation.
             if discord_cat_id.startswith("forum-"):

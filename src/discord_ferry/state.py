@@ -81,6 +81,9 @@ class MigrationState:
     errors: list[dict[str, str]] = field(default_factory=list)
     warnings: list[dict[str, str]] = field(default_factory=list)
 
+    # Native-fidelity attribute application counts (slowmode, user_limit, ...)
+    native_fidelity_counts: dict[str, int] = field(default_factory=dict)
+
     # Stoat server ID and Autumn URL (discovered during CONNECT phase)
     stoat_server_id: str = ""
     autumn_url: str = ""

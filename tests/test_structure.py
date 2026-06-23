@@ -868,6 +868,113 @@ async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
     assert created_bodies[0].get("nsfw") is True
 
 
+async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
+    """CHANNELS phase PATCHes slowmode (text) and voice.max_users (voice)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "txt1": ChannelMeta(nsfw=False, slowmode=30),
+            "vc1": ChannelMeta(nsfw=False, user_limit=5),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [
+        _make_export(channel_id="txt1", channel_name="slow-chat", category_id=""),
+        _make_export(channel_id="vc1", channel_name="voice-chat", channel_type=2, category_id=""),
+    ]
+
+    edit_bodies: dict[str, dict[str, object]] = {}
+
+    def _capture(url: object, **kwargs: object) -> None:
+        channel_id = str(url).rsplit("/", 1)[-1]
+        edit_bodies[channel_id] = kwargs.get("json", {})  # type: ignore[assignment]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-txt1", "name": "slow-chat"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-vc1", "name": "voice-chat"},
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-txt1",
+            payload={"_id": "stoat-txt1"},
+            callback=_capture,  # type: ignore[arg-type]
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-vc1",
+            payload={"_id": "stoat-vc1"},
+            callback=_capture,  # type: ignore[arg-type]
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert edit_bodies["stoat-txt1"].get("slowmode") == 30
+    assert "voice" not in edit_bodies["stoat-txt1"]
+    assert edit_bodies["stoat-vc1"].get("voice") == {"max_users": 5}
+    assert "slowmode" not in edit_bodies["stoat-vc1"]
+    assert state.native_fidelity_counts == {"slowmode": 1, "user_limit": 1}
+
+
+async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
+    """A voice channel that falls back to text (Bug #194) skips the voice PATCH.
+
+    slowmode is still applied to the text-fallback channel.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "vc1": ChannelMeta(nsfw=False, slowmode=15, user_limit=8),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [
+        _make_export(channel_id="vc1", channel_name="voice-chat", channel_type=2, category_id="")
+    ]
+
+    edit_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        # First call (Voice) fails -> Bug #194 fallback to Text.
+        m.post(f"{STOAT_URL}/servers/srv1/channels", status=400)
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-vc1", "name": "voice-chat"},
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-vc1",
+            payload={"_id": "stoat-vc1"},
+            callback=lambda url, **kwargs: edit_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(edit_bodies) == 1
+    # created_as_voice is False, so the voice kwarg must be omitted.
+    assert "voice" not in edit_bodies[0]
+    # slowmode still applies to the text-fallback channel.
+    assert edit_bodies[0].get("slowmode") == 15
+    assert state.native_fidelity_counts == {"slowmode": 1}
+
+
 async def test_run_channels_applies_channel_permission_overrides(tmp_path: Path) -> None:
     """CHANNELS phase applies role permission overrides via PUT after channel creation."""
     events: list[MigrationEvent] = []
