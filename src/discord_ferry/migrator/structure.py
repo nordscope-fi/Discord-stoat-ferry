@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import load_discord_metadata
-from discord_ferry.errors import MigrationError
+from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
@@ -30,9 +31,11 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
-from discord_ferry.uploader.autumn import upload_with_cache
+from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
+    import aiohttp
+
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEChannel, DCEExport, DCERole
@@ -341,6 +344,55 @@ async def run_server(
             )
 
 
+async def _resolve_role_icon(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    role_name: str,
+    role_id: str,
+    icon_hash: str,
+) -> str | None:
+    """Download a role icon, upload to Autumn, return the attachment id or None.
+
+    Token-safe: an AutumnUploadError (which may carry the HTTP body) is never
+    interpolated into a warning. The temp file is always cleaned up.
+    """
+    icon_bytes = await download_role_icon(session, role_id, icon_hash)
+    if icon_bytes is None:
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "role_icon_download_failed",
+                "message": f"Role icon download failed for role '{role_name}'.",
+            }
+        )
+        return None
+    icon_dir = config.output_dir / "role-icons"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = icon_dir / f"{role_id}.png"
+    try:
+        temp_path.write_bytes(icon_bytes)
+        icon_id = await upload_to_autumn(
+            session, state.autumn_url, "icons", temp_path, config.token
+        )
+        state.native_fidelity_counts["role_icons"] = (
+            state.native_fidelity_counts.get("role_icons", 0) + 1
+        )
+        return icon_id
+    except AutumnUploadError:
+        # Fixed template — never str(exc); the body may echo x-session-token.
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "role_icon_upload_failed",
+                "message": f"Role icon upload failed for role '{role_name}'.",
+            }
+        )
+        return None
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 async def run_roles(
     config: FerryConfig,
     state: MigrationState,
@@ -451,6 +503,22 @@ async def run_roles(
             rm = role_meta.get(role.id)
             if rm is not None:
                 edit_kwargs["hoist"] = rm.hoist
+                if rm.icon_hash:
+                    icon_id = await _resolve_role_icon(
+                        session, config, state, role.name, role.id, rm.icon_hash
+                    )
+                    if icon_id is not None:
+                        edit_kwargs["icon"] = icon_id
+                elif rm.unicode_emoji:
+                    state.warnings.append(
+                        {
+                            "phase": "roles",
+                            "type": "role_icon_skipped",
+                            "message": (
+                                f"Role '{role.name}' has an emoji icon (not migratable to Stoat)."
+                            ),
+                        }
+                    )
             if not edit_kwargs:
                 continue
             try:

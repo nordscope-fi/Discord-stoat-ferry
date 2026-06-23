@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 from aioresponses import aioresponses
 
@@ -15,6 +16,7 @@ from discord_ferry.discord.metadata import (
     RoleOverride,
     save_discord_metadata,
 )
+from discord_ferry.errors import AutumnUploadError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     make_unique_channel_name,
@@ -428,6 +430,156 @@ async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert any(w.get("type") == "hoist_skipped" for w in state.warnings)
+
+
+async def test_run_roles_image_icon_uploaded_and_folded(tmp_path: Path) -> None:
+    """ROLES downloads an image role icon, uploads to Autumn, folds icon into edit."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="VIP")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"PNGDATA"),
+        ),
+        patch(
+            "discord_ferry.migrator.structure.upload_to_autumn",
+            new=AsyncMock(return_value="autumn-id"),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "VIP"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert any(body.get("icon") == "autumn-id" for body in patch_bodies)
+    assert state.native_fidelity_counts.get("role_icons") == 1
+
+
+async def test_run_roles_emoji_icon_skipped_with_warning(tmp_path: Path) -> None:
+    """ROLES skips an emoji-only role icon with a warning and no icon kwarg."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Fire")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=False, position=0, unicode_emoji="🔥")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"PNGDATA"),
+        ) as mock_download,
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Fire"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert any(w.get("type") == "role_icon_skipped" for w in state.warnings)
+    assert all("icon" not in body for body in patch_bodies)
+    mock_download.assert_not_called()
+
+
+async def test_run_roles_icon_upload_error_is_token_safe(tmp_path: Path) -> None:
+    """A failed icon upload never leaks the HTTP body and preserves hoist/rank."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="VIP", position=3)
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+    upload_error = AutumnUploadError("Upload failed with status 500: x-session-token=SECRET")
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"PNGDATA"),
+        ),
+        patch(
+            "discord_ferry.migrator.structure.upload_to_autumn",
+            new=AsyncMock(side_effect=upload_error),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "VIP"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    for w in state.warnings:
+        msg = str(w.get("message", ""))
+        assert "SECRET" not in msg
+        assert "x-session-token" not in msg
+    # The role still receives hoist despite the failed icon; no icon kwarg leaks.
+    assert any(body.get("hoist") is True for body in patch_bodies)
+    assert all("icon" not in body for body in patch_bodies)
 
 
 async def test_run_roles_truncates_long_name(tmp_path: Path) -> None:
