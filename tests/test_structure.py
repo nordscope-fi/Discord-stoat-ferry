@@ -685,6 +685,121 @@ async def test_run_channels_skips_category_type(tmp_path: Path) -> None:
     assert state.channel_map == {}
 
 
+def _category_titles_from_patch(bodies: list[dict[str, object]]) -> list[str]:
+    """Extract category titles, in order, from the last categories PATCH body."""
+    cats = bodies[-1].get("categories", []) if bodies else []
+    return [str(c.get("title", "")) for c in cats]  # type: ignore[union-attr]
+
+
+async def test_run_channels_orders_categories_by_discord_position(tmp_path: Path) -> None:
+    """CHANNELS orders the category upsert by Discord position (ascending)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"cat-A": "sc-A", "cat-B": "sc-B"},
+    )
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        category_positions={"cat-A": 2, "cat-B": 0},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [
+        _make_export(channel_id="ch-a", channel_name="a", category_id="cat-A", category="Alpha"),
+        _make_export(channel_id="ch-b", channel_name="b", category_id="cat-B", category="Bravo"),
+    ]
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-cha", "name": "a"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-chb", "name": "b"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_channels(config, state, exports, events.append)
+
+    titles = _category_titles_from_patch(patch_bodies)
+    assert titles == ["Bravo", "Alpha"]  # position 0 before position 2
+
+
+async def test_run_channels_category_without_position_sorts_last(tmp_path: Path) -> None:
+    """A category with no captured Discord position sorts after positioned ones."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"cat-A": "sc-A", "cat-Z": "sc-Z"},
+    )
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        category_positions={"cat-A": 5},  # cat-Z absent → sentinel → last
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [
+        _make_export(channel_id="ch-a", channel_name="a", category_id="cat-A", category="Alpha"),
+        _make_export(channel_id="ch-z", channel_name="z", category_id="cat-Z", category="Zeta"),
+    ]
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-cha", "name": "a"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-chz", "name": "z"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_channels(config, state, exports, events.append)
+
+    titles = _category_titles_from_patch(patch_bodies)
+    assert titles == ["Alpha", "Zeta"]
+
+
+async def test_run_channels_records_text_channel_ids(tmp_path: Path) -> None:
+    """CHANNELS records created top-level Text channel IDs (not voice/threads)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    exports = [
+        _make_export(channel_id="t1", channel_name="general", channel_type=0, category_id=""),
+        _make_export(channel_id="v1", channel_name="Voice", channel_type=2, category_id=""),
+    ]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-t1", "name": "general"})
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "sc-v1", "name": "Voice"})
+
+        await run_channels(config, state, exports, events.append)
+
+    assert "sc-t1" in state.text_channel_ids
+    assert "sc-v1" not in state.text_channel_ids
+
+
 async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
     """CHANNELS phase creates each channel only once even if the same ID appears twice."""
     events: list[MigrationEvent] = []
@@ -1007,8 +1122,8 @@ async def test_run_roles_rank_failure_is_non_fatal(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert state.role_map["r1"] == "stoat-r1"
-    rank_warnings = [w for w in state.warnings if "rank" in w["message"].lower()]
-    assert len(rank_warnings) > 0
+    attr_warnings = [w for w in state.warnings if w.get("type") == "role_attributes_failed"]
+    assert len(attr_warnings) > 0
 
 
 async def test_run_roles_applies_permissions(tmp_path: Path) -> None:

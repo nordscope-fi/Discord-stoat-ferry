@@ -86,6 +86,19 @@ def _generate_category_id() -> str:
     return uuid.uuid4().hex[:26]
 
 
+def _stoat_channel_type(channel_type: int) -> str:
+    """Map a Discord channel type int to a Stoat channel type string.
+
+    Discord type 2 is a voice channel; everything else (text, announcement,
+    threads, forum, media) maps to a Stoat Text channel.
+    """
+    match channel_type:
+        case 2:
+            return "Voice"
+        case _:
+            return "Text"
+
+
 async def run_server(
     config: FerryConfig,
     state: MigrationState,
@@ -660,14 +673,7 @@ async def run_channels(
         seen_channel_ids.add(channel.id)
 
         # Map Discord channel type to Stoat type string.
-        stoat_type: str | None
-        match channel.type:
-            case 2:
-                stoat_type = "Voice"
-            case 0 | 5 | 11 | 12 | 15 | 16:
-                stoat_type = "Text"
-            case _:
-                stoat_type = "Text"
+        stoat_type: str | None = _stoat_channel_type(channel.type)
 
         # Build channel name; prefix with parent name for threads.
         ch_name = channel.name
@@ -772,7 +778,7 @@ async def run_channels(
     forum_channel_info: dict[str, list[tuple[str, str, int]]] = {}
 
     async with get_session(config) as session:
-        for idx, (channel, stoat_type, unique_name, discord_cat_id, _is_thread) in enumerate(
+        for idx, (channel, stoat_type, unique_name, discord_cat_id, is_thread) in enumerate(
             channels_to_create, start=1
         ):
             ch: DCEChannel = channel
@@ -828,6 +834,10 @@ async def run_channels(
                     raise
 
             state.channel_map[ch.id] = stoat_channel_id
+
+            # Record top-level Text channels for reliable invite targeting (S4).
+            if stoat_type == "Text" and not is_thread:
+                state.text_channel_ids.append(stoat_channel_id)
 
             # Track forum post info for index channel generation.
             if discord_cat_id.startswith("forum-"):
@@ -1007,6 +1017,20 @@ async def run_channels(
                         "channels": category_channels.get(stoat_cat_id, []),
                     }
                 )
+
+            # Order categories by Discord position (S3). Forum-derived categories
+            # (keyed in category_map by a non-Discord forum key) have no position
+            # and sort to the end with a stable title tie-break.
+            positions = discord_metadata.category_positions if discord_metadata else {}
+            inverse_category_map = {v: k for k, v in state.category_map.items()}
+            position_sentinel = 1_000_000
+
+            def _category_sort_key(entry: dict[str, Any]) -> tuple[int, str]:
+                discord_cat_id = inverse_category_map.get(str(entry["id"]), "")
+                pos = positions.get(discord_cat_id, position_sentinel)
+                return (pos, str(entry["title"]))
+
+            all_categories.sort(key=_category_sort_key)
 
             await api_upsert_categories(
                 session,
