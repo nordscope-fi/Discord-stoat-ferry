@@ -29,6 +29,8 @@ except ImportError:
     pass
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, MutableMapping
+
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
 
@@ -108,6 +110,26 @@ def _format_bytes(n: int | float) -> str:
             return f"{value:,.1f} {unit}"
         value /= 1024
     return f"{value:,.1f} TB"
+
+
+# Session credentials that must never persist to app.storage.user on disk.
+# Per security.md (GUI Storage): clear all token-like values when migration
+# completes or errors. `stoat_url` is also stored at setup but is intentionally
+# EXCLUDED here — it is an instance URL, not a credential.
+_SESSION_TOKEN_KEYS: tuple[str, ...] = ("token", "discord_token")
+
+
+def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> None:
+    """Best-effort removal of session secret keys from GUI storage.
+
+    Total and non-throwing: a missing key is a no-op (``storage.pop(k, None)``),
+    so this is idempotent and safe on any path (dry-run, partially-populated
+    storage, repeat calls). Cleanup ownership: the export phase clears only
+    ``discord_token``; the terminal migration screen clears
+    ``_SESSION_TOKEN_KEYS`` (both tokens).
+    """
+    for key in keys:
+        storage.pop(key, None)
 
 
 def _format_eta(total_messages: int, rate_limit: float) -> str:
@@ -752,9 +774,13 @@ def export_page() -> None:
             on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
             ui.notify(f"Export failed: {exc}", type="negative")
         finally:
-            # Clear tokens from storage (security — avoid persisting to disk)
-            storage.pop("discord_token", None)
-            storage.pop("token", None)
+            # Clear ONLY the Discord token here — export is its sole consumer.
+            # The Stoat token MUST survive: this finally runs synchronously
+            # BEFORE the queued ui.navigate.to("/validate") redirect loads, and
+            # both validate_page and migrate_page guard on storage["token"].
+            # Clearing it here bounces the user back to setup. The Stoat token is
+            # cleared by the terminal migration screen (migrate_page._run).
+            _clear_tokens(storage, ("discord_token",))
 
     background_tasks.create(_run_export())
 
@@ -1378,6 +1404,15 @@ def migrate_page() -> None:
         except Exception as exc:
             log_display.push(f"[ERROR] Unexpected error: {exc}")
             ui.notify(f"Unexpected error: {exc}", type="negative")
+        finally:
+            # Terminal owner of session-token cleanup, for BOTH offline and
+            # orchestrated modes, on success AND error. (Offline mode never
+            # visits /export, so its finally is the only cleanup point.) Safe
+            # because this runs AFTER run_migration returns: config already holds
+            # its own token copy (a plain str), the engine never reads
+            # app.storage, and the only in-_run storage read (config.resume,
+            # above) has already completed. Do NOT move token reads below this.
+            _clear_tokens(storage, _SESSION_TOKEN_KEYS)
 
     background_tasks.create(_run())
 
