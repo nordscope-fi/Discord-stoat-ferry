@@ -217,6 +217,7 @@ async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> Non
         forum_index_message_ids={forum_key: "idx-msg-1"},
         channel_message_counts={"fp1": 800},
         channel_categories={"fp1": forum_key, "ch1": "cat1"},
+        native_fidelity_counts={"slowmode": 2, "user_limit": 1},
     )
     # Non-empty message_map so prior_messages_total is meaningful.
     prior.message_map["old-1"] = "stoat-old-1"
@@ -232,6 +233,8 @@ async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> Non
     assert state.channel_message_counts == {"fp1": 800}
     assert state.category_names == {forum_key: "my-forum", "cat1": "General"}
     assert state.channel_categories == {"fp1": forum_key, "ch1": "cat1"}
+    # native_fidelity_counts carried cumulatively so the report reflects all runs.
+    assert state.native_fidelity_counts == {"slowmode": 2, "user_limit": 1}
     # Carried lists are copies, not aliases of the prior structures.
     assert state.forum_channel_members[forum_key] is not prior.forum_channel_members[forum_key]
 

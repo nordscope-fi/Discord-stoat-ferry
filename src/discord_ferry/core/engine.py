@@ -195,13 +195,15 @@ async def run_migration(
             state.channel_message_counts = dict(prior.channel_message_counts)
             state.category_names = dict(prior.category_names)
             state.channel_categories = dict(prior.channel_categories)
+            state.native_fidelity_counts = dict(prior.native_fidelity_counts)
             # Carry-over audit (every MigrationState field classified):
             #   CARRY: role_map / channel_map / category_map / emoji_map,
             #     category_names, channel_categories, message_map, avatar_cache,
             #     upload_cache, author_names, stoat_server_id, autumn_url,
             #     invite_code / invite_url, channel_message_offsets,
             #     channel_message_counts, forum_channel_members /
-            #     forum_category_names / forum_index_message_ids, and the
+            #     forum_category_names / forum_index_message_ids,
+            #     native_fidelity_counts (cumulative fidelity counter), and the
             #     cumulative counters (attachments_uploaded/skipped,
             #     reactions_applied, pins_applied). prior_messages_total is DERIVED
             #     here from len(prior.message_map).
