@@ -31,6 +31,8 @@ class RoleMeta:
     position: int = 0
     icon_hash: str = ""
     unicode_emoji: str = ""
+    name: str = ""
+    color: str = ""  # hex "#rrggbb", or "" for no color
 
 
 @dataclass
@@ -97,6 +99,8 @@ def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
                 "position": v.position,
                 "icon_hash": v.icon_hash,
                 "unicode_emoji": v.unicode_emoji,
+                "name": v.name,
+                "color": v.color,
             }
             for k, v in meta.role_metadata.items()
         },
@@ -146,6 +150,8 @@ def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
                 position=v.get("position", 0),
                 icon_hash=v.get("icon_hash", ""),
                 unicode_emoji=v.get("unicode_emoji", ""),
+                name=v.get("name", ""),
+                color=v.get("color", ""),
             )
             for k, v in data.get("role_metadata", {}).items()
         },

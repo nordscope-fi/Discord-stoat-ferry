@@ -276,6 +276,24 @@ async def api_fetch_server(
     return await _api_request(session, "GET", url, token)
 
 
+async def api_fetch_root(session: aiohttp.ClientSession, stoat_url: str) -> dict[str, Any]:
+    """Best-effort GET / for instance config (limits, app URL).
+
+    Returns the parsed config dict, or ``{}`` on any non-200 status, network
+    error, or malformed JSON body. Intentionally NOT routed through
+    ``_api_request`` -- this is a best-effort probe and must not carry the
+    retry/circuit-breaker machinery.
+    """
+    url = f"{stoat_url.rstrip('/')}/"
+    try:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return {}
+            return await resp.json()  # type: ignore[no-any-return]
+    except (aiohttp.ClientError, ValueError):
+        return {}
+
+
 async def api_edit_server(
     session: aiohttp.ClientSession,
     stoat_url: str,

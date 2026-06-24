@@ -395,3 +395,46 @@ async def test_download_role_icon_none_on_client_error():
             from discord_ferry.discord.client import download_role_icon
 
             assert await download_role_icon(s, "r1", "hash") is None
+
+
+@pytest.mark.asyncio
+async def test_capture_role_name_and_hex_color() -> None:
+    guild_id = "100"
+    with aioresponses() as m:
+        m.get(
+            f"{DISCORD_API}/guilds/{guild_id}",
+            payload={"description": "", "nsfw_level": 0, "banner": None},
+        )
+        m.get(
+            f"{DISCORD_API}/guilds/{guild_id}/roles",
+            payload=[
+                {
+                    "id": "200",
+                    "name": "Mod",
+                    "permissions": "0",
+                    "position": 2,
+                    "color": 16711680,
+                    "hoist": False,
+                    "managed": False,
+                    "icon": None,
+                    "unicode_emoji": None,
+                },
+                {
+                    "id": "201",
+                    "name": "NoColor",
+                    "permissions": "0",
+                    "position": 1,
+                    "color": 0,
+                    "hoist": False,
+                    "managed": False,
+                    "icon": None,
+                    "unicode_emoji": None,
+                },
+            ],
+        )
+        m.get(f"{DISCORD_API}/guilds/{guild_id}/channels", payload=[])
+        async with aiohttp.ClientSession() as s:
+            meta = await fetch_and_translate_guild_metadata(s, "tok", guild_id)
+    assert meta.role_metadata["200"].name == "Mod"
+    assert meta.role_metadata["200"].color == "#ff0000"  # 16711680 -> hex
+    assert meta.role_metadata["201"].color == ""  # color 0 -> ""

@@ -69,6 +69,8 @@ async def fetch_and_translate_guild_metadata(
             position=role.position,
             icon_hash=role.icon,
             unicode_emoji=role.unicode_emoji,
+            name=role.name,
+            color=f"#{role.color:06x}" if role.color > 0 else "",
         )
 
     # Build channel metadata (filter user overrides, translate permissions)

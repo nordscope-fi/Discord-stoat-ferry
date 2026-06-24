@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass
 class DCERole:
-    """Parsed role from author's role list."""
+    """A Discord role record — from a DCE export author list or a live guild fetch."""
 
     id: str
     name: str

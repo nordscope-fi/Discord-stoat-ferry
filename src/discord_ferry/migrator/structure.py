@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.discord.client import download_role_icon
-from discord_ferry.discord.metadata import load_discord_metadata
+from discord_ferry.discord.metadata import RoleMeta, load_discord_metadata
 from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
@@ -19,6 +19,7 @@ from discord_ferry.migrator.api import (
     api_edit_channel,
     api_edit_role,
     api_edit_server,
+    api_fetch_root,
     api_fetch_server,
     api_pin_message,
     api_send_message,
@@ -31,6 +32,7 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.parser.models import DCERole
 from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
@@ -38,7 +40,7 @@ if TYPE_CHECKING:
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
-    from discord_ferry.parser.models import DCEChannel, DCEExport, DCERole
+    from discord_ferry.parser.models import DCEChannel, DCEExport
     from discord_ferry.state import MigrationState
 
 logger = logging.getLogger(__name__)
@@ -403,6 +405,14 @@ async def _resolve_role_icon(
         temp_path.unlink(missing_ok=True)
 
 
+def _role_from_metadata(role_id: str, rm: RoleMeta) -> DCERole:
+    """Build a DCERole from live Discord metadata (for roles absent from the export).
+
+    Lives here (not in parser/models) so parser/ never imports discord/metadata.
+    """
+    return DCERole(id=role_id, name=rm.name, color=rm.color or None, position=rm.position)
+
+
 async def run_roles(
     config: FerryConfig,
     state: MigrationState,
@@ -441,6 +451,48 @@ async def run_roles(
     # Filter out the @everyone role.
     roles_to_create = [r for r in unique_roles if r.id != guild_id]
 
+    # Classify provenance before the live-role union: any role created this run
+    # whose id is NOT in this set came from live-only discovery (a "structural"
+    # role absent from the export because no member posted it).
+    export_role_ids = {r.id for r in unique_roles}
+
+    # Live role discovery: union the export-derived roles with the full live role
+    # list (already captured in discord_metadata.role_metadata, which enumerates
+    # every non-managed, non-@everyone role). Live wins on name/color/position.
+    discord_metadata = load_discord_metadata(config.output_dir)
+    if discord_metadata is not None:
+        merged_roles: dict[str, DCERole] = {r.id: r for r in roles_to_create}
+        for role_id, live_rm in discord_metadata.role_metadata.items():
+            merged_roles[role_id] = _role_from_metadata(role_id, live_rm)
+        roles_to_create = list(merged_roles.values())
+
+        # Role cap: read the live server_roles limit (best-effort; 200 fallback).
+        # The union can exceed Stoat's cap, so pre-flight truncate by lowest
+        # (position, id) and keep the top-N. Scoped to the union path only.
+        async with get_session(config) as _root_session:
+            root = await api_fetch_root(_root_session, config.stoat_url)
+        role_limit = (
+            root.get("features", {}).get("limits", {}).get("global", {}).get("server_roles", 200)
+        )
+        # Order the union position-desc so that (a) pre-flight truncation keeps the
+        # highest-priority roles and (b) the per-instance TooManyRoles backstop, if
+        # it fires, drops the least-important roles first. Scoped to the union path;
+        # the export-only create order is left byte-for-byte unchanged.
+        roles_to_create.sort(key=lambda r: (r.position, r.id), reverse=True)
+        if len(roles_to_create) > role_limit:
+            dropped = len(roles_to_create) - role_limit
+            roles_to_create = roles_to_create[:role_limit]
+            state.warnings.append(
+                {
+                    "phase": "roles",
+                    "type": "role_limit_exceeded",
+                    "message": (
+                        f"Server role limit ({role_limit}) exceeded; "
+                        f"skipped {dropped} lowest-priority role(s)."
+                    ),
+                }
+            )
+
     # Incremental: capture which roles already exist BEFORE the creation loop
     # populates role_map, so the create/attributes/perms passes can skip them.
     pre_existing_role_ids = set(state.role_map)
@@ -461,15 +513,38 @@ async def run_roles(
         for idx, role in enumerate(roles_to_create, start=1):
             if role.id in pre_existing_role_ids:
                 continue
-            result = await api_create_role(
-                session,
-                config.stoat_url,
-                config.token,
-                state.stoat_server_id,
-                truncate_name(role.name),
-            )
+            try:
+                result = await api_create_role(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    state.stoat_server_id,
+                    truncate_name(role.name),
+                )
+            except MigrationError as exc:
+                if "TooManyRoles" in str(exc) or "too many" in str(exc).lower():
+                    state.warnings.append(
+                        {
+                            "phase": "roles",
+                            "type": "role_limit_exceeded",
+                            "message": (
+                                f"Stoat role limit reached at '{role.name}'; "
+                                "remaining roles skipped."
+                            ),
+                        }
+                    )
+                    break
+                raise
             stoat_role_id: str = result["id"]
             state.role_map[role.id] = stoat_role_id
+
+            # Credit recovered structural roles: created THIS run (the
+            # pre_existing_role_ids guard above already excludes prior-run roles)
+            # and absent from the export-derived set, i.e. live-only discovery.
+            if role.id not in export_role_ids:
+                state.native_fidelity_counts["structural_roles"] = (
+                    state.native_fidelity_counts.get("structural_roles", 0) + 1
+                )
 
             # Apply colour if present (British spelling required by Stoat API).
             if role.color:
@@ -507,7 +582,7 @@ async def run_roles(
     # metadata). Both fold into a single api_edit_role call per role when present.
     discord_metadata = load_discord_metadata(config.output_dir)
     role_meta = discord_metadata.role_metadata if discord_metadata else {}
-    ranked_roles = sorted(roles_to_create, key=lambda r: r.position)
+    ranked_roles = sorted(roles_to_create, key=lambda r: (r.position, r.id))
     async with get_session(config) as session:
         for role in ranked_roles:
             if role.id in pre_existing_role_ids:

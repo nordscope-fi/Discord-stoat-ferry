@@ -1042,3 +1042,52 @@ async def test_api_edit_channel_patches_body():
                 voice={"max_users": 5},
             )
     assert result["_id"] == "ch1"
+
+
+@pytest.mark.asyncio
+async def test_api_fetch_root_returns_config():
+    from discord_ferry.migrator.api import api_fetch_root
+
+    with aioresponses() as m:
+        m.get(
+            "https://stoat.test/",
+            payload={"features": {"limits": {"global": {"server_roles": 200}}}},
+        )
+        async with aiohttp.ClientSession() as s:
+            root = await api_fetch_root(s, "https://stoat.test")
+    assert root["features"]["limits"]["global"]["server_roles"] == 200
+
+
+@pytest.mark.asyncio
+async def test_api_fetch_root_returns_empty_on_error():
+    from discord_ferry.migrator.api import api_fetch_root
+
+    with aioresponses() as m:
+        m.get("https://stoat.test/", status=500)
+        async with aiohttp.ClientSession() as s:
+            assert await api_fetch_root(s, "https://stoat.test") == {}
+
+
+@pytest.mark.asyncio
+async def test_api_fetch_root_returns_empty_on_client_error():
+    from discord_ferry.migrator.api import api_fetch_root
+
+    with aioresponses() as m:
+        m.get("https://stoat.test/", exception=aiohttp.ClientError())
+        async with aiohttp.ClientSession() as s:
+            assert await api_fetch_root(s, "https://stoat.test") == {}
+
+
+@pytest.mark.asyncio
+async def test_api_fetch_root_returns_empty_on_malformed_json():
+    from discord_ferry.migrator.api import api_fetch_root
+
+    with aioresponses() as m:
+        m.get(
+            "https://stoat.test/",
+            body="not json",
+            status=200,
+            content_type="application/json",
+        )
+        async with aiohttp.ClientSession() as s:
+            assert await api_fetch_root(s, "https://stoat.test") == {}
