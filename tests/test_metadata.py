@@ -420,3 +420,40 @@ def test_batch2_fields_default_on_legacy_json():
     assert restored.channel_metadata["c1"].slowmode == 0
     assert restored.channel_metadata["c1"].user_limit == 0
     assert restored.role_metadata["r1"].icon_hash == ""
+
+
+def test_rolemeta_name_color_round_trip():
+    from discord_ferry.discord.metadata import (
+        DiscordMetadata,
+        RoleMeta,
+        _dict_to_meta,
+        _meta_to_dict,
+    )
+
+    meta = DiscordMetadata(
+        guild_id="g",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=3, name="Mod", color="#ff0000")},
+    )
+    restored = _dict_to_meta(_meta_to_dict(meta))
+    assert restored.role_metadata["r1"].name == "Mod"
+    assert restored.role_metadata["r1"].color == "#ff0000"
+
+
+def test_rolemeta_legacy_json_defaults_name_color():
+    from discord_ferry.discord.metadata import _dict_to_meta
+
+    legacy = {
+        "guild_id": "g",
+        "fetched_at": "t",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {},
+        "role_metadata": {"r1": {"hoist": False, "position": 0}},  # no name/color keys
+    }
+    restored = _dict_to_meta(legacy)
+    assert restored.role_metadata["r1"].name == ""
+    assert restored.role_metadata["r1"].color == ""
