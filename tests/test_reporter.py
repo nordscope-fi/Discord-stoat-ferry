@@ -81,6 +81,19 @@ def test_report_includes_native_fidelity(tmp_path: Path) -> None:
     assert "Slowmode set on 1 channel(s)" in md
 
 
+def test_report_surfaces_structural_roles(tmp_path: Path) -> None:
+    """The markdown report credits recovered structural roles when counted."""
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.native_fidelity_counts = {"structural_roles": 3}
+    exports = [_make_export()]
+
+    generate_markdown_report(config, state, exports)
+    md = (tmp_path / "migration_report.md").read_text()
+    assert "## Native Fidelity" in md
+    assert "Recovered 3 structural role(s)" in md
+
+
 def test_generate_report_summary_keys(tmp_path: Path) -> None:
     """Summary dict contains all required keys."""
     config = _make_config(tmp_path)

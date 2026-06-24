@@ -451,6 +451,11 @@ async def run_roles(
     # Filter out the @everyone role.
     roles_to_create = [r for r in unique_roles if r.id != guild_id]
 
+    # Classify provenance before the live-role union: any role created this run
+    # whose id is NOT in this set came from live-only discovery (a "structural"
+    # role absent from the export because no member posted it).
+    export_role_ids = {r.id for r in unique_roles}
+
     # Live role discovery: union the export-derived roles with the full live role
     # list (already captured in discord_metadata.role_metadata, which enumerates
     # every non-managed, non-@everyone role). Live wins on name/color/position.
@@ -532,6 +537,14 @@ async def run_roles(
                 raise
             stoat_role_id: str = result["id"]
             state.role_map[role.id] = stoat_role_id
+
+            # Credit recovered structural roles: created THIS run (the
+            # pre_existing_role_ids guard above already excludes prior-run roles)
+            # and absent from the export-derived set, i.e. live-only discovery.
+            if role.id not in export_role_ids:
+                state.native_fidelity_counts["structural_roles"] = (
+                    state.native_fidelity_counts.get("structural_roles", 0) + 1
+                )
 
             # Apply colour if present (British spelling required by Stoat API).
             if role.color:

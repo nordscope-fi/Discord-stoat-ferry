@@ -826,6 +826,82 @@ async def test_managed_role_not_created(tmp_path: Path) -> None:
     assert state.role_map == {"r1": "stoat-r1"}
 
 
+async def test_structural_roles_counted_for_live_only(tmp_path: Path) -> None:
+    """A live-only role (in role_metadata, absent from the export) increments
+    native_fidelity_counts['structural_roles']; an overlap role does not."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    # r1 appears in the export (overlap); r2 is live-only (no member posted it).
+    role = DCERole(id="r1", name="Member")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={
+            "r1": RoleMeta(name="Member", position=1),
+            "r2": RoleMeta(name="Ghost", position=0),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r1", "name": "Member"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r2", "name": "Ghost"},
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r2", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    # Both roles created; only the live-only r2 counts as structural.
+    assert set(state.role_map) == {"r1", "r2"}
+    assert state.native_fidelity_counts.get("structural_roles") == 1
+
+
+async def test_structural_roles_zero_when_all_overlap(tmp_path: Path) -> None:
+    """When every created role also appears in the export, no structural-role
+    credit is recorded."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Member")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(name="Member", position=0)},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r1", "name": "Member"},
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert state.role_map == {"r1": "stoat-r1"}
+    assert state.native_fidelity_counts.get("structural_roles") is None
+
+
 async def test_no_token_fallback_unchanged(tmp_path: Path) -> None:
     """With no discord_metadata.json, the created set equals the export-derived set."""
     events: list[MigrationEvent] = []
@@ -2446,9 +2522,7 @@ async def test_role_cap_truncates_and_warns(tmp_path: Path) -> None:
                 kwargs.get("json", {}).get("name", "")
             ),
         )
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True
-        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True)
 
         await run_roles(config, state, exports, events.append)
 

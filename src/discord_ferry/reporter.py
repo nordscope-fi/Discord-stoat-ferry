@@ -405,6 +405,10 @@ def generate_markdown_report(
             lines.append(f"- Voice user-limit set on {nf['user_limit']} channel(s)\n")
         if nf.get("role_icons"):
             lines.append(f"- Icons set on {nf['role_icons']} role(s)\n")
+        if nf.get("structural_roles"):
+            lines.append(
+                f"- Recovered {nf['structural_roles']} structural role(s) absent from the export\n"
+            )
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     output_path = config.output_dir / "migration_report.md"
