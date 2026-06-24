@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.gui import _compute_summary, _format_eta, _msgs_per_hour
+from discord_ferry.gui import (
+    _SESSION_TOKEN_KEYS,
+    _clear_tokens,
+    _compute_summary,
+    _format_eta,
+    _msgs_per_hour,
+)
 from discord_ferry.parser.dce_parser import parse_export_directory
 
 if TYPE_CHECKING:
@@ -307,3 +313,44 @@ def test_gui_imports_run_rollback() -> None:
     import discord_ferry.gui as gui_mod
 
     assert hasattr(gui_mod, "run_rollback")
+
+
+# ---------------------------------------------------------------------------
+# _clear_tokens + _SESSION_TOKEN_KEYS unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_clear_tokens_discord_only_leaves_stoat() -> None:
+    storage: dict[str, Any] = {
+        "token": "stoat-tok",
+        "discord_token": "disc-tok",
+        "stoat_url": "https://stoat.example",
+    }
+    _clear_tokens(storage, ("discord_token",))
+    assert "discord_token" not in storage
+    assert storage["token"] == "stoat-tok"
+    assert storage["stoat_url"] == "https://stoat.example"
+
+
+def test_clear_tokens_session_keys_clears_both() -> None:
+    storage: dict[str, Any] = {
+        "token": "stoat-tok",
+        "discord_token": "disc-tok",
+        "stoat_url": "https://stoat.example",
+    }
+    _clear_tokens(storage, _SESSION_TOKEN_KEYS)
+    assert "token" not in storage
+    assert "discord_token" not in storage
+    assert storage["stoat_url"] == "https://stoat.example"
+
+
+def test_clear_tokens_missing_key_is_noop() -> None:
+    storage: dict[str, Any] = {}
+    _clear_tokens(storage, _SESSION_TOKEN_KEYS)  # must not raise
+    assert storage == {}
+
+
+def test_session_token_keys_pinned() -> None:
+    # Constant-pin: the security-critical key list must never silently shrink.
+    # This is the load-bearing CI guard against the recurring token-leak vector.
+    assert _SESSION_TOKEN_KEYS == ("token", "discord_token")

@@ -29,6 +29,8 @@ except ImportError:
     pass
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, MutableMapping
+
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
 
@@ -108,6 +110,26 @@ def _format_bytes(n: int | float) -> str:
             return f"{value:,.1f} {unit}"
         value /= 1024
     return f"{value:,.1f} TB"
+
+
+# Session credentials that must never persist to app.storage.user on disk.
+# Per security.md (GUI Storage): clear all token-like values when migration
+# completes or errors. `stoat_url` is also stored at setup but is intentionally
+# EXCLUDED here — it is an instance URL, not a credential.
+_SESSION_TOKEN_KEYS: tuple[str, ...] = ("token", "discord_token")
+
+
+def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> None:
+    """Best-effort removal of session secret keys from GUI storage.
+
+    Total and non-throwing: a missing key is a no-op (``storage.pop(k, None)``),
+    so this is idempotent and safe on any path (dry-run, partially-populated
+    storage, repeat calls). Cleanup ownership: the export phase clears only
+    ``discord_token``; the terminal migration screen clears
+    ``_SESSION_TOKEN_KEYS`` (both tokens).
+    """
+    for key in keys:
+        storage.pop(key, None)
 
 
 def _format_eta(total_messages: int, rate_limit: float) -> str:
