@@ -1404,6 +1404,15 @@ def migrate_page() -> None:
         except Exception as exc:
             log_display.push(f"[ERROR] Unexpected error: {exc}")
             ui.notify(f"Unexpected error: {exc}", type="negative")
+        finally:
+            # Terminal owner of session-token cleanup, for BOTH offline and
+            # orchestrated modes, on success AND error. (Offline mode never
+            # visits /export, so its finally is the only cleanup point.) Safe
+            # because this runs AFTER run_migration returns: config already holds
+            # its own token copy (a plain str), the engine never reads
+            # app.storage, and the only in-_run storage read (config.resume,
+            # above) has already completed. Do NOT move token reads below this.
+            _clear_tokens(storage, _SESSION_TOKEN_KEYS)
 
     background_tasks.create(_run())
 
