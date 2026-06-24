@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_add_reaction, get_session
+from discord_ferry.state import save_state
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -58,7 +60,9 @@ async def run_reactions(
     )
 
     if config.dry_run:
-        state.reactions_applied = len(state.pending_reactions)
+        state.reactions_applied = total
+        state.reaction_message_counts = {}
+        state.pending_reactions = []
         on_event(
             MigrationEvent(
                 phase="reactions",
@@ -68,11 +72,15 @@ async def run_reactions(
         )
         return
 
-    # Track per-message reaction counts to enforce the 20-per-message Stoat limit.
-    per_message_counts: dict[str, int] = {}
+    # Resume-safe: seed per-message cap counts from persisted state.
+    per_message_counts: dict[str, int] = dict(state.reaction_message_counts)
+    queue = list(state.pending_reactions)  # snapshot — we reassign state.pending_reactions below
+    remaining: list[dict[str, object]] = []
+    checkpoint_interval = max(config.checkpoint_interval, 1)
+    last_save = time.monotonic()
 
     async with get_session(config) as session:
-        for idx, entry in enumerate(state.pending_reactions, start=1):
+        for pos, entry in enumerate(queue, start=1):
             channel_id = str(entry["channel_id"])
             message_id = str(entry["message_id"])
             emoji = str(entry["emoji"])
@@ -87,11 +95,11 @@ async def run_reactions(
                             f"Skipping reaction on message {message_id} "
                             f"— already at {_MAX_REACTIONS_PER_MESSAGE} reactions"
                         ),
-                        current=idx,
+                        current=pos,
                         total=total,
                     )
                 )
-                continue
+                continue  # cap-skipped: consumed (not retried, not retained)
 
             try:
                 await api_add_reaction(
@@ -99,17 +107,17 @@ async def run_reactions(
                 )
                 state.reactions_applied += 1
                 per_message_counts[message_id] = current_count + 1
-
                 on_event(
                     MigrationEvent(
                         phase="reactions",
                         status="progress",
                         message=f"Added reaction {emoji} to message {message_id}",
-                        current=idx,
+                        current=pos,
                         total=total,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
+                remaining.append(entry)  # retained for resume
                 state.errors.append(
                     {
                         "phase": "reactions",
@@ -124,13 +132,27 @@ async def run_reactions(
                     MigrationEvent(
                         phase="reactions",
                         status="error",
-                        message=f"Failed reaction {emoji} on {message_id}: {exc}",
-                        current=idx,
+                        message=f"Failed to add reaction {emoji} to message {message_id}: {exc}",
+                        current=pos,
                         total=total,
                     )
                 )
 
+            # Periodic checkpoint: persist counter + remaining (incl. unprocessed tail)
+            # + per-message counts together in ONE save_state — never a subset.
+            now = time.monotonic()
+            if pos % checkpoint_interval == 0 and now - last_save >= 5.0:
+                state.pending_reactions = remaining + queue[pos:]
+                state.reaction_message_counts = per_message_counts
+                save_state(state, config.output_dir)
+                last_save = now
+
             await asyncio.sleep(0.5)
+
+    # Final settle: only un-applied (failed) entries remain.
+    state.pending_reactions = remaining
+    state.reaction_message_counts = per_message_counts
+    save_state(state, config.output_dir)
 
     on_event(
         MigrationEvent(
