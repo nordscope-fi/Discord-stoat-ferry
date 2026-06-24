@@ -683,6 +683,173 @@ async def test_run_roles_colour_without_hash(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: ROLES — live role discovery (union sourcing)
+# ---------------------------------------------------------------------------
+
+
+async def test_live_only_role_is_created(tmp_path: Path) -> None:
+    """A live role absent from every export author is still created via the union."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    # Export author posts under r1 only; r2 exists live but nobody posted under it.
+    role_a = DCERole(id="r1", name="Admin")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role_a])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={
+            "r1": RoleMeta(name="Admin", position=0),
+            "r2": RoleMeta(name="LiveOnly", position=1),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    created_names: list[str] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r1", "name": "Admin"},
+            callback=lambda url, **kwargs: created_names.append(  # type: ignore[misc]
+                kwargs.get("json", {}).get("name", "")
+            ),
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r2", "name": "LiveOnly"},
+            callback=lambda url, **kwargs: created_names.append(  # type: ignore[misc]
+                kwargs.get("json", {}).get("name", "")
+            ),
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r2", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert "LiveOnly" in created_names
+    assert state.role_map.get("r2") == "stoat-r2"
+
+
+async def test_overlap_role_uses_live_name_color(tmp_path: Path) -> None:
+    """A role in both export and live metadata uses the LIVE name/colour."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    # Export carries the stale name/no colour; live metadata wins.
+    role = DCERole(id="r1", name="OldName")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(name="NewName", color="#00ff00", position=0)},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    created_names: list[str] = []
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r1", "name": "NewName"},
+            callback=lambda url, **kwargs: created_names.append(  # type: ignore[misc]
+                kwargs.get("json", {}).get("name", "")
+            ),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    assert created_names == ["NewName"]
+    assert any(body.get("colour") == 0x00FF00 for body in patch_bodies)
+
+
+async def test_managed_role_not_created(tmp_path: Path) -> None:
+    """A managed role (excluded at capture, absent from role_metadata) is not created."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Admin")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    # role_metadata enumerates only non-managed roles; the managed "rbot" is absent.
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(name="Admin", position=0)},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    created_ids: list[str] = []
+
+    def _capture(url: object, **kwargs: object) -> None:
+        name = kwargs.get("json", {}).get("name", "")  # type: ignore[union-attr]
+        created_ids.append(name)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-r1", "name": "Admin"},
+            callback=_capture,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert created_ids == ["Admin"]
+    assert state.role_map == {"r1": "stoat-r1"}
+
+
+async def test_no_token_fallback_unchanged(tmp_path: Path) -> None:
+    """With no discord_metadata.json, the created set equals the export-derived set."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role_a = DCERole(id="r1", name="Admin")
+    role_b = DCERole(id="r2", name="Mod")
+    exports = [
+        _make_export(
+            messages=[
+                _make_message("m1", roles=[role_a]),
+                _make_message("m2", roles=[role_b]),
+            ]
+        )
+    ]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2", "name": "Mod"})
+
+        await run_roles(config, state, exports, events.append)
+
+    # Exactly the two export-derived roles, no live union.
+    assert state.role_map == {"r1": "stoat-r1", "r2": "stoat-r2"}
+
+
+# ---------------------------------------------------------------------------
 # Phase 5: CATEGORIES
 # ---------------------------------------------------------------------------
 

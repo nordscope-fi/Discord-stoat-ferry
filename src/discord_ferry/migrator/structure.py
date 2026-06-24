@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.discord.client import download_role_icon
-from discord_ferry.discord.metadata import load_discord_metadata
+from discord_ferry.discord.metadata import RoleMeta, load_discord_metadata
 from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
@@ -31,6 +31,7 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.parser.models import DCERole
 from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
-    from discord_ferry.parser.models import DCEChannel, DCEExport, DCERole
+    from discord_ferry.parser.models import DCEChannel, DCEExport
     from discord_ferry.state import MigrationState
 
 logger = logging.getLogger(__name__)
@@ -403,6 +404,14 @@ async def _resolve_role_icon(
         temp_path.unlink(missing_ok=True)
 
 
+def _role_from_metadata(role_id: str, rm: RoleMeta) -> DCERole:
+    """Build a DCERole from live Discord metadata (for roles absent from the export).
+
+    Lives here (not in parser/models) so parser/ never imports discord/metadata.
+    """
+    return DCERole(id=role_id, name=rm.name, color=rm.color or None, position=rm.position)
+
+
 async def run_roles(
     config: FerryConfig,
     state: MigrationState,
@@ -440,6 +449,16 @@ async def run_roles(
 
     # Filter out the @everyone role.
     roles_to_create = [r for r in unique_roles if r.id != guild_id]
+
+    # Live role discovery: union the export-derived roles with the full live role
+    # list (already captured in discord_metadata.role_metadata, which enumerates
+    # every non-managed, non-@everyone role). Live wins on name/color/position.
+    discord_metadata = load_discord_metadata(config.output_dir)
+    if discord_metadata is not None:
+        merged_roles: dict[str, DCERole] = {r.id: r for r in roles_to_create}
+        for role_id, live_rm in discord_metadata.role_metadata.items():
+            merged_roles[role_id] = _role_from_metadata(role_id, live_rm)
+        roles_to_create = list(merged_roles.values())
 
     # Incremental: capture which roles already exist BEFORE the creation loop
     # populates role_map, so the create/attributes/perms passes can skip them.
