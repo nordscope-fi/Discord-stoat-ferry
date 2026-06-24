@@ -208,8 +208,9 @@ async def run_migration(
             #     reactions_applied, pins_applied). prior_messages_total is DERIVED
             #     here from len(prior.message_map).
             #   RESET each run: completed_channel_ids (re-enter every channel for
-            #     new msgs); pending_pins / pending_reactions (consumed by REPORT —
-            #     carrying a stale list would re-pin/re-react); failed_messages,
+            #     new msgs); pending_pins / pending_reactions (consumed by the
+            #     reactions/pins phases — carrying a stale list would re-pin/re-react);
+            #     failed_messages,
             #     warnings / errors, validation_results, embeds_* / replies_*
             #     (per-run fidelity counters); current_phase, started_at,
             #     completed_at, export_completed, rollback_progress, is_dry_run.
