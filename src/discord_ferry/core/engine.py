@@ -182,6 +182,7 @@ async def run_migration(
             # Keep offsets so messages phase resumes from last offset per channel.
             # CLEAR completed_channel_ids so every channel is re-entered (new messages may exist).
             state.channel_message_offsets = dict(prior.channel_message_offsets)
+            state.channel_high_water = dict(prior.channel_high_water)
             state.completed_channel_ids = set()
             # S3 + I2: carry forum index + per-channel counts so REPORT's
             # _rebuild_forum_indexes PATCHes (not re-posts) with cumulative counts,
@@ -201,6 +202,8 @@ async def run_migration(
             #     category_names, channel_categories, message_map, avatar_cache,
             #     upload_cache, author_names, stoat_server_id, autumn_url,
             #     invite_code / invite_url, channel_message_offsets,
+            #     channel_high_water (durable per-channel high-water mark for
+            #     --incremental delta skipping),
             #     channel_message_counts, forum_channel_members /
             #     forum_category_names / forum_index_message_ids,
             #     native_fidelity_counts (cumulative fidelity counter), and the

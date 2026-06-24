@@ -125,6 +125,27 @@ def _make_message(
     return DCEMessage(**defaults)
 
 
+def _capture_sends(sent: list[dict[str, Any]]) -> Any:
+    """Patch target for api_send_message: record kwargs, return a fake id."""
+
+    async def _send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent.append(kwargs)
+        return {"_id": f"stoat-{kwargs.get('idempotency_key', 'x')}"}
+
+    return _send
+
+
+def _sent_message_ids(sent: list[dict[str, Any]]) -> list[str]:
+    """Discord ids of captured MESSAGE sends (excludes the thread/forum header)."""
+    return [
+        k["idempotency_key"].removeprefix("ferry-")
+        for k in sent
+        if not k["idempotency_key"].startswith("ferry-header-")
+    ]
+
+
 def _collect_events(events: list[MigrationEvent]) -> Any:
     def callback(event: MigrationEvent) -> None:
         events.append(event)
@@ -2242,3 +2263,241 @@ async def test_reaction_count_mixed_some_over_one(tmp_path: Path) -> None:
     assert "[Original counts:" in sent_content[0]
     assert "fire" in sent_content[0]
     assert "wave" not in sent_content[0]
+
+
+async def test_incremental_skips_at_or_below_high_water(tmp_path: Path) -> None:
+    """SC-1: incremental copies only ids > the durable high-water mark."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={"ch1": "200"}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[
+            _make_message(id="100", timestamp="2024-01-01T00:00:00+00:00"),
+            _make_message(id="200", timestamp="2024-01-02T00:00:00+00:00"),
+            _make_message(id="300", timestamp="2024-01-03T00:00:00+00:00"),
+            _make_message(id="400", timestamp="2024-01-04T00:00:00+00:00"),
+        ],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["300", "400"]
+
+
+async def test_marker_written_at_completion_is_max_id(tmp_path: Path) -> None:
+    """SC-2: full run writes channel_high_water=max id; transient offset popped."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    export = _make_export(
+        messages=[_make_message(id="100"), _make_message(id="200"), _make_message(id="300")],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert state.channel_high_water["ch1"] == "300"
+    assert "ch1" not in state.channel_message_offsets
+    assert "ch1" in state.completed_channel_ids
+
+
+async def test_marker_is_true_max_not_last_by_timestamp(tmp_path: Path) -> None:
+    """SC-10: id order disagrees with timestamp order -> marker is the true max id."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    export = _make_export(
+        messages=[
+            _make_message(id="300", timestamp="2024-01-01T00:00:00+00:00"),
+            _make_message(id="100", timestamp="2024-06-01T00:00:00+00:00"),
+        ],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert state.channel_high_water["ch1"] == "300"
+
+
+async def test_empty_export_writes_no_marker(tmp_path: Path) -> None:
+    """SC-11: a channel with no messages writes no marker and does not crash."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    export = _make_export(messages=[])
+    await run_messages(config, state, [export], lambda e: None)
+    assert "ch1" not in state.channel_high_water
+    assert "ch1" in state.completed_channel_ids
+
+
+async def test_incremental_crashed_prior_falls_back_to_offset(tmp_path: Path) -> None:
+    """SC-8: no durable marker but a carried transient offset -> max() uses the offset."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={}, channel_message_offsets={"ch1": "200"})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[_make_message(id="100"), _make_message(id="200"), _make_message(id="300")],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["300"]
+
+
+async def test_incremental_new_channel_full_copy(tmp_path: Path) -> None:
+    """SC-9: a channel with no marker/offset copies every message."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[_make_message(id="100"), _make_message(id="200"), _make_message(id="300")],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["100", "200", "300"]
+
+
+async def test_incremental_no_new_messages_count_not_inflated(tmp_path: Path) -> None:
+    """SC-6: a no-new-messages incremental leaves channel_message_counts unchanged."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(
+        channel_high_water={"ch1": "400"},
+        channel_message_offsets={},
+        channel_message_counts={"ch1": 800},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[
+            _make_message(id="100"),
+            _make_message(id="200"),
+            _make_message(id="300"),
+            _make_message(id="400"),
+        ],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == []
+    assert state.channel_message_counts["ch1"] == 800
+
+
+async def test_incremental_k_new_raises_count_by_k(tmp_path: Path) -> None:
+    """SC-7: K new messages raise the per-channel count by exactly K."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(
+        channel_high_water={"ch1": "200"},
+        channel_message_offsets={},
+        channel_message_counts={"ch1": 800},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[
+            _make_message(id="100"),
+            _make_message(id="200"),
+            _make_message(id="300"),
+            _make_message(id="400"),
+        ],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert state.channel_message_counts["ch1"] == 802
+
+
+async def test_incremental_old_state_degrades_to_full_copy(tmp_path: Path) -> None:
+    """SC-15: incremental off an old state (no marker, no offset) re-copies all (harmless)."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["100", "200"]
+
+
+async def test_resume_uses_transient_offset_unchanged(tmp_path: Path) -> None:
+    """SC-16: --resume still skips via the transient offset (byte-for-byte unchanged)."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_message_offsets={"ch1": "200"}, channel_high_water={})
+    config = _make_config(tmp_path, resume=True)
+    export = _make_export(
+        messages=[_make_message(id="100"), _make_message(id="200"), _make_message(id="300")],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["300"]
+
+
+async def test_incremental_completion_event_reports_new_and_skipped(tmp_path: Path) -> None:
+    """SC-20: incremental completion event reports copied-new and skipped counts."""
+    sent: list[dict[str, Any]] = []
+    events: list[MigrationEvent] = []
+    state = _make_state(channel_high_water={"ch1": "200"}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[
+            _make_message(id="100"),
+            _make_message(id="200"),
+            _make_message(id="300"),
+            _make_message(id="400"),
+        ],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], _collect_events(events))
+    msgs = [e.message for e in events if e.message.startswith("Completed 'general'")]
+    assert any("2 new, 2 already present" in m for m in msgs)
+
+
+async def test_dry_run_incremental_writes_no_marker(tmp_path: Path) -> None:
+    """SC-12: dry-run takes the separate early branch and never writes channel_high_water.
+
+    Pre-seed an existing marker so the assertion distinguishes "never wrote" from
+    "wrote then deleted" — the dry-run path must leave the marker untouched.
+    """
+    state = _make_state(channel_high_water={"ch1": "999"})
+    config = _make_config(tmp_path, incremental=True, dry_run=True)
+    export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    await run_messages(config, state, [export], lambda e: None)
+    assert state.channel_high_water == {"ch1": "999"}
+
+
+async def test_non_numeric_message_id_not_skipped_or_marked(tmp_path: Path) -> None:
+    """isdigit guard: a non-numeric id is copied (never skipped) and never advances the marker."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={"ch1": "200"}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_export(
+        messages=[_make_message(id="system-msg", timestamp="2024-01-01T00:00:00+00:00")],
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["system-msg"]  # non-numeric id is not skipped
+    assert state.channel_high_water["ch1"] == "200"  # marker unchanged (non-numeric ignored)
+
+
+def _make_thread_export(
+    channel_id: str = "ch1", messages: list[DCEMessage] | None = None
+) -> DCEExport:
+    return DCEExport(
+        guild=_make_guild(),
+        channel=DCEChannel(id=channel_id, type=0, name="thread"),
+        messages=messages or [],
+        is_thread=True,
+        parent_channel_name="general",
+    )
+
+
+async def test_unchanged_thread_makes_zero_posts(tmp_path: Path) -> None:
+    """SC-4: an unchanged thread channel (marker present) posts nothing — not even the header."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={"ch1": "200"}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_thread_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert sent == []
+
+
+async def test_new_thread_posts_header(tmp_path: Path) -> None:
+    """SC-5: a brand-new thread channel (no marker) posts the header."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_thread_export(messages=[_make_message(id="100")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    headers = [
+        k.get("content") for k in sent if k.get("idempotency_key", "").startswith("ferry-header-")
+    ]
+    assert headers == ["[Thread migrated from #general]"]

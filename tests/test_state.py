@@ -573,3 +573,23 @@ def test_new_reporting_fields_default_when_absent(tmp_path: Path) -> None:
     loaded = load_state(tmp_path)
     assert loaded.source_messages_total == 0
     assert loaded.reaction_message_counts == {}
+
+
+def test_channel_high_water_round_trips(tmp_path: Path) -> None:
+    """channel_high_water survives save/load unchanged."""
+    state = MigrationState(channel_high_water={"ch1": "500", "ch2": "42"})
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.channel_high_water == {"ch1": "500", "ch2": "42"}
+
+
+def test_load_state_defaults_channel_high_water(tmp_path: Path) -> None:
+    """A pre-feature state.json without channel_high_water loads with {} (back-compat)."""
+    state = MigrationState(channel_map={"a": "b"})
+    save_state(state, tmp_path)
+    path = tmp_path / "state.json"
+    data = json.loads(path.read_text())
+    data.pop("channel_high_water", None)  # emulate a v2.6.2 file
+    path.write_text(json.dumps(data))
+    loaded = load_state(tmp_path)
+    assert loaded.channel_high_water == {}
