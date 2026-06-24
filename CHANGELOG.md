@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.0] - 2026-06-24
+
+### Added
+
+- **Live role discovery — migrate every server role, not just roles whose members posted** (`migrator/structure.py`, `discord/metadata.py`, `discord/__init__.py`, `migrator/api.py`). Previously `run_roles` derived its role set from `msg.author.roles`, so a role only migrated if someone wearing it posted in an exported channel — empty/structural/staff roles silently vanished. When a `discord_token` is supplied, role creation now sources from the **union** of export-derived roles and the full live Discord role list (already captured in `discord_metadata.role_metadata`, which enumerates every non-managed, non-@everyone role). For a role present in both, the **live** name/colour/position win over the (possibly stale) export snapshot. `RoleMeta` gained `name` and `color` (normalised to hex at capture); a `_role_from_metadata` adapter synthesises a `DCERole` for live-only roles so all three existing role passes (create / rank / permissions) cover them unchanged.
+- **Graceful Stoat role-cap handling.** Stoat enforces a configurable `server_roles` limit (default 200) that the wider role set can now reach. The live limit is read best-effort from `GET /` (`features.limits.global.server_roles`, via a new `api_fetch_root` wrapper, 200 fallback); if the union exceeds it, the lowest-priority roles by `(position, id)` are dropped with a single `role_limit_exceeded` warning, and a `TooManyRoles` create-time backstop stops gracefully rather than crashing the phase.
+- **Reporter credit** (`reporter.py`): the `## Native Fidelity` section now reports the count of recovered "structural" roles (live-only roles absent from the export), counted per-run.
+
+### Changed
+
+- Role rank ordering now sorts by `(position, id)` (string id) for a deterministic tie-break when multiple roles share a Discord position — relevant now that the full live role list (with denser positions) feeds the rank pass.
+
+### Notes
+
+- Without a `discord_token` (no live metadata), role sourcing falls back to the prior export-derived behaviour byte-for-byte — same role set, same create order. Managed/integration roles and `@everyone` remain excluded. This does not assign members to roles (that requires a Discord→Stoat identity map, which does not exist); it only ensures the roles themselves are created.
+
 ## [2.5.1] - 2026-06-24
 
 ### Fixed
