@@ -837,3 +837,46 @@ def test_report_omits_invite_when_absent(tmp_path: Path) -> None:
     state = MigrationState()
     report = generate_report(config, state, exports=[])
     assert not report.get("invite", {}).get("code")
+
+
+# ---------------------------------------------------------------------------
+# S3: stats==JSON equality — reporter and summarize_state share denominator
+# ---------------------------------------------------------------------------
+
+
+def test_report_messages_matches_stats(tmp_path: Path) -> None:
+    """generate_report fidelity.messages equals summarize_state fidelity.messages (S3).
+
+    Divergence scenario: source_messages_total (100) != sum(export.message_count)
+    (80) simulates post-filter divergence.  With 10 failures the two denominators
+    produce different percentages:
+      old reporter (sum=80): (80-10)/80 = 87.5%
+      stats / new reporter (source_total=100): (100-10)/100 = 90.0%
+    The test is RED on pre-fix code and GREEN after reporter adopts source_messages_total.
+    """
+    from discord_ferry.stats import summarize_state
+
+    # exports total = 80, but engine recorded 100 source messages before filtering
+    exports = [
+        _make_export(channel_id="c1", message_count=50),
+        _make_export(channel_id="c2", message_count=30),
+    ]
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        source_messages_total=100,
+        message_map={f"m{i}": f"sm{i}" for i in range(90)},  # 90 imported
+        failed_messages=[
+            FailedMessage(discord_msg_id=f"fail{i}", stoat_channel_id="c1", error="err")
+            for i in range(10)
+        ],
+        reactions_applied=5,
+        pending_reactions=[],  # cleared — reactions sub-score = 100%
+    )
+
+    report = generate_report(config, state, exports)
+    summary = summarize_state(state)
+
+    # Core assertion: both surfaces agree on message fidelity %
+    assert report["fidelity"]["messages"] == summary.fidelity.messages
+    # Reactions: pending cleared → 100% on both surfaces
+    assert report["fidelity"]["reactions"] == 100.0
