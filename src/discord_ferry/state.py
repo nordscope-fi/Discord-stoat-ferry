@@ -59,6 +59,12 @@ class MigrationState:
     role_map: dict[str, str] = field(default_factory=dict)
     channel_map: dict[str, str] = field(default_factory=dict)
     category_map: dict[str, str] = field(default_factory=dict)
+    category_names: dict[str, str] = field(default_factory=dict)  # discord_cat_id -> title
+    # discord_ch_id -> effective discord_cat_id (the forum key for forum channels).
+    # Persisted so incremental re-runs can re-attach carried channels to the
+    # CORRECT category in the full-replace upsert, even with multiple
+    # simultaneously carried-only categories (exact, not best-effort).
+    channel_categories: dict[str, str] = field(default_factory=dict)
     message_map: dict[str, str] = field(default_factory=dict)
     emoji_map: dict[str, str] = field(default_factory=dict)
 
@@ -229,6 +235,8 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "role_map": state.role_map,
         "channel_map": state.channel_map,
         "category_map": state.category_map,
+        "category_names": state.category_names,
+        "channel_categories": state.channel_categories,
         "message_map": state.message_map,
         "emoji_map": state.emoji_map,
         "avatar_cache": state.avatar_cache,
@@ -295,6 +303,8 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             role_map=data.get("role_map", {}),
             channel_map=data.get("channel_map", {}),
             category_map=data.get("category_map", {}),
+            category_names=data.get("category_names", {}),
+            channel_categories=data.get("channel_categories", {}),
             message_map=data.get("message_map", {}),
             emoji_map=data.get("emoji_map", {}),
             avatar_cache=data.get("avatar_cache", {}),

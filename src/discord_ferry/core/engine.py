@@ -183,6 +183,39 @@ async def run_migration(
             # CLEAR completed_channel_ids so every channel is re-entered (new messages may exist).
             state.channel_message_offsets = dict(prior.channel_message_offsets)
             state.completed_channel_ids = set()
+            # S3 + I2: carry forum index + per-channel counts so REPORT's
+            # _rebuild_forum_indexes PATCHes (not re-posts) with cumulative counts,
+            # and channel_categories so the CHANNELS upsert re-attaches carried
+            # channels to the correct category on a partial re-export.
+            state.forum_channel_members = {
+                k: list(v) for k, v in prior.forum_channel_members.items()
+            }
+            state.forum_category_names = dict(prior.forum_category_names)
+            state.forum_index_message_ids = dict(prior.forum_index_message_ids)
+            state.channel_message_counts = dict(prior.channel_message_counts)
+            state.category_names = dict(prior.category_names)
+            state.channel_categories = dict(prior.channel_categories)
+            state.native_fidelity_counts = dict(prior.native_fidelity_counts)
+            # Carry-over audit (every MigrationState field classified):
+            #   CARRY: role_map / channel_map / category_map / emoji_map,
+            #     category_names, channel_categories, message_map, avatar_cache,
+            #     upload_cache, author_names, stoat_server_id, autumn_url,
+            #     invite_code / invite_url, channel_message_offsets,
+            #     channel_message_counts, forum_channel_members /
+            #     forum_category_names / forum_index_message_ids,
+            #     native_fidelity_counts (cumulative fidelity counter), and the
+            #     cumulative counters (attachments_uploaded/skipped,
+            #     reactions_applied, pins_applied). prior_messages_total is DERIVED
+            #     here from len(prior.message_map).
+            #   RESET each run: completed_channel_ids (re-enter every channel for
+            #     new msgs); pending_pins / pending_reactions (consumed by REPORT —
+            #     carrying a stale list would re-pin/re-react); failed_messages,
+            #     warnings / errors, validation_results, embeds_* / replies_*
+            #     (per-run fidelity counters); current_phase, started_at,
+            #     completed_at, export_completed, rollback_progress, is_dry_run.
+            #   DECISION: autumn_uploads / referenced_autumn_ids stay reset —
+            #     orphan-sweep is per-run; carrying matters only if a cross-run
+            #     sweep is added (none today).
             on_event(
                 MigrationEvent(
                     phase="validate",

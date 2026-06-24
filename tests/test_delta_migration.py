@@ -197,6 +197,48 @@ async def test_incremental_new_channel_full_migration(tmp_path: Path) -> None:
     assert "300" in processed_ids
 
 
+async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> None:
+    """SC-8: incremental carry-over copies forum fields + counts + category maps.
+
+    Regression: on main only the ID maps are carried, so forum_channel_members,
+    forum_category_names, forum_index_message_ids, channel_message_counts,
+    category_names, and channel_categories are silently reset to empty — which
+    makes the forum-index rebuild re-POST (instead of PATCH) and report delta
+    (instead of cumulative) counts on the 2nd run.
+    """
+    forum_key = "forum-my-forum"
+    prior = _make_prior_state(
+        tmp_path,
+        channel_map={"fp1": "stoat-fp1", f"forum-index-{forum_key}": "stoat-idx1"},
+        category_map={forum_key: "stoat-forumcat", "cat1": "stoat-cat1"},
+        category_names={forum_key: "my-forum", "cat1": "General"},
+        forum_channel_members={forum_key: ["fp1"]},
+        forum_category_names={forum_key: "my-forum"},
+        forum_index_message_ids={forum_key: "idx-msg-1"},
+        channel_message_counts={"fp1": 800},
+        channel_categories={"fp1": forum_key, "ch1": "cat1"},
+        native_fidelity_counts={"slowmode": 2, "user_limit": 1},
+    )
+    # Non-empty message_map so prior_messages_total is meaningful.
+    prior.message_map["old-1"] = "stoat-old-1"
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+
+    # All forum-rebuild + membership fields carried verbatim from the prior run.
+    assert state.forum_channel_members == {forum_key: ["fp1"]}
+    assert state.forum_category_names == {forum_key: "my-forum"}
+    assert state.forum_index_message_ids == {forum_key: "idx-msg-1"}
+    assert state.channel_message_counts == {"fp1": 800}
+    assert state.category_names == {forum_key: "my-forum", "cat1": "General"}
+    assert state.channel_categories == {"fp1": forum_key, "ch1": "cat1"}
+    # native_fidelity_counts carried cumulatively so the report reflects all runs.
+    assert state.native_fidelity_counts == {"slowmode": 2, "user_limit": 1}
+    # Carried lists are copies, not aliases of the prior structures.
+    assert state.forum_channel_members[forum_key] is not prior.forum_channel_members[forum_key]
+
+
 async def test_incremental_delta_stats_in_report(tmp_path: Path) -> None:
     """Report includes delta stats: this_run, cumulative, prior_run_total."""
     from discord_ferry.reporter import generate_report

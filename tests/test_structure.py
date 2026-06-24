@@ -2121,7 +2121,7 @@ async def test_banner_download_includes_auth_header(tmp_path: Path) -> None:
         captured_headers.append(dict(headers))  # type: ignore[arg-type]
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
         m.get(
             f"{BANNER_CDN}/111/testhash.png?size=1024",
             body=b"FAKEPNG",
@@ -2161,7 +2161,7 @@ async def test_banner_download_no_auth_header_when_no_token(tmp_path: Path) -> N
         captured_headers.append(dict(headers))  # type: ignore[arg-type]
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
         m.get(
             f"{BANNER_CDN}/111/testhash.png?size=1024",
             body=b"FAKEPNG",
