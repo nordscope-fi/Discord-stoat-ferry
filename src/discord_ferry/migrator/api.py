@@ -276,9 +276,7 @@ async def api_fetch_server(
     return await _api_request(session, "GET", url, token)
 
 
-async def api_fetch_root(
-    session: aiohttp.ClientSession, stoat_url: str
-) -> dict[str, Any]:
+async def api_fetch_root(session: aiohttp.ClientSession, stoat_url: str) -> dict[str, Any]:
     """Best-effort GET / for instance config (limits, app URL).
 
     Returns the parsed config dict, or ``{}`` on any non-200 status, network
