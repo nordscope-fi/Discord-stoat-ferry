@@ -13,6 +13,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core.engine import _rebuild_forum_indexes
 from discord_ferry.discord.metadata import (
     DiscordMetadata,
     PermissionPair,
@@ -20,6 +21,7 @@ from discord_ferry.discord.metadata import (
     save_discord_metadata,
 )
 from discord_ferry.errors import MigrationError
+from discord_ferry.migrator.messages import ChannelResult, _merge_channel_result
 from discord_ferry.migrator.structure import (
     run_categories,
     run_channels,
@@ -614,11 +616,14 @@ async def test_rerun_partial_export_keeps_carried_only_category(tmp_path: Path) 
         ),
     ]
     # Prior: category C (cat1) with two carried channels; cat2 not yet mapped.
+    # channel_categories is what a real prior run persists — the upsert seeds
+    # carried-channel membership from it (exact), not from a heuristic.
     state = MigrationState(
         stoat_server_id="srv1",
         category_map={"cat1": "stoat-cat1"},
         channel_map={"ch1": "stoat-ch1", "ch2": "stoat-ch2"},
         category_names={"cat1": "General"},
+        channel_categories={"ch1": "cat1", "ch2": "cat1"},
     )
     config = _make_config(tmp_path, incremental=True)
 
@@ -726,3 +731,180 @@ async def test_rerun_forum_index_channel_not_recreated(tmp_path: Path) -> None:
     forum_channels = by_id["stoat-forumcat"]["channels"]  # type: ignore[index]
     assert forum_channels[0] == "stoat-idx1", "Carried index channel not re-attached at top"
     assert "stoat-fp1" in forum_channels
+
+
+# ---------------------------------------------------------------------------
+# SC-7b: Two simultaneously carried-only categories — exact membership
+# ---------------------------------------------------------------------------
+
+
+async def test_rerun_two_carried_only_categories_keep_own_channels(tmp_path: Path) -> None:
+    """SC-7b: two carried-only categories each retain ONLY their own channels.
+
+    Prior state has cat A with {a1, a2} and cat B with {b1, b2}, all carried,
+    plus a persisted ``channel_categories`` mapping every channel to its category.
+    The current (partial) export contains only a new channel in a THIRD category.
+
+    The authoritative upsert must place a1,a2 under A and b1,b2 under B — no
+    cross-contamination and no duplication. This FAILS against Task 3's
+    best-effort heuristic (which extends every unplaced carried channel onto
+    every carried-only category) and PASSES with exact channel_categories seeding.
+    """
+    # Current export: only a new channel in a third category (catC).
+    exports = [
+        _make_export(
+            channel_id="new1", channel_name="newchan", category_id="catC", category="Fresh"
+        ),
+    ]
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"catA": "stoat-catA", "catB": "stoat-catB"},
+        channel_map={
+            "a1": "stoat-a1",
+            "a2": "stoat-a2",
+            "b1": "stoat-b1",
+            "b2": "stoat-b2",
+        },
+        category_names={"catA": "Alpha", "catB": "Bravo"},
+        channel_categories={
+            "a1": "catA",
+            "a2": "catA",
+            "b1": "catB",
+            "b2": "catB",
+        },
+    )
+    config = _make_config(tmp_path, incremental=True, upload_delay=0)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-new1", "name": "newchan"},
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_categories(config, state, exports, lambda e: None)
+        await run_channels(config, state, exports, lambda e: None)
+
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    # Each carried-only category contains ONLY its own channels — no cross-talk.
+    assert set(by_id["stoat-catA"]["channels"]) == {"stoat-a1", "stoat-a2"}  # type: ignore[index]
+    assert set(by_id["stoat-catB"]["channels"]) == {"stoat-b1", "stoat-b2"}  # type: ignore[index]
+    # No duplication within either category.
+    assert len(by_id["stoat-catA"]["channels"]) == 2  # type: ignore[index]
+    assert len(by_id["stoat-catB"]["channels"]) == 2  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# SC-9 (rebuild): _rebuild_forum_indexes PATCHes the carried index message
+# ---------------------------------------------------------------------------
+
+
+async def test_rebuild_forum_indexes_patches_on_rerun(tmp_path: Path) -> None:
+    """SC-9: with a carried forum_index_message_ids, the rebuild edits (PATCHes).
+
+    When ``forum_index_message_ids`` is carried from the prior run, the REPORT
+    phase's ``_rebuild_forum_indexes`` must call ``api_edit_message`` (PATCH on
+    /channels/{id}/messages/{msg}) exactly once per forum and must NOT POST a new
+    message. On main this map is reset, so the rebuild re-POSTs a duplicate.
+    """
+    forum_key = "forum-my-forum"
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map={"fp1": "stoat-fp1", f"forum-index-{forum_key}": "stoat-idx1"},
+        forum_category_names={forum_key: "my-forum"},
+        forum_channel_members={forum_key: ["fp1"]},
+        forum_index_message_ids={forum_key: "idx-msg-1"},
+        channel_message_counts={"fp1": 5},
+    )
+    config = _make_config(tmp_path, incremental=True, upload_delay=0)
+
+    patch_calls: list[object] = []
+    post_calls: list[object] = []
+
+    with aioresponses() as m:
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg-1",
+            payload={"_id": "idx-msg-1"},
+            repeat=True,
+            callback=lambda url, **kw: patch_calls.append(url),  # type: ignore[misc]
+        )
+        # A POST would only fire if the carried message id were ignored (the bug).
+        m.post(
+            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            payload={"_id": "new-msg"},
+            repeat=True,
+            callback=lambda url, **kw: post_calls.append(url),  # type: ignore[misc]
+        )
+
+        await _rebuild_forum_indexes(config, state, lambda e: None)
+
+    assert len(patch_calls) == 1, f"Expected exactly 1 PATCH (edit), got {len(patch_calls)}"
+    assert post_calls == [], "Expected 0 new index-message POSTs on re-run"
+
+
+# ---------------------------------------------------------------------------
+# SC-10: Rebuilt forum index reports CUMULATIVE counts (prior + new)
+# ---------------------------------------------------------------------------
+
+
+async def test_rebuild_forum_indexes_reports_cumulative_counts(tmp_path: Path) -> None:
+    """SC-10: carried count (800) + this-run delta (47) → index shows 847.
+
+    Mirrors the 2nd-run flow: the incremental carry-over seeds
+    ``channel_message_counts={'fp1': 800}``; the MESSAGES phase then accumulates
+    47 new messages via ``+=`` (simulated through ``_merge_channel_result``);
+    the rebuild's PATCH body must report 847, not the delta 47. On main the count
+    is not carried, so the body would show 47.
+    """
+    forum_key = "forum-my-forum"
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map={"fp1": "stoat-fp1", f"forum-index-{forum_key}": "stoat-idx1"},
+        forum_category_names={forum_key: "my-forum"},
+        forum_channel_members={forum_key: ["fp1"]},
+        forum_index_message_ids={forum_key: "idx-msg-1"},
+        # Carried cumulative count from the prior run.
+        channel_message_counts={"fp1": 800},
+    )
+    # This run's MESSAGES phase migrates 47 new messages; accumulates via +=.
+    _merge_channel_result(state, ChannelResult(channel_id="fp1", messages_migrated=47))
+    assert state.channel_message_counts["fp1"] == 847  # sanity: carry + delta
+
+    config = _make_config(tmp_path, incremental=True, upload_delay=0)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg-1",
+            payload={"_id": "idx-msg-1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await _rebuild_forum_indexes(config, state, lambda e: None)
+
+    assert patch_bodies, "Expected an api_edit_message PATCH"
+    content = patch_bodies[-1].get("content", "")
+    assert isinstance(content, str)
+    # The fp1 line must report the cumulative 847, not the delta 47. Match the
+    # full per-channel line so "847" is not mistaken for a substring of "47".
+    assert "<#stoat-fp1> — 847 messages migrated" in content, (
+        f"Expected cumulative 847 for fp1, got: {content!r}"
+    )
+    assert "<#stoat-fp1> — 47 messages migrated" not in content, (
+        "Index showed delta count, not cumulative"
+    )

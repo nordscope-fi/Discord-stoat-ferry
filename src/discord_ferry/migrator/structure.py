@@ -942,6 +942,13 @@ async def run_channels(
                 if ch.id not in state.forum_channel_members.get(discord_cat_id, []):
                     state.forum_channel_members.setdefault(discord_cat_id, []).append(ch.id)
 
+            # Persist the effective Discord category for this channel (the forum
+            # key for forum channels). Runs for BOTH carried and new channels so a
+            # future incremental re-run can re-attach carried channels to the
+            # CORRECT category — exact even with multiple carried-only categories.
+            if discord_cat_id:
+                state.channel_categories[ch.id] = discord_cat_id
+
             # Track which Stoat category this channel belongs to.
             if discord_cat_id and discord_cat_id in state.category_map:
                 stoat_cat_id = state.category_map[discord_cat_id]
@@ -1076,26 +1083,17 @@ async def run_channels(
                     )
 
             # Re-attach carried channels that this run did not place into any
-            # category (their category is absent from a partial re-export). They are
-            # distributed to carried-only categories (those with no channels recorded
-            # this run) so the full-replace upsert does not orphan them. Membership is
-            # not persisted, so with multiple carried-only categories the partition is
-            # best-effort; in the common case (DCE re-exports full structure, or a
-            # single carried-only category) it is exact.
-            placed_channel_ids = {cid for ids in category_channels.values() for cid in ids}
-            unplaced_carried = [
-                stoat_ch_id
-                for ch_id, stoat_ch_id in state.channel_map.items()
-                if not ch_id.startswith("forum-index-") and stoat_ch_id not in placed_channel_ids
-            ]
-            if unplaced_carried:
-                carried_only_cats = [
-                    state.category_map[discord_cat_id]
-                    for discord_cat_id in state.category_map
-                    if state.category_map[discord_cat_id] not in category_channels
-                ]
-                for stoat_cat_id in carried_only_cats:
-                    category_channels.setdefault(stoat_cat_id, []).extend(unplaced_carried)
+            # category (their category is absent from a partial re-export) so the
+            # full-replace upsert does not orphan them. Seed EXACTLY from the
+            # persisted channel->category map: each carried channel goes back under
+            # its own recorded category, which is correct for ANY number of
+            # simultaneously carried-only categories (no cross-contamination). The
+            # ``not in`` guard dedups against channels already placed this run.
+            for discord_ch_id, discord_cat_id in state.channel_categories.items():
+                stoat_cat = state.category_map.get(discord_cat_id)
+                stoat_ch = state.channel_map.get(discord_ch_id)
+                if stoat_cat and stoat_ch and stoat_ch not in category_channels.get(stoat_cat, []):
+                    category_channels.setdefault(stoat_cat, []).append(stoat_ch)
 
             # Build the full categories array.
             all_categories: list[dict[str, Any]] = []
