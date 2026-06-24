@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.1] - 2026-06-24
+
+### Fixed
+
+- **GUI token lifecycle — two HIGH security/state-lifecycle defects in the NiceGUI shell** (`gui.py`), from the 2026-06-24 codebase bug hunt. Token cleanup is now centralised through a single `_clear_tokens(storage, keys)` helper and a `_SESSION_TOKEN_KEYS = ("token", "discord_token")` constant (`stoat_url` intentionally excluded — it is an instance URL, not a credential).
+  - **Orchestrated export no longer clears the still-needed Stoat token.** `_run_export`'s `finally` cleared both the Discord token and the Stoat `token`, but the orchestrated flow immediately redirects to `/validate`, whose guard (and `/migrate`'s) requires `storage["token"]`. The synchronous `finally` runs before the queued redirect loads, so the 1-Click flow bounced the user back to setup with an empty Stoat field. The export `finally` now clears only `discord_token`; the Stoat token is cleared at the terminal migration screen.
+  - **Offline-mode migration now clears the Stoat token from on-disk storage.** The migration `_run` had no `finally`, and offline mode (setup → /validate → /migrate, skipping /export) never reached the export cleanup — so the plaintext Stoat token persisted in `.nicegui/storage-user.json` after completion or error (a `security.md` violation). The migration `_run` gained a terminal `finally` that clears both tokens on success AND error, for both offline and orchestrated modes. Safe for the in-flight migration: `FerryConfig` holds its own token copy (built before the task), the engine never reads `app.storage`, and the only in-`_run` storage read precedes `run_migration`.
+  - Guarded by a constant-pin unit test (`tests/test_gui.py`) that fails CI if the security-critical key list ever silently shrinks, plus helper behaviour tests.
+
+### Notes
+
+- Two non-terminal abandonment cases remain out of scope (tokens linger if the user opens `/migrate` or lands on `/validate` but never proceeds — fixing them needs client-disconnect hooks). Bounded by the single-user, local-only (`127.0.0.1`), gitignored-storage nature of the tool.
+
 ## [2.6.0] - 2026-06-24
 
 ### Added
