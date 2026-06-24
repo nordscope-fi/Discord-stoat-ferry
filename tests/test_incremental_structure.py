@@ -41,7 +41,6 @@ from discord_ferry.state import MigrationState
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from discord_ferry.core.events import MigrationEvent
 
 STOAT_URL = "https://api.test"
 
