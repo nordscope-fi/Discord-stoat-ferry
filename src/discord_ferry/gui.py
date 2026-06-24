@@ -774,9 +774,13 @@ def export_page() -> None:
             on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
             ui.notify(f"Export failed: {exc}", type="negative")
         finally:
-            # Clear tokens from storage (security — avoid persisting to disk)
-            storage.pop("discord_token", None)
-            storage.pop("token", None)
+            # Clear ONLY the Discord token here — export is its sole consumer.
+            # The Stoat token MUST survive: this finally runs synchronously
+            # BEFORE the queued ui.navigate.to("/validate") redirect loads, and
+            # both validate_page and migrate_page guard on storage["token"].
+            # Clearing it here bounces the user back to setup. The Stoat token is
+            # cleared by the terminal migration screen (migrate_page._run).
+            _clear_tokens(storage, ("discord_token",))
 
     background_tasks.create(_run_export())
 
