@@ -526,7 +526,7 @@ async def run_roles(
     # metadata). Both fold into a single api_edit_role call per role when present.
     discord_metadata = load_discord_metadata(config.output_dir)
     role_meta = discord_metadata.role_metadata if discord_metadata else {}
-    ranked_roles = sorted(roles_to_create, key=lambda r: r.position)
+    ranked_roles = sorted(roles_to_create, key=lambda r: (r.position, r.id))
     async with get_session(config) as session:
         for role in ranked_roles:
             if role.id in pre_existing_role_ids:

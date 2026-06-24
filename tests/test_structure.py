@@ -1596,6 +1596,57 @@ async def test_run_roles_sets_rank_from_position(tmp_path: Path) -> None:
     assert any(b.get("rank") == 3 for b in rank_bodies)
 
 
+async def test_run_roles_rank_tie_break_is_deterministic(tmp_path: Path) -> None:
+    """On equal position, the rank pass processes roles in a deterministic id order.
+
+    Two roles share position 5 but have ids "30" and "20". The deterministic sort
+    key (position, id) must process role "20" before role "30" regardless of input
+    order. The functional goal is determinism — same-position roles emit a stable
+    processing order independent of export/union insertion order.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    # Export order lists "30" first, then "20" — so a position-only (stable) sort
+    # would preserve that input order and process "30" before "20".
+    role_30 = DCERole(id="30", name="Thirty", position=5)
+    role_20 = DCERole(id="20", name="Twenty", position=5)
+    exports = [
+        _make_export(
+            messages=[
+                _make_message("m1", roles=[role_30]),
+                _make_message("m2", roles=[role_20]),
+            ]
+        )
+    ]
+
+    # FIFO POST registration mirrors first-pass insertion (export) order:
+    # "30" -> stoat-30, "20" -> stoat-20.
+    patched_role_ids: list[str] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-30", "name": "Thirty"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-20", "name": "Twenty"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-30",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patched_role_ids.append("30"),  # type: ignore[misc]
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-20",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patched_role_ids.append("20"),  # type: ignore[misc]
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    # Real processing order: the rank PATCH for the lexically-smaller id fires first.
+    assert patched_role_ids == ["20", "30"]
+
+
 async def test_run_roles_rank_failure_is_non_fatal(tmp_path: Path) -> None:
     """ROLES phase logs a warning and continues if rank setting fails."""
     events: list[MigrationEvent] = []
