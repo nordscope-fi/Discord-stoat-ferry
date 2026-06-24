@@ -1024,3 +1024,21 @@ async def test_expected_404_ok_with_204_unchanged_behaviour(
         )
     assert result == {}
     assert _circuit_state.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_api_edit_channel_patches_body():
+    with aioresponses() as m:
+        m.patch("https://stoat.test/channels/ch1", payload={"_id": "ch1"})
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.migrator.api import api_edit_channel
+
+            result = await api_edit_channel(
+                s,
+                "https://stoat.test",
+                "tok",
+                "ch1",
+                slowmode=30,
+                voice={"max_users": 5},
+            )
+    assert result["_id"] == "ch1"

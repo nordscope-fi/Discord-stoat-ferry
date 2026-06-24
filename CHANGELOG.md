@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.5.0] - 2026-06-24
+
+### Added
+
+- **Native-fidelity batch 2: per-channel slowmode, voice user-limit, and image role icons.** Successor to the v2.3.0 batch (#62). Three more native Discord properties now migrate when a `discord_token` is supplied, all source-verified against `stoatchat/stoatchat` @ a15a542:
+  - **Per-channel slowmode** (`migrator/structure.py`, `migrator/api.py`). Discord `rate_limit_per_user` is captured into `ChannelMeta.slowmode` and applied via a new `api_edit_channel` PATCH wrapper (routes through the existing rate-limited `_api_request`). Applied only when `> 0`, clamped to Stoat's `0..=21600` range with a `slowmode_clamped` warning. Slowmode is a flat top-level PATCH field.
+  - **Voice channel user-limit** (`migrator/structure.py`). Discord voice `user_limit` is captured into `ChannelMeta.user_limit` and applied as `voice={"max_users": N}` (nested). Discord's `0` (unlimited) maps to an omitted `max_users` (Stoat rejects `0`). The voice PATCH is gated by a `created_as_voice` flag so it never fires on a channel that fell back to Text via the Bug #194 retry; slowmode still applies to such fallbacks.
+  - **Image role icons** (`migrator/structure.py`, `discord/client.py`). A role's image icon is downloaded from the Discord CDN (`download_role_icon`, capped at the Autumn 2.5 MB icons limit), uploaded to Autumn under the `icons` tag, and folded into the existing role attributes pass as `DataEditRole.icon`. Unicode-emoji-only role icons are not migratable and are skipped with a warning. The Autumn upload failure is caught as `AutumnUploadError` and reported with a fixed, role-name-only message — never the raw exception body, which can echo the session token (`security.md`).
+  - **Reporter credit + shell surfacing** (`reporter.py`, `cli.py`, `gui.py`, `state.py`). Applied counts accumulate in `MigrationState.native_fidelity_counts` (serialized for resume) and surface as `report["native_fidelity"]`, a `## Native Fidelity` markdown section, a CLI summary line, and a GUI completion-card label (hidden when empty).
+  - **Graceful degradation.** With no `discord_token`, all three fields skip and emit distinct one-time `slowmode_skipped` / `user_limit_skipped` / `role_icon_skipped` warnings; migration completes and v2.3.0 fields are unaffected.
+
 ## [2.4.2] - 2026-06-23
 
 ### Fixed

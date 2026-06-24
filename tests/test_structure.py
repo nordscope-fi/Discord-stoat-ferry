@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 from aioresponses import aioresponses
 
@@ -15,6 +16,7 @@ from discord_ferry.discord.metadata import (
     RoleOverride,
     save_discord_metadata,
 )
+from discord_ferry.errors import AutumnUploadError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     make_unique_channel_name,
@@ -428,6 +430,203 @@ async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert any(w.get("type") == "hoist_skipped" for w in state.warnings)
+
+
+async def test_batch2_fields_skip_without_metadata(tmp_path: Path) -> None:
+    """S5 graceful-degrade: channels + roles emit batch-2 skip warnings without metadata.
+
+    With no discord_metadata.json present, run_channels and run_roles must complete
+    (populating channel_map/role_map) and emit one-time skip warnings for the batch-2
+    fields: slowmode_skipped, user_limit_skipped (channels) and role_icon_skipped (roles).
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [
+        _make_export(
+            channel_id="ch1",
+            channel_name="general",
+            category_id="",
+            messages=[_make_message("m1", roles=[role])],
+        )
+    ]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "general"},
+        )
+
+        await run_roles(config, state, exports, events.append)
+        await run_channels(config, state, exports, events.append)
+
+    # Migration completed: maps populated.
+    assert state.role_map.get("r1") == "stoat-r1"
+    assert state.channel_map.get("ch1") == "stoat-ch1"
+
+    warning_types = [w.get("type") for w in state.warnings]
+    assert "role_icon_skipped" in warning_types
+    assert "slowmode_skipped" in warning_types
+    assert "user_limit_skipped" in warning_types
+    # v2.3.0 hoist_skipped still fires alongside the new role_icon_skipped.
+    assert "hoist_skipped" in warning_types
+    # One-time warnings, not per-item.
+    assert warning_types.count("slowmode_skipped") == 1
+    assert warning_types.count("user_limit_skipped") == 1
+    assert warning_types.count("role_icon_skipped") == 1
+
+
+async def test_run_roles_image_icon_uploaded_and_folded(tmp_path: Path) -> None:
+    """ROLES downloads an image role icon, uploads to Autumn, folds icon into edit."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="VIP")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"PNGDATA"),
+        ),
+        patch(
+            "discord_ferry.migrator.structure.upload_to_autumn",
+            new=AsyncMock(return_value="autumn-id"),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "VIP"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert any(body.get("icon") == "autumn-id" for body in patch_bodies)
+    assert state.native_fidelity_counts.get("role_icons") == 1
+
+
+async def test_run_roles_emoji_icon_skipped_with_warning(tmp_path: Path) -> None:
+    """ROLES skips an emoji-only role icon with a warning and no icon kwarg."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Fire")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=False, position=0, unicode_emoji="🔥")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"PNGDATA"),
+        ) as mock_download,
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Fire"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert any(w.get("type") == "role_icon_skipped" for w in state.warnings)
+    assert all("icon" not in body for body in patch_bodies)
+    mock_download.assert_not_called()
+
+
+async def test_run_roles_icon_upload_error_is_token_safe(tmp_path: Path) -> None:
+    """A failed icon upload never leaks the HTTP body and preserves hoist/rank."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="VIP", position=3)
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+    upload_error = AutumnUploadError("Upload failed with status 500: x-session-token=SECRET")
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"PNGDATA"),
+        ),
+        patch(
+            "discord_ferry.migrator.structure.upload_to_autumn",
+            new=AsyncMock(side_effect=upload_error),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "VIP"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    for w in state.warnings:
+        msg = str(w.get("message", ""))
+        assert "SECRET" not in msg
+        assert "x-session-token" not in msg
+    # The role still receives hoist despite the failed icon; no icon kwarg leaks.
+    assert any(body.get("hoist") is True for body in patch_bodies)
+    assert all("icon" not in body for body in patch_bodies)
 
 
 async def test_run_roles_truncates_long_name(tmp_path: Path) -> None:
@@ -866,6 +1065,153 @@ async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
 
     assert len(created_bodies) == 1
     assert created_bodies[0].get("nsfw") is True
+
+
+async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
+    """CHANNELS phase PATCHes slowmode (text) and voice.max_users (voice)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "txt1": ChannelMeta(nsfw=False, slowmode=30),
+            "vc1": ChannelMeta(nsfw=False, user_limit=5),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [
+        _make_export(channel_id="txt1", channel_name="slow-chat", category_id=""),
+        _make_export(channel_id="vc1", channel_name="voice-chat", channel_type=2, category_id=""),
+    ]
+
+    edit_bodies: dict[str, dict[str, object]] = {}
+
+    def _capture(url: object, **kwargs: object) -> None:
+        channel_id = str(url).rsplit("/", 1)[-1]
+        edit_bodies[channel_id] = kwargs.get("json", {})  # type: ignore[assignment]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-txt1", "name": "slow-chat"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-vc1", "name": "voice-chat"},
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-txt1",
+            payload={"_id": "stoat-txt1"},
+            callback=_capture,  # type: ignore[arg-type]
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-vc1",
+            payload={"_id": "stoat-vc1"},
+            callback=_capture,  # type: ignore[arg-type]
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert edit_bodies["stoat-txt1"].get("slowmode") == 30
+    assert "voice" not in edit_bodies["stoat-txt1"]
+    assert edit_bodies["stoat-vc1"].get("voice") == {"max_users": 5}
+    assert "slowmode" not in edit_bodies["stoat-vc1"]
+    assert state.native_fidelity_counts == {"slowmode": 1, "user_limit": 1}
+
+
+async def test_channel_slowmode_clamped_above_max(tmp_path: Path) -> None:
+    """Slowmode > 21600 is clamped to 21600 and a slowmode_clamped warning is logged."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "txt1": ChannelMeta(nsfw=False, slowmode=30000),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [_make_export(channel_id="txt1", channel_name="slow-chat", category_id="")]
+
+    edit_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-txt1", "name": "slow-chat"},
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-txt1",
+            payload={"_id": "stoat-txt1"},
+            callback=lambda url, **kwargs: edit_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(edit_bodies) == 1
+    assert edit_bodies[0].get("slowmode") == 21600
+    assert any(w.get("type") == "slowmode_clamped" for w in state.warnings)
+
+
+async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
+    """A voice channel that falls back to text (Bug #194) skips the voice PATCH.
+
+    slowmode is still applied to the text-fallback channel.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "vc1": ChannelMeta(nsfw=False, slowmode=15, user_limit=8),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    exports = [
+        _make_export(channel_id="vc1", channel_name="voice-chat", channel_type=2, category_id="")
+    ]
+
+    edit_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        # First call (Voice) fails -> Bug #194 fallback to Text.
+        m.post(f"{STOAT_URL}/servers/srv1/channels", status=400)
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-vc1", "name": "voice-chat"},
+        )
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-vc1",
+            payload={"_id": "stoat-vc1"},
+            callback=lambda url, **kwargs: edit_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, exports, events.append)
+
+    assert len(edit_bodies) == 1
+    # created_as_voice is False, so the voice kwarg must be omitted.
+    assert "voice" not in edit_bodies[0]
+    # slowmode still applies to the text-fallback channel.
+    assert edit_bodies[0].get("slowmode") == 15
+    assert state.native_fidelity_counts == {"slowmode": 1}
 
 
 async def test_run_channels_applies_channel_permission_overrides(tmp_path: Path) -> None:

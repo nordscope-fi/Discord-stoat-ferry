@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import load_discord_metadata
-from discord_ferry.errors import MigrationError
+from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
     api_create_server,
+    api_edit_channel,
     api_edit_role,
     api_edit_server,
     api_fetch_server,
@@ -29,9 +31,11 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
-from discord_ferry.uploader.autumn import upload_with_cache
+from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
+    import aiohttp
+
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEChannel, DCEExport, DCERole
@@ -340,6 +344,55 @@ async def run_server(
             )
 
 
+async def _resolve_role_icon(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    role_name: str,
+    role_id: str,
+    icon_hash: str,
+) -> str | None:
+    """Download a role icon, upload to Autumn, return the attachment id or None.
+
+    Token-safe: an AutumnUploadError (which may carry the HTTP body) is never
+    interpolated into a warning. The temp file is always cleaned up.
+    """
+    icon_bytes = await download_role_icon(session, role_id, icon_hash)
+    if icon_bytes is None:
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "role_icon_download_failed",
+                "message": f"Role icon download failed for role '{role_name}'.",
+            }
+        )
+        return None
+    icon_dir = config.output_dir / "role-icons"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = icon_dir / f"{role_id}.png"
+    try:
+        temp_path.write_bytes(icon_bytes)
+        icon_id = await upload_to_autumn(
+            session, state.autumn_url, "icons", temp_path, config.token
+        )
+        state.native_fidelity_counts["role_icons"] = (
+            state.native_fidelity_counts.get("role_icons", 0) + 1
+        )
+        return icon_id
+    except AutumnUploadError:
+        # Fixed template — never str(exc); the body may echo x-session-token.
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "role_icon_upload_failed",
+                "message": f"Role icon upload failed for role '{role_name}'.",
+            }
+        )
+        return None
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 async def run_roles(
     config: FerryConfig,
     state: MigrationState,
@@ -450,6 +503,22 @@ async def run_roles(
             rm = role_meta.get(role.id)
             if rm is not None:
                 edit_kwargs["hoist"] = rm.hoist
+                if rm.icon_hash:
+                    icon_id = await _resolve_role_icon(
+                        session, config, state, role.name, role.id, rm.icon_hash
+                    )
+                    if icon_id is not None:
+                        edit_kwargs["icon"] = icon_id
+                elif rm.unicode_emoji:
+                    state.warnings.append(
+                        {
+                            "phase": "roles",
+                            "type": "role_icon_skipped",
+                            "message": (
+                                f"Role '{role.name}' has an emoji icon (not migratable to Stoat)."
+                            ),
+                        }
+                    )
             if not edit_kwargs:
                 continue
             try:
@@ -482,6 +551,13 @@ async def run_roles(
                 "phase": "roles",
                 "type": "hoist_skipped",
                 "message": "Role hoist skipped: Discord metadata unavailable.",
+            }
+        )
+        state.warnings.append(
+            {
+                "phase": "roles",
+                "type": "role_icon_skipped",
+                "message": "Role icons skipped: Discord metadata unavailable.",
             }
         )
 
@@ -788,6 +864,7 @@ async def run_channels(
             nsfw = ch_meta.nsfw if ch_meta else False
 
             stoat_channel_id: str
+            created_as_voice = stoat_type == "Voice"
             try:
                 result = await api_create_channel(
                     session,
@@ -802,6 +879,7 @@ async def run_channels(
                 stoat_channel_id = result["_id"]
             except MigrationError as exc:
                 if stoat_type == "Voice":
+                    created_as_voice = False
                     # Voice channels may fail (Bug #194) — retry as text.
                     state.warnings.append(
                         {
@@ -834,6 +912,52 @@ async def run_channels(
                     raise
 
             state.channel_map[ch.id] = stoat_channel_id
+
+            # S1/S2 (native-fidelity batch 2): apply slowmode + voice user_limit.
+            if ch_meta is not None:
+                edit_kwargs: dict[str, Any] = {}
+                if ch_meta.slowmode > 0:
+                    if ch_meta.slowmode > 21600:
+                        state.warnings.append(
+                            {
+                                "phase": "channels",
+                                "type": "slowmode_clamped",
+                                "message": (
+                                    f"Slowmode for '{unique_name}' clamped to 21600s "
+                                    f"(was {ch_meta.slowmode})."
+                                ),
+                            }
+                        )
+                    edit_kwargs["slowmode"] = min(ch_meta.slowmode, 21600)
+                if created_as_voice and ch_meta.user_limit >= 1:
+                    edit_kwargs["voice"] = {"max_users": ch_meta.user_limit}
+                if edit_kwargs:
+                    try:
+                        await api_edit_channel(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            stoat_channel_id,
+                            **edit_kwargs,
+                        )
+                        if "slowmode" in edit_kwargs:
+                            state.native_fidelity_counts["slowmode"] = (
+                                state.native_fidelity_counts.get("slowmode", 0) + 1
+                            )
+                        if "voice" in edit_kwargs:
+                            state.native_fidelity_counts["user_limit"] = (
+                                state.native_fidelity_counts.get("user_limit", 0) + 1
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        state.warnings.append(
+                            {
+                                "phase": "channels",
+                                "type": "channel_attributes_failed",
+                                "message": (
+                                    f"Failed to set attributes for channel '{unique_name}': {exc}"
+                                ),
+                            }
+                        )
 
             # Track forum post info for index channel generation.
             if discord_cat_id.startswith("forum-"):
@@ -1035,6 +1159,33 @@ async def run_channels(
                 state.stoat_server_id,
                 all_categories,
             )
+
+    # S5: graceful-degrade — slowmode/user_limit need Discord metadata.
+    if discord_metadata is None:
+        on_event(
+            MigrationEvent(
+                phase="channels",
+                status="warning",
+                message=(
+                    "Slowmode / voice user-limit not migrated "
+                    "(no Discord metadata — discord_token required)."
+                ),
+            )
+        )
+        state.warnings.append(
+            {
+                "phase": "channels",
+                "type": "slowmode_skipped",
+                "message": "Slowmode skipped: Discord metadata unavailable.",
+            }
+        )
+        state.warnings.append(
+            {
+                "phase": "channels",
+                "type": "user_limit_skipped",
+                "message": "Voice user-limit skipped: Discord metadata unavailable.",
+            }
+        )
 
     on_event(
         MigrationEvent(

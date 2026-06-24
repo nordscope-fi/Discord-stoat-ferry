@@ -64,7 +64,12 @@ async def fetch_and_translate_guild_metadata(
             continue
         translated = translate_permissions(role.permissions)
         role_permissions[role.id] = PermissionPair(allow=translated, deny=0)
-        role_metadata[role.id] = RoleMeta(hoist=role.hoist, position=role.position)
+        role_metadata[role.id] = RoleMeta(
+            hoist=role.hoist,
+            position=role.position,
+            icon_hash=role.icon,
+            unicode_emoji=role.unicode_emoji,
+        )
 
     # Build channel metadata (filter user overrides, translate permissions)
     channel_metadata: dict[str, ChannelMeta] = {}
@@ -105,6 +110,8 @@ async def fetch_and_translate_guild_metadata(
             nsfw=channel.nsfw,
             default_override=default_override,
             role_overrides=role_overrides,
+            slowmode=channel.rate_limit_per_user,
+            user_limit=channel.user_limit,
         )
 
     return DiscordMetadata(

@@ -292,3 +292,106 @@ async def test_fetch_guild_nsfw_level_mapping(
     async with aiohttp.ClientSession() as session:
         meta = await fetch_and_translate_guild_metadata(session, TOKEN, guild_id)
     assert meta.guild_nsfw is expected
+
+
+async def test_capture_batch2_fields(mock_discord: aioresponses) -> None:
+    """Capture slowmode/user_limit/role-icon/unicode_emoji into metadata."""
+    guild_id = "100"
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}",
+        payload={"description": "", "nsfw_level": 0, "banner": None},
+    )
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}/roles",
+        payload=[
+            {
+                "id": "200",
+                "name": "Mod",
+                "permissions": "0",
+                "position": 2,
+                "color": 0,
+                "hoist": True,
+                "managed": False,
+                "icon": "iconhash123",
+                "unicode_emoji": None,
+            }
+        ],
+    )
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{guild_id}/channels",
+        payload=[
+            {
+                "id": "300",
+                "name": "gen",
+                "type": 0,
+                "nsfw": False,
+                "position": 0,
+                "rate_limit_per_user": 30,
+                "permission_overwrites": [],
+            },
+            {
+                "id": "301",
+                "name": "vc",
+                "type": 2,
+                "nsfw": False,
+                "position": 1,
+                "user_limit": 5,
+                "permission_overwrites": [],
+            },
+        ],
+    )
+    async with aiohttp.ClientSession() as session:
+        meta = await fetch_and_translate_guild_metadata(session, TOKEN, guild_id)
+    assert meta.channel_metadata["300"].slowmode == 30
+    assert meta.channel_metadata["301"].user_limit == 5
+    assert meta.role_metadata["200"].icon_hash == "iconhash123"
+    assert meta.role_metadata["200"].unicode_emoji == ""
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_returns_bytes():
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, body=b"\x89PNG-data", status=200)
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.discord.client import download_role_icon
+
+            data = await download_role_icon(s, "r1", "hash")
+    assert data == b"\x89PNG-data"
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_none_on_404():
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, status=404)
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.discord.client import download_role_icon
+
+            assert await download_role_icon(s, "r1", "hash") is None
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_none_when_oversize(monkeypatch):
+    # Patch the limit down so a small body exercises the oversize branch without
+    # streaming a multi-MB body through aioresponses (which trips an internal
+    # parser assertion on aiohttp 3.14).
+    from discord_ferry.discord import client as discord_client
+
+    monkeypatch.setattr(discord_client, "_ROLE_ICON_MAX_BYTES", 4)
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, body=b"toobig", status=200)
+        async with aiohttp.ClientSession() as s:
+            assert await discord_client.download_role_icon(s, "r1", "hash") is None
+
+
+@pytest.mark.asyncio
+async def test_download_role_icon_none_on_client_error():
+    url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
+    with aioresponses() as m:
+        m.get(url, exception=aiohttp.ClientError())
+        async with aiohttp.ClientSession() as s:
+            from discord_ferry.discord.client import download_role_icon
+
+            assert await download_role_icon(s, "r1", "hash") is None
