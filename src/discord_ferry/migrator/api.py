@@ -453,6 +453,29 @@ async def api_edit_role(
     return await _api_request(session, "PATCH", url, token, kwargs)
 
 
+async def api_edit_channel(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Edit a channel's properties (slowmode, voice info, etc.).
+
+    Args:
+        session: An active aiohttp ClientSession.
+        stoat_url: Stoat API base URL.
+        token: Stoat session token.
+        channel_id: Target channel ID.
+        **kwargs: Fields to update (e.g. ``slowmode=30``, ``voice={"max_users": 5}``).
+
+    Returns:
+        Updated channel object dict.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
+    return await _api_request(session, "PATCH", url, token, kwargs)
+
+
 async def api_upsert_categories(
     session: aiohttp.ClientSession,
     stoat_url: str,

@@ -24,6 +24,8 @@ class DiscordRole:
     color: int = 0
     hoist: bool = False
     managed: bool = False
+    icon: str = ""
+    unicode_emoji: str = ""
 
 
 @dataclass
@@ -35,4 +37,6 @@ class DiscordChannel:
     type: int
     nsfw: bool = False
     position: int = 0
+    rate_limit_per_user: int = 0  # slowmode seconds (text channels)
+    user_limit: int = 0  # voice channel capacity cap (0 = unlimited)
     permission_overwrites: list[PermissionOverwrite] = field(default_factory=list)

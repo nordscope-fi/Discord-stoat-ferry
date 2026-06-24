@@ -29,6 +29,8 @@ class RoleMeta:
 
     hoist: bool = False
     position: int = 0
+    icon_hash: str = ""
+    unicode_emoji: str = ""
 
 
 @dataclass
@@ -38,6 +40,8 @@ class ChannelMeta:
     nsfw: bool
     default_override: PermissionPair | None = None
     role_overrides: list[RoleOverride] = field(default_factory=list)
+    slowmode: int = 0
+    user_limit: int = 0
 
 
 @dataclass
@@ -88,7 +92,13 @@ def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
         "user_override_channels": meta.user_override_channels,
         "banner_hash": meta.banner_hash,
         "role_metadata": {
-            k: {"hoist": v.hoist, "position": v.position} for k, v in meta.role_metadata.items()
+            k: {
+                "hoist": v.hoist,
+                "position": v.position,
+                "icon_hash": v.icon_hash,
+                "unicode_emoji": v.unicode_emoji,
+            }
+            for k, v in meta.role_metadata.items()
         },
         "category_positions": meta.category_positions,
         "guild_description": meta.guild_description,
@@ -111,6 +121,8 @@ def _channel_meta_to_dict(cm: ChannelMeta) -> dict[str, Any]:
         }
         for ro in cm.role_overrides
     ]
+    d["slowmode"] = cm.slowmode
+    d["user_limit"] = cm.user_limit
     return d
 
 
@@ -129,7 +141,12 @@ def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
         user_override_channels=data.get("user_override_channels", []),
         banner_hash=data.get("banner_hash", ""),
         role_metadata={
-            k: RoleMeta(hoist=v.get("hoist", False), position=v.get("position", 0))
+            k: RoleMeta(
+                hoist=v.get("hoist", False),
+                position=v.get("position", 0),
+                icon_hash=v.get("icon_hash", ""),
+                unicode_emoji=v.get("unicode_emoji", ""),
+            )
             for k, v in data.get("role_metadata", {}).items()
         },
         category_positions=data.get("category_positions", {}),
@@ -154,4 +171,6 @@ def _dict_to_channel_meta(data: dict[str, Any]) -> ChannelMeta:
             )
             for ro in data.get("role_overrides", [])
         ],
+        slowmode=data.get("slowmode", 0),
+        user_limit=data.get("user_limit", 0),
     )

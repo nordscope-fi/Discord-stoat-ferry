@@ -183,6 +183,7 @@ def generate_report(
     )
     report["checklist"] = checklist
     report["invite"] = {"code": state.invite_code, "url": state.invite_url}
+    report["native_fidelity"] = dict(state.native_fidelity_counts)
 
     _write_report(config.output_dir, report)
 
@@ -394,6 +395,16 @@ def generate_markdown_report(
             lines.append(f"- [{w.get('type', 'unknown')}] {w.get('message', '')}")
     else:
         lines.append("No warnings.\n")
+
+    nf = state.native_fidelity_counts
+    if nf:
+        lines.append("\n## Native Fidelity\n")
+        if nf.get("slowmode"):
+            lines.append(f"- Slowmode set on {nf['slowmode']} channel(s)\n")
+        if nf.get("user_limit"):
+            lines.append(f"- Voice user-limit set on {nf['user_limit']} channel(s)\n")
+        if nf.get("role_icons"):
+            lines.append(f"- Icons set on {nf['role_icons']} role(s)\n")
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     output_path = config.output_dir / "migration_report.md"

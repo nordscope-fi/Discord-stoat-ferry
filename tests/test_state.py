@@ -252,6 +252,25 @@ def test_completed_channel_ids_roundtrip(tmp_path: Path) -> None:
     assert loaded.completed_channel_ids == {"ch_a", "ch_b", "ch_c"}
 
 
+def test_native_fidelity_counts_round_trip() -> None:
+    """native_fidelity_counts dict survives _state_to_dict -> _dict_to_state."""
+    from discord_ferry.state import _dict_to_state, _state_to_dict
+
+    s = MigrationState()
+    s.native_fidelity_counts = {"slowmode": 2, "user_limit": 1, "role_icons": 3}
+    restored = _dict_to_state(_state_to_dict(s))
+    assert restored.native_fidelity_counts == {"slowmode": 2, "user_limit": 1, "role_icons": 3}
+
+
+def test_native_fidelity_counts_save_load_roundtrip(tmp_path: Path) -> None:
+    """native_fidelity_counts survives a JSON save/load round-trip."""
+    state = MigrationState()
+    state.native_fidelity_counts = {"slowmode": 4}
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.native_fidelity_counts == {"slowmode": 4}
+
+
 def test_channel_message_offsets_roundtrip(tmp_path: Path) -> None:
     """channel_message_offsets dict survives JSON serialization."""
     state = MigrationState(channel_message_offsets={"ch1": "msg_123", "ch2": "msg_456"})
