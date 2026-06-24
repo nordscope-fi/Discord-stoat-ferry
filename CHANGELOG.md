@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.2] - 2026-06-24
+
+### Fixed
+
+- **Reporting integrity: post-migration reports were wrong on every run** (reaction/pin counters + message-fidelity denominator). From the 2026-06-24 v2.5.1 bug-hunt refresh; affects all three reporting surfaces (`ferry stats`, `migration_report.json`, the markdown report).
+  - **Reaction fidelity is no longer stuck at 50%** (`migrator/reactions.py`, `reporter.py`, `stats.py`): `state.pending_reactions` was never cleared, so every surface computed `reactions_total = reactions_applied + len(pending_reactions) = 2N` after a fully successful run → a flat 50% reaction sub-score. `run_reactions` now consumes `pending_reactions` as a work queue (applied entries removed, failed retained, cap-skipped removed), so the derived total self-corrects to N (100%).
+  - **Resume no longer double-counts** (`migrator/reactions.py`, `migrator/pins.py`): the engine re-runs the in-progress phase on resume; with the pending list never consumed, `reactions_applied`/`pins_applied` re-incremented over the persisted value. The phases now checkpoint progress via `save_state` (periodic, mirroring the messages phase) so a resumed phase processes only the remainder. A new persisted `MigrationState.reaction_message_counts` keeps the 20-reactions-per-message cap exact across a resume.
+  - **`ferry stats` no longer reports 0% Messages fidelity on a normal run** (`stats.py`, `core/engine.py`, `state.py`): `summarize_state` used the incremental-only `prior_messages_total` (default 0) as the message denominator. A new persisted `MigrationState.source_messages_total` (set by the engine from the post-filter export total, on every run incl. resume) is now the shared denominator for both `ferry stats` and the JSON/markdown report (legacy fallback to imported+failed / `sum(exports)`), so the two surfaces agree.
+  - **Dry-run** now reports 100% for reactions/pins (clears the pending list) instead of 50%.
+
+### Notes
+
+- Server-side state was always correct — Stoat reaction/pin PUTs are idempotent; these were purely local counter/stats bugs. Out of scope (tracked separately): the incremental message-offset re-stream (`migrator/messages.py`) and the forum-index count double-count (`core/engine.py`).
+
 ## [2.6.1] - 2026-06-24
 
 ### Fixed

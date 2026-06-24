@@ -100,7 +100,7 @@ def generate_report(
     else:
         source_guild = {"id": "", "name": ""}
 
-    total_messages = sum(e.message_count for e in exports)
+    total_messages = state.source_messages_total or sum(e.message_count for e in exports)
     messages_imported = len(state.message_map)
     messages_skipped = max(0, total_messages - messages_imported)
 
@@ -343,7 +343,7 @@ def generate_markdown_report(
     lines.append(f"**Completed:** {state.completed_at}\n")
 
     # S18: Fidelity score section.
-    total_msgs = sum(e.message_count for e in exports)
+    total_msgs = state.source_messages_total or sum(e.message_count for e in exports)
     fidelity = compute_fidelity_score(
         total_messages=total_msgs,
         failed_count=len(state.failed_messages),

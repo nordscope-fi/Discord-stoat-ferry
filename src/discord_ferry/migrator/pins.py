@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_pin_message, get_session
+from discord_ferry.state import save_state
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -54,6 +56,7 @@ async def run_pins(
 
     if config.dry_run:
         state.pins_applied = len(state.pending_pins)
+        state.pending_pins = []
         on_event(
             MigrationEvent(
                 phase="pins",
@@ -63,24 +66,29 @@ async def run_pins(
         )
         return
 
+    queue = list(state.pending_pins)  # snapshot
+    remaining: list[tuple[str, str]] = []
+    checkpoint_interval = max(config.checkpoint_interval, 1)
+    last_save = time.monotonic()
+
     async with get_session(config) as session:
-        for idx, (channel_id, message_id) in enumerate(state.pending_pins, start=1):
+        for pos, (channel_id, message_id) in enumerate(queue, start=1):
             try:
                 await api_pin_message(
                     session, config.stoat_url, config.token, channel_id, message_id
                 )
                 state.pins_applied += 1
-
                 on_event(
                     MigrationEvent(
                         phase="pins",
                         status="progress",
                         message=f"Pinned message {message_id} in channel {channel_id}",
-                        current=idx,
+                        current=pos,
                         total=total,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
+                remaining.append((channel_id, message_id))
                 state.errors.append(
                     {
                         "phase": "pins",
@@ -96,12 +104,21 @@ async def run_pins(
                         phase="pins",
                         status="error",
                         message=f"Failed to pin message {message_id}: {exc}",
-                        current=idx,
+                        current=pos,
                         total=total,
                     )
                 )
 
+            now = time.monotonic()
+            if pos % checkpoint_interval == 0 and now - last_save >= 5.0:
+                state.pending_pins = remaining + queue[pos:]
+                save_state(state, config.output_dir)
+                last_save = now
+
             await asyncio.sleep(0.5)
+
+    state.pending_pins = remaining
+    save_state(state, config.output_dir)
 
     on_event(
         MigrationEvent(

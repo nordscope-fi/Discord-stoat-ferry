@@ -84,6 +84,14 @@ class StateSummary:
     current_phase: str
 
 
+def _message_denominator(state: MigrationState) -> int:
+    """Total source messages for fidelity. Prefer the engine-set source total;
+    fall back to imported+failed for legacy states that never recorded it."""
+    if state.source_messages_total:
+        return state.source_messages_total
+    return len(state.message_map) + len(state.failed_messages)
+
+
 def summarize_state(state: MigrationState) -> StateSummary:
     """Build a state-only summary suitable for ``ferry stats`` rendering.
 
@@ -97,15 +105,11 @@ def summarize_state(state: MigrationState) -> StateSummary:
     value equals ``reactions_applied`` and the sub-score becomes 100%. In
     partial migrations the derived value reflects "attempted so far",
     giving a meaningful denominator.
-
-    Note: ``reporter.generate_report`` passes ``len(pending_reactions)``
-    alone — a latent overestimate in partial state. The two surfaces
-    diverge intentionally; aligning ``reporter.py`` is tracked separately.
     """
     reactions_total = state.reactions_applied + len(state.pending_reactions)
 
     score_dict = compute_fidelity_score(
-        total_messages=state.prior_messages_total,
+        total_messages=_message_denominator(state),
         failed_count=len(state.failed_messages),
         attachments_uploaded=state.attachments_uploaded,
         attachments_skipped=state.attachments_skipped,

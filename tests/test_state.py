@@ -545,3 +545,31 @@ def test_invite_fields_default_when_absent(tmp_path: Path) -> None:
     loaded = load_state(tmp_path)
     assert loaded.invite_code == ""
     assert loaded.invite_url == ""
+
+
+def test_new_reporting_fields_round_trip(tmp_path: Path) -> None:
+    """source_messages_total and reaction_message_counts survive save/load."""
+    from discord_ferry.state import MigrationState, load_state, save_state
+
+    state = MigrationState()
+    state.source_messages_total = 1234
+    state.reaction_message_counts = {"01HMSG": 7}
+    save_state(state, tmp_path)
+
+    loaded = load_state(tmp_path)
+    assert loaded.source_messages_total == 1234
+    assert loaded.reaction_message_counts == {"01HMSG": 7}
+
+
+def test_new_reporting_fields_default_when_absent(tmp_path: Path) -> None:
+    """Legacy state.json without the new fields loads with safe defaults."""
+    import json
+
+    from discord_ferry.state import load_state
+
+    (tmp_path / "state.json").write_text(json.dumps({"stoat_server_id": "srv1"}), encoding="utf-8")
+    (tmp_path / "message_map.json").write_text(json.dumps({}), encoding="utf-8")
+
+    loaded = load_state(tmp_path)
+    assert loaded.source_messages_total == 0
+    assert loaded.reaction_message_counts == {}

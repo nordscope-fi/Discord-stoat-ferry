@@ -128,6 +128,9 @@ class MigrationState:
     # Incremental/delta migration tracking
     # prior_messages_total: message count from the prior run (set at init for delta mode)
     prior_messages_total: int = 0
+    # source_messages_total: total source messages in this run's exports (post-filter),
+    # set by the engine. Denominator for message fidelity in stats/reporter. 0 = unset (legacy).
+    source_messages_total: int = 0
 
     # Forum index tracking: populated during CHANNELS phase, consumed by REPORT phase.
     # forum_channel_members: forum_cat_key -> list of discord_channel_ids in that forum
@@ -137,6 +140,9 @@ class MigrationState:
     # Per-channel message counts: discord_channel_id -> messages migrated.
     # Incremented by _process_message; used by forum index rebuild in REPORT phase.
     channel_message_counts: dict[str, int] = field(default_factory=dict)
+    # reaction_message_counts: Stoat message_id -> reactions applied, persisted so the
+    # 20-per-message cap stays exact across a resume (reactions phase clears pending as it goes).
+    reaction_message_counts: dict[str, int] = field(default_factory=dict)
 
     # Forum index message IDs: forum_cat_key -> stoat_message_id.
     # Populated by _rebuild_forum_indexes; used to PATCH (not re-POST) on re-runs.
@@ -264,9 +270,11 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "failed_messages": [dataclasses.asdict(fm) for fm in state.failed_messages],
         "validation_results": state.validation_results,
         "prior_messages_total": state.prior_messages_total,
+        "source_messages_total": state.source_messages_total,
         "forum_channel_members": state.forum_channel_members,
         "forum_category_names": state.forum_category_names,
         "channel_message_counts": state.channel_message_counts,
+        "reaction_message_counts": state.reaction_message_counts,
         "forum_index_message_ids": state.forum_index_message_ids,
         "embeds_total": state.embeds_total,
         "embeds_dropped": state.embeds_dropped,
@@ -332,9 +340,11 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             failed_messages=[FailedMessage(**d) for d in data.get("failed_messages", [])],
             validation_results=data.get("validation_results", {}),
             prior_messages_total=data.get("prior_messages_total", 0),
+            source_messages_total=data.get("source_messages_total", 0),
             forum_channel_members=data.get("forum_channel_members", {}),
             forum_category_names=data.get("forum_category_names", {}),
             channel_message_counts=data.get("channel_message_counts", {}),
+            reaction_message_counts=data.get("reaction_message_counts", {}),
             forum_index_message_ids=data.get("forum_index_message_ids", {}),
             embeds_total=data.get("embeds_total", 0),
             embeds_dropped=data.get("embeds_dropped", 0),
