@@ -393,6 +393,11 @@ async def run_migration(
                 filtered_exports.append(export)
         exports = filtered_exports
 
+    # Persist the post-filter source message total so stats.summarize_state (state-only)
+    # and reporter.generate_report share ONE denominator. Set unconditionally — the
+    # messages phase is skipped on resume, so this must not be gated on it.
+    state.source_messages_total = sum(e.message_count for e in exports)
+
     # Pre-creation review: emit summary event and optionally wait for user confirmation
     if not config.dry_run and not config.resume:
         discord_meta = load_discord_metadata(config.output_dir)

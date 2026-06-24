@@ -313,6 +313,56 @@ async def test_run_migration_validate_total_in_event(tmp_path: Path) -> None:
     assert completed.total > 0
 
 
+async def test_run_migration_sets_source_messages_total(tmp_path: Path) -> None:
+    """source_messages_total is set from the parsed exports on a fresh run."""
+    from discord_ferry.parser.dce_parser import parse_export_directory
+
+    config = _make_config(tmp_path)
+    expected = sum(
+        e.message_count for e in parse_export_directory(config.export_dir, metadata_only=True)
+    )
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert expected > 0
+    assert state.source_messages_total == expected
+
+
+async def test_run_migration_resume_repopulates_source_messages_total(tmp_path: Path) -> None:
+    """A resume run re-derives source_messages_total even though MESSAGES is skipped."""
+    from discord_ferry.state import load_state, save_state
+
+    prior = MigrationState()
+    prior.current_phase = "report"
+    prior.source_messages_total = 0  # legacy/never-set
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, resume=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.source_messages_total > 0
+    _ = load_state  # silence unused import if not needed
+
+
+async def test_run_migration_source_messages_total_post_filter(tmp_path: Path) -> None:
+    """source_messages_total reflects only exports that survive the thread filter (R1 guard).
+
+    Fixtures have two thread exports (msg_count=1 and msg_count=2) and four non-thread
+    exports. Setting min_thread_messages=5 filters both threads, so the post-filter total
+    must be strictly less than the unfiltered total.
+    """
+    from discord_ferry.parser.dce_parser import parse_export_directory
+
+    all_exports = parse_export_directory(FIXTURES_DIR, metadata_only=True)
+    unfiltered_total = sum(e.message_count for e in all_exports)
+    # min_thread_messages=5 filters threads with msg_count < 5 (both thread fixtures)
+    post_filter_total = sum(
+        e.message_count for e in all_exports if not (e.is_thread and e.message_count < 5)
+    )
+    assert post_filter_total < unfiltered_total, "fixture sanity: filter must actually remove msgs"
+
+    config = _make_config(tmp_path, min_thread_messages=5)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.source_messages_total == post_filter_total
+
+
 async def test_run_migration_default_connect_phase(tmp_path: Path) -> None:
     """Connect phase runs by default when no override is provided (uses _DEFAULT_PHASES)."""
     from aioresponses import aioresponses
