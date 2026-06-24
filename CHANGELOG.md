@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.5.1] - 2026-06-24
+
+### Fixed
+
+- **Incremental (`--incremental`) migration now reuses the prior server and structure instead of duplicating everything.** Fixes the dominant cluster from the 2026-06-23 codebase bug hunt: the structure phases had no idempotency guard, so every delta re-run re-created all roles/categories/channels and `run_server` minted a brand-new server (stranding the carried ID maps).
+  - **Server reuse** (`migrator/structure.py`): `run_server` reuses the carried `state.stoat_server_id` (not only `--server-id`); a deleted prior server raises a clear `MigrationError` instead of silently creating a new server.
+  - **Structure-phase idempotency** (`run_roles`/`run_categories`/`run_channels`): a capture-before-mutate `pre_existing_*_ids` snapshot skips already-migrated roles (across the create, attributes, and permissions passes), reuses carried category/channel IDs, preserves category membership (no orphaning), reuses forum-index channels, and excludes carried channels from the `--max-channels` truncation budget.
+  - **Exact category membership** (`state.py`, `core/engine.py`): a persisted `channel_categories` map reconstructs carried-only categories exactly on a partial re-export (no cross-contamination).
+  - **Carry-over completeness** (`core/engine.py`): the incremental carry-over now also carries `forum_channel_members`, `forum_category_names`, `forum_index_message_ids`, `channel_message_counts`, `category_names`, `channel_categories`, and `native_fidelity_counts`, with a field-by-field audit comment. `_rebuild_forum_indexes` PATCHes the existing pinned index with cumulative counts instead of posting duplicates.
+  - Locked by `tests/test_incremental_structure.py` (real-phase two-run tests). The prior `tests/test_delta_migration.py` mocked the structure phases, which is why this shipped undetected.
+
 ## [2.5.0] - 2026-06-24
 
 ### Added
