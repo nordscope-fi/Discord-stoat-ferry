@@ -16,7 +16,7 @@ from discord_ferry.discord.metadata import (
     RoleOverride,
     save_discord_metadata,
 )
-from discord_ferry.errors import AutumnUploadError
+from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     make_unique_channel_name,
@@ -733,7 +733,11 @@ async def test_live_only_role_is_created(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert "LiveOnly" in created_names
-    assert state.role_map.get("r2") == "stoat-r2"
+    # The union creates roles position-desc, so the FIFO mock id pairing is not
+    # insertion-ordered; assert the live-only role is mapped to a created id.
+    assert "r2" in state.role_map
+    assert state.role_map["r2"] in {"stoat-r1", "stoat-r2"}
+    assert set(state.role_map) == {"r1", "r2"}
 
 
 async def test_overlap_role_uses_live_name_color(tmp_path: Path) -> None:
@@ -2393,3 +2397,169 @@ async def test_banner_download_no_auth_header_when_no_token(tmp_path: Path) -> N
 
     assert captured_headers, "Banner CDN request was not made"
     assert "Authorization" not in captured_headers[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: ROLES — Stoat role-cap handling (Task 6)
+# ---------------------------------------------------------------------------
+
+
+async def test_role_cap_truncates_and_warns(tmp_path: Path) -> None:
+    """When the union exceeds the live server_roles limit, only the top-N by
+    position are created and a role_limit_exceeded warning names the dropped count."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    # Export author posts under r1 only; the live metadata supplies four roles
+    # at distinct positions. The limit is 2, so the two highest positions win.
+    role_a = DCERole(id="r1", name="Admin")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role_a])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={
+            "r1": RoleMeta(name="Admin", position=0),
+            "r2": RoleMeta(name="Mod", position=1),
+            "r3": RoleMeta(name="VIP", position=2),
+            "r4": RoleMeta(name="Top", position=3),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    created_names: list[str] = []
+
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/",
+            payload={"features": {"limits": {"global": {"server_roles": 2}}}},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-x", "name": "x"},
+            repeat=True,
+            callback=lambda url, **kwargs: created_names.append(  # type: ignore[misc]
+                kwargs.get("json", {}).get("name", "")
+            ),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    # Only the two highest-position roles are created.
+    assert len(created_names) == 2
+    assert set(created_names) == {"Top", "VIP"}
+
+    warnings = [w for w in state.warnings if w.get("type") == "role_limit_exceeded"]
+    assert warnings, "expected a role_limit_exceeded warning"
+    assert "2" in warnings[0]["message"]  # dropped count of 2 (4 union - 2 limit)
+
+
+async def test_too_many_roles_backstop_non_fatal(tmp_path: Path) -> None:
+    """If api_create_role raises a TooManyRoles MigrationError mid-loop, the phase
+    does not crash and a role_limit_exceeded warning is recorded."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role_a = DCERole(id="r1", name="Admin")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role_a])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={
+            "r1": RoleMeta(name="Admin", position=0),
+            "r2": RoleMeta(name="Mod", position=1),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    call_count = {"n": 0}
+
+    async def _fake_create_role(*_args: object, **_kwargs: object) -> dict[str, str]:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return {"id": "stoat-r2", "name": "Mod"}
+        raise MigrationError("Stoat API error 400: TooManyRoles")
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.api_create_role",
+            side_effect=_fake_create_role,
+        ),
+    ):
+        # Live limit high enough that pre-flight truncation does NOT engage;
+        # the backstop is what must fire.
+        m.get(
+            f"{STOAT_URL}/",
+            payload={"features": {"limits": {"global": {"server_roles": 200}}}},
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r2", payload={}, repeat=True)
+
+        # Must not raise.
+        await run_roles(config, state, exports, events.append)
+
+    warnings = [w for w in state.warnings if w.get("type") == "role_limit_exceeded"]
+    assert warnings, "expected a role_limit_exceeded backstop warning"
+
+
+async def test_resume_truncation_deterministic(tmp_path: Path) -> None:
+    """Two runs over identical discord_metadata truncate to the same top-N set."""
+    config = _make_config(tmp_path)
+
+    role_a = DCERole(id="r1", name="Admin")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role_a])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={
+            "r1": RoleMeta(name="Admin", position=0),
+            "r2": RoleMeta(name="Mod", position=1),
+            "r3": RoleMeta(name="VIP", position=2),
+            "r4": RoleMeta(name="Top", position=3),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    # Run twice over identical metadata; the truncated set must be stable.
+    first = await _run_and_collect(config, exports)
+    second = await _run_and_collect(config, exports)
+    assert first == second
+    assert first == {"Top", "VIP"}
+
+
+async def _run_and_collect(config: FerryConfig, exports: list[DCEExport]) -> set[str]:
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    created_names: list[str] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/",
+            payload={"features": {"limits": {"global": {"server_roles": 2}}}},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-x", "name": "x"},
+            repeat=True,
+            callback=lambda url, **kwargs: created_names.append(  # type: ignore[misc]
+                kwargs.get("json", {}).get("name", "")
+            ),
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True)
+        await run_roles(config, state, exports, events.append)
+    return set(created_names)

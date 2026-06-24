@@ -19,6 +19,7 @@ from discord_ferry.migrator.api import (
     api_edit_channel,
     api_edit_role,
     api_edit_server,
+    api_fetch_root,
     api_fetch_server,
     api_pin_message,
     api_send_message,
@@ -460,6 +461,33 @@ async def run_roles(
             merged_roles[role_id] = _role_from_metadata(role_id, live_rm)
         roles_to_create = list(merged_roles.values())
 
+        # Role cap: read the live server_roles limit (best-effort; 200 fallback).
+        # The union can exceed Stoat's cap, so pre-flight truncate by lowest
+        # (position, id) and keep the top-N. Scoped to the union path only.
+        async with get_session(config) as _root_session:
+            root = await api_fetch_root(_root_session, config.stoat_url)
+        role_limit = (
+            root.get("features", {}).get("limits", {}).get("global", {}).get("server_roles", 200)
+        )
+        # Order the union position-desc so that (a) pre-flight truncation keeps the
+        # highest-priority roles and (b) the per-instance TooManyRoles backstop, if
+        # it fires, drops the least-important roles first. Scoped to the union path;
+        # the export-only create order is left byte-for-byte unchanged.
+        roles_to_create.sort(key=lambda r: (r.position, r.id), reverse=True)
+        if len(roles_to_create) > role_limit:
+            dropped = len(roles_to_create) - role_limit
+            roles_to_create = roles_to_create[:role_limit]
+            state.warnings.append(
+                {
+                    "phase": "roles",
+                    "type": "role_limit_exceeded",
+                    "message": (
+                        f"Server role limit ({role_limit}) exceeded; "
+                        f"skipped {dropped} lowest-priority role(s)."
+                    ),
+                }
+            )
+
     # Incremental: capture which roles already exist BEFORE the creation loop
     # populates role_map, so the create/attributes/perms passes can skip them.
     pre_existing_role_ids = set(state.role_map)
@@ -480,13 +508,28 @@ async def run_roles(
         for idx, role in enumerate(roles_to_create, start=1):
             if role.id in pre_existing_role_ids:
                 continue
-            result = await api_create_role(
-                session,
-                config.stoat_url,
-                config.token,
-                state.stoat_server_id,
-                truncate_name(role.name),
-            )
+            try:
+                result = await api_create_role(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    state.stoat_server_id,
+                    truncate_name(role.name),
+                )
+            except MigrationError as exc:
+                if "TooManyRoles" in str(exc) or "too many" in str(exc).lower():
+                    state.warnings.append(
+                        {
+                            "phase": "roles",
+                            "type": "role_limit_exceeded",
+                            "message": (
+                                f"Stoat role limit reached at '{role.name}'; "
+                                "remaining roles skipped."
+                            ),
+                        }
+                    )
+                    break
+                raise
             stoat_role_id: str = result["id"]
             state.role_map[role.id] = stoat_role_id
 
