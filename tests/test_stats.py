@@ -109,6 +109,7 @@ def _full_state() -> MigrationState:
     state.embeds_dropped = 1
     state.failed_messages = []
     state.prior_messages_total = 1000
+    state.source_messages_total = 1000
     state.errors = [{"phase": "MESSAGES", "message": "rate limited at message 42"}]
     state.warnings = [{"phase": "STRUCTURE", "message": "emoji slot near cap"}]
     state.channel_message_counts = {"c0": 600, "c1": 300, "c2": 100}
@@ -449,3 +450,24 @@ def test_stats_channels_section_omitted_when_empty(runner: CliRunner, tmp_path: 
     result = runner.invoke(main, ["stats", str(out)])
     assert result.exit_code == 0
     assert "Per-Channel Messages" not in result.output
+
+
+def test_summarize_state_messages_fidelity_uses_source_total() -> None:
+    """A fresh run (prior_messages_total=0) still reports correct Messages fidelity."""
+    state = MigrationState()
+    state.message_map = {f"m{i}": f"sm{i}" for i in range(100)}
+    state.failed_messages = []
+    state.source_messages_total = 100  # set by engine, even on a fresh run
+    state.prior_messages_total = 0  # incremental-only; must NOT be the denominator
+    summary = summarize_state(state)
+    assert summary.fidelity.messages == 100.0
+
+
+def test_summarize_state_messages_fidelity_legacy_fallback() -> None:
+    """Legacy state (source_messages_total absent/0) falls back to map+failed, not 0%."""
+    state = MigrationState()
+    state.message_map = {f"m{i}": f"sm{i}" for i in range(50)}
+    state.failed_messages = []
+    state.source_messages_total = 0  # legacy
+    summary = summarize_state(state)
+    assert summary.fidelity.messages == 100.0  # 50/50, not 0/0
