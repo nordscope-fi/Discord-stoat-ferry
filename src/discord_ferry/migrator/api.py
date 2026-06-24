@@ -281,9 +281,10 @@ async def api_fetch_root(
 ) -> dict[str, Any]:
     """Best-effort GET / for instance config (limits, app URL).
 
-    Returns the parsed config dict, or ``{}`` on any non-200 status or network
-    error. Intentionally NOT routed through ``_api_request`` -- this is a
-    best-effort probe and must not carry the retry/circuit-breaker machinery.
+    Returns the parsed config dict, or ``{}`` on any non-200 status, network
+    error, or malformed JSON body. Intentionally NOT routed through
+    ``_api_request`` -- this is a best-effort probe and must not carry the
+    retry/circuit-breaker machinery.
     """
     url = f"{stoat_url.rstrip('/')}/"
     try:
@@ -291,7 +292,7 @@ async def api_fetch_root(
             if resp.status != 200:
                 return {}
             return await resp.json()  # type: ignore[no-any-return]
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, ValueError):
         return {}
 
 
