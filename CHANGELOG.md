@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.7] - 2026-06-25
+
+### Fixed
+
+Autumn upload robustness cluster — the first batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 1). All in `uploader/autumn.py` and its callers.
+
+- **A malformed Autumn `200` no longer aborts the migration with a raw exception** (`uploader/autumn.py`). The success path did `await response.json()` + `result["id"]`, so a non-JSON `200` (reverse-proxy HTML, empty body) raised a raw `aiohttp.ContentTypeError` / `KeyError`, and an empty body would raise `TypeError`. Because `_resolve_role_icon` (`migrator/structure.py`) caught only `AutumnUploadError`, such a raw error escaped its guard and **aborted the entire migration** for any server with custom role icons. The body is now parsed with `json(content_type=None)` inside `try/except (aiohttp.ClientError, ValueError)` and an explicit `isinstance(result, dict) and "id" in result` check; every malformed `200` raises `AutumnUploadError` (carrying only the tag — never the response body or token).
+- **`--verify-uploads` now actually detects a corrupt upload** (`uploader/autumn.py`). On a present-and-mismatched server `size`, `upload_to_autumn` previously popped the cache entry but still **returned** the bad id, which `upload_with_cache` immediately re-inserted — the whole feature was a no-op that propagated the corrupt id forever. A size mismatch is now treated as a failed upload (raises `AutumnUploadError`; never returned, never cached). The now-dead `cache` parameter was removed from `upload_to_autumn`.
+- **A non-JSON `429` no longer crashes the retry path, and `Retry-After` is honoured** (`uploader/autumn.py`). The 429 branch did `await response.json()` assuming a JSON body; an HTML `429` from a reverse proxy raised `ContentTypeError` that bypassed backoff and (in the sticker/attachment loop) dropped the media. A new module-private `_retry_after_ms` computes the backoff defensively: body `retry_after` (ms) → `Retry-After` header (integer seconds) → 1000 ms default, tolerant of any non-JSON body.
+- **Role-icon upload failures degrade instead of aborting** (`migrator/structure.py`). `_resolve_role_icon`'s guard is broadened to `except (AutumnUploadError, OSError)` (also covering the temp-file write), so an icon that can't be uploaded is skipped with a token-safe warning and the roles phase continues — rank/hoist for that role still apply.
+- **Sticker and embed-media uploads reach attachment parity** (`migrator/messages.py`). Both now pass `verify_size=config.verify_uploads` and register in `state.autumn_uploads` like regular attachments. The embed `media_id` is additionally credited to `referenced_autumn_ids` on a successful send (but **not** added to `autumn_ids`, so it does not consume the 5-attachment cap) — without this it would have been reported as a false orphan on every migrated embed image.
+
 ## [2.6.6] - 2026-06-25
 
 ### Fixed

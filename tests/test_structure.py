@@ -2637,3 +2637,104 @@ async def _run_and_collect(config: FerryConfig, exports: list[DCEExport]) -> set
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True)
         await run_roles(config, state, exports, events.append)
     return set(created_names)
+
+
+# ---------------------------------------------------------------------------
+# S4 — role-icon upload failure degrades (never aborts the roles phase)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_roles_icon_upload_failure_degrades(tmp_path: Path) -> None:
+    """A non-JSON Autumn icon response skips the icon (token-safe warning); phase completes."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc123")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    patch_bodies: list[dict[str, object]] = []
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        # Non-JSON 200 from Autumn -> AutumnUploadError (post-S1) -> caught by the broadened guard.
+        m.post(
+            f"{AUTUMN_URL}/icons",
+            status=200,
+            body=b"<html>SENTINEL_BODY</html>",
+            content_type="text/html",
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        # Must NOT raise — degrade, not abort.
+        await run_roles(config, state, exports, events.append)
+
+    icon_warnings = [w for w in state.warnings if w.get("type") == "role_icon_upload_failed"]
+    assert icon_warnings  # icon skipped with a warning
+    assert any(b.get("hoist") is True for b in patch_bodies)  # rank/hoist still applied
+    # SC-18 token-safety: the warning carries no response body and no token.
+    for w in icon_warnings:
+        assert "SENTINEL_BODY" not in w["message"]
+        assert config.token not in w["message"]
+
+
+async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
+    """An OSError writing the temp icon file degrades (warning) instead of aborting."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc123")},
+    )
+    save_discord_metadata(meta, tmp_path)  # written before the write_bytes patch
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+        patch("pathlib.Path.write_bytes", side_effect=OSError("disk full")),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        # Must NOT raise — the OSError on temp-file write degrades to a warning.
+        await run_roles(config, state, exports, events.append)
+
+    assert any(w.get("type") == "role_icon_upload_failed" for w in state.warnings)

@@ -181,3 +181,232 @@ def test_icons_limit_matches_stoat_autumn_config() -> None:
     from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
     assert TAG_SIZE_LIMITS["icons"] == 2_500_000
+
+
+# ---------------------------------------------------------------------------
+# S1 — malformed 200 -> AutumnUploadError
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_non_json_200_raises_autumn_error(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """A 200 with an HTML body raises AutumnUploadError, not ContentTypeError."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=200,
+        body=b"<html>SENTINEL_BODY</html>",
+        content_type="text/html",
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, "secret-token-xyz")
+
+
+async def test_upload_empty_200_body_raises_autumn_error(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """An empty 200 body (json -> None) raises AutumnUploadError."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=200, body=b"")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+
+
+async def test_upload_200_missing_id_raises_autumn_error(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """A 200 whose JSON lacks 'id' raises AutumnUploadError."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"size": 50})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+
+
+async def test_upload_error_message_omits_token_and_body(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """The raised error never contains the response body or the token (Tiger #1)."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=200,
+        body=b"<html>SENTINEL_BODY</html>",
+        content_type="text/html",
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError) as ei:
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, "secret-token-xyz")
+    text = str(ei.value)
+    assert "SENTINEL_BODY" not in text
+    assert "secret-token-xyz" not in text
+
+
+# ---------------------------------------------------------------------------
+# S2 — verify_size mismatch is a failed upload (raise, never cache)
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_size_mismatch_raises(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """verify_size=True with a server size != local size raises AutumnUploadError."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 100)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 999})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="size mismatch"):
+            await upload_to_autumn(
+                session, AUTUMN_URL, "attachments", file, TOKEN, verify_size=True
+            )
+
+
+async def test_verify_size_mismatch_not_cached(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """A mismatch via upload_with_cache leaves NO cache entry (corrupt id never cached)."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 100)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 999})
+    cache: dict[str, str] = {}
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError):
+            await upload_with_cache(
+                session, AUTUMN_URL, "attachments", file, TOKEN, cache, delay=0, verify_size=True
+            )
+    assert str(file) not in cache
+
+
+async def test_verify_size_match_returns_and_caches(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """verify_size=True with matching size returns the id and caches it."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 100)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 100})
+    cache: dict[str, str] = {}
+    async with aiohttp.ClientSession() as session:
+        result = await upload_with_cache(
+            session, AUTUMN_URL, "attachments", file, TOKEN, cache, delay=0, verify_size=True
+        )
+    assert result == "x"
+    assert cache[str(file)] == "x"
+
+
+async def test_verify_size_no_size_field_returns_id(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """verify_size=True with no 'size' field returns the id (best-effort unchanged)."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 100)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(
+            session, AUTUMN_URL, "attachments", file, TOKEN, verify_size=True
+        )
+    assert result == "x"
+
+
+async def test_verify_size_false_ignores_mismatch(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Default verify_size=False ignores a size mismatch (path unchanged)."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 100)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 999})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "x"
+
+
+# ---------------------------------------------------------------------------
+# S3 — 429 non-JSON tolerance + Retry-After header
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record autumn-module asyncio.sleep delays without waiting."""
+    calls: list[float] = []
+
+    async def _fake_sleep(secs: float) -> None:
+        calls.append(secs)
+
+    monkeypatch.setattr("discord_ferry.uploader.autumn.asyncio.sleep", _fake_sleep)
+    return calls
+
+
+async def test_429_html_body_retries_then_succeeds(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A 429 with an HTML body retries (no ContentTypeError) using the default backoff."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments", status=429, body=b"<html>429</html>", content_type="text/html"
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept and slept[0] == 1.0
+
+
+async def test_429_empty_body_default_backoff(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A 429 with an empty body falls back to the 1000 ms default."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, body=b"")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 1.0
+
+
+async def test_429_body_retry_after_honored(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A 429 with a body retry_after sleeps that many ms (existing behavior preserved)."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": 100})
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 0.1
+
+
+async def test_429_retry_after_header_used(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A 429 with no body field but a Retry-After header sleeps that many seconds."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments", status=429, body=b"", headers={"Retry-After": "2"}
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 2.0
+
+
+async def test_429_exhausted_raises(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """Three consecutive 429s exhaust retries and raise AutumnUploadError (no crash)."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    for _ in range(3):
+        mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, body=b"")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="Upload failed after"):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)

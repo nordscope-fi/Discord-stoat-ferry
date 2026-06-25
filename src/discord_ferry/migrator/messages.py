@@ -1005,8 +1005,10 @@ async def _process_message(
                 config.token,
                 state.upload_cache,
                 config.upload_delay,
+                verify_size=config.verify_uploads,
             )
             autumn_ids.append(sticker_id)
+            state.autumn_uploads[sticker_id] = f"{msg.id}:sticker:{sticker_path.name}"
             if channel_result is not None:
                 channel_result.attachments_uploaded += 1
             else:
@@ -1032,6 +1034,7 @@ async def _process_message(
 
     # Step 4: Flatten embeds (max 5, only those with title or description).
     stoat_embeds: list[dict[str, Any]] = []
+    embed_media_ids: list[str] = []
     for raw_embed in msg.embeds[:5]:
         flat, embed_media_path = flatten_embed(raw_embed, config.export_dir)
         if flat.get("description") or flat.get("title"):
@@ -1046,8 +1049,11 @@ async def _process_message(
                         config.token,
                         state.upload_cache,
                         config.upload_delay,
+                        verify_size=config.verify_uploads,
                     )
                     flat["media"] = media_id
+                    state.autumn_uploads[media_id] = f"{msg.id}:embed"
+                    embed_media_ids.append(media_id)
                     if channel_result is not None:
                         channel_result.attachments_uploaded += 1
                     else:
@@ -1184,11 +1190,11 @@ async def _process_message(
 
         if channel_result is not None:
             channel_result.message_map_updates[msg.id] = stoat_msg_id
-            channel_result.referenced_autumn_ids.update(autumn_ids)
+            channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
             channel_result.messages_migrated += 1  # S15: track for forum index rebuild
         else:
             state.message_map[msg.id] = stoat_msg_id
-            state.referenced_autumn_ids.update(autumn_ids)
+            state.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
             # S15: Track per-channel message count (direct-state path, e.g. retry).
             if export_channel_id:
                 state.channel_message_counts[export_channel_id] = (
