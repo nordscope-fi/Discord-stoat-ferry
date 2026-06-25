@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.5] - 2026-06-25
+
+### Fixed
+
+- **Thread `merge` strategy now honours the durable high-water marker** (`migrator/messages.py`). Closes GitHub #78 (finding M2). The v2.6.3 incremental gate covered the default `flatten` strategy (via `_process_single_channel`), but `thread_strategy="merge"` runs a separate function (`_merge_threads`) that re-POSTed the separator + **every** thread message into the parent channel on **every** `--incremental` run — idempotency-keyed so it never duplicated content, but wasted O(all-thread-messages) HTTP work each run. `_merge_threads` now: skips the separator and already-copied messages on `--incremental` (gated on `config.incremental`), tracks the thread's max message id (over all messages incl. system/skip-type ones, `isdigit()`-guarded), and writes a per-thread `channel_high_water` marker at completion (every run, so a first full run sets it up). An unchanged merged thread therefore makes **zero** POSTs on an incremental run, matching `flatten`; a thread with K new messages re-POSTs only those K (no re-sent separator). `flatten`, `archive`, and `--resume` behaviour are unchanged. The per-channel completion event now reports the count actually posted this run.
+
 ## [2.6.4] - 2026-06-25
 
 ### Fixed
