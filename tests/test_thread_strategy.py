@@ -359,3 +359,186 @@ async def test_thread_sort_by_message_count(tmp_path: Path) -> None:
     assert "400" in state.channel_map
     assert "300" in state.channel_map  # high-traffic thread kept
     assert "200" not in state.channel_map  # low-traffic thread dropped
+
+
+# ---------------------------------------------------------------------------
+# #78 — merge strategy honours the durable high-water marker
+# ---------------------------------------------------------------------------
+
+
+def _capture_keys(keys: list[str]) -> object:
+    """Patch target for api_send_message: record idempotency_key, return a fake id."""
+
+    async def _send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        keys.append(str(kwargs.get("idempotency_key", "")))
+        return {"_id": f"stoat-{kwargs.get('idempotency_key', 'x')}"}
+
+    return _send
+
+
+def _merge_setup(
+    tmp_path: Path,
+    thread_msg_ids: list[str],
+    marker: str | None = None,
+    incremental: bool = True,
+) -> tuple[FerryConfig, MigrationState, DCEExport, DCEExport]:
+    """Parent (ch 100) + one thread (ch 200) with the given message ids."""
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=incremental
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    if marker is not None:
+        state.channel_high_water["200"] = marker
+    parent = _make_export(channel_id="100", channel_name="general")
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message(mid, f"msg {mid}") for mid in thread_msg_ids],
+        message_count=len(thread_msg_ids),
+    )
+    return config, state, parent, thread
+
+
+async def test_merge_incremental_unchanged_thread_zero_posts(tmp_path: Path) -> None:
+    """S1: an unchanged merged thread (all ids <= marker) makes zero POSTs."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20"], marker="20")
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert not any(k.startswith("ferry-thread-sep-200") for k in keys)
+    assert not any(k.startswith("ferry-merge-") for k in keys)
+
+
+async def test_merge_brand_new_thread_posts_all_and_records_marker(tmp_path: Path) -> None:
+    """S2: a brand-new thread posts separator + all messages and records the marker."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert "ferry-thread-sep-200" in keys
+    assert {"ferry-merge-10", "ferry-merge-20", "ferry-merge-30"}.issubset(set(keys))
+    assert state.channel_high_water["200"] == "30"
+
+
+async def test_merge_second_run_unchanged_zero_posts(tmp_path: Path) -> None:
+    """S2-AC3: after a brand-new run records the marker, a 2nd run makes zero POSTs."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys([])):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    # second run over the same export, reusing the now-marked state
+    config2, _state2, parent2, thread2 = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    keys2: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys2)):
+        await run_messages(config2, state, [parent2, thread2], lambda e: None)
+    assert keys2 == []
+
+
+async def test_merge_incremental_only_new_messages(tmp_path: Path) -> None:
+    """S3: a thread with K new ids > marker re-POSTs only those K; no separator."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30", "40"], marker="20")
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    merge_keys = sorted(k for k in keys if k.startswith("ferry-merge-"))
+    assert merge_keys == ["ferry-merge-30", "ferry-merge-40"]
+    assert not any(k.startswith("ferry-thread-sep-") for k in keys)
+    assert state.channel_high_water["200"] == "40"
+
+
+async def test_merge_event_reports_posted_count(tmp_path: Path) -> None:
+    """S5: the completion event counts posted (2), not the full history (4)."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30", "40"], marker="20")
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys([])):
+        await run_messages(config, state, [parent, thread], events.append)
+    merged = [e.message for e in events if "Merged thread" in e.message]
+    assert any("(2 messages)" in m for m in merged)
+
+
+async def test_merge_skip_type_trailing_high_id_marker(tmp_path: Path) -> None:
+    """Critique I2: a trailing skip-type id still advances the marker (max over ALL ids)."""
+    from unittest.mock import patch
+
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent = _make_export(channel_id="100", channel_name="general")
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[
+            _make_message("10", "a"),
+            _make_message("20", "b"),
+            DCEMessage(
+                id="30",
+                type="ThreadCreated",  # a _SKIP_TYPES message
+                timestamp="2024-01-15T12:00:00+00:00",
+                content="",
+                author=_make_author(),
+            ),
+        ],
+        message_count=3,
+    )
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert "ferry-merge-30" not in keys  # skip-type never posted
+    assert state.channel_high_water["200"] == "30"  # but it advances the marker
+
+
+async def test_merge_non_numeric_thread_id_no_crash(tmp_path: Path) -> None:
+    """S4: a non-numeric thread message id never hits int() — no ValueError."""
+    from unittest.mock import patch
+
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    state.channel_high_water["200"] = "20"  # numeric marker present
+    parent = _make_export(channel_id="100", channel_name="general")
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("sys-x", "a system-id message"), _make_message("30", "new")],
+        message_count=2,
+    )
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)  # must not raise
+    assert "ferry-merge-sys-x" in keys  # non-numeric never skipped (no int() compare)
+    assert "ferry-merge-30" in keys  # 30 > 20 marker -> posts
+
+
+async def test_merge_non_numeric_marker_no_crash(tmp_path: Path) -> None:
+    """#77 parity: a non-numeric carried marker degrades to no-threshold, never crashes."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20"], marker="sys-marker")
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)  # must not raise
+    # Threshold normalized to "" -> every message copies (idempotent), no ValueError.
+    assert "ferry-merge-10" in keys
+    assert "ferry-merge-20" in keys

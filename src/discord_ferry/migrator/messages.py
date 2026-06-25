@@ -459,29 +459,43 @@ async def _merge_threads(
                 )
                 continue
 
-            # Send separator message.
-            separator = (
-                f"\u2500\u2500 Thread: {export.channel.name} "
-                f"({export.message_count} messages) \u2500\u2500"
+            _thread_skip_below = (
+                state.channel_high_water.get(export.channel.id, "") if config.incremental else ""
             )
-            try:
-                await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    parent_stoat_id,
-                    content=separator,
-                    masquerade={"name": "Discord Ferry"},
-                    idempotency_key=f"ferry-thread-sep-{export.channel.id}",
+            # #77 parity: a non-numeric marker (only reachable via a hand-edited
+            # state.json) degrades to "no threshold" rather than crashing int().
+            if _thread_skip_below and not _thread_skip_below.isdigit():
+                _thread_skip_below = ""
+            _thread_max_id = 0
+            _posted = 0
+
+            # Send separator message (skip on incremental when the thread already
+            # has a durable marker \u2014 the separator was posted on the first run).
+            if not (config.incremental and export.channel.id in state.channel_high_water):
+                separator = (
+                    f"\u2500\u2500 Thread: {export.channel.name} "
+                    f"({export.message_count} messages) \u2500\u2500"
                 )
-            except Exception as exc:  # noqa: BLE001
-                state.warnings.append(
-                    {
-                        "phase": "messages",
-                        "type": "merge_separator_failed",
-                        "message": f"Thread separator for {export.channel.name!r} failed: {exc}",
-                    }
-                )
+                try:
+                    await api_send_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        parent_stoat_id,
+                        content=separator,
+                        masquerade={"name": "Discord Ferry"},
+                        idempotency_key=f"ferry-thread-sep-{export.channel.id}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    state.warnings.append(
+                        {
+                            "phase": "messages",
+                            "type": "merge_separator_failed",
+                            "message": (
+                                f"Thread separator for {export.channel.name!r} failed: {exc}"
+                            ),
+                        }
+                    )
 
             # Send all thread messages to the parent channel.
             if export.json_path is not None:
@@ -489,9 +503,17 @@ async def _merge_threads(
             else:
                 message_source = iter(sorted(export.messages, key=lambda m: m.timestamp))
 
-            msg_count = 0
             for msg in message_source:
+                # Track the thread's max id over ALL messages (incl. skip-types),
+                # ABOVE the _SKIP_TYPES continue, so the marker == max(all ids)
+                # across runs (mirrors flatten _channel_max_id). isdigit-guarded.
+                _mid = int(msg.id) if msg.id.isdigit() else None
+                if _mid is not None and _mid > _thread_max_id:
+                    _thread_max_id = _mid
                 if msg.type in _SKIP_TYPES:
+                    continue
+                # Incremental: skip messages already copied on a prior run.
+                if _thread_skip_below and _mid is not None and _mid <= int(_thread_skip_below):
                     continue
 
                 content = _build_content(msg, state)
@@ -523,8 +545,13 @@ async def _merge_threads(
                             }
                         )
 
-                msg_count += 1
+                _posted += 1
                 await _rate_limit_with_pause(config)
+
+            # Durable high-water mark for this thread (written every run so a later
+            # --incremental run skips already-copied messages). Overwrite, like flatten.
+            if _thread_max_id:
+                state.channel_high_water[export.channel.id] = str(_thread_max_id)
 
             on_event(
                 MigrationEvent(
@@ -532,7 +559,7 @@ async def _merge_threads(
                     status="progress",
                     message=(
                         f"Merged thread {export.channel.name!r} "
-                        f"({msg_count} messages) into parent channel."
+                        f"({_posted} messages) into parent channel."
                     ),
                     channel_name=export.channel.name,
                 )
