@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.8] - 2026-06-26
+
+### Fixed
+
+Resume & migration-lock integrity cluster — the second batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 2). All in `core/engine.py`, `migrator/structure.py`, and `state.py`.
+
+- **The advisory migration lock now survives the SERVER phase** (`core/engine.py`, `migrator/structure.py`). The S17 lock is a `[FERRY_LOCK:{ts}:{host}]` marker appended to the live server description by `_acquire_migration_lock`; the SERVER phase then PATCHed the description with the Discord guild description — a full-field replacement that **wiped the marker**, so the lock protected only the connect+server phases and a second concurrent existing-server migration saw no lock during the hours-long message/reaction/pin tail. The engine now stashes the marker it wrote into a transient `state.migration_lock_marker` (never persisted, re-acquired each run), and `run_server` folds it into the description it already PATCHes — no extra API call. `_release_migration_lock` clears the field.
+- **A `--resume` after a kill mid-SERVER no longer creates a duplicate server** (`migrator/structure.py`). `run_server` set `state.stoat_server_id` from `api_create_server` but only the engine's post-phase save persisted it; a kill in that window left an on-disk state with no server id, so `--resume` re-entered the create branch and made a second server (orphaning the first with all its channels/roles). The id is now persisted with `save_state` immediately after creation, so `--resume` takes the reuse branch.
+- **`run_roles` resume now finalizes attributes and permissions for roles created before a crash** (`migrator/structure.py`, `state.py`, `core/engine.py`). `pre_existing_role_ids = set(role_map)` (captured at phase start) gated all three role passes, so on resume the roles created in the prior run were treated as pre-existing and their rank/hoist/icon/permissions were **never applied**. A new persisted `state.roles_finalized` set now gates the attributes + permissions passes (the create pass still gates on `pre_existing_role_ids` to avoid duplicate creation); roles are marked finalized at the **end** of a completed `run_roles` (regardless of the metadata-gated permissions pass), so a crash before the end re-runs both passes idempotently on resume. `roles_finalized` is carried into `--incremental` state and back-compat-seeded from `role_map` for migrations completed by an older version, so incremental runs still skip re-editing. A periodic intra-phase save in the create loop gives hard-kill durability.
+
 ## [2.6.7] - 2026-06-25
 
 ### Fixed

@@ -593,3 +593,52 @@ def test_load_state_defaults_channel_high_water(tmp_path: Path) -> None:
     path.write_text(json.dumps(data))
     loaded = load_state(tmp_path)
     assert loaded.channel_high_water == {}
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — S3: roles_finalized round-trip + seed; S1 marker not persisted
+# ---------------------------------------------------------------------------
+
+
+def test_roles_finalized_roundtrip(tmp_path: Path) -> None:
+    """S3 SC-16: roles_finalized survives save/load."""
+    state = MigrationState(roles_finalized={"r1", "r2"})
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.roles_finalized == {"r1", "r2"}
+
+
+def test_load_seeds_roles_finalized_for_completed_migration(tmp_path: Path) -> None:
+    """S3 SC-17: a completed migration with no roles_finalized key is seeded from role_map."""
+    state = MigrationState(
+        completed_at="2026-06-26T00:00:00+00:00", role_map={"r1": "s1", "r2": "s2"}
+    )
+    save_state(state, tmp_path)
+    path = tmp_path / "state.json"
+    data = json.loads(path.read_text())
+    data.pop("roles_finalized", None)  # emulate an older ferry state file
+    path.write_text(json.dumps(data))
+    loaded = load_state(tmp_path)
+    assert loaded.roles_finalized == {"r1", "r2"}
+
+
+def test_load_does_not_seed_roles_finalized_without_completed_at(tmp_path: Path) -> None:
+    """S3 SC-17 (control): a crashed (not completed) migration is NOT seeded."""
+    state = MigrationState(role_map={"r1": "s1"})  # no completed_at
+    save_state(state, tmp_path)
+    path = tmp_path / "state.json"
+    data = json.loads(path.read_text())
+    data.pop("roles_finalized", None)
+    path.write_text(json.dumps(data))
+    loaded = load_state(tmp_path)
+    assert loaded.roles_finalized == set()
+
+
+def test_migration_lock_marker_not_persisted(tmp_path: Path) -> None:
+    """S1 SC-18: the transient lock marker is never serialized."""
+    state = MigrationState(migration_lock_marker="[FERRY_LOCK:1:h]")
+    save_state(state, tmp_path)
+    path = tmp_path / "state.json"
+    assert "migration_lock_marker" not in json.loads(path.read_text())
+    loaded = load_state(tmp_path)
+    assert loaded.migration_lock_marker == ""

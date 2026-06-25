@@ -2738,3 +2738,263 @@ async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert any(w.get("type") == "role_icon_upload_failed" for w in state.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — S1: migration lock survives the SERVER phase
+# ---------------------------------------------------------------------------
+
+
+def _meta_with_description(desc: str = "Cosy") -> DiscordMetadata:
+    return DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        guild_description=desc,
+    )
+
+
+async def test_lock_marker_preserved_in_server_description_patch(tmp_path: Path) -> None:
+    """S1 SC-1: run_server folds the lock marker into the description PATCH (token-safe)."""
+    config = _make_config(tmp_path, server_id="srv1", token="secret-token-xyz")
+    state = MigrationState(
+        stoat_server_id="srv1", migration_lock_marker="[FERRY_LOCK:9999999999:host]"
+    )
+    save_discord_metadata(_meta_with_description("Cosy"), tmp_path)
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "name": "S"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_server(config, state, [_make_export()], lambda e: None)
+    desc_bodies = [b for b in bodies if "description" in b]
+    assert len(desc_bodies) == 1
+    assert "Cosy" in desc_bodies[0]["description"]  # type: ignore[operator]
+    assert "[FERRY_LOCK:9999999999:host]" in desc_bodies[0]["description"]  # type: ignore[operator]
+    assert all("secret-token-xyz" not in w.get("message", "") for w in state.warnings)
+
+
+async def test_lock_marker_adds_no_extra_server_patch(tmp_path: Path) -> None:
+    """S1 SC-2: the marker folds into the existing description PATCH — no extra PATCH."""
+    config = _make_config(tmp_path, server_id="srv1")
+    state = MigrationState(stoat_server_id="srv1", migration_lock_marker="[FERRY_LOCK:1:h]")
+    save_discord_metadata(_meta_with_description("Cosy"), tmp_path)
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "name": "S"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_server(config, state, [_make_export()], lambda e: None)
+    # Exactly one description-bearing PATCH (the marker is folded in, not a separate call).
+    assert len([b for b in bodies if "description" in b]) == 1
+    # The permission-bootstrap PATCH (default_permissions only) carries no description.
+    assert any("default_permissions" in b and "description" not in b for b in bodies)
+
+
+async def test_create_path_description_has_no_lock_marker(tmp_path: Path) -> None:
+    """S1 SC-3: the create path has no lock (empty marker) → description PATCH carries no marker."""
+    config = _make_config(tmp_path)  # no server_id -> create path
+    state = MigrationState()  # migration_lock_marker == ""
+    save_discord_metadata(_meta_with_description("Cosy"), tmp_path)
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "new1", "name": "S"})
+        m.patch(
+            f"{STOAT_URL}/servers/new1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_server(config, state, [_make_export()], lambda e: None)
+    desc_bodies = [b for b in bodies if "description" in b]
+    assert desc_bodies and desc_bodies[0]["description"] == "Cosy"
+    assert all("[FERRY_LOCK" not in str(b.get("description", "")) for b in bodies)
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — S2: persist stoat_server_id immediately after create (--resume)
+# ---------------------------------------------------------------------------
+
+
+async def test_server_id_persisted_right_after_create(tmp_path: Path) -> None:
+    """S2 SC-6: save_state runs right after create, with stoat_server_id already set."""
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    recorded: list[str] = []
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.save_state",
+            side_effect=lambda s, d: recorded.append(s.stoat_server_id),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "new1", "name": "S"})
+        m.patch(f"{STOAT_URL}/servers/new1", payload={}, repeat=True)
+        await run_server(config, state, [_make_export()], lambda e: None)
+    assert recorded and recorded[0] == "new1"  # persisted immediately after create
+
+
+async def test_resume_after_create_reuses_server(tmp_path: Path) -> None:
+    """S2 SC-7: a --resume from a kill-after-create state reuses the server (no second create)."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")  # persisted post-create state
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "name": "S"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
+        # No /servers/create mock — aioresponses raises if create fires.
+        await run_server(config, state, [_make_export()], lambda e: None)
+    assert state.stoat_server_id == "srv1"
+
+
+async def test_dry_run_server_unchanged(tmp_path: Path) -> None:
+    """S2 SC-8: dry-run uses a placeholder id and makes no HTTP calls."""
+    config = _make_config(tmp_path, dry_run=True)
+    state = MigrationState()
+    with aioresponses():  # any request would raise
+        await run_server(config, state, [_make_export()], lambda e: None)
+    assert state.stoat_server_id.startswith("dry-server")
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — S3: run_roles resume finalizes attributes + permissions
+# ---------------------------------------------------------------------------
+
+
+def _meta_with_role(role_id: str = "r1") -> DiscordMetadata:
+    return DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={role_id: PermissionPair(allow=1, deny=0)},
+        channel_metadata={},
+        role_metadata={role_id: RoleMeta(hoist=True, position=2)},
+    )
+
+
+async def test_resume_finalizes_unfinalized_role(tmp_path: Path) -> None:
+    """S3 SC-9: a created-but-unfinalized role gets attrs PATCH + perms PUT on resume."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1", role_map={"r1": "stoat-r1"}, roles_finalized=set()
+    )
+    exports = [_make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="Mods")])])]
+    save_discord_metadata(_meta_with_role("r1"), tmp_path)
+    patched: list[dict[str, object]] = []
+    putted: list[dict[str, object]] = []
+    with aioresponses() as m:
+        # No POST /roles mock — create must NOT fire for the already-mapped role.
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: patched.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        m.put(
+            f"{STOAT_URL}/servers/srv1/permissions/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: putted.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(config, state, exports, lambda e: None)
+    assert patched and putted  # attrs + perms both applied on resume
+    assert "r1" in state.roles_finalized
+
+
+async def test_resume_does_not_recreate_mapped_role(tmp_path: Path) -> None:
+    """S3 SC-10: the create pass skips an already-mapped role (no duplicate api_create_role)."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1", role_map={"r1": "stoat-r1"}, roles_finalized=set()
+    )
+    exports = [_make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="Mods")])])]
+    save_discord_metadata(_meta_with_role("r1"), tmp_path)
+    creates: list[object] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "should-not-happen"},
+            repeat=True,
+            callback=lambda url, **kw: creates.append(url),  # type: ignore[misc]
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+        await run_roles(config, state, exports, lambda e: None)
+    assert creates == []  # no create POST fired
+
+
+async def test_incremental_finalized_role_skips_attrs_and_perms(tmp_path: Path) -> None:
+    """S3 SC-11: a finalized role is skipped by both attrs and perms passes (no HTTP)."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1", role_map={"r1": "stoat-r1"}, roles_finalized={"r1"}
+    )
+    exports = [_make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="Mods")])])]
+    save_discord_metadata(_meta_with_role("r1"), tmp_path)
+    with aioresponses():  # NO mocks — any role PATCH/PUT/POST would raise
+        await run_roles(config, state, exports, lambda e: None)
+    assert state.roles_finalized == {"r1"}
+
+
+async def test_mark_at_end_finalizes_without_metadata(tmp_path: Path) -> None:
+    """S3 SC-12: a completed run finalizes created roles even with no Discord metadata."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="Mods")])])]
+    # No save_discord_metadata -> permissions pass skipped, attrs no-op (position 0).
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1"}, repeat=True)
+        await run_roles(config, state, exports, lambda e: None)
+    assert "r1" in state.roles_finalized
+
+
+async def test_completed_run_finalizes_all_created_roles(tmp_path: Path) -> None:
+    """S3 SC-13: a normal completed run finalizes every created role."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [DCERole(id="r1", name="A"), DCERole(id="r2", name="B")]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2"})
+        await run_roles(config, state, exports, lambda e: None)
+    assert state.roles_finalized == {"r1", "r2"}
+
+
+async def test_create_loop_saves_state_periodically(tmp_path: Path) -> None:
+    """S3 SC-14: the create loop persists mid-phase (hard-kill durability)."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [DCERole(id=f"r{i}", name=f"R{i}") for i in range(1, 11)]  # 10 roles -> idx%10 fires
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+    with (
+        aioresponses() as m,
+        patch("discord_ferry.migrator.structure.save_state") as spy,
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-x"}, repeat=True)
+        await run_roles(config, state, exports, lambda e: None)
+    # One intra-loop save (at idx==10) + one finalize-at-end save.
+    assert spy.call_count >= 2
+
+
+async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) -> None:
+    """S3 SC-15: a TooManyRoles break leaves the unmapped role out of roles_finalized."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [DCERole(id="r1", name="A"), DCERole(id="r2", name="B")]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", status=400, body=b'{"type":"TooManyRoles"}')
+        await run_roles(config, state, exports, lambda e: None)
+    assert "r1" in state.role_map and "r2" not in state.role_map
+    assert "r1" in state.roles_finalized and "r2" not in state.roles_finalized

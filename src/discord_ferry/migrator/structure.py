@@ -33,6 +33,7 @@ from discord_ferry.migrator.api import (
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.models import DCERole
+from discord_ferry.state import save_state
 from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
@@ -167,6 +168,9 @@ async def run_server(
 
             result = await api_create_server(session, config.stoat_url, config.token, name)
             state.stoat_server_id = result["_id"]
+            # S2: persist immediately so a kill before the post-phase save still records the
+            # server id — on --resume the reuse branch fires instead of creating a duplicate.
+            save_state(state, config.output_dir)
             on_event(
                 MigrationEvent(
                     phase="server",
@@ -283,7 +287,11 @@ async def run_server(
         if discord_meta is not None:
             server_kwargs: dict[str, Any] = {"nsfw": discord_meta.guild_nsfw}
             if discord_meta.guild_description:
-                server_kwargs["description"] = discord_meta.guild_description
+                desc = discord_meta.guild_description
+                # S1: preserve the advisory-lock marker the engine wrote (else this PATCH wipes it).
+                if state.migration_lock_marker:
+                    desc = f"{desc} {state.migration_lock_marker}"
+                server_kwargs["description"] = desc
             try:
                 await api_edit_server(
                     session,
@@ -537,6 +545,10 @@ async def run_roles(
                 raise
             stoat_role_id: str = result["id"]
             state.role_map[role.id] = stoat_role_id
+            # S3: persist periodically so a hard-kill mid-create leaves role_map durable
+            # (resume then skips already-created roles instead of duplicating them).
+            if idx % 10 == 0:
+                save_state(state, config.output_dir)
 
             # Credit recovered structural roles: created THIS run (the
             # pre_existing_role_ids guard above already excludes prior-run roles)
@@ -585,7 +597,9 @@ async def run_roles(
     ranked_roles = sorted(roles_to_create, key=lambda r: (r.position, r.id))
     async with get_session(config) as session:
         for role in ranked_roles:
-            if role.id in pre_existing_role_ids:
+            # S3: gate on roles_finalized (not pre_existing) so resume finalizes created-but-
+            # unfinished roles; --incremental skips prior-completed (finalized) roles.
+            if role.id in state.roles_finalized:
                 continue
             rank_role_id = state.role_map.get(role.id)
             if not rank_role_id:
@@ -658,7 +672,8 @@ async def run_roles(
     if discord_metadata and not config.dry_run:
         async with get_session(config) as session:
             for role in roles_to_create:
-                if role.id in pre_existing_role_ids:
+                # S3: gate on roles_finalized (not pre_existing) — see attributes pass above.
+                if role.id in state.roles_finalized:
                     continue
                 stoat_role_id_or_none = state.role_map.get(role.id)
                 if not stoat_role_id_or_none:
@@ -706,6 +721,13 @@ async def run_roles(
                             "message": f"Failed to set server default permissions: {exc}",
                         }
                     )
+
+    # S3: mark every mapped role finalized (regardless of whether the metadata-gated perms pass
+    # ran) so --incremental skips re-editing; a crash before here leaves them un-finalized and
+    # resume re-runs attrs+perms idempotently. Unmapped roles (e.g. after a TooManyRoles break)
+    # are excluded by the `in state.role_map` filter.
+    state.roles_finalized.update(r.id for r in roles_to_create if r.id in state.role_map)
+    save_state(state, config.output_dir)
 
     on_event(
         MigrationEvent(

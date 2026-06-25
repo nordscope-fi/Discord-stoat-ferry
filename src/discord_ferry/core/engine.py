@@ -163,6 +163,9 @@ async def run_migration(
             # Carry over ID maps so structure phases are skipped / reused
             state.channel_map = dict(prior.channel_map)
             state.role_map = dict(prior.role_map)
+            # C1: carry finalized-roles so incremental skips re-editing (load_state seeds `prior`
+            # for old-ferry states). Without this every incremental run re-PATCHes all roles.
+            state.roles_finalized = set(prior.roles_finalized)
             state.category_map = dict(prior.category_map)
             state.emoji_map = dict(prior.emoji_map)
             state.avatar_cache = dict(prior.avatar_cache)
@@ -771,6 +774,8 @@ async def _acquire_migration_lock(
             config.server_id or "",
             description=new_description,
         )
+        # S1: stash the marker so the SERVER phase's description PATCH preserves it (transient).
+        state.migration_lock_marker = lock_marker
         on_event(
             MigrationEvent(
                 phase="connect",
@@ -815,6 +820,7 @@ async def _release_migration_lock(
                     config.server_id or "",
                     description=description,
                 )
+        state.migration_lock_marker = ""
         on_event(
             MigrationEvent(
                 phase="connect",
