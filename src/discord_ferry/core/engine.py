@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import re
 import socket
 from collections.abc import Callable, Coroutine
@@ -183,6 +184,9 @@ async def run_migration(
             # CLEAR completed_channel_ids so every channel is re-entered (new messages may exist).
             state.channel_message_offsets = dict(prior.channel_message_offsets)
             state.channel_high_water = dict(prior.channel_high_water)
+            # #76: carry failed messages forward (as independent copies) so an
+            # incremental run self-heals prior failures instead of wiping the record.
+            state.failed_messages = [dataclasses.replace(fm) for fm in prior.failed_messages]
             state.completed_channel_ids = set()
             # S3 + I2: carry forum index + per-channel counts so REPORT's
             # _rebuild_forum_indexes PATCHes (not re-posts) with cumulative counts,
@@ -204,6 +208,7 @@ async def run_migration(
             #     invite_code / invite_url, channel_message_offsets,
             #     channel_high_water (durable per-channel high-water mark for
             #     --incremental delta skipping),
+            #     failed_messages (so incremental self-heals prior failures — #76),
             #     channel_message_counts, forum_channel_members /
             #     forum_category_names / forum_index_message_ids,
             #     native_fidelity_counts (cumulative fidelity counter), and the
@@ -213,7 +218,6 @@ async def run_migration(
             #   RESET each run: completed_channel_ids (re-enter every channel for
             #     new msgs); pending_pins / pending_reactions (consumed by the
             #     reactions/pins phases — carrying a stale list would re-pin/re-react);
-            #     failed_messages,
             #     warnings / errors, validation_results, embeds_* / replies_*
             #     (per-run fidelity counters); current_phase, started_at,
             #     completed_at, export_completed, rollback_progress, is_dry_run.

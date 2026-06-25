@@ -685,16 +685,33 @@ async def _process_single_channel(
                         state.channel_high_water.get(export.channel.id, ""),
                         state.channel_message_offsets.get(export.channel.id, ""),
                     )
-                    if v
+                    if v and v.isdigit()
                 ),
                 key=int,
                 default="",
             )
         else:
             _skip_below = ""
+        # #77: a checkpoint can persist a non-numeric raw msg.id as the transient
+        # offset. Normalize so the single loop comparison int(_skip_below) is always
+        # safe for BOTH resume and incremental — degrade to "no threshold", never crash.
+        if _skip_below and not _skip_below.isdigit():
+            _skip_below = ""
+        # #76: ids that failed to POST on a prior run sit below the high-water mark;
+        # on incremental, exclude them from the skip so the phase re-POSTs them
+        # (self-heal). Empty unless incremental, so --resume is unaffected.
+        if config.incremental:
+            _failed_ids_here = {
+                fm.discord_msg_id
+                for fm in state.failed_messages
+                if fm.stoat_channel_id == stoat_channel_id
+            }
+        else:
+            _failed_ids_here = set()
         _channel_max_id = 0
         _skipped = 0
         _copied = 0
+        _retried = 0
         for idx, msg in enumerate(message_source):
             # Cancel check inside the message loop.
             if config.cancel_event and config.cancel_event.is_set():
@@ -706,11 +723,17 @@ async def _process_single_channel(
             _mid = int(msg.id) if msg.id.isdigit() else None
             if _mid is not None and _mid > _channel_max_id:
                 _channel_max_id = _mid
-            # Skip messages already copied (resume offset or incremental high-water).
-            if _skip_below and _mid is not None and _mid <= int(_skip_below):
+            # Skip messages already copied (resume offset or incremental high-water),
+            # UNLESS this id failed on a prior run (#76 self-heal) — then re-attempt it.
+            _would_skip = bool(_skip_below) and _mid is not None and _mid <= int(_skip_below)
+            _is_retry = msg.id in _failed_ids_here
+            if _would_skip and not _is_retry:
                 _skipped += 1
                 continue
-            _copied += 1
+            if _would_skip and _is_retry:
+                _retried += 1
+            else:
+                _copied += 1
 
             await _process_message(
                 msg=msg,
@@ -728,7 +751,10 @@ async def _process_single_channel(
                 now = time.monotonic()
                 if now - _last_save_time >= 5.0:
                     async with save_lock:
-                        state.channel_message_offsets[export.channel.id] = msg.id
+                        # #77: only persist numeric ids so a system-message id never
+                        # poisons the offset (the read-side guard above is the real fix).
+                        if msg.id.isdigit():
+                            state.channel_message_offsets[export.channel.id] = msg.id
                         # Merge partial result before saving so checkpoint includes progress.
                         _merge_channel_result(state, result)
                         save_state(state, config.output_dir)
@@ -758,14 +784,34 @@ async def _process_single_channel(
             if _channel_max_id:
                 state.channel_high_water[export.channel.id] = str(_channel_max_id)
             state.channel_message_offsets.pop(export.channel.id, None)
+            # #76 reconcile this channel's previously-failed ids: drop any that
+            # succeeded this run (now in message_map), and collapse the carried +
+            # fresh-re-fail duplicate to a single entry. Scoped to this channel so
+            # other channels' and brand-new failures are untouched.
+            if config.incremental and _failed_ids_here:
+                _seen: set[str] = set()
+                _reconciled: list[FailedMessage] = []
+                for fm in state.failed_messages:
+                    if (
+                        fm.stoat_channel_id == stoat_channel_id
+                        and fm.discord_msg_id in _failed_ids_here
+                    ):
+                        if fm.discord_msg_id in state.message_map:
+                            continue  # succeeded this run -> drop (S2-AC6)
+                        if fm.discord_msg_id in _seen:
+                            continue  # carried + re-fail dup -> collapse (S2-AC7)
+                        _seen.add(fm.discord_msg_id)
+                    _reconciled.append(fm)
+                state.failed_messages = _reconciled
             save_state(state, config.output_dir)
             # Return empty result since we already merged.
             result = ChannelResult(channel_id=export.channel.id)
 
         if config.incremental:
-            _complete_msg = (
-                f"Completed {export.channel.name!r}: {_copied} new, {_skipped} already present."
-            )
+            _parts = [f"{_copied} new", f"{_skipped} already present"]
+            if _retried:
+                _parts.append(f"{_retried} retried")
+            _complete_msg = f"Completed {export.channel.name!r}: {', '.join(_parts)}."
         else:
             _complete_msg = f"Completed {export.channel.name!r} ({total} messages)."
         on_event(
