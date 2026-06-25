@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
 
+# Edited-message marker appended by _build_content; shared with the empty-message
+# guard so the two stay byte-identical. Changing this changes migrated content.
+_EDITED_MARKER = " *(edited)*"
+
 # ---------------------------------------------------------------------------
 # Message splitting
 # ---------------------------------------------------------------------------
@@ -1102,9 +1106,18 @@ async def _process_message(
                 }
             )
 
-    # Step 6: Empty message fallback.
-    if msg.content == "" and not autumn_ids and not stoat_embeds:
-        content = f"{format_original_timestamp(msg.timestamp)} [empty message]"
+    # Step 6: Empty message fallback — test the BUILT content, not raw msg.content.
+    # Every PRE-guard append path (poll, sticker text, attachment placeholders,
+    # failed-embed notes, cross-channel reply fallback) lands in `content` above, so a
+    # body that came only from one of those is preserved. The empty baseline is rebuilt
+    # from the same parts _build_content uses: prefix + " " join, plus the edited marker
+    # (which carries its own leading space -> the empty-edited baseline has a DOUBLE space
+    # by construction). Both sides are .strip()ed, so the internal double space matches.
+    timestamp_prefix = format_original_timestamp(msg.timestamp)
+    edited_suffix = _EDITED_MARKER if msg.timestamp_edited else ""
+    empty_built = f"{timestamp_prefix} {edited_suffix}"
+    if content.strip() == empty_built.strip() and not autumn_ids and not stoat_embeds:
+        content = f"{timestamp_prefix} [empty message]{edited_suffix}"
 
     # Step 6b: Append reaction text if text mode.
     _effective_mode = (
@@ -1293,7 +1306,7 @@ def _build_content(msg: DCEMessage, state: MigrationState) -> str:
     content = f"{format_original_timestamp(msg.timestamp)} {content}"
 
     if msg.timestamp_edited:
-        content += " *(edited)*"
+        content += _EDITED_MARKER
 
     # Append sticker representations (text only — images uploaded separately).
     sticker_text, _ = handle_stickers(msg.stickers)
