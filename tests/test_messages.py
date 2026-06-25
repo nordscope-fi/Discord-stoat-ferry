@@ -626,19 +626,21 @@ async def test_reply_reference_not_in_map_is_silently_skipped(
 # ---------------------------------------------------------------------------
 
 
-async def test_empty_message_gets_placeholder(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """Empty content + no attachments + no embeds → placeholder text sent."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
-
+async def test_empty_message_gets_placeholder(tmp_path: Path) -> None:
+    """Empty content + no attachments + no embeds → [empty message] in the SENT content."""
+    sent: list[dict[str, Any]] = []
     state = _make_state()
     config = _make_config(tmp_path)
     # Use a Default type — GuildMemberJoin is now a skip type.
     msg = _make_message(id="msg1", content="", msg_type="Default")
     export = _make_export(messages=[msg])
 
-    await run_messages(config, state, [export], lambda e: None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
 
     assert "msg1" in state.message_map
+    assert len(sent) == 1
+    assert "[empty message]" in sent[0]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -2873,3 +2875,203 @@ async def test_checkpoint_skips_non_numeric_offset_write(tmp_path: Path, monkeyp
     # No checkpoint ever persisted the non-numeric id as an offset.
     assert all(off is None or off.isdigit() for off in captured)
     assert "sys-xyz" not in captured
+
+
+# ---------------------------------------------------------------------------
+# Empty-message guard tests the BUILT content (poll/sticker/placeholder/embed)
+# ---------------------------------------------------------------------------
+
+
+async def test_poll_only_message_preserves_poll_text(tmp_path: Path) -> None:
+    """A poll-only message (empty raw content) keeps its poll text, not [empty message]."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="poll1",
+        content="",
+        msg_type="Default",
+        poll={"question": {"text": "Fav?"}, "answers": [{"text": "Blue", "votes": 3}]},
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    content = sent[0]["content"]
+    assert "Poll: Fav?" in content
+    assert "Blue" in content
+    assert "[empty message]" not in content
+
+
+async def test_sticker_text_only_message_preserves_sticker_text(tmp_path: Path) -> None:
+    """A sticker-text-only message (remote sticker, no local image) keeps the sticker text."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="stick1",
+        content="",
+        msg_type="Default",
+        stickers=[{"name": "wave", "sourceUrl": "https://cdn.test/wave.png"}],
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    content = sent[0]["content"]
+    assert "[Sticker: wave]" in content
+    assert "[empty message]" not in content
+
+
+async def test_placeholder_only_message_preserves_placeholder(tmp_path: Path) -> None:
+    """An oversized-attachment-only message keeps the skip placeholder, not [empty message]."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    att = DCEAttachment(
+        id="big1", url="big.png", file_name="big.png", file_size_bytes=21 * 1024 * 1024
+    )
+    msg = _make_message(id="ph1", content="", msg_type="Default", attachments=[att])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    content = sent[0]["content"]
+    assert "File too large: big.png" in content
+    assert "[empty message]" not in content
+
+
+async def test_failed_embed_note_only_message_preserves_note(tmp_path: Path) -> None:
+    """A message whose only embed cannot migrate keeps the failed-embed note."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    # Embed with neither title nor description -> dropped -> failed-embed note appended.
+    msg = _make_message(id="emb1", content="", msg_type="Default", embeds=[{"url": "x"}])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    content = sent[0]["content"]
+    assert "embed(s) could not be migrated" in content
+    assert "[empty message]" not in content
+
+
+async def test_empty_edited_message_relabeled_with_edited_marker(tmp_path: Path) -> None:
+    """A truly-empty edited message is labeled [empty message] *(edited)* (S6 relabel)."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="ee1",
+        content="",
+        msg_type="Default",
+        timestamp="2024-01-15T12:00:00+00:00",
+        timestamp_edited="2024-01-15T13:00:00+00:00",
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    # M1: pin the EXACT built string, not just a substring.
+    assert sent[0]["content"] == "*[2024-01-15 12:00 UTC]* [empty message] *(edited)*"
+
+
+async def test_truly_empty_message_still_labeled_empty(tmp_path: Path) -> None:
+    """A truly-empty non-edited message still gets the [empty message] placeholder (S4.1)."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="te1", content="", msg_type="Default", timestamp="2024-01-15T12:00:00+00:00"
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    assert sent[0]["content"] == "*[2024-01-15 12:00 UTC]* [empty message]"
+
+
+async def test_attachment_only_message_not_labeled_empty(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """An attachment-only message (uploads OK) is NOT labeled [empty message] (S4.2)."""
+    att_file = tmp_path / "file.png"
+    att_file.write_bytes(b"data")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "att_id"})
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    att = DCEAttachment(id="att1", url="file.png", file_name="file.png")
+    msg = _make_message(id="ao1", content="", msg_type="Default", attachments=[att])
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    assert "[empty message]" not in sent[0]["content"]
+
+
+async def test_embed_only_message_not_labeled_empty(tmp_path: Path) -> None:
+    """An embed-only message (embed has title/description) is NOT labeled empty (S4.3)."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="eo1",
+        content="",
+        msg_type="Default",
+        embeds=[{"title": "Hi", "description": "there"}],
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    assert "[empty message]" not in sent[0]["content"]
+
+
+async def test_whitespace_only_message_labeled_empty(tmp_path: Path) -> None:
+    """A whitespace-only message strips to the baseline and is labeled [empty message]."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="ws1", content="   ", msg_type="Default", timestamp="2024-01-15T12:00:00+00:00"
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    assert sent[0]["content"] == "*[2024-01-15 12:00 UTC]* [empty message]"
+
+
+async def test_emoji_only_message_not_falsely_labeled_empty(tmp_path: Path) -> None:
+    """M4: a real text message (emoji/spoiler) never collapses to the empty baseline."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(id="em1", content="||boo||", msg_type="Default")
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    assert "[empty message]" not in sent[0]["content"]

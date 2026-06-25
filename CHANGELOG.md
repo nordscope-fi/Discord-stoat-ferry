@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.6] - 2026-06-25
+
+### Fixed
+
+- **Empty-message fallback no longer silently clobbers poll/sticker/placeholder/embed-note bodies** (`migrator/messages.py`). From the 2026-06-24 v2.5.1 bug-hunt refresh (HIGH-severity silent content data loss). The Step 6 empty-message guard tested the **raw** `msg.content == ""`, but `_build_content` and the caller append several optional bodies into the built `content` *before* that guard — poll text (`flatten_poll`), sticker text (`handle_stickers`), oversized/expired-attachment placeholders, and the "[N embed(s) could not be migrated]" note. A message whose entire body came from one of those paths (e.g. a poll-only or sticker-only message, which has empty raw content) was therefore overwritten with `[empty message]` — silent loss the user never saw. The guard now tests the **built** `content`: it compares `content.strip()` against a reconstructed empty baseline (the timestamp prefix plus, for edited messages, the `*(edited)*` marker), so any pre-guard append path is preserved. The `not autumn_ids and not stoat_embeds` conditions are retained, so attachment-only and embed-only messages are still **not** labeled empty, and a whitespace-only message is now (correctly) treated as empty. Empty **edited** messages are relabeled `[empty message] *(edited)*` instead of dropping the edit marker. The `" *(edited)*"` literal was extracted into a shared `_EDITED_MARKER` constant so `_build_content` and the guard stay byte-identical.
+
 ## [2.6.5] - 2026-06-25
 
 ### Fixed
