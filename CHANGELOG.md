@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.4] - 2026-06-25
+
+### Fixed
+
+- **Incremental mode now self-heals previously-failed messages, and a non-numeric carried offset no longer crashes the skip gate** (`migrator/messages.py`, `core/engine.py`). Closes the v2.6.3 **known limitation** (GitHub #76) and a folded-in pre-existing crash (GitHub #77), both surfaced by the whole-branch review of the v2.6.3 work.
+  - **A message that failed to POST on a prior run is now re-attempted automatically on the next `--incremental` run** (#76). The durable `channel_high_water` mark tracks the highest message id *seen*, not *successfully copied*, so a failed id sat below the mark and was skipped forever — and the engine carry-over reset `failed_messages`, wiping its retry record. Now the incremental carry-over **carries `failed_messages` forward** (as independent copies), the within-channel skip gate **excludes previously-failed ids for that channel** so the messages phase re-POSTs them, and a completion-time **reconciliation** drops ids that succeeded this run and collapses the carried + fresh-re-fail duplicate to a single entry (so the failure count stays stable across runs). Running `ferry retry` before `--incremental` is **no longer required** — the v2.6.3 known-limitation note is resolved. `--resume` is unaffected (it does not consult `failed_messages`); an unchanged channel with no prior failures still makes zero POSTs.
+  - **A non-numeric carried offset no longer fails the channel worker** (#77). The skip threshold used `max(…, key=int)` / `int(_skip_below)`, but the periodic checkpoint persisted the raw `msg.id`, which can be non-numeric for some system messages; a prior run that crashed right after such a checkpoint then raised `ValueError` (swallowed by `asyncio.gather` → the channel was silently skipped). The threshold now filters/normalizes non-numeric values to "no threshold" (copy, never crash) for both `--incremental` and `--resume`, and the checkpoint write is guarded with `isdigit()`.
+  - The incremental per-channel completion event now distinguishes re-attempted failures from new messages (`"{n} new, {m} already present, {k} retried"`; the `retried` clause is omitted when zero, byte-identical to the prior message).
+
+### Notes
+
+- A permanently-unsendable message is re-attempted (one idempotent POST) on each incremental run, matching the existing `ferry retry` semantics (no retry cap); `retry_count` is preserved if a cap is ever wanted. Edited/deleted-message sync remains out of scope.
+
 ## [2.6.3] - 2026-06-25
 
 ### Fixed

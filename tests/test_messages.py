@@ -2501,3 +2501,343 @@ async def test_new_thread_posts_header(tmp_path: Path) -> None:
         k.get("content") for k in sent if k.get("idempotency_key", "").startswith("ferry-header-")
     ]
     assert headers == ["[Thread migrated from #general]"]
+
+
+# ---------------------------------------------------------------------------
+# #77 — non-numeric carried offset crash guard (S3)
+# ---------------------------------------------------------------------------
+
+
+async def test_incremental_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
+    """SC-11: a non-numeric carried offset degrades to no-threshold, never raises."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(channel_message_offsets={"ch1": "sys-abc"})  # non-numeric
+    export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"100", "200"}  # no threshold -> both copied
+
+
+async def test_resume_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
+    """SC-12: resume path shares the guard — non-numeric offset, no ValueError."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, resume=True, output_dir=tmp_path)
+    state = _make_state(channel_message_offsets={"ch1": "sys-abc"})
+    export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"100", "200"}
+
+
+async def test_incremental_numeric_high_water_still_governs(tmp_path: Path) -> None:
+    """SC-13: a numeric high-water still skips at-or-below it (no behaviour change)."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(channel_high_water={"ch1": "200"})
+    export = _make_export(
+        messages=[_make_message(id="100"), _make_message(id="200"), _make_message(id="300")]
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"300"}
+
+
+async def test_incremental_non_numeric_offset_with_numeric_high_water(tmp_path: Path) -> None:
+    """SC-14: non-numeric offset is ignored; the numeric high-water governs."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_message_offsets={"ch1": "sys-abc"}, channel_high_water={"ch1": "200"}
+    )
+    export = _make_export(
+        messages=[_make_message(id="100"), _make_message(id="200"), _make_message(id="300")]
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"300"}
+
+
+# ---------------------------------------------------------------------------
+# #76 — incremental failed-message self-heal: skip-gate exclusion (S2)
+# ---------------------------------------------------------------------------
+
+
+async def test_incremental_reattempts_failed_id(tmp_path: Path) -> None:
+    """SC-4 (CRITICAL): a previously-failed id is re-POSTed alongside genuinely-new ids."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"200", "400"}
+
+
+async def test_incremental_unchanged_channel_no_failures_zero_posts(tmp_path: Path) -> None:
+    """SC-6: no prior failures + all ids <= marker -> zero POSTs (v2.6.3 regression guard)."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(channel_high_water={"ch1": "300"})
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == []
+
+
+async def test_resume_does_not_reattempt_failed_id(tmp_path: Path) -> None:
+    """SC-7: --resume must NOT consult failed_messages (no self-heal on resume)."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, resume=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_message_offsets={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == []  # 200 NOT re-attempted under resume
+
+
+async def test_incremental_marker_monotonicity(tmp_path: Path) -> None:
+    """SC-8: re-attempting low failed 200 under higher new 400 keeps the marker at 400."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert state.channel_high_water["ch1"] == "400"
+
+
+async def test_incremental_failed_id_equals_marker_boundary(tmp_path: Path) -> None:
+    """SC-18: failed id == marker (skip uses <=) is still re-attempted."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "200"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _sent_message_ids(sent) == ["200"]
+    assert state.channel_high_water["ch1"] == "200"
+
+
+async def test_incremental_empty_failed_is_pure_v263(tmp_path: Path) -> None:
+    """SC-19: empty failed_messages -> only genuinely-new ids POST."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(channel_high_water={"ch1": "300"}, failed_messages=[])
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"400"}
+
+
+async def test_incremental_multiple_failed_ids_one_channel(tmp_path: Path) -> None:
+    """SC-21: multiple carried failures in one channel are all re-attempted."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[
+            FailedMessage("150", "stoat_ch1", "boom"),
+            FailedMessage("250", "stoat_ch1", "boom"),
+        ],
+    )
+    export = _make_export(
+        messages=[_make_message(id=i) for i in ("100", "150", "200", "250", "300", "400")]
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert set(_sent_message_ids(sent)) == {"150", "250", "400"}
+
+
+# ---------------------------------------------------------------------------
+# #76 — completion-time reconciliation: drop-on-success / collapse-on-re-fail (S2)
+# ---------------------------------------------------------------------------
+
+
+def _capture_sends_failing(sent: list[dict[str, Any]], fail_ids: set[str]) -> Any:
+    """Capture that RAISES for ids in fail_ids (re-fail path), succeeds otherwise."""
+
+    async def _send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent.append(kwargs)
+        key = kwargs.get("idempotency_key", "")
+        if key.removeprefix("ferry-") in fail_ids:
+            raise RuntimeError("simulated send failure")
+        return {"_id": f"stoat-{key}"}
+
+    return _send
+
+
+async def test_reconcile_drops_succeeded_failed_id(tmp_path: Path) -> None:
+    """SC-9 (CRITICAL): a re-attempt that succeeds is dropped from failed_messages."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert all(fm.discord_msg_id != "200" for fm in state.failed_messages)
+    assert "200" in state.message_map
+
+
+async def test_reconcile_collapses_refailed_id(tmp_path: Path) -> None:
+    """SC-10 (CRITICAL): a re-attempt that fails again leaves exactly one entry, stable."""
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+
+    def _ids(s: MigrationState) -> list[str]:
+        return [fm.discord_msg_id for fm in s.failed_messages if fm.discord_msg_id == "200"]
+
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
+    sent1: list[dict[str, Any]] = []
+    with patch(
+        "discord_ferry.migrator.messages.api_send_message",
+        _capture_sends_failing(sent1, {"200"}),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _ids(state) == ["200"]  # exactly one, not two
+    # second identical incremental run keeps it stable (not growing)
+    sent2: list[dict[str, Any]] = []
+    with patch(
+        "discord_ferry.migrator.messages.api_send_message",
+        _capture_sends_failing(sent2, {"200"}),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+    assert _ids(state) == ["200"]
+
+
+async def test_reconcile_isolation_across_channels(tmp_path: Path) -> None:
+    """SC-20: each channel's reconcile only touches its own failures."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_map={"ch1": "stoat_ch1", "ch2": "stoat_ch2"},
+        channel_high_water={"ch1": "300", "ch2": "600"},
+        failed_messages=[
+            FailedMessage("100", "stoat_ch1", "boom"),  # in ch1 export -> succeeds -> drop
+            FailedMessage("500", "stoat_ch2", "boom"),  # absent from ch2 export -> retained
+        ],
+    )
+    export1 = _make_export(channel_id="ch1", messages=[_make_message(id="100")])
+    export2 = _make_export(channel_id="ch2", messages=[_make_message(id="550")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export1, export2], lambda e: None)
+    remaining = {fm.discord_msg_id for fm in state.failed_messages}
+    assert "100" not in remaining  # ch1 failure succeeded -> dropped
+    assert "500" in remaining  # ch2 failure not in export -> retained
+
+
+async def test_dry_run_incremental_does_not_touch_failed_messages(tmp_path: Path) -> None:
+    """SC-22: reconcile is unreachable in dry-run (run_messages returns early)."""
+    config = _make_config(tmp_path, incremental=True, dry_run=True, output_dir=tmp_path)
+    state = _make_state(failed_messages=[FailedMessage("200", "stoat_ch1", "boom")])
+    export = _make_export(messages=[_make_message(id="200")])
+    await run_messages(config, state, [export], lambda e: None)
+    assert [fm.discord_msg_id for fm in state.failed_messages] == ["200"]
+
+
+async def test_reconcile_keeps_deleted_unrecoverable_failed_id(tmp_path: Path) -> None:
+    """SC-23: a carried failed id absent from the re-export lingers, no POST."""
+    sent: list[dict[str, Any]] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "300", "400")])  # no 200
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert "200" not in _sent_message_ids(sent)
+    assert any(fm.discord_msg_id == "200" for fm in state.failed_messages)
+
+
+# ---------------------------------------------------------------------------
+# #76 — observability: retried count in the incremental complete event (S4)
+# ---------------------------------------------------------------------------
+
+
+async def test_incremental_complete_event_reports_retried(tmp_path: Path) -> None:
+    """SC-15: incremental complete event distinguishes retried from new."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(
+        channel_high_water={"ch1": "300"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends([])):
+        await run_messages(config, state, [export], events.append)
+    msgs = [e.message for e in events if e.message.startswith("Completed 'general':")]
+    assert msgs[-1] == "Completed 'general': 1 new, 2 already present, 1 retried."
+
+
+async def test_incremental_complete_event_omits_retried_when_zero(tmp_path: Path) -> None:
+    """SC-16: with no retries the message is byte-identical to today's form."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
+    state = _make_state(channel_high_water={"ch1": "300"}, failed_messages=[])
+    export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends([])):
+        await run_messages(config, state, [export], events.append)
+    msgs = [e.message for e in events if e.message.startswith("Completed 'general':")]
+    assert msgs[-1] == "Completed 'general': 1 new, 3 already present."
+
+
+# ---------------------------------------------------------------------------
+# #77 — defensive write-side guard for the transient offset (S5, P2)
+# ---------------------------------------------------------------------------
+
+
+async def test_checkpoint_skips_non_numeric_offset_write(tmp_path: Path, monkeypatch: Any) -> None:
+    """SC-17: a non-numeric msg.id is never persisted as a transient offset.
+
+    The offset is popped at channel completion, so an end-state assertion would be
+    trivially green. Spy on save_state to capture the offset value at each checkpoint
+    save — the moment the guard acts.
+    """
+    import discord_ferry.migrator.messages as messages_mod
+
+    captured: list[Any] = []
+
+    def _spy_save(state: Any, output_dir: Any) -> None:
+        captured.append(state.channel_message_offsets.get("ch1"))
+
+    monkeypatch.setattr(messages_mod, "save_state", _spy_save)
+
+    # Force the checkpoint's 5s save gate to pass on every message.
+    clock = {"v": 0.0}
+
+    def _fake_monotonic() -> float:
+        clock["v"] += 100.0
+        return clock["v"]
+
+    monkeypatch.setattr(messages_mod.time, "monotonic", _fake_monotonic)
+
+    config = _make_config(tmp_path, incremental=True, output_dir=tmp_path, checkpoint_interval=1)
+    state = _make_state(channel_high_water={"ch1": "300"})
+    # A non-numeric (system-message) id followed by a numeric one.
+    export = _make_export(messages=[_make_message(id="sys-xyz"), _make_message(id="400")])
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends([])):
+        await run_messages(config, state, [export], lambda e: None)
+    # No checkpoint ever persisted the non-numeric id as an offset.
+    assert all(off is None or off.isdigit() for off in captured)
+    assert "sys-xyz" not in captured

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PhaseFunction, run_migration
-from discord_ferry.state import MigrationState, save_state
+from discord_ferry.state import FailedMessage, MigrationState, save_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback, MigrationEvent
@@ -264,3 +264,29 @@ async def test_incremental_carries_channel_high_water(tmp_path: Path) -> None:
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
     assert state.channel_high_water == {"ch1": "300"}
     assert state.completed_channel_ids == set()
+
+
+async def test_incremental_carries_failed_messages(tmp_path: Path) -> None:
+    """SC-1: incremental carry-over copies prior.failed_messages forward."""
+    _make_prior_state(
+        tmp_path,
+        channel_map={"ch1": "stoat_ch1"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+    )
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert [fm.discord_msg_id for fm in state.failed_messages] == ["200"]
+
+
+async def test_incremental_carried_failed_messages_are_independent_copies(tmp_path: Path) -> None:
+    """SC-2: mutating a carried FailedMessage must not affect the prior state object."""
+    prior = _make_prior_state(
+        tmp_path,
+        channel_map={"ch1": "stoat_ch1"},
+        failed_messages=[FailedMessage("200", "stoat_ch1", "boom", retry_count=2)],
+    )
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    state.failed_messages[0].retry_count = 99
+    assert prior.failed_messages[0].retry_count == 2  # no aliasing
+    assert state.failed_messages[0] is not prior.failed_messages[0]
