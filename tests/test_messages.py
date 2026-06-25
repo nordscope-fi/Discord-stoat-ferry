@@ -3075,3 +3075,160 @@ async def test_emoji_only_message_not_falsely_labeled_empty(tmp_path: Path) -> N
 
     assert len(sent) == 1
     assert "[empty message]" not in sent[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# S5 — sticker/embed upload parity (verify_size + autumn_uploads + referenced)
+# ---------------------------------------------------------------------------
+
+
+async def test_sticker_registered_in_autumn_uploads(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """A successfully-uploaded sticker id is tracked in autumn_uploads and referenced."""
+    sticker_dir = tmp_path / "stickers"
+    sticker_dir.mkdir()
+    (sticker_dir / "cool.png").write_bytes(b"data")
+    msg = _make_message(
+        id="msg_s",
+        content="hi",
+        stickers=[
+            {"id": "sticker1", "name": "Cool", "format": "png", "sourceUrl": "stickers/cool.png"}
+        ],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_s1"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_s"}, repeat=True)
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "autumn_s1" in state.autumn_uploads
+    assert "autumn_s1" in state.referenced_autumn_ids
+
+
+async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """verify_uploads on: a sticker size mismatch skips the sticker; the message still sends."""
+    sticker_dir = tmp_path / "stickers"
+    sticker_dir.mkdir()
+    (sticker_dir / "cool.png").write_bytes(b"data")
+    msg = _make_message(
+        id="msg_s2",
+        content="hi",
+        stickers=[
+            {"id": "sticker1", "name": "Cool", "format": "png", "sourceUrl": "stickers/cool.png"}
+        ],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path, verify_uploads=True)
+    state = _make_state()
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "s", "size": 999}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_s2"}, repeat=True)
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "msg_s2" in state.message_map  # message still sent
+    assert "s" not in state.autumn_uploads  # mismatched sticker not registered
+
+
+async def test_embed_media_registered_and_referenced_not_orphan(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Embed media id is tracked AND referenced on success -> not reported as an orphan."""
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "thumb.png").write_bytes(b"png")
+    msg = _make_message(
+        id="msg_e",
+        content="x",
+        embeds=[{"title": "T", "description": "D", "thumbnail": {"url": "media/thumb.png"}}],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_m1"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_e"}, repeat=True)
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "autumn_m1" in state.autumn_uploads
+    assert "autumn_m1" in state.referenced_autumn_ids
+    orphans = set(state.autumn_uploads) - state.referenced_autumn_ids
+    assert "autumn_m1" not in orphans
+
+
+async def test_embed_media_not_a_top_level_attachment(tmp_path: Path) -> None:
+    """Embed media id is set on flat['media'] but NOT in the sent attachments (5-cap untouched)."""
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "thumb.png").write_bytes(b"png")
+    msg = _make_message(
+        id="msg_e2",
+        content="x",
+        embeds=[{"title": "T", "description": "D", "thumbnail": {"url": "media/thumb.png"}}],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", return_value="autumn_m2"),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    first = sent[0]
+    assert first.get("attachments") in (None, [])  # media not attached as a top-level file
+    assert any(e.get("media") == "autumn_m2" for e in (first.get("embeds") or []))
+
+
+async def test_embed_media_unsent_is_orphan(tmp_path: Path) -> None:
+    """Embed media uploaded but send fails -> tracked but NOT referenced (orphan)."""
+
+    async def always_fail(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        raise RuntimeError("API down")
+
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "thumb.png").write_bytes(b"png")
+    msg = _make_message(
+        id="msg_e3",
+        content="x",
+        embeds=[{"title": "T", "description": "D", "thumbnail": {"url": "media/thumb.png"}}],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", always_fail),
+        patch("discord_ferry.migrator.messages.upload_with_cache", return_value="autumn_m3"),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert "autumn_m3" in state.autumn_uploads
+    assert "autumn_m3" not in state.referenced_autumn_ids
+
+
+async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """verify_uploads on: an embed-media size mismatch skips the media; the message still sends."""
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "thumb.png").write_bytes(b"x" * 100)
+    msg = _make_message(
+        id="msg_e4",
+        content="x",
+        embeds=[{"title": "T", "description": "D", "thumbnail": {"url": "media/thumb.png"}}],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path, verify_uploads=True)
+    state = _make_state()
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "m", "size": 999}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_e4"}, repeat=True)
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "msg_e4" in state.message_map  # message still sent
+    assert "m" not in state.autumn_uploads  # mismatched media not registered

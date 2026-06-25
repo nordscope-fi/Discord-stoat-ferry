@@ -391,7 +391,7 @@ async def _resolve_role_icon(
             state.native_fidelity_counts.get("role_icons", 0) + 1
         )
         return icon_id
-    except AutumnUploadError:
+    except (AutumnUploadError, OSError):
         # Fixed template — never str(exc); the body may echo x-session-token.
         state.warnings.append(
             {
