@@ -290,3 +290,24 @@ async def test_incremental_carried_failed_messages_are_independent_copies(tmp_pa
     state.failed_messages[0].retry_count = 99
     assert prior.failed_messages[0].retry_count == 2  # no aliasing
     assert state.failed_messages[0] is not prior.failed_messages[0]
+
+
+async def test_incremental_carries_roles_finalized(tmp_path: Path) -> None:
+    """SC-19: incremental carry-over copies prior.roles_finalized (C1)."""
+    _make_prior_state(
+        tmp_path,
+        role_map={"r1": "s1"},
+        roles_finalized={"r1"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.roles_finalized == {"r1"}
+
+
+async def test_incremental_seeds_then_carries_roles_finalized_for_old_state(tmp_path: Path) -> None:
+    """SC-19 (seed+carry): a completed prior state with no roles_finalized is seeded."""
+    # _make_prior_state sets completed_at; roles_finalized defaults empty -> simulates an old ferry.
+    _make_prior_state(tmp_path, role_map={"r1": "s1", "r2": "s2"})
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.roles_finalized == {"r1", "r2"}

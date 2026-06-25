@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import aiohttp
 import pytest
 from aioresponses import aioresponses
 
@@ -1698,3 +1699,45 @@ def test_select_invite_channel_none_when_only_voice(tmp_path: Path) -> None:
     state = MigrationState(channel_map={"d_voice": "s_voice"})
     exports = _exports_voice_only("d_voice")
     assert _select_invite_channel(config, state, exports) is None
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — S1: migration-lock marker plumbing (engine _acquire/_release)
+# ---------------------------------------------------------------------------
+
+
+async def test_acquire_raises_on_live_lock_marker(tmp_path: Path) -> None:
+    """S1 SC-4: a live (unexpired) lock marker blocks a concurrent acquire."""
+    from discord_ferry.core.engine import _acquire_migration_lock
+    from discord_ferry.errors import MigrationError
+
+    config = _make_config(tmp_path, server_id="srv1")
+    state = MigrationState()
+    with aioresponses() as m:
+        # ts far in the future -> age < expiry -> treated as a live lock.
+        m.get(
+            "https://api.test/servers/srv1",
+            payload={"_id": "srv1", "description": "x [FERRY_LOCK:9999999999:host]"},
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="Another migration is in progress"):
+                await _acquire_migration_lock(config, state, session, lambda e: None)
+
+
+async def test_acquire_sets_and_release_clears_lock_marker(tmp_path: Path) -> None:
+    """S1 SC-5: _acquire stashes the marker in state; _release clears it."""
+    from discord_ferry.core.engine import _acquire_migration_lock, _release_migration_lock
+
+    config = _make_config(tmp_path, server_id="srv1")
+    state = MigrationState()
+    with aioresponses() as m:
+        m.get(
+            "https://api.test/servers/srv1", payload={"_id": "srv1", "description": ""}, repeat=True
+        )
+        m.patch("https://api.test/servers/srv1", payload={}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            acquired = await _acquire_migration_lock(config, state, session, lambda e: None)
+            assert acquired is True
+            assert state.migration_lock_marker.startswith("[FERRY_LOCK:")
+            await _release_migration_lock(config, state, session, lambda e: None)
+            assert state.migration_lock_marker == ""

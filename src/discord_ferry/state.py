@@ -94,6 +94,10 @@ class MigrationState:
     stoat_server_id: str = ""
     autumn_url: str = ""
 
+    # S17 lock marker the engine wrote this run (transient — re-acquired each run, NOT persisted).
+    # run_server appends it to the description PATCH so the SERVER phase doesn't wipe the lock.
+    migration_lock_marker: str = ""
+
     # Resume tracking
     current_phase: str = ""
     completed_channel_ids: set[str] = field(default_factory=set)
@@ -122,6 +126,11 @@ class MigrationState:
     # Orphan upload tracking: detect Autumn files uploaded but never referenced in a message
     autumn_uploads: dict[str, str] = field(default_factory=dict)  # autumn_id -> source_id
     referenced_autumn_ids: set[str] = field(default_factory=set)  # confirmed used
+
+    # S3: roles whose attributes+permissions passes completed (a full run_roles). Gates the
+    # attrs/perms passes so resume finalizes created-but-unfinished roles while --incremental
+    # skips re-editing prior-completed ones.
+    roles_finalized: set[str] = field(default_factory=set)
 
     # Dead-letter queue: messages that failed to send (typed, retryable)
     failed_messages: list[FailedMessage] = field(default_factory=list)
@@ -272,6 +281,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "export_completed": state.export_completed,
         "autumn_uploads": state.autumn_uploads,
         "referenced_autumn_ids": list(state.referenced_autumn_ids),
+        "roles_finalized": list(state.roles_finalized),
         "failed_messages": [dataclasses.asdict(fm) for fm in state.failed_messages],
         "validation_results": state.validation_results,
         "prior_messages_total": state.prior_messages_total,
@@ -312,7 +322,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
         )
 
     try:
-        return MigrationState(
+        state = MigrationState(
             role_map=data.get("role_map", {}),
             channel_map=data.get("channel_map", {}),
             category_map=data.get("category_map", {}),
@@ -343,6 +353,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             export_completed=data.get("export_completed", False),
             autumn_uploads=data.get("autumn_uploads", {}),
             referenced_autumn_ids=set(data.get("referenced_autumn_ids", [])),
+            roles_finalized=set(data.get("roles_finalized", [])),
             failed_messages=[FailedMessage(**d) for d in data.get("failed_messages", [])],
             validation_results=data.get("validation_results", {}),
             prior_messages_total=data.get("prior_messages_total", 0),
@@ -361,6 +372,12 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             invite_url=data.get("invite_url", ""),
             native_fidelity_counts=data.get("native_fidelity_counts", {}),
         )
+        # S3 back-compat seed: an older completed migration has no roles_finalized; treat all
+        # mapped roles as finalized so its first --incremental run does not re-edit them. A
+        # crashed migration has no completed_at -> not seeded -> resume finalizes the remainder.
+        if state.completed_at and state.role_map and not state.roles_finalized:
+            state.roles_finalized = set(state.role_map)
+        return state
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e
 

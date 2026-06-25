@@ -186,10 +186,13 @@ async def test_run_roles_skips_all_passes_for_already_migrated_roles(
     )
     save_discord_metadata(meta, tmp_path)
 
-    # Prior state: both roles already mapped.
+    # Prior COMPLETED migration: both roles mapped AND finalized. Under S3, roles_finalized
+    # (not role_map membership) is the signal that the attrs/perms passes already ran, so an
+    # incremental run skips them. (A completed migration carries/seeds roles_finalized.)
     state = MigrationState(
         stoat_server_id="srv1",
         role_map={"r1": "stoat-r1", "r2": "stoat-r2"},
+        roles_finalized={"r1", "r2"},
     )
     config = _make_config(tmp_path, incremental=True)
     exports = [_make_role_export([role_a, role_b])]
