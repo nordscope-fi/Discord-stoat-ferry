@@ -2467,11 +2467,11 @@ async def test_non_numeric_message_id_not_skipped_or_marked(tmp_path: Path) -> N
 
 
 def _make_thread_export(
-    channel_id: str = "ch1", messages: list[DCEMessage] | None = None
+    channel_id: str = "ch1", messages: list[DCEMessage] | None = None, channel_type: int = 0
 ) -> DCEExport:
     return DCEExport(
         guild=_make_guild(),
-        channel=DCEChannel(id=channel_id, type=0, name="thread"),
+        channel=DCEChannel(id=channel_id, type=channel_type, name="thread"),
         messages=messages or [],
         is_thread=True,
         parent_channel_name="general",
@@ -2489,6 +2489,19 @@ async def test_unchanged_thread_makes_zero_posts(tmp_path: Path) -> None:
     assert sent == []
 
 
+async def test_unchanged_forum_post_makes_zero_posts(tmp_path: Path) -> None:
+    """Forum-post exports with a marker post nothing — not even the header."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={"ch1": "200"}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_thread_export(
+        messages=[_make_message(id="100"), _make_message(id="200")], channel_type=15
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    assert sent == []
+
+
 async def test_new_thread_posts_header(tmp_path: Path) -> None:
     """SC-5: a brand-new thread channel (no marker) posts the header."""
     sent: list[dict[str, Any]] = []
@@ -2501,3 +2514,17 @@ async def test_new_thread_posts_header(tmp_path: Path) -> None:
         k.get("content") for k in sent if k.get("idempotency_key", "").startswith("ferry-header-")
     ]
     assert headers == ["[Thread migrated from #general]"]
+
+
+async def test_new_forum_post_posts_header(tmp_path: Path) -> None:
+    """A brand-new forum-post export posts the forum header."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(channel_high_water={}, channel_message_offsets={})
+    config = _make_config(tmp_path, incremental=True)
+    export = _make_thread_export(messages=[_make_message(id="100")], channel_type=15)
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+    headers = [
+        k.get("content") for k in sent if k.get("idempotency_key", "").startswith("ferry-header-")
+    ]
+    assert headers == ["[Forum post migrated from #general]"]
