@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.3] - 2026-06-25
+
+### Fixed
+
+- **Incremental mode now copies only NEW messages** (`migrator/messages.py`, `core/engine.py`, `state.py`). From the 2026-06-24 v2.5.1 bug-hunt refresh — this closes the two items the v2.6.2 entry flagged as "tracked separately" (the incremental message-offset re-stream and the forum-index count double-count).
+  - **`--incremental` no longer re-streams and re-POSTs the entire history every run.** The within-channel skip (`messages.py`) was gated solely on `config.resume`, but `--incremental` and `--resume` are mutually exclusive, so the skip never fired for incremental runs — every run did O(all-messages) work. Server-side idempotency (`Idempotency-Key=ferry-{msg.id}`) hid the duplicate POSTs, so the symptom was invisible: no speedup, ever.
+  - **Durable per-channel high-water mark** (`MigrationState.channel_high_water`, persisted): the existing `channel_message_offsets` is transient within-run resume state and is popped on channel completion, so after a clean run there was nothing to skip from. The new field records the highest copied message id per channel, is written at channel completion (never popped), is carried into incremental runs by the engine, and is consulted by a mode-aware skip gate — resume keeps using the transient offset (unchanged), incremental uses `max(high_water, carried_offset)` so a crashed prior run degrades gracefully. Back-compat: an old `state.json` lacking the field loads with `{}` and the run falls back to a (harmless, idempotent) full re-copy.
+  - **The thread/forum header POST is now gated on the same marker**, so an unchanged thread/forum channel makes zero POSTs on an incremental run (previously it re-POSTed `[Thread migrated from #…]` every run, idempotency-keyed only).
+  - **The forum-index message counter no longer inflates across incremental runs.** It double-counted because re-processed messages re-incremented `channel_message_counts`; once messages stop re-processing the count holds — fixed for free, locked in by test.
+  - Replaced two false-green delta tests (`tests/test_delta_migration.py`): a `... or True` tautology and an assertion against the wrong (avatar) value. Added real-production-code guard tests (`tests/test_messages.py`) that drive the real messages phase against mocked Stoat endpoints and fail if the skip gate or the carry-over is removed.
+
+### Notes
+
+- Edited/deleted-message sync is explicitly out of scope — a high-water mark can only detect appended messages, not changes to already-copied ones.
+- **Known limitation — run `ferry retry` before `--incremental`.** A message that failed to POST on a prior run (recorded in `failed_messages`) is below the channel's high-water mark, so a later `--incremental` skips it and does not auto-retry it; `failed_messages` is also reset per incremental run, so its retry record is lost. Retry such failures with `ferry retry` against the prior `state.json` *before* running an incremental update. (Previously, the broken incremental re-streamed everything and thus re-attempted failures as a side effect; that accidental self-heal is gone now that re-streaming is fixed.) A proper fix — preserving failed-message retry across incremental runs — is tracked as a follow-up.
+
 ## [2.6.2] - 2026-06-24
 
 ### Fixed

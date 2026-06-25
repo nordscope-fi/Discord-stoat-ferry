@@ -88,13 +88,13 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     assert state.channel_map == {"111": "stoat-ch-111", "222": "stoat-ch-222"}
     assert state.role_map == {"aaa": "stoat-role-aaa"}
     assert state.category_map == {"cat1": "stoat-cat-1"}
-    assert state.emoji_map == {"em1": "autumn-av-1"} or "em1" in state.emoji_map
+    assert state.emoji_map == {"em1": "autumn-em-1"}
     assert state.avatar_cache == {"user1": "autumn-av-1"}
     assert state.stoat_server_id == "stoat-server-xyz"
     assert state.autumn_url == "https://autumn.test"
 
     # Offsets carried over (channels not completed, so they can receive new messages)
-    assert state.channel_message_offsets.get("111") == "99999" or True  # may clear on completion
+    assert state.channel_message_offsets.get("111") == "99999"
     assert state.completed_channel_ids == set()
 
     # Cumulative counters carried forward
@@ -125,41 +125,25 @@ async def test_incremental_no_prior_state_runs_fresh(tmp_path: Path) -> None:
 
 
 async def test_incremental_skips_old_messages(tmp_path: Path) -> None:
-    """Messages with ID <= offset are skipped in incremental mode."""
+    """SC-19: incremental carries the durable marker the real phase skips against.
 
-    # Inject a messages phase that checks offsets are applied
-    processed_ids: list[str] = []
-
-    async def spy_messages_phase(
-        config: FerryConfig,
-        state: MigrationState,
-        exports: list[Any],
-        emit: EventCallback,
-    ) -> None:
-        """Simulate processing: record which message IDs would pass the offset filter."""
-        all_ids = ["100", "200", "300", "400"]
-        offset = state.channel_message_offsets.get("test-ch", "")
-        for msg_id in all_ids:
-            if (config.resume or config.incremental) and offset and int(msg_id) <= int(offset):
-                continue  # skipped (old message)
-            processed_ids.append(msg_id)
-
+    The previous version used a spy messages phase that re-implemented the filter and
+    injected a channel_message_offsets value that would not survive a real completion,
+    so it passed whether or not the production gate existed. This version asserts the
+    durable channel_high_water marker is carried; the real run_messages skip behaviour
+    is guarded directly in tests/test_messages.py (SC-1/SC-8).
+    """
     _make_prior_state(
         tmp_path,
         channel_map={"test-ch": "stoat-ch-test"},
-        channel_message_offsets={"test-ch": "200"},
+        channel_high_water={"test-ch": "200"},
+        channel_message_offsets={},
     )
-
-    overrides = {**_NOOP_OVERRIDES, "messages": spy_messages_phase}
     config = _make_config(tmp_path, incremental=True)
-    await run_migration(config, lambda e: None, phase_overrides=overrides)
-
-    # IDs 100 and 200 are <= offset 200, so they should be skipped
-    assert "100" not in processed_ids
-    assert "200" not in processed_ids
-    # IDs 300 and 400 are new (> offset 200)
-    assert "300" in processed_ids
-    assert "400" in processed_ids
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    # The carried durable marker is what a real messages phase would skip against.
+    assert state.channel_high_water == {"test-ch": "200"}
+    assert state.completed_channel_ids == set()
 
 
 async def test_incremental_new_channel_full_migration(tmp_path: Path) -> None:
@@ -267,3 +251,16 @@ async def test_incremental_delta_stats_in_report(tmp_path: Path) -> None:
     assert delta["prior_run_total"] == 10
     assert delta["cumulative"] == len(state.message_map)
     assert delta["this_run"] == len(state.message_map) - 10
+
+
+async def test_incremental_carries_channel_high_water(tmp_path: Path) -> None:
+    """Incremental carry-over copies channel_high_water and resets completed_channel_ids."""
+    _make_prior_state(
+        tmp_path,
+        channel_map={"ch1": "stoat-ch1"},
+        channel_high_water={"ch1": "300"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.channel_high_water == {"ch1": "300"}
+    assert state.completed_channel_ids == set()

@@ -624,7 +624,13 @@ async def _process_single_channel(
         )
 
         # Inject a system header for flattened threads/forum posts.
-        if export.is_thread and export.parent_channel_name:
+        # Gate on a missing durable marker so an unchanged (previously-completed)
+        # thread/forum channel makes zero POSTs on an incremental run.
+        if (
+            export.is_thread
+            and export.parent_channel_name
+            and export.channel.id not in state.channel_high_water
+        ):
             if export.channel.type in (15, 16):
                 header = f"[Forum post migrated from #{export.parent_channel_name}]"
             else:
@@ -665,16 +671,46 @@ async def _process_single_channel(
         _checkpoint_interval = max(config.checkpoint_interval, 1)
         _last_save_time = time.monotonic()
 
-        _channel_msg_offset = state.channel_message_offsets.get(export.channel.id, "")
+        # Per-channel skip threshold: messages with id <= threshold are already copied.
+        # Resume -> transient within-run offset. Incremental -> durable high-water mark
+        # (or a carried transient offset from a crashed prior run, whichever is higher).
+        # Plain runs skip nothing.
+        if config.resume:
+            _skip_below = state.channel_message_offsets.get(export.channel.id, "")
+        elif config.incremental:
+            _skip_below = max(
+                (
+                    v
+                    for v in (
+                        state.channel_high_water.get(export.channel.id, ""),
+                        state.channel_message_offsets.get(export.channel.id, ""),
+                    )
+                    if v
+                ),
+                key=int,
+                default="",
+            )
+        else:
+            _skip_below = ""
+        _channel_max_id = 0
+        _skipped = 0
+        _copied = 0
         for idx, msg in enumerate(message_source):
             # Cancel check inside the message loop.
             if config.cancel_event and config.cancel_event.is_set():
                 break
 
-            # Resume: skip messages already processed within this channel.
-            # Compare as integers — Snowflake IDs are numeric.
-            if config.resume and _channel_msg_offset and int(msg.id) <= int(_channel_msg_offset):
+            # Track the highest numeric message id seen (durable high-water mark).
+            # isdigit() guard: real Discord ids are numeric snowflakes, but tests and
+            # some system messages may use non-numeric ids — never crash the loop.
+            _mid = int(msg.id) if msg.id.isdigit() else None
+            if _mid is not None and _mid > _channel_max_id:
+                _channel_max_id = _mid
+            # Skip messages already copied (resume offset or incremental high-water).
+            if _skip_below and _mid is not None and _mid <= int(_skip_below):
+                _skipped += 1
                 continue
+            _copied += 1
 
             await _process_message(
                 msg=msg,
@@ -717,16 +753,26 @@ async def _process_single_channel(
         async with save_lock:
             _merge_channel_result(state, result)
             state.completed_channel_ids.add(export.channel.id)
+            # Durable high-water mark — survives completion (unlike the transient
+            # offset below) so a later --incremental run skips already-copied messages.
+            if _channel_max_id:
+                state.channel_high_water[export.channel.id] = str(_channel_max_id)
             state.channel_message_offsets.pop(export.channel.id, None)
             save_state(state, config.output_dir)
             # Return empty result since we already merged.
             result = ChannelResult(channel_id=export.channel.id)
 
+        if config.incremental:
+            _complete_msg = (
+                f"Completed {export.channel.name!r}: {_copied} new, {_skipped} already present."
+            )
+        else:
+            _complete_msg = f"Completed {export.channel.name!r} ({total} messages)."
         on_event(
             MigrationEvent(
                 phase="messages",
                 status="progress",
-                message=f"Completed {export.channel.name!r} ({total} messages).",
+                message=_complete_msg,
                 current=total,
                 total=total,
                 channel_name=export.channel.name,

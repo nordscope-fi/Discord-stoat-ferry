@@ -98,6 +98,10 @@ class MigrationState:
     current_phase: str = ""
     completed_channel_ids: set[str] = field(default_factory=set)
     channel_message_offsets: dict[str, str] = field(default_factory=dict)
+    # Durable per-channel high-water mark (channel id -> highest copied message id).
+    # Unlike channel_message_offsets (transient within-run resume state, popped on
+    # completion), this survives completion and drives --incremental skipping.
+    channel_high_water: dict[str, str] = field(default_factory=dict)
 
     # Counters (incremented by phase implementations)
     attachments_uploaded: int = 0
@@ -257,6 +261,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "current_phase": state.current_phase,
         "completed_channel_ids": list(state.completed_channel_ids),
         "channel_message_offsets": state.channel_message_offsets,
+        "channel_high_water": state.channel_high_water,
         "attachments_uploaded": state.attachments_uploaded,
         "attachments_skipped": state.attachments_skipped,
         "reactions_applied": state.reactions_applied,
@@ -327,6 +332,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             current_phase=data.get("current_phase", ""),
             completed_channel_ids=set(data.get("completed_channel_ids", [])),
             channel_message_offsets=data.get("channel_message_offsets", {}),
+            channel_high_water=data.get("channel_high_water", {}),
             attachments_uploaded=data.get("attachments_uploaded", 0),
             attachments_skipped=data.get("attachments_skipped", 0),
             reactions_applied=data.get("reactions_applied", 0),
