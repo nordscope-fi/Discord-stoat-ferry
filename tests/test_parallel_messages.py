@@ -10,6 +10,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core.security import SecureTokenStore
 from discord_ferry.migrator.messages import (
     ChannelResult,
     _merge_channel_result,
@@ -420,9 +421,12 @@ async def test_cancel_event_stops_all_workers(tmp_path: Path) -> None:
         ]
         exports.append(_make_export(channel_id=ch_id, name=f"channel-{ch_id}", messages=msgs))
 
-    with patch("discord_ferry.migrator.messages.api_send_message", counting_send):
-        # CancelledError from _rate_limit_with_pause will propagate.
-        # The gather handles exceptions, so run_messages should complete.
+    # Batch 3 (S2): cancellation now PROPAGATES out of run_messages (intended behaviour
+    # change) so the engine takes its clean-cancel path; it no longer "completes".
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", counting_send),
+        pytest.raises(asyncio.CancelledError),
+    ):
         await run_messages(config, state, exports, lambda e: None)
 
     # Not all messages should have been sent — cancellation stopped early.
@@ -474,3 +478,270 @@ async def test_max_concurrent_channels_respected(tmp_path: Path) -> None:
     assert max_concurrent_seen <= 2, (
         f"Expected max 2 concurrent channels, saw {max_concurrent_seen}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch 3 (S2): cancel contract — run_messages must PROPAGATE CancelledError
+# ---------------------------------------------------------------------------
+
+
+async def test_run_messages_raises_on_cancel(tmp_path: Path) -> None:
+    """SC-6: cancel during the parallel phase → run_messages raises CancelledError and
+    emits NO messages 'completed' event (the engine's clean-cancel path handles it)."""
+    cancel_event = asyncio.Event()
+    sent = 0
+
+    async def counting_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        nonlocal sent
+        sent += 1
+        cancel_event.set()  # cancel after the first send
+        return {"_id": f"id_{sent}"}
+
+    state = _make_state(channel_map={"ch1": "stoat_ch1", "ch2": "stoat_ch2"})
+    config = _make_config(tmp_path, max_concurrent_channels=1, cancel_event=cancel_event)
+    exports = [
+        _make_export(
+            channel_id=c,
+            name=c,
+            messages=[
+                _make_message(
+                    id=f"{c}_{i}", content="m", timestamp=f"2024-01-15T12:{i:02d}:00+00:00"
+                )
+                for i in range(5)
+            ],
+        )
+        for c in ("ch1", "ch2")
+    ]
+    events: list[MigrationEvent] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", counting_send),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_messages(config, state, exports, _collect_events(events))
+
+    assert not any(e.status == "completed" and e.phase == "messages" for e in events)
+
+
+async def test_cancel_preserves_completed_channels(tmp_path: Path) -> None:
+    """SC-8: a channel finished before the cancel is checkpointed; the cancelled channel is
+    NOT marked complete."""
+    cancel_event = asyncio.Event()
+    sent = 0
+
+    async def send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        nonlocal sent
+        sent += 1
+        if channel_id == "stoat_ch2":
+            cancel_event.set()  # cancel once ch2 (processed after ch1) starts sending
+        return {"_id": f"id_{sent}"}
+
+    state = _make_state(channel_map={"ch1": "stoat_ch1", "ch2": "stoat_ch2"})
+    config = _make_config(tmp_path, max_concurrent_channels=1, cancel_event=cancel_event)
+    exports = [
+        _make_export(channel_id="ch1", name="ch1", messages=[_make_message(id="a1", content="m")]),
+        _make_export(
+            channel_id="ch2",
+            name="ch2",
+            messages=[_make_message(id="b1", content="m", timestamp="2024-01-15T13:00:00+00:00")],
+        ),
+    ]
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", send),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_messages(config, state, exports, lambda e: None)
+
+    assert "ch1" in state.completed_channel_ids  # finished before cancel — survives
+    assert "a1" in state.message_map
+    assert "ch2" not in state.completed_channel_ids  # cancelled mid-channel — not complete
+
+
+async def test_cancel_before_first_send_not_marked_complete(tmp_path: Path) -> None:
+    """SC-9: cancel detected at the loop-top (before any send) RAISES (not break), so the
+    channel is NOT self-marked complete (:748 break→raise)."""
+    cancel_event = asyncio.Event()
+    cancel_event.set()  # already cancelled before the run starts
+
+    async def send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        raise AssertionError("should not send when cancelled before the loop starts")
+
+    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    config = _make_config(tmp_path, max_concurrent_channels=1, cancel_event=cancel_event)
+    exports = [
+        _make_export(channel_id="ch1", name="ch1", messages=[_make_message(id="a1", content="m")])
+    ]
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", send),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_messages(config, state, exports, lambda e: None)
+
+    assert "ch1" not in state.completed_channel_ids
+    assert "ch1" not in state.channel_high_water
+
+
+# ---------------------------------------------------------------------------
+# Batch 3 (S3): resume coverage — a pre-loop worker crash aborts (resumable)
+# ---------------------------------------------------------------------------
+
+
+def _crash_on_progress(bad_name: str) -> Any:
+    """An on_event callback that raises BEFORE the per-message loop for *bad_name*.
+
+    The first "progress" event for a channel ('Importing X...') fires at the top of
+    _process_single_channel, before the message loop — raising there simulates a worker
+    crashing before sending any message (an unexpected setup raise). Only the 'progress'
+    status is targeted so the result-loop's later 'warning' emit is not disturbed.
+    """
+
+    def cb(event: Any) -> None:
+        if event.channel_name == bad_name and event.status == "progress":
+            raise RuntimeError(f"pre-loop boom in {bad_name}")
+
+    return cb
+
+
+async def test_pre_loop_crash_reraises_first_exception(tmp_path: Path) -> None:
+    """SC-11/13: a non-cancel worker crash propagates out of run_messages AFTER the good
+    channels have self-checkpointed (their work survives); the crashed channel is not
+    marked complete and is recorded as a channel_worker_failed error."""
+    state = _make_state(
+        channel_map={
+            "ch_good1": "stoat_good1",
+            "ch_bad": "stoat_bad",
+            "ch_good2": "stoat_good2",
+        }
+    )
+    config = _make_config(tmp_path, max_concurrent_channels=3)
+    exports = [
+        _make_export(
+            channel_id="ch_good1", name="good1", messages=[_make_message(id="g1", content="m")]
+        ),
+        _make_export(
+            channel_id="ch_bad",
+            name="bad",
+            messages=[_make_message(id="b", content="m", timestamp="2024-01-15T12:01:00+00:00")],
+        ),
+        _make_export(
+            channel_id="ch_good2",
+            name="good2",
+            messages=[_make_message(id="g2", content="m", timestamp="2024-01-15T12:02:00+00:00")],
+        ),
+    ]
+
+    async def ok_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return {"_id": f"id_{channel_id}"}
+
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", ok_send),
+        pytest.raises(RuntimeError),
+    ):
+        await run_messages(config, state, exports, _crash_on_progress("bad"))
+
+    # SC-13: good channels self-checkpointed before the re-raise — their work survives.
+    assert "g1" in state.message_map and "g2" in state.message_map
+    assert "ch_good1" in state.completed_channel_ids
+    assert "ch_good2" in state.completed_channel_ids
+    # SC-11: the crashed channel is NOT marked complete (so --resume re-runs it).
+    assert "ch_bad" not in state.completed_channel_ids
+    # SC-14 (audit signal): a channel_worker_failed error is recorded.
+    assert any(e["type"] == "channel_worker_failed" for e in state.errors)
+
+
+async def test_pre_loop_crash_resume_reruns_only_failed_channel(tmp_path: Path) -> None:
+    """SC-12: on --resume the previously-incomplete channel is re-sent while channels already
+    in completed_channel_ids are skipped (no duplicate sends)."""
+    sends: list[str] = []
+
+    async def record(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sends.append(channel_id)
+        return {"_id": f"id_{len(sends)}"}
+
+    state = _make_state(channel_map={"ch_bad": "stoat_bad", "ch_good": "stoat_good"})
+    state.completed_channel_ids.add("ch_good")  # good channel already done in a prior run
+    config = _make_config(tmp_path, max_concurrent_channels=2, resume=True)
+    exports = [
+        _make_export(
+            channel_id="ch_good", name="good", messages=[_make_message(id="g", content="m")]
+        ),
+        _make_export(
+            channel_id="ch_bad",
+            name="bad",
+            messages=[_make_message(id="b", content="m", timestamp="2024-01-15T12:01:00+00:00")],
+        ),
+    ]
+    with patch("discord_ferry.migrator.messages.api_send_message", record):
+        await run_messages(config, state, exports, lambda e: None)
+
+    assert "stoat_bad" in sends  # crashed channel re-run
+    assert "stoat_good" not in sends  # completed channel skipped (resume gate)
+    assert "ch_bad" in state.completed_channel_ids
+
+
+async def test_channel_worker_failure_is_token_safe(tmp_path: Path) -> None:
+    """SC-14: the recorded error and the emitted warning are safe_sanitize'd — no raw token."""
+    secret = "stoat_secret_token_value"
+
+    def crash_with_token(event: Any) -> None:
+        if event.channel_name == "bad" and event.status == "progress":
+            raise RuntimeError(f"failure leaking {secret}")
+
+    captured: list[Any] = []
+
+    def on_event(event: Any) -> None:
+        captured.append(event)
+        crash_with_token(event)
+
+    state = _make_state(channel_map={"ch_bad": "stoat_bad"})
+    config = _make_config(tmp_path, token_store=SecureTokenStore({"stoat": secret}))
+    exports = [
+        _make_export(channel_id="ch_bad", name="bad", messages=[_make_message(id="b", content="m")])
+    ]
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", lambda *a, **k: None),
+        pytest.raises(RuntimeError),
+    ):
+        await run_messages(config, state, exports, on_event)
+
+    assert all(secret not in e["message"] for e in state.errors)
+    assert all(secret not in (e.message or "") for e in captured if e.status == "warning")
+
+
+async def test_cancel_precedence_over_crash(tmp_path: Path) -> None:
+    """SC-15: when one worker is cancelled and another crashes in the same gather, cancel
+    wins (run_messages raises CancelledError) and the crashed channel stays resumable."""
+    cancel_event = asyncio.Event()
+    cancel_event.set()  # the non-crashing channel will hit the loop-top cancel check
+
+    async def noop_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"_id": "x"}
+
+    state = _make_state(channel_map={"ch_cancel": "stoat_cancel", "ch_crash": "stoat_crash"})
+    config = _make_config(tmp_path, max_concurrent_channels=2, cancel_event=cancel_event)
+    exports = [
+        _make_export(
+            channel_id="ch_cancel", name="cancel", messages=[_make_message(id="c", content="m")]
+        ),
+        _make_export(
+            channel_id="ch_crash",
+            name="crash",
+            messages=[_make_message(id="x", content="m", timestamp="2024-01-15T12:01:00+00:00")],
+        ),
+    ]
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", noop_send),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_messages(config, state, exports, _crash_on_progress("crash"))
+
+    assert "ch_crash" not in state.completed_channel_ids

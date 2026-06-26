@@ -1,5 +1,6 @@
 """Tests for the migration engine orchestrator."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -949,6 +950,86 @@ async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     assert any("1 succeeded" in e.message and "1 still failed" in e.message for e in events)
 
 
+async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> None:
+    """SC-1: a deterministically-failing retry TERMINATES (no mutate-during-iteration hang)
+    via the REAL _process_message append path; the message stays failed with retry_count+1.
+
+    M2: patch api_send_message (one level BELOW _process_message), NOT _process_message — so
+    the real append to state.failed_messages happens. The pre-fix code (silent return + a
+    live-list loop) hangs forever; asyncio.wait_for turns that into a TimeoutError.
+    """
+    config = _make_retry_config(tmp_path)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    _write_dce_json(config.export_dir, "ch1", [_dce_msg_dict("msg_fail")])
+    exports = _make_exports_from_dir(config.export_dir)
+    state = MigrationState(
+        channel_map={"ch1": "stoat_ch1"},
+        autumn_url=AUTUMN_URL,
+        failed_messages=[
+            FailedMessage(discord_msg_id="msg_fail", stoat_channel_id="stoat_ch1", error="err")
+        ],
+    )
+
+    async def always_fail_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        # Yield + throttle: a true await suspension lets asyncio.wait_for enforce its
+        # timeout (a synchronous raise would never yield, so a regression would hang
+        # UNBOUNDED instead of timing out); the small sleep bounds a regression's growth.
+        await asyncio.sleep(0.01)
+        raise RuntimeError("still broken")
+
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", always_fail_send):
+        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
+
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].discord_msg_id == "msg_fail"
+    assert state.failed_messages[0].retry_count == 1
+    assert any("0 succeeded" in e.message and "1 still failed" in e.message for e in events)
+
+
+async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -> None:
+    """SC-4: success + real re-failure + not-found, all under a timeout (no hang).
+
+    Uses the real _process_message append path (patches api_send_message) for the failing
+    channel so the snapshot-iteration fix is genuinely exercised.
+    """
+    config = _make_retry_config(tmp_path)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    _write_dce_json(config.export_dir, "ch_ok", [_dce_msg_dict("msg_ok")])
+    _write_dce_json(config.export_dir, "ch_fail", [_dce_msg_dict("msg_fail")])
+    exports = _make_exports_from_dir(config.export_dir)
+    state = MigrationState(
+        channel_map={"ch_ok": "stoat_ch_ok", "ch_fail": "stoat_ch_fail"},
+        autumn_url=AUTUMN_URL,
+        failed_messages=[
+            FailedMessage(discord_msg_id="msg_ok", stoat_channel_id="stoat_ch_ok", error="e"),
+            FailedMessage(discord_msg_id="msg_fail", stoat_channel_id="stoat_ch_fail", error="e"),
+            FailedMessage(discord_msg_id="msg_gone", stoat_channel_id="stoat_ch_ok", error="e"),
+        ],
+    )
+
+    call = 0
+
+    async def send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        nonlocal call
+        call += 1
+        await asyncio.sleep(0.01)  # yield so wait_for can bound a regression
+        if channel_id == "stoat_ch_fail":
+            raise RuntimeError("still broken")
+        return {"_id": f"ok_{call}"}
+
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", send):
+        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
+
+    ids = {fm.discord_msg_id for fm in state.failed_messages}
+    assert ids == {"msg_fail", "msg_gone"}
+    assert "msg_ok" in state.message_map
+    assert any("1 succeeded" in e.message and "2 still failed" in e.message for e in events)
+
+
 # ---------------------------------------------------------------------------
 # Post-migration validation (S7)
 # ---------------------------------------------------------------------------
@@ -1741,3 +1822,43 @@ async def test_acquire_sets_and_release_clears_lock_marker(tmp_path: Path) -> No
             assert state.migration_lock_marker.startswith("[FERRY_LOCK:")
             await _release_migration_lock(config, state, session, lambda e: None)
             assert state.migration_lock_marker == ""
+
+
+async def test_run_migration_messages_cancel_clean_path(tmp_path: Path) -> None:
+    """SC-10: a CancelledError from the messages phase takes the engine's clean-cancel path
+    (skipped event 'Cancelled during messages'), NOT phase_failed, and run_migration returns."""
+
+    async def cancelling_messages(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        raise asyncio.CancelledError("Migration cancelled by user")
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    overrides = {**_NOOP_OVERRIDES, "messages": cancelling_messages}
+    # Must NOT raise — the engine handles CancelledError cleanly and returns.
+    await run_migration(config, events.append, phase_overrides=overrides)
+
+    msg_events = [e for e in events if e.phase == "messages"]
+    assert any(e.status == "skipped" and "Cancelled" in e.message for e in msg_events)
+    assert not any(e.status == "error" for e in msg_events)
+
+
+async def test_run_migration_messages_crash_keeps_phase_for_resume(tmp_path: Path) -> None:
+    """SC-11 (engine): a non-cancel messages-phase crash → MigrationError, with current_phase
+    persisted as 'messages' so --resume re-runs it."""
+    from discord_ferry.errors import MigrationError
+    from discord_ferry.state import load_state
+
+    async def crashing_messages(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        raise RuntimeError("channel worker boom")
+
+    config = _make_config(tmp_path)
+    overrides = {**_NOOP_OVERRIDES, "messages": crashing_messages}
+    with pytest.raises(MigrationError, match="messages"):
+        await run_migration(config, lambda e: None, phase_overrides=overrides)
+
+    saved = load_state(tmp_path)
+    assert saved.current_phase == "messages"

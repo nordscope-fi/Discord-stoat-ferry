@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.9] - 2026-06-26
+
+### Fixed
+
+Message-phase control-flow cluster — the third batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 3). All in `migrator/messages.py` and `core/engine.py`. Common root: `asyncio.gather(*tasks, return_exceptions=True)` collapsed every `BaseException` (including `asyncio.CancelledError`) into a swallowed warning, and the `_process_message` retry path returned instead of re-raising.
+
+- **`ferry retry` no longer hangs or silently drops a still-failing message** (`migrator/messages.py`, `core/engine.py`). On the retry path (`_process_message` called with `channel_result=None`), a send failure was caught, appended to `state.failed_messages`, and the function **returned without re-raising**. The retry loop `for fm in state.failed_messages` then (a) appended to the very list it was iterating → mutate-during-iteration → an infinite loop on a deterministically-failing message, and (b) counted the re-failure as `retried` (reported success) and dropped it. `_process_message` now re-raises on failure **only when `channel_result is None`** (the parallel per-channel path keeps degrade-in-loop), and `run_retry_failed` iterates a `list(...)` snapshot — so the retry terminates, keeps the message failed with `retry_count` incremented, and accounts it correctly.
+- **User cancellation during the parallel message phase is now handled cleanly** (`migrator/messages.py`). `gather(..., return_exceptions=True)` returned a worker's `asyncio.CancelledError` as a result item, which the result loop logged as a `channel_worker_failed` warning before emitting the phase `completed` event — so the engine's clean-cancel handler never ran. The result loop now detects `CancelledError` first (it is a `BaseException`, not an `Exception`) and re-raises `asyncio.CancelledError` after checkpointing the channels that finished before the cancel, so the engine saves state and reports "Cancelled during messages". The in-loop cancel check also raises instead of `break`-ing, so a cancelled-mid-channel worker no longer falls through to self-marking the channel complete (which would lose its un-sent tail on `--resume`).
+- **A channel worker that crashes before its per-message loop is no longer silently lost** (`migrator/messages.py`, `core/engine.py`). Such a crash was recorded as a warning while the phase reported `completed` and `current_phase` advanced past `messages`, so on `--resume` the channel was skipped — never migrated, never retried, no DLQ entry. The result loop now collects the first non-cancel exception and re-raises it after checkpointing the successful channels, so the phase fails with `current_phase` still `"messages"`; `--resume` then re-runs the crashed channel while already-completed channels skip via `completed_channel_ids`. All surfaced failure strings are sanitised once via `safe_sanitize` and reused for both the persisted error and the emitted event (no raw exception/token in the event).
+
+**Behaviour change:** a channel worker raising an unexpected exception **before** sending any message now **aborts the run** (resumable via `--resume`) instead of degrading to a warning and reporting the phase `completed`. This trades a silent, unrecoverable per-channel data loss for a surfaced, resumable failure. A single message failing *inside* a channel's send loop still degrades-in-loop (recorded as a `FailedMessage`, channel continues) exactly as before.
+
 ## [2.6.8] - 2026-06-26
 
 ### Fixed
