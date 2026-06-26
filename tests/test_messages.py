@@ -11,8 +11,10 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.migrator.messages import (
+    ChannelResult,
     _build_content,
     _build_masquerade,
+    _process_message,
     _resolve_attachment_path,
     _skip_attachment,
     _upload_attachments,
@@ -3232,3 +3234,47 @@ async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aior
 
     assert "msg_e4" in state.message_map  # message still sent
     assert "m" not in state.autumn_uploads  # mismatched media not registered
+
+
+async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Path) -> None:
+    """SC-5: a send failure re-raises iff channel_result is None (the retry path); with a
+    ChannelResult it degrades-in-loop (returns, records to the result, not to state).
+
+    This is the S1 contract guard — only the retry path (channel_result=None) must raise; the
+    parallel per-channel path (channel_result set) must keep degrade-in-loop.
+    """
+    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    config = _make_config(tmp_path)
+    msg = _make_message(id="m1", content="hi", timestamp="2024-06-01T08:30:00+00:00")
+
+    async def fail_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("send boom")
+
+    async with aiohttp.ClientSession() as session:
+        with patch("discord_ferry.migrator.messages.api_send_message", fail_send):
+            # (a) channel_result is None → re-raise (retry path).
+            with pytest.raises(RuntimeError):
+                await _process_message(
+                    msg=msg,
+                    stoat_channel_id="stoat_ch1",
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda e: None,
+                    channel_result=None,
+                )
+            assert len(state.failed_messages) == 1  # appended before the raise
+
+            # (b) channel_result set → returns (no raise), records to the result.
+            result = ChannelResult(channel_id="ch1")
+            await _process_message(
+                msg=msg,
+                stoat_channel_id="stoat_ch1",
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda e: None,
+                channel_result=result,
+            )
+            assert len(result.failed_messages) == 1  # recorded to the result
+            assert len(state.failed_messages) == 1  # unchanged from (a) — not state-written

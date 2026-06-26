@@ -998,7 +998,11 @@ async def run_retry_failed(
         config.session = session
         retried = 0
         still_failed: list[FailedMessage] = []
-        for fm in state.failed_messages:
+        # Batch 3 (S1): iterate a snapshot — _process_message (channel_result=None) appends
+        # a FailedMessage to state.failed_messages on a re-fail, so a live-list loop would
+        # never terminate (mutate-during-iteration). state.failed_messages is rebuilt from
+        # still_failed below, discarding the in-loop duplicate.
+        for fm in list(state.failed_messages):
             found_msg = found_messages.get(fm.discord_msg_id)
             if found_msg is None:
                 on_event(

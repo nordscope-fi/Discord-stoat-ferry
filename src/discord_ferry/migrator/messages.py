@@ -374,30 +374,56 @@ async def run_messages(
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Batch 3 (S2/S3): re-classify the gather outcome. Workers self-checkpoint
+        # (completed_channel_ids + merge under save_lock) before returning, so successes are
+        # already persisted; this loop merges defensively (idempotent — the worker resets its
+        # result to empty after its own merge) then re-raises so cancel/crash PROPAGATE
+        # instead of being swallowed as warnings.
+        cancelled = False
+        first_exc: BaseException | None = None
         for export, result in zip(eligible_exports, results, strict=True):
+            # CancelledError is a BaseException (NOT Exception) — check it FIRST so a user
+            # cancel never lands in the generic-exception branch (cancel wins — see below).
+            if isinstance(result, asyncio.CancelledError):
+                cancelled = True
+                continue
             if isinstance(result, BaseException):
-                # Channel worker raised an unhandled exception — record as error.
+                # Channel worker raised an unhandled exception — record (token-safe: sanitise
+                # once, use for BOTH the persisted error and the emitted event).
+                safe_res = safe_sanitize(config.token_store, str(result))
                 state.errors.append(
                     {
                         "phase": "messages",
                         "type": "channel_worker_failed",
-                        "message": safe_sanitize(
-                            config.token_store,
-                            f"Channel {export.channel.name!r} worker failed: {result}",
-                        ),
+                        "message": f"Channel {export.channel.name!r} worker failed: {safe_res}",
                     }
                 )
                 on_event(
                     MigrationEvent(
                         phase="messages",
                         status="warning",
-                        message=f"Channel {export.channel.name!r} failed: {result}",
+                        message=f"Channel {export.channel.name!r} failed: {safe_res}",
                         channel_name=export.channel.name,
                     )
                 )
-            else:
-                _merge_channel_result(state, result)
-                state.completed_channel_ids.add(export.channel.id)
+                if first_exc is None:
+                    first_exc = result
+                continue
+            # Success — merge + mark complete (idempotent with the worker's own self-merge +
+            # result-reset; kept defensively, NOT load-bearing).
+            _merge_channel_result(state, result)
+            state.completed_channel_ids.add(export.channel.id)
+
+        # Cancel takes precedence over a concurrent crash: a user cancel must reach the
+        # engine's clean-cancel handler, not phase_failed.
+        if cancelled or (config.cancel_event and config.cancel_event.is_set()):
+            raise asyncio.CancelledError("Migration cancelled by user")
+        # B1 abort-and-resume (S3): a pre-loop worker crash fails the phase so current_phase
+        # stays "messages" and --resume re-runs it (completed channels skip). first_exc may be
+        # a non-Exception BaseException (e.g. SystemExit) — re-raise as-is rather than filter
+        # to Exception, which would silently drop it.
+        if first_exc is not None:
+            raise first_exc
 
     # Process thread exports for merge/archive modes (after parent channels complete).
     if thread_strategy == "merge" and thread_exports:
@@ -744,9 +770,12 @@ async def _process_single_channel(
         _copied = 0
         _retried = 0
         for idx, msg in enumerate(message_source):
-            # Cancel check inside the message loop.
+            # Cancel check inside the message loop. Batch 3 (S2): raise (not break) so a
+            # cancelled-mid-channel worker propagates like the _rate_limit_with_pause path
+            # and never falls through to the self-mark-complete at the loop end (which would
+            # lose the un-sent tail on --resume).
             if config.cancel_event and config.cancel_event.is_set():
-                break
+                raise asyncio.CancelledError("Migration cancelled by user")
 
             # Track the highest numeric message id seen (durable high-water mark).
             # isdigit() guard: real Discord ids are numeric snowflakes, but tests and
@@ -1250,6 +1279,13 @@ async def _process_message(
                 message=f"Message {msg.id} failed: {safe_exc}",
             )
         )
+        # Batch 3 (S1): the retry path (engine.run_retry_failed) calls this with
+        # channel_result=None and relies on an exception to mark a re-failure. Re-raise so
+        # the retry loop accounts correctly and terminates. The parallel per-channel path
+        # (channel_result set) keeps degrade-in-loop. Guard is provably retry-path-only:
+        # only engine.py's retry loop passes channel_result=None.
+        if channel_result is None:
+            raise
         return
 
     # Step 9: Resume checkpoint handled in the caller's periodic save loop.
