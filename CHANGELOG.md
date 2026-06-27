@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.11] - 2026-06-27
+
+### Fixed
+
+CLI display & blueprint round-trip robustness — the fifth batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 5). All in the CLI shell (`cli.py`); the engine, migrators, GUI shell, and blueprint module are unchanged (the GUI shell was audited and uses no Rich markup and has no blueprint-build path, so none of these findings apply to it).
+
+- **A markup-hostile channel/server/guild name can no longer abort a migration** (`cli.py`, S1/F5a). `Console` renders with markup enabled, so a Discord name containing Rich metacharacters (`spam[/]`, `[bold]news`, an unbalanced `]`) interpolated into a progress line raised `rich.errors.MarkupError`. Because `_ProgressTracker.on_event` runs synchronously inside the engine's `emit`, that exception unwound into the engine and was re-raised as a `MigrationError`, aborting an otherwise-healthy migration over a cosmetic display string. Every user-controlled value (event message, channel name, server/guild name, warnings, exception text, rollback suspect names, failure errors, the `ferry stats` error/warning previews) is now escaped via a new `_safe()` helper before markup interpolation; static format tags and integer/ID values are left live. A narrow `except MarkupError` guard around each tracker's render body is a defense-in-depth net (it falls back to an unstyled print and never swallows control flow — the rollback confirm/pause path is deliberately kept outside it).
+- **`build` no longer aborts mid-build and orphans a server on a voice-channel failure** (`cli.py`, S2/F5b). The blueprint `build` command POSTed `channel_type="Voice"` with no error handling; a voice-create failure (Stoat "Bug #194") propagated and `sys.exit`ed after the server, roles, and earlier channels were already created — leaving an orphan server with no rollback. A new `_build_blueprint_channel()` helper mirrors the main migration path's voice→Text fallback (retry the channel as Text with a warning; non-voice errors still propagate); both build loops use it, and the categorized loop preserves the recovered channel's id into its category. This also un-breaks `ferry build --template gaming|community|education`, whose shipped templates contain Voice channels.
+- **`build` now replays a blueprint's role hierarchy** (`cli.py`, S4/F5d). `BlueprintRole.rank` survived the export→import JSON round-trip but the build role loop applied only colour and permissions, so every built role got Stoat's default rank and the hierarchy was silently lost. The role loop now folds colour + rank into a single `api_edit_role` PATCH. This also restores the shipped templates' role ranks (Admin/Moderator/Member ordering).
+- **`export-blueprint` is unchanged** (S3/F5c, decision A1). A Discord voice channel is still exported as `type="Voice"`, consistent with the migration path and the shipped templates; S2's new `build` fallback makes that value build-safe.
+
+Internal: the build command's six Stoat API helpers were hoisted from a function-local import to module level (no import-cost change — the module already loads them via `run_migration`), giving the new module-level channel helper access to them and a single uniform mock-patch target for tests.
+
+**Behaviour note:** S1 is a robustness fix (a hostile name no longer crashes the run) and is otherwise display-preserving; S2 narrows the abort surface (voice failures now recover; all other errors behave as before). **Known limitations:** (1) a hand-authored blueprint that sets an *explicit* `rank: 0` will not have that rank replayed — rank 0 is treated as "unranked" and left at Stoat's default (the shipped templates all use rank ≥ 1, and `export-blueprint` never emits roles, so neither is affected); (2) a *non-voice* channel-create failure during `build` still aborts mid-build and leaves a partial server (pre-existing behaviour, unchanged — S2 only recovers the voice-create case; orphan-server teardown is out of scope).
+
 ## [2.6.10] - 2026-06-27
 
 ### Fixed
