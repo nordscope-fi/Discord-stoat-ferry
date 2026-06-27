@@ -498,6 +498,20 @@ async def _merge_threads(
             # state.json) degrades to "no threshold" rather than crashing int().
             if _thread_skip_below and not _thread_skip_below.isdigit():
                 _thread_skip_below = ""
+            # Batch 7 S1 (#76 self-heal ported): ids that failed to POST on a prior run
+            # sit below the high-water mark; on incremental, exclude them from the skip so
+            # the merge re-POSTs them. Empty unless incremental, so --resume is unaffected.
+            # Scoped to parent_stoat_id (mirrors the parallel path's stoat_channel_id filter).
+            _failed_ids_here = (
+                {
+                    fm.discord_msg_id
+                    for fm in state.failed_messages
+                    if fm.stoat_channel_id == parent_stoat_id
+                }
+                if config.incremental
+                else set()
+            )
+            _succeeded_ids: set[str] = set()
             _thread_max_id = 0
             _posted = 0
 
@@ -519,12 +533,13 @@ async def _merge_threads(
                         idempotency_key=f"ferry-thread-sep-{export.channel.id}",
                     )
                 except Exception as exc:  # noqa: BLE001
+                    safe_exc = safe_sanitize(config.token_store, str(exc))
                     state.warnings.append(
                         {
                             "phase": "messages",
                             "type": "merge_separator_failed",
                             "message": (
-                                f"Thread separator for {export.channel.name!r} failed: {exc}"
+                                f"Thread separator for {export.channel.name!r} failed: {safe_exc}"
                             ),
                         }
                     )
@@ -544,14 +559,21 @@ async def _merge_threads(
                     _thread_max_id = _mid
                 if msg.type in _SKIP_TYPES:
                     continue
-                # Incremental: skip messages already copied on a prior run.
-                if _thread_skip_below and _mid is not None and _mid <= int(_thread_skip_below):
+                # Incremental: skip messages already copied on a prior run, UNLESS this id
+                # failed on a prior run (#76 self-heal) — then re-attempt it.
+                _would_skip = (
+                    bool(_thread_skip_below)
+                    and _mid is not None
+                    and _mid <= int(_thread_skip_below)
+                )
+                if _would_skip and msg.id not in _failed_ids_here:
                     continue
 
                 content = _build_content(msg, state)
                 masquerade = await _build_masquerade(msg.author, session, state, config)
                 parts = _split_message(content)
 
+                _msg_failed = False
                 for part_idx, part_content in enumerate(parts):
                     idem_key = (
                         f"ferry-merge-{msg.id}"
@@ -569,14 +591,32 @@ async def _merge_threads(
                             idempotency_key=idem_key,
                         )
                     except Exception as exc:  # noqa: BLE001
+                        safe_exc = safe_sanitize(config.token_store, str(exc))
                         state.warnings.append(
                             {
                                 "phase": "messages",
                                 "type": "merge_message_failed",
-                                "message": f"Merge message {msg.id} failed: {exc}",
+                                "message": f"Merge message {msg.id} failed: {safe_exc}",
                             }
                         )
+                        # Batch 7 S1: record the failure ONCE per message (a multi-part
+                        # message strands on the first failing part) so it lands in
+                        # failed_messages — recoverable via incremental re-attempt / retry.
+                        if not _msg_failed:
+                            _msg_failed = True
+                            state.failed_messages.append(
+                                FailedMessage(
+                                    discord_msg_id=msg.id,
+                                    stoat_channel_id=parent_stoat_id,
+                                    error=safe_exc,
+                                    content_preview=content[:50] if content else "",
+                                )
+                            )
 
+                # A message that POSTed all parts cleanly drives reconciliation (drop on
+                # success); a failed one is left in failed_messages for the next run.
+                if not _msg_failed:
+                    _succeeded_ids.add(msg.id)
                 _posted += 1
                 await _rate_limit_with_pause(config)
 
@@ -584,6 +624,27 @@ async def _merge_threads(
             # --incremental run skips already-copied messages). Overwrite, like flatten.
             if _thread_max_id:
                 state.channel_high_water[export.channel.id] = str(_thread_max_id)
+
+            # Batch 7 S1: reconcile this parent's previously-failed ids (mirrors the
+            # parallel path :849-867). Drop any that succeeded this run (in _succeeded_ids
+            # — the merge path never writes message_map), and collapse the carried +
+            # fresh-re-fail duplicate to one entry. Scoped to parent_stoat_id + the ids
+            # carried into this thread, so sibling threads' entries are untouched.
+            if config.incremental and _failed_ids_here:
+                _seen: set[str] = set()
+                _reconciled: list[FailedMessage] = []
+                for fm in state.failed_messages:
+                    if (
+                        fm.stoat_channel_id == parent_stoat_id
+                        and fm.discord_msg_id in _failed_ids_here
+                    ):
+                        if fm.discord_msg_id in _succeeded_ids:
+                            continue  # succeeded this run -> drop
+                        if fm.discord_msg_id in _seen:
+                            continue  # carried + re-fail dup -> collapse
+                        _seen.add(fm.discord_msg_id)
+                    _reconciled.append(fm)
+                state.failed_messages = _reconciled
 
             on_event(
                 MigrationEvent(

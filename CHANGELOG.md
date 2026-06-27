@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.13] - 2026-06-27
+
+### Fixed
+
+Incremental edge cases — the seventh batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt
+(`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 7). Three engine-side fixes
+(`migrator/messages.py`, `migrator/structure.py`, `reporter.py`); no GUI/CLI/state-schema changes.
+All three are follow-up gaps in/around the v2.6.x incremental machinery (durable `channel_high_water`
+v2.6.3, the #76 failed-message self-heal v2.6.4, reporting-integrity v2.6.2).
+
+- **Merge-strategy thread failures are no longer permanently lost** (`migrator/messages.py`, S1/F7a).
+  In `thread_strategy="merge"`, a message whose POST failed was recorded only as a warning, never a
+  `FailedMessage`, while the high-water marker was written regardless — so on a later `--incremental`
+  run the failed id sat below the marker and was skipped forever, unrecoverable by `ferry retry`. The
+  shipped #76 self-heal is now ported into the merge loop: a POST failure is recorded as a
+  `FailedMessage` (in all modes); on `--incremental` a prior-failed id is excluded from the skip gate
+  and re-attempted; a completion reconciliation drops ids that succeeded this run and collapses a
+  carried + re-fail duplicate to one entry. The high-water marker write is unchanged
+  (plain/resume byte-identical). Both merge warnings (separator + message) are now sanitized via
+  `safe_sanitize` so a token-bearing exception is never persisted to `state.json`. **Known
+  limitation:** the `--incremental` re-attempt is the idempotency-safe primary recovery; recovering a
+  *partial-success multi-part* merge message via `ferry retry` may re-send already-delivered parts
+  (the `ferry-merge-` vs `ferry-` idempotency-namespace difference) — a proper fix needs the merge
+  context threaded into the retry engine and is out of scope for this batch.
+- **Incremental category sync no longer transiently deletes carried categories** (`migrator/structure.py`,
+  S2/F7b). `run_categories` built its early full-replace category PATCH from only this run's (partial)
+  export, so in incremental mode introducing a new category deleted carried-only categories until the
+  CHANNELS phase re-PATCHed — a window where a crash/cancel left the live server wrong. The early
+  upsert is now skipped in incremental mode; `run_channels`' authoritative upsert (which enumerates the
+  full `category_map`) is the single source of truth. Fresh (non-incremental) runs are unchanged.
+- **Fidelity scores can no longer render negative** (`reporter.py`, S3/F7c). In incremental mode the
+  messages denominator is this run's partial `source_messages_total` while `failed_count` is carried
+  cumulatively, so `compute_fidelity_score` could emit a negative Messages percentage (e.g. -60%) and
+  depress the overall score. All five ratios are now clamped to `[0, 1]` via a `_clamp01` helper — a
+  no-op for in-range inputs. The single helper change also fixes `ferry stats` (it delegates to the
+  same function).
+
 ## [2.6.12] - 2026-06-27
 
 ### Fixed
