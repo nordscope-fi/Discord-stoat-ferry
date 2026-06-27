@@ -144,6 +144,7 @@ class ChannelResult:
     embeds_dropped: int = 0
     replies_linked: int = 0
     replies_total: int = 0
+    reactions_dropped: int = 0  # Batch 4 (S1): unmapped-emoji reactions silently dropped
 
 
 def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
@@ -167,6 +168,7 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
     state.embeds_dropped += result.embeds_dropped
     state.replies_linked += result.replies_linked
     state.replies_total += result.replies_total
+    state.reactions_dropped += result.reactions_dropped
 
 
 def _skip_attachment(
@@ -1244,6 +1246,25 @@ async def _process_message(
                                 "channel_id": stoat_channel_id,
                                 "message_id": stoat_msg_id,
                                 "emoji": stoat_emoji,
+                            }
+                        )
+                    else:
+                        # Batch 4 (S1): the emoji never entered emoji_map (no asset / beyond
+                        # the cap) — the reaction is dropped. Count it (acc-aware) + warn so the
+                        # fidelity report reflects the loss instead of silently claiming 100%.
+                        if channel_result is not None:
+                            channel_result.reactions_dropped += 1
+                        else:
+                            state.reactions_dropped += 1
+                        acc_warnings.append(
+                            {
+                                "phase": "messages",
+                                "type": "unmapped_emoji_reaction",
+                                "message": safe_sanitize(
+                                    config.token_store,
+                                    f"Reaction emoji {reaction.emoji.id} not migrated "
+                                    "(not in emoji_map) — dropped",
+                                ),
                             }
                         )
                 else:  # Unicode emoji.

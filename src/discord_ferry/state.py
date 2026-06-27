@@ -111,6 +111,8 @@ class MigrationState:
     attachments_uploaded: int = 0
     attachments_skipped: int = 0
     reactions_applied: int = 0
+    reactions_capped: int = 0  # Batch 4 (S4): reactions skipped at the 20/msg Stoat cap
+    reactions_dropped: int = 0  # Batch 4 (S1): custom reactions whose emoji never mapped
     pins_applied: int = 0
 
     # Timing
@@ -274,6 +276,8 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "attachments_uploaded": state.attachments_uploaded,
         "attachments_skipped": state.attachments_skipped,
         "reactions_applied": state.reactions_applied,
+        "reactions_capped": state.reactions_capped,
+        "reactions_dropped": state.reactions_dropped,
         "pins_applied": state.pins_applied,
         "started_at": state.started_at,
         "completed_at": state.completed_at,
@@ -346,6 +350,8 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             attachments_uploaded=data.get("attachments_uploaded", 0),
             attachments_skipped=data.get("attachments_skipped", 0),
             reactions_applied=data.get("reactions_applied", 0),
+            reactions_capped=data.get("reactions_capped", 0),
+            reactions_dropped=data.get("reactions_dropped", 0),
             pins_applied=data.get("pins_applied", 0),
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),

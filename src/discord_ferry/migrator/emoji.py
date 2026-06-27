@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
@@ -47,6 +47,56 @@ def _extract_emoji_from_content(content: str) -> list[tuple[str, str, bool]]:
     return results
 
 
+class _EmojiRecord(TypedDict):
+    """A discovered custom emoji + an occurrence tally for usage-ranked truncation."""
+
+    id: str
+    name: str
+    is_animated: bool
+    image_url: str
+    uses: int
+
+
+def _record_emoji(
+    discovered: dict[str, _EmojiRecord],
+    emoji_id: str,
+    name: str,
+    is_animated: bool,
+    image_url: str,
+) -> None:
+    """Record an emoji encounter (Batch 4 S2+S3).
+
+    New emoji are added with ``uses=1``. On re-encounter, ``uses`` is incremented and the
+    stored ``image_url`` is UPGRADED (never downgraded) when it is empty and the new source
+    carries a usable path — so an emoji first seen in content/embeds (no path) is rescued by a
+    later reaction that has the real downloaded asset.
+    """
+    rec = discovered.get(emoji_id)
+    if rec is None:
+        discovered[emoji_id] = {
+            "id": emoji_id,
+            "name": name,
+            "is_animated": is_animated,
+            "image_url": image_url,
+            "uses": 1,
+        }
+        return
+    rec["uses"] += 1
+    if not rec["image_url"] and image_url:
+        rec["image_url"] = image_url
+        rec["name"] = name
+        rec["is_animated"] = is_animated
+
+
+def _numeric_id_key(value: str) -> tuple[int, int | str]:
+    """Deterministic, non-numeric-safe sort key for an emoji id.
+
+    Numeric snowflake ids sort by magnitude; non-numeric ids (test fixtures, odd exports) sort
+    after, lexicographically. The ``0``/``1`` tuple head prevents any int-vs-str comparison.
+    """
+    return (0, int(value)) if value.isdigit() else (1, value)
+
+
 async def run_emoji(
     config: FerryConfig,
     state: MigrationState,
@@ -63,8 +113,8 @@ async def run_emoji(
     """
     on_event(MigrationEvent(phase="emoji", status="started", message="Scanning exports for emoji"))
 
-    # emoji_id -> {"id", "name", "is_animated", "image_url"}
-    discovered: dict[str, dict[str, object]] = {}
+    # emoji_id -> _EmojiRecord (id, name, is_animated, image_url, uses)
+    discovered: dict[str, _EmojiRecord] = {}
 
     for export in exports:
         msg_iter = (
@@ -76,24 +126,15 @@ async def run_emoji(
             # Source 1: reactions with a non-empty custom emoji ID.
             for reaction in msg.reactions:
                 emoji = reaction.emoji
-                if emoji.id and emoji.id not in discovered:
-                    discovered[emoji.id] = {
-                        "id": emoji.id,
-                        "name": emoji.name,
-                        "is_animated": emoji.is_animated,
-                        "image_url": emoji.image_url,
-                    }
+                if emoji.id:
+                    _record_emoji(
+                        discovered, emoji.id, emoji.name, emoji.is_animated, emoji.image_url
+                    )
 
             # Source 2: inline emoji in message content.
             if msg.content:
                 for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(msg.content):
-                    if emoji_id not in discovered:
-                        discovered[emoji_id] = {
-                            "id": emoji_id,
-                            "name": emoji_name,
-                            "is_animated": is_animated,
-                            "image_url": "",
-                        }
+                    _record_emoji(discovered, emoji_id, emoji_name, is_animated, "")
 
             # Source 3: emoji in embed fields.
             for embed in msg.embeds:
@@ -110,28 +151,34 @@ async def run_emoji(
                         for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(
                             str(text_field)
                         ):
-                            if emoji_id not in discovered:
-                                discovered[emoji_id] = {
-                                    "id": emoji_id,
-                                    "name": emoji_name,
-                                    "is_animated": is_animated,
-                                    "image_url": "",
-                                }
+                            _record_emoji(discovered, emoji_id, emoji_name, is_animated, "")
 
     if not discovered:
         on_event(MigrationEvent(phase="emoji", status="completed", message="No custom emoji found"))
         return
 
-    # Enforce the 100-emoji server limit with a deterministic sort by ID.
-    emoji_list = sorted(discovered.values(), key=lambda e: str(e["id"]))
+    # Enforce the 100-emoji server limit. Batch 4 (S3): rank UPLOADABLE emoji first (an emoji
+    # with no local asset is skipped at upload below, so it must never occupy a kept slot ahead
+    # of a creatable one), then by occurrence frequency (most-used kept), tie-break by numeric id
+    # (non-numeric-safe) — NOT the old lexicographic str(id) slice. "Uploadable" matches the
+    # upload gate: a non-empty local path that is not an un-downloaded http URL.
+    emoji_list = sorted(
+        discovered.values(),
+        key=lambda e: (
+            0 if (e["image_url"] and not e["image_url"].startswith("http")) else 1,
+            -e["uses"],
+            _numeric_id_key(e["id"]),
+        ),
+    )
     if len(emoji_list) > config.max_emoji:
+        dropped_names = ", ".join(str(e["name"]) for e in emoji_list[config.max_emoji :])
         state.warnings.append(
             {
                 "phase": "emoji",
                 "type": "emoji_limit",
                 "message": (
                     f"Found {len(emoji_list)} unique emoji; truncating to {config.max_emoji} "
-                    f"(Stoat server limit)."
+                    f"by usage (Stoat server limit). Dropped: {dropped_names}"
                 ),
             }
         )
@@ -141,7 +188,7 @@ async def run_emoji(
                 status="warning",
                 message=(
                     f"Found {len(emoji_list)} emoji but Stoat limit is {config.max_emoji}; "
-                    f"truncating to first {config.max_emoji} by ID."
+                    f"truncating to the {config.max_emoji} most-used. Dropped: {dropped_names}"
                 ),
             )
         )

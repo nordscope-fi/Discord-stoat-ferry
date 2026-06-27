@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aioresponses import aioresponses
@@ -745,3 +745,77 @@ async def test_cancel_precedence_over_crash(tmp_path: Path) -> None:
         await run_messages(config, state, exports, _crash_on_progress("crash"))
 
     assert "ch_crash" not in state.completed_channel_ids
+
+
+# ---------------------------------------------------------------------------
+# Batch 4 (S1): unmapped-emoji reactions are counted + warned (not silently dropped)
+# ---------------------------------------------------------------------------
+
+
+async def test_unmapped_emoji_reaction_dropped_counted(tmp_path: Path) -> None:
+    """SC-1/3: a custom reaction whose emoji is not in emoji_map increments reactions_dropped
+    (folded once from the per-channel ChannelResult) and records a structured warning."""
+    state = _make_state(channel_map={"ch1": "stoat_ch1"})  # emoji_map empty
+    config = _make_config(tmp_path, reaction_mode="native")
+    msg = _make_message(
+        id="m1",
+        content="hi",
+        reactions=[DCEReaction(emoji=DCEEmoji(id="123", name="party"), count=1)],
+    )
+    export = _make_export(channel_id="ch1", name="ch1", messages=[msg])
+    with patch(
+        "discord_ferry.migrator.messages.api_send_message",
+        AsyncMock(return_value={"_id": "x"}),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert state.reactions_dropped == 1
+    assert any(w["type"] == "unmapped_emoji_reaction" for w in state.warnings)
+
+
+async def test_mapped_and_unicode_reactions_not_dropped(tmp_path: Path) -> None:
+    """SC-2: a mapped custom reaction and a Unicode reaction are queued, not counted dropped."""
+    state = _make_state(channel_map={"ch1": "stoat_ch1"}, emoji_map={"123": "stoat_emoji_1"})
+    config = _make_config(tmp_path, reaction_mode="native")
+    msg = _make_message(
+        id="m1",
+        content="hi",
+        reactions=[
+            DCEReaction(emoji=DCEEmoji(id="123", name="party"), count=1),  # mapped custom
+            DCEReaction(emoji=DCEEmoji(id="", name="🔥"), count=1),  # unicode
+        ],
+    )
+    export = _make_export(channel_id="ch1", name="ch1", messages=[msg])
+    with patch(
+        "discord_ferry.migrator.messages.api_send_message",
+        AsyncMock(return_value={"_id": "x"}),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert state.reactions_dropped == 0
+    assert len(state.pending_reactions) == 2  # both queued
+    assert not any(w["type"] == "unmapped_emoji_reaction" for w in state.warnings)
+
+
+async def test_unmapped_emoji_reaction_warning_token_safe(tmp_path: Path) -> None:
+    """SC-5: the dropped-reaction warning is safe_sanitize'd (no registered token leaks)."""
+    secret = "stoat_secret_token_value"
+    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    config = _make_config(
+        tmp_path, reaction_mode="native", token_store=SecureTokenStore({"stoat": secret})
+    )
+    # Contrived: emoji id == the token, so a non-sanitised warning would leak it.
+    msg = _make_message(
+        id="m1",
+        content="hi",
+        reactions=[DCEReaction(emoji=DCEEmoji(id=secret, name="x"), count=1)],
+    )
+    export = _make_export(channel_id="ch1", name="ch1", messages=[msg])
+    with patch(
+        "discord_ferry.migrator.messages.api_send_message",
+        AsyncMock(return_value={"_id": "x"}),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert state.reactions_dropped == 1
+    assert all(secret not in w["message"] for w in state.warnings)

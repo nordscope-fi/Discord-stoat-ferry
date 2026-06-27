@@ -880,3 +880,30 @@ def test_report_messages_matches_stats(tmp_path: Path) -> None:
     assert report["fidelity"]["messages"] == summary.fidelity.messages
     # Reactions: pending cleared → 100% on both surfaces
     assert report["fidelity"]["reactions"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# Batch 4 (D1): capped + dropped reactions lower the reaction fidelity %
+# ---------------------------------------------------------------------------
+
+
+def test_fidelity_reactions_capped_lowers_score() -> None:
+    """SC-16: capped reactions in the denominator drop the reaction ratio below 100%."""
+    score = compute_fidelity_score(
+        total_messages=10,
+        failed_count=0,
+        attachments_uploaded=0,
+        attachments_skipped=0,
+        reactions_applied=20,
+        reactions_total=25,  # 20 applied + 5 capped, assembled by the caller
+    )
+    assert score["reactions"] == 80.0
+
+
+def test_generate_report_reactions_dropped_lowers_score(tmp_path: Path) -> None:
+    """SC-18: dropped reactions enter the call-site denominator → ratio < 100% in the report."""
+    config = _make_config(tmp_path)
+    exports = [_make_export(channel_id="c1", message_count=1)]
+    state = MigrationState(reactions_applied=3, reactions_dropped=1)  # pending empty
+    report = generate_report(config, state, exports)
+    assert report["fidelity"]["reactions"] == 75.0  # 3 / (3 + 1)

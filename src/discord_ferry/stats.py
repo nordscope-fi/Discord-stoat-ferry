@@ -100,13 +100,19 @@ def summarize_state(state: MigrationState) -> StateSummary:
 
     Reactions: the ``compute_fidelity_score`` function takes
     ``reactions_total`` but ``MigrationState`` does not carry it. We derive
-    it: ``reactions_total = reactions_applied + len(pending_reactions)``.
-    In completed migrations ``pending_reactions`` is empty, so the derived
-    value equals ``reactions_applied`` and the sub-score becomes 100%. In
-    partial migrations the derived value reflects "attempted so far",
-    giving a meaningful denominator.
+    it (Batch 4): ``reactions_total = reactions_applied + reactions_capped
+    + reactions_dropped + len(pending_reactions)``. Capped (>20/msg Stoat
+    limit) and dropped (unmapped-emoji) reactions count as fidelity loss, so
+    a completed run that lost reactions reports < 100% instead of hiding it.
+    A run whose ONLY reactions were dropped (applied=0, pending=0, dropped>0)
+    now yields a non-zero total, so the sub-score renders 0% rather than N/A.
     """
-    reactions_total = state.reactions_applied + len(state.pending_reactions)
+    reactions_total = (
+        state.reactions_applied
+        + state.reactions_capped
+        + state.reactions_dropped
+        + len(state.pending_reactions)
+    )
 
     score_dict = compute_fidelity_score(
         total_messages=_message_denominator(state),

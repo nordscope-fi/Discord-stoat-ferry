@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.10] - 2026-06-27
+
+### Fixed
+
+Reaction/emoji fidelity-visibility cluster — the fourth batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 4). All in `migrator/emoji.py`, `migrator/reactions.py`, `migrator/messages.py`, `reporter.py`, `stats.py`, and `state.py`. Theme: reactions/emoji were dropped correctly (per Stoat's caps / missing assets) but with no durable signal, so the reaction fidelity score reported 100% while reactions were silently lost.
+
+- **Unmapped-emoji reactions are no longer silently dropped** (`migrator/messages.py`). A native-mode custom reaction whose emoji never entered `emoji_map` (no uploadable asset, or beyond the emoji cap) hit a branch with no `else` — the reaction vanished with no counter or warning. It now increments a durable `reactions_dropped` counter (on the per-channel `ChannelResult`, folded into state; the retry/direct-state path writes state directly) and records a token-safe `unmapped_emoji_reaction` warning.
+- **Emoji discovery upgrades a stranded record on a better-asset re-encounter** (`migrator/emoji.py`). First-seen-wins discovery stored `image_url=''` for an emoji first seen in message content/embeds; a later reaction carrying the real downloaded asset was discarded (the emoji was then skipped at upload and never entered `emoji_map`, compounding the dropped-reaction loss). A new `_record_emoji` helper upgrades the stored record in-place when the stored `image_url` is empty and the new source has a usable path (never downgrades), across all three discovery sources.
+- **Emoji-cap truncation ranks by uploadability then usage, not a lexicographic accident** (`migrator/emoji.py`). When more than `max_emoji` unique emoji are found, the kept subset was the first N by `str(id)` — an arbitrary lexicographic slice that could drop high-traffic emoji while keeping rare ones. The kept set is now ranked uploadable-first (an asset-less emoji can never occupy a slot ahead of a creatable one), then by occurrence frequency, with a non-numeric-id-safe tie-break; the truncation warning names the dropped emoji. A `_EmojiRecord` `TypedDict` keeps the occurrence tally `mypy --strict`-clean.
+- **Cap-skipped reactions are counted in the fidelity denominator** (`migrator/reactions.py`). At Stoat's 20-reactions-per-message hard cap the loop emitted an ephemeral warning then `continue`d without counting, so cap-skipped reactions were in neither `reactions_applied` nor `pending_reactions` — invisible to the score. A durable `reactions_capped` counter now records them.
+- **Reaction fidelity now reflects capped + dropped reactions** (`reporter.py`, `stats.py`). The reaction denominator (`reactions_total`) is assembled at the report call sites as `reactions_applied + reactions_capped + reactions_dropped + len(pending_reactions)` (no `compute_fidelity_score` signature change). This also fixes the `stats.py` None-gate: a run whose only reactions were dropped (applied 0, pending empty, dropped > 0) now reports **0%** reaction fidelity instead of "N/A". Two new persisted `MigrationState` counters (`reactions_capped`, `reactions_dropped`) deserialise from old `state.json` as 0.
+
+**Behaviour note:** this is a **reporting** change, not a migration-behaviour change — the same reactions/emoji are migrated/dropped as before (Stoat's 20-reaction and 100-emoji caps are unchanged); the reaction fidelity percentage now reflects the loss instead of hiding it, and the emoji kept under the cap are chosen by uploadability + usage rather than id order.
+
 ## [2.6.9] - 2026-06-26
 
 ### Fixed
