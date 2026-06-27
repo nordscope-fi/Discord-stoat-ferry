@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -3278,3 +3278,33 @@ async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Pa
             )
             assert len(result.failed_messages) == 1  # recorded to the result
             assert len(state.failed_messages) == 1  # unchanged from (a) — not state-written
+
+
+async def test_process_message_unmapped_reaction_direct_state_counts(tmp_path: Path) -> None:
+    """SC-4: on the direct-state path (channel_result is None), an unmapped-emoji reaction
+    increments state.reactions_dropped directly (no ChannelResult to fold)."""
+    state = _make_state(channel_map={"ch1": "stoat_ch1"})  # emoji_map empty
+    config = _make_config(tmp_path, reaction_mode="native")
+    msg = _make_message(
+        id="m1",
+        content="hi",
+        reactions=[DCEReaction(emoji=DCEEmoji(id="123", name="party"), count=1)],
+    )
+
+    async with aiohttp.ClientSession() as session:
+        with patch(
+            "discord_ferry.migrator.messages.api_send_message",
+            AsyncMock(return_value={"_id": "x"}),
+        ):
+            await _process_message(
+                msg=msg,
+                stoat_channel_id="stoat_ch1",
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda e: None,
+                channel_result=None,
+            )
+
+    assert state.reactions_dropped == 1
+    assert any(w["type"] == "unmapped_emoji_reaction" for w in state.warnings)

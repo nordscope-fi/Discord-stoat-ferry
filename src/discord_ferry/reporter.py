@@ -117,7 +117,12 @@ def generate_report(
         replies_linked=state.replies_linked,
         replies_total=state.replies_total,
         reactions_applied=state.reactions_applied,
-        reactions_total=state.reactions_applied + len(state.pending_reactions),
+        reactions_total=(
+            state.reactions_applied
+            + state.reactions_capped
+            + state.reactions_dropped
+            + len(state.pending_reactions)
+        ),
     )
 
     # Delta stats: messages migrated in this run vs cumulatively
@@ -354,7 +359,12 @@ def generate_markdown_report(
         replies_linked=state.replies_linked,
         replies_total=state.replies_total,
         reactions_applied=state.reactions_applied,
-        reactions_total=state.reactions_applied + len(state.pending_reactions),
+        reactions_total=(
+            state.reactions_applied
+            + state.reactions_capped
+            + state.reactions_dropped
+            + len(state.pending_reactions)
+        ),
     )
     lines.append("## Fidelity Score\n")
     lines.append(f"**Overall:** {fidelity['overall']}%  ")

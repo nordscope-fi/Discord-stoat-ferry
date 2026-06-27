@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -537,3 +538,234 @@ async def test_run_emoji_static_no_animation_warning(tmp_path: Path) -> None:
     assert state.emoji_map["666"] == "autumn_id"
     # No animation warnings.
     assert not any("animated" in w["message"].lower() for w in state.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Batch 4 (S2): discovery upgrade-in-place + (S3) usage-ranked truncation
+# ---------------------------------------------------------------------------
+
+
+def _emoji_patches() -> Any:
+    """The standard run_emoji mock trio (upload + create + sleep)."""
+    return (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="autumn_id"),
+        ),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "stoat_id"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    )
+
+
+async def test_emoji_content_first_reaction_later_upgrades(tmp_path: Path) -> None:
+    """SC-6: a content-first emoji (image_url='') is upgraded by a later reaction with a real
+    path, so it uploads and enters emoji_map."""
+    (tmp_path / "smile.png").write_bytes(b"PNG")
+    msg1 = _make_message(msg_id="m1", content="<:smile:123>")  # content source -> image_url=''
+    msg2 = _make_message(
+        msg_id="m2",
+        reactions=[
+            DCEReaction(emoji=DCEEmoji(id="123", name="smile", image_url="smile.png"), count=1)
+        ],
+    )
+    exports = [_make_export([msg1, msg2])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, [].append)
+    assert "123" in state.emoji_map  # upgraded -> uploaded -> mapped
+
+
+async def test_emoji_reaction_first_content_later_no_downgrade(tmp_path: Path) -> None:
+    """SC-7: a reaction-first emoji (real path) is NOT downgraded by a later content occurrence."""
+    (tmp_path / "smile.png").write_bytes(b"PNG")
+    msg1 = _make_message(
+        msg_id="m1",
+        reactions=[
+            DCEReaction(emoji=DCEEmoji(id="123", name="smile", image_url="smile.png"), count=1)
+        ],
+    )
+    msg2 = _make_message(msg_id="m2", content="<:smile:123>")  # later, image_url=''
+    exports = [_make_export([msg1, msg2])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, [].append)
+    assert "123" in state.emoji_map  # real path retained, no downgrade
+
+
+async def test_emoji_content_only_still_skipped(tmp_path: Path) -> None:
+    """SC-8: an emoji that only ever appears in content (image_url='') is still skipped."""
+    msg = _make_message(content="<:ghost:123>")  # never a reaction -> no real path
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, [].append)
+    assert "123" not in state.emoji_map
+
+
+async def test_emoji_cap_ranks_by_usage(tmp_path: Path) -> None:
+    """SC-9: the cap keeps the MOST-used emoji, not the lexicographic-first."""
+    for fn in ("a.png", "b.png", "c.png"):
+        (tmp_path / fn).write_bytes(b"PNG")
+    msgs = [
+        _make_message(msg_id="m1", content="<:dup:999> <:dup:999>"),  # 999 used 2x (content)
+        _make_message(
+            msg_id="m2",
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="999", name="dup", image_url="a.png"), count=1)
+            ],
+        ),  # 999 -> 3 uses + real path
+        _make_message(
+            msg_id="m3",
+            reactions=[DCEReaction(emoji=DCEEmoji(id="100", name="b", image_url="b.png"), count=1)],
+        ),
+        _make_message(
+            msg_id="m4",
+            reactions=[DCEReaction(emoji=DCEEmoji(id="200", name="c", image_url="c.png"), count=1)],
+        ),
+    ]
+    exports = [_make_export(msgs)]
+    config = dataclasses.replace(_make_config(tmp_path), max_emoji=2)
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, [].append)
+    assert "999" in state.emoji_map  # most-used survives despite sorting last lexicographically
+    assert "200" not in state.emoji_map  # least-used (tie-break loser) dropped
+
+
+async def test_emoji_cap_ranking_deterministic(tmp_path: Path) -> None:
+    """SC-10: repeated runs keep the same subset (stable tie-break)."""
+    for fn in ("a.png", "b.png", "c.png"):
+        (tmp_path / fn).write_bytes(b"PNG")
+
+    def _msgs() -> list[Any]:
+        return [
+            _make_message(msg_id="m1", content="<:dup:999> <:dup:999>"),
+            _make_message(
+                msg_id="m2",
+                reactions=[
+                    DCEReaction(emoji=DCEEmoji(id="999", name="dup", image_url="a.png"), count=1)
+                ],
+            ),
+            _make_message(
+                msg_id="m3",
+                reactions=[
+                    DCEReaction(emoji=DCEEmoji(id="100", name="b", image_url="b.png"), count=1)
+                ],
+            ),
+            _make_message(
+                msg_id="m4",
+                reactions=[
+                    DCEReaction(emoji=DCEEmoji(id="200", name="c", image_url="c.png"), count=1)
+                ],
+            ),
+        ]
+
+    config = dataclasses.replace(_make_config(tmp_path), max_emoji=2)
+    keys = []
+    for _ in range(2):
+        state = _make_state()
+        up, cr, sl = _emoji_patches()
+        with up, cr, sl:
+            await run_emoji(config, state, [_make_export(_msgs())], [].append)
+        keys.append(sorted(state.emoji_map))
+    assert keys[0] == keys[1]
+
+
+async def test_emoji_cap_non_numeric_id_safe(tmp_path: Path) -> None:
+    """SC-11: a non-numeric emoji id does not crash the usage sort (NEW fixture)."""
+    (tmp_path / "w.png").write_bytes(b"PNG")
+    (tmp_path / "n.png").write_bytes(b"PNG")
+    msgs = [
+        _make_message(
+            msg_id="m1",
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="weird_id", name="w", image_url="w.png"), count=1)
+            ],
+        ),
+        _make_message(
+            msg_id="m2",
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="weird_id", name="w", image_url="w.png"), count=1)
+            ],
+        ),  # weird_id used 2x
+        _make_message(
+            msg_id="m3",
+            reactions=[DCEReaction(emoji=DCEEmoji(id="100", name="n", image_url="n.png"), count=1)],
+        ),  # 100 used 1x
+    ]
+    exports = [_make_export(msgs)]
+    config = dataclasses.replace(_make_config(tmp_path), max_emoji=1)
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, [].append)  # must NOT raise
+    assert "weird_id" in state.emoji_map  # higher-used kept; sort handled mixed ids
+
+
+async def test_emoji_truncation_warning_names_dropped(tmp_path: Path) -> None:
+    """SC-12: the truncation warning surfaces the dropped emoji name."""
+    (tmp_path / "k.png").write_bytes(b"PNG")
+    (tmp_path / "d.png").write_bytes(b"PNG")
+    msgs = [
+        _make_message(
+            msg_id="m1",
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="100", name="keepme", image_url="k.png"), count=1)
+            ],
+        ),
+        _make_message(
+            msg_id="m2",
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="100", name="keepme", image_url="k.png"), count=1)
+            ],
+        ),  # keepme used 2x
+        _make_message(
+            msg_id="m3",
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="200", name="dropme", image_url="d.png"), count=1)
+            ],
+        ),  # dropme used 1x
+    ]
+    exports = [_make_export(msgs)]
+    config = dataclasses.replace(_make_config(tmp_path), max_emoji=1)
+    state = _make_state()
+    events: list[Any] = []
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, events.append)
+    warn = " ".join(w["message"] for w in state.warnings)
+    assert "dropme" in warn  # the dropped emoji's name is surfaced
+
+
+async def test_emoji_cap_prefers_uploadable_over_high_use_assetless(tmp_path: Path) -> None:
+    """SC-9b (code-review #1): an asset-less high-use emoji (content-only, image_url='') must
+    NOT take a kept slot ahead of an uploadable lower-use emoji — else the slot is wasted
+    (skipped at upload) and a creatable emoji is dropped."""
+    (tmp_path / "k.png").write_bytes(b"PNG")
+    msgs = [
+        # 999: content-only (no asset), used 3x — high uses but NOT uploadable.
+        _make_message(msg_id="m1", content="<:big:999> <:big:999> <:big:999>"),
+        # 100: a real reaction asset, used 1x — uploadable.
+        _make_message(
+            msg_id="m2",
+            reactions=[DCEReaction(emoji=DCEEmoji(id="100", name="k", image_url="k.png"), count=1)],
+        ),
+    ]
+    exports = [_make_export(msgs)]
+    config = dataclasses.replace(_make_config(tmp_path), max_emoji=1)
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(config, state, exports, [].append)
+    assert "100" in state.emoji_map  # uploadable kept despite fewer uses
+    assert "999" not in state.emoji_map  # asset-less high-use one dropped (would be unuploadable)

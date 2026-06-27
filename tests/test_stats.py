@@ -471,3 +471,21 @@ def test_summarize_state_messages_fidelity_legacy_fallback() -> None:
     state.source_messages_total = 0  # legacy
     summary = summarize_state(state)
     assert summary.fidelity.messages == 100.0  # 50/50, not 0/0
+
+
+def test_summarize_state_all_dropped_reactions_shows_zero_not_none() -> None:
+    """SC-17 (HEADLINE): an all-dropped reaction run reports 0% reactions, not N/A.
+
+    applied=0, pending=[], dropped=5 → the local reactions_total now includes dropped (=5), so
+    the None-gate is truthy and the ratio renders 0/5 = 0.0 instead of being hidden as None.
+    """
+    state = MigrationState(reactions_dropped=5)
+    summary = summarize_state(state)
+    assert summary.fidelity.reactions == 0.0  # NOT None
+
+
+def test_summarize_state_capped_reactions_lower_ratio() -> None:
+    """SC-19: capped reactions enter the stats denominator (additive)."""
+    state = MigrationState(reactions_applied=8, reactions_capped=2)  # pending empty
+    summary = summarize_state(state)
+    assert summary.fidelity.reactions == 80.0  # 8 / (8 + 2)

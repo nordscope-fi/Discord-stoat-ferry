@@ -99,6 +99,7 @@ async def run_reactions(
                         total=total,
                     )
                 )
+                state.reactions_capped += 1  # Batch 4 (S4): count for the fidelity denominator
                 continue  # cap-skipped: consumed (not retried, not retained)
 
             try:

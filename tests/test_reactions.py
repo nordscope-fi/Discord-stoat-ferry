@@ -262,3 +262,39 @@ async def test_run_reactions_dry_run_reports_full(tmp_path: Path) -> None:
     assert state.reactions_applied == 4
     assert state.pending_reactions == []
     assert summarize_state(state).fidelity.reactions == 100.0
+
+
+async def test_run_reactions_cap_counter(tmp_path: Path) -> None:
+    """SC-14: reactions skipped at the 20/message cap increment reactions_capped."""
+    events: list[Any] = []
+    config = _make_config(tmp_path)
+    pending = [_reaction(message_id="msg1", emoji=f"e{i}") for i in range(25)]
+    state = _make_state(pending=pending)
+
+    mock_add = AsyncMock(return_value={})
+    with (
+        patch("discord_ferry.migrator.reactions.api_add_reaction", new=mock_add),
+        patch("discord_ferry.migrator.reactions.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_reactions(config, state, [], events.append)
+
+    assert state.reactions_applied == 20
+    assert state.reactions_capped == 5  # 25 - 20 skipped at the cap
+
+
+async def test_run_reactions_cap_counter_resume_no_double_count(tmp_path: Path) -> None:
+    """SC-15: re-running after the cap consumed the overflow does not re-count."""
+    config = _make_config(tmp_path)
+    pending = [_reaction(message_id="msg1", emoji=f"e{i}") for i in range(25)]
+    state = _make_state(pending=pending)
+
+    with (
+        patch("discord_ferry.migrator.reactions.api_add_reaction", new=AsyncMock(return_value={})),
+        patch("discord_ferry.migrator.reactions.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_reactions(config, state, [], [].append)
+        assert state.reactions_capped == 5
+        # second run: pending consumed -> phase returns early -> no additional caps
+        await run_reactions(config, state, [], [].append)
+
+    assert state.reactions_capped == 5

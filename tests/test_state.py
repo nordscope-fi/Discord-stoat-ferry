@@ -642,3 +642,25 @@ def test_migration_lock_marker_not_persisted(tmp_path: Path) -> None:
     assert "migration_lock_marker" not in json.loads(path.read_text())
     loaded = load_state(tmp_path)
     assert loaded.migration_lock_marker == ""
+
+
+def test_reaction_counters_round_trip(tmp_path: Path) -> None:
+    """SC-20: reactions_capped + reactions_dropped survive a save/load round-trip."""
+    state = MigrationState(reactions_capped=5, reactions_dropped=3)
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.reactions_capped == 5
+    assert loaded.reactions_dropped == 3
+
+
+def test_reaction_counters_backcompat_missing_keys(tmp_path: Path) -> None:
+    """SC-21: an old state.json without the new keys loads with both defaulting to 0."""
+    save_state(MigrationState(), tmp_path)
+    path = tmp_path / "state.json"
+    data = json.loads(path.read_text())
+    data.pop("reactions_capped", None)
+    data.pop("reactions_dropped", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = load_state(tmp_path)
+    assert loaded.reactions_capped == 0
+    assert loaded.reactions_dropped == 0
