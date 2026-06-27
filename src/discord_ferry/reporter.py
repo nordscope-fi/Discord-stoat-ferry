@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from discord_ferry.state import MigrationState
 
 
+def _clamp01(value: float) -> float:
+    """Clamp a ratio into [0.0, 1.0].
+
+    Defends against scope-mismatched numerators (Batch 7 S3): in incremental mode the
+    denominator is this-run's partial source total while failed_count is carried
+    cumulatively, so an unclamped ratio could go negative (or >1). A no-op for any ratio
+    already in range.
+    """
+    return max(0.0, min(1.0, value))
+
+
 def compute_fidelity_score(
     total_messages: int,
     failed_count: int,
@@ -54,11 +65,13 @@ def compute_fidelity_score(
         Dict with 'overall', 'messages', 'attachments', 'embeds', 'replies',
         and 'reactions' scores (0-100).
     """
-    msg_ratio = (total_messages - failed_count) / max(total_messages, 1)
-    att_ratio = attachments_uploaded / max(attachments_uploaded + attachments_skipped, 1)
-    embed_ratio = (embeds_total - embeds_dropped) / embeds_total if embeds_total else 1.0
-    reply_ratio = replies_linked / replies_total if replies_total else 1.0
-    reaction_ratio = reactions_applied / max(reactions_total, 1) if reactions_total else 1.0
+    msg_ratio = _clamp01((total_messages - failed_count) / max(total_messages, 1))
+    att_ratio = _clamp01(attachments_uploaded / max(attachments_uploaded + attachments_skipped, 1))
+    embed_ratio = _clamp01((embeds_total - embeds_dropped) / embeds_total) if embeds_total else 1.0
+    reply_ratio = _clamp01(replies_linked / replies_total) if replies_total else 1.0
+    reaction_ratio = (
+        _clamp01(reactions_applied / max(reactions_total, 1)) if reactions_total else 1.0
+    )
     overall = (
         msg_ratio * 0.40
         + att_ratio * 0.25

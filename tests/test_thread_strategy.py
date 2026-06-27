@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core.security import SecureTokenStore
 from discord_ferry.migrator.messages import run_messages
 from discord_ferry.migrator.structure import run_channels
 from discord_ferry.parser.models import (
@@ -16,7 +17,7 @@ from discord_ferry.parser.models import (
     DCEGuild,
     DCEMessage,
 )
-from discord_ferry.state import MigrationState
+from discord_ferry.state import FailedMessage, MigrationState
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -542,3 +543,287 @@ async def test_merge_non_numeric_marker_no_crash(tmp_path: Path) -> None:
     # Threshold normalized to "" -> every message copies (idempotent), no ValueError.
     assert "ferry-merge-10" in keys
     assert "ferry-merge-20" in keys
+
+
+# ---------------------------------------------------------------------------
+# Batch 7 S1 — thread-merge failed-message self-heal (#76 pattern ported)
+# ---------------------------------------------------------------------------
+
+
+def _fail_on(fail_ids: set[str], keys: list[str] | None = None) -> object:
+    """Patch target for api_send_message: raise for merge POSTs whose key maps to a
+    msg.id in fail_ids; else record the idempotency_key + return a fake id.
+
+    Mirrors _capture_keys but injects a per-message send failure.
+    """
+
+    async def _send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        mid = ""
+        if key.startswith("ferry-merge-"):
+            mid = key[len("ferry-merge-") :].split("_p")[0]
+        if mid and mid in fail_ids:
+            raise RuntimeError(f"simulated send failure for {mid}")
+        if keys is not None:
+            keys.append(key)
+        return {"_id": f"stoat-{key}"}
+
+    return _send
+
+
+async def test_merge_success_records_no_failure(tmp_path: Path) -> None:
+    """SC-1: a fully-successful merge run records zero FailedMessage (non-regression)."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(
+        tmp_path, ["10", "20", "30"], marker=None, incremental=False
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys([])):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert state.failed_messages == []
+    assert state.channel_high_water["200"] == "30"
+
+
+async def test_merge_failure_recorded_plain_mode(tmp_path: Path) -> None:
+    """SC-2: a merge POST failure is recorded as a FailedMessage even in plain mode."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(
+        tmp_path, ["10", "20", "30"], marker=None, incremental=False
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    failed = [fm for fm in state.failed_messages if fm.discord_msg_id == "20"]
+    assert len(failed) == 1
+    assert failed[0].stoat_channel_id == "stoat-ch-100"
+    assert failed[0].content_preview  # non-empty preview from built content
+    assert state.channel_high_water["200"] == "30"  # marker still max(all ids)
+
+
+async def test_merge_incremental_reattempts_prior_failed_id(tmp_path: Path) -> None:
+    """SC-3: a prior-failed id below the marker is re-attempted on --incremental."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert state.channel_high_water["200"] == "30"
+    assert any(fm.discord_msg_id == "20" for fm in state.failed_messages)
+    # run 2: reuse state, all succeed; "20" must be re-attempted despite <= marker.
+    config2, _s2, parent2, thread2 = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    keys2: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys2)):
+        await run_messages(config2, state, [parent2, thread2], lambda e: None)
+    assert "ferry-merge-20" in keys2
+    assert "ferry-merge-10" not in keys2  # already-copied, not failed -> skipped
+
+
+async def test_merge_reattempt_success_drops_entry(tmp_path: Path) -> None:
+    """SC-4: a successful re-attempt drops the entry from failed_messages."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    config2, _s2, parent2, thread2 = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys([])):
+        await run_messages(config2, state, [parent2, thread2], lambda e: None)
+    assert not any(fm.discord_msg_id == "20" for fm in state.failed_messages)
+
+
+async def test_merge_reattempt_refail_collapses_to_one(tmp_path: Path) -> None:
+    """SC-5: a re-failing id stays as exactly one entry (carried+re-fail collapsed)."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    config2, _s2, parent2, thread2 = _merge_setup(tmp_path, ["10", "20", "30"], marker=None)
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config2, state, [parent2, thread2], lambda e: None)
+    assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "20"]) == 1
+
+
+async def test_merge_plain_mode_ignores_marker_no_failrecord_on_success(tmp_path: Path) -> None:
+    """SC-6: plain mode (incremental=False) ignores the marker (no skip), no FailedMessage."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(
+        tmp_path, ["10", "20", "30"], marker="20", incremental=False
+    )
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    # No incremental skip in plain mode: every message is (re-)posted, no FailedMessage.
+    assert {"ferry-merge-10", "ferry-merge-20", "ferry-merge-30"}.issubset(set(keys))
+    assert state.failed_messages == []
+
+
+async def test_merge_multipart_failure_records_one(tmp_path: Path) -> None:
+    """SC-7: a multi-part message with a failing part records exactly one FailedMessage."""
+    from unittest.mock import patch
+
+    long_text = "a" * 5000  # > 2000 -> _split_message yields multiple parts
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=False
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent = _make_export(channel_id="100", channel_name="general")
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("50", long_text)],
+        message_count=1,
+    )
+
+    async def _send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        if key == "ferry-merge-50_p2":
+            raise RuntimeError("part 2 fails")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _send):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "50"]) == 1
+
+
+async def test_merge_cross_thread_sibling_safety(tmp_path: Path) -> None:
+    """SC-8: thread B completion does not drop/mangle thread A's still-failed entry."""
+    from unittest.mock import patch
+
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    state.channel_high_water["200"] = "30"
+    state.channel_high_water["201"] = "31"
+    state.failed_messages.append(
+        FailedMessage(
+            discord_msg_id="20", stoat_channel_id="stoat-ch-100", error="prior", content_preview="x"
+        )
+    )
+    parent = _make_export(channel_id="100", channel_name="general")
+    thread_a = _make_export(
+        channel_id="200",
+        channel_name="thread-a",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message(m, f"m{m}") for m in ["10", "20", "30"]],
+        message_count=3,
+    )
+    thread_b = _make_export(
+        channel_id="201",
+        channel_name="thread-b",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message(m, f"m{m}") for m in ["11", "21", "31"]],
+        message_count=3,
+    )
+    # B succeeds; A's "20" re-fails -> A keeps exactly one entry, B adds none, none mangled.
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config, state, [parent, thread_a, thread_b], lambda e: None)
+    assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "20"]) == 1
+
+
+async def test_merge_fully_failed_message_is_recorded_for_retry(tmp_path: Path) -> None:
+    """SC-9: a fully-failed merge message is recorded so ferry retry can recover it.
+
+    KNOWN LIMITATION (documented, design §S1 I1): the incremental re-attempt path
+    (SC-3/4/5) is the asserted-correct recovery and is idempotency-safe. `ferry retry`
+    recovers a FULLY-failed merge message cleanly, but recovering a PARTIAL-SUCCESS
+    multi-part merge message via `ferry retry` may duplicate already-sent parts (the
+    `ferry-merge-` vs `ferry-` idempotency-namespace mismatch). We do NOT assert the
+    duplicate as desired; this test only asserts the recordable surface.
+    """
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10"], marker=None, incremental=False)
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"10"})):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    failed = [fm for fm in state.failed_messages if fm.discord_msg_id == "10"]
+    assert len(failed) == 1
+    assert failed[0].stoat_channel_id == "stoat-ch-100"  # retry posts to the parent channel
+
+
+async def test_merge_failure_sanitizes_token(tmp_path: Path) -> None:
+    """SC-10: a token in the exception is absent from FailedMessage.error AND warnings."""
+    from unittest.mock import patch
+
+    token = "SECRET-TOKEN-12345"
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=False
+    )
+    config.token_store = SecureTokenStore({"discord": token})
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent = _make_export(channel_id="100", channel_name="general")
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("60", "hi")],
+        message_count=1,
+    )
+
+    async def _send(
+        session: object, stoat_url: object, token_: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        raise RuntimeError(f"boom {token}")
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _send):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert all(token not in (fm.error or "") for fm in state.failed_messages)
+    assert all(token not in str(w.get("message", "")) for w in state.warnings)
+
+
+async def test_merge_empty_thread_no_marker_no_failure(tmp_path: Path) -> None:
+    """SC-11: an empty merge thread writes no marker and records no failure."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, [], marker=None, incremental=False)
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys([])):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert state.failed_messages == []
+    assert "200" not in state.channel_high_water
+
+
+async def test_merge_separator_failure_not_recorded_as_failed(tmp_path: Path) -> None:
+    """SC-12: a separator failure is warn-only, never a FailedMessage."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["10", "20"], marker=None)
+
+    async def _send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        if key.startswith("ferry-thread-sep-"):
+            raise RuntimeError("sep fails")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _send):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert state.failed_messages == []
+    assert any(w.get("type") == "merge_separator_failed" for w in state.warnings)
+
+
+async def test_merge_non_numeric_id_failure_recorded(tmp_path: Path) -> None:
+    """SC-13: a non-numeric merge id that fails is recorded; numeric marker unaffected."""
+    from unittest.mock import patch
+
+    config, state, parent, thread = _merge_setup(
+        tmp_path, ["sys-x", "30"], marker=None, incremental=False
+    )
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"sys-x"})):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+    assert any(fm.discord_msg_id == "sys-x" for fm in state.failed_messages)
+    assert state.channel_high_water["200"] == "30"  # max over numeric ids only

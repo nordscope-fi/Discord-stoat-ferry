@@ -489,3 +489,24 @@ def test_summarize_state_capped_reactions_lower_ratio() -> None:
     state = MigrationState(reactions_applied=8, reactions_capped=2)  # pending empty
     summary = summarize_state(state)
     assert summary.fidelity.reactions == 80.0  # 8 / (8 + 2)
+
+
+# ---------------------------------------------------------------------------
+# Batch 7 S3 — clamped fidelity propagates through ferry stats
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_state_messages_fidelity_clamped() -> None:
+    """SC-24: ferry stats shows messages 0.0 when carried failures exceed this-run source.
+
+    Confirms summarize_state delegates to compute_fidelity_score (single clamp fixes both).
+    """
+    from discord_ferry.state import FailedMessage
+
+    state = MigrationState(stoat_server_id="srv1")
+    state.source_messages_total = 50
+    state.failed_messages = [
+        FailedMessage(discord_msg_id=str(i), stoat_channel_id="c", error="boom") for i in range(80)
+    ]
+    summary = summarize_state(state)
+    assert summary.fidelity.messages == 0.0

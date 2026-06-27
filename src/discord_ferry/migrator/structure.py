@@ -808,8 +808,12 @@ async def run_categories(
         # Suppress this transient upsert when no category is genuinely new: it
         # would set empty channels arrays and orphan carried channels until the
         # CHANNELS phase re-PATCHes. run_channels owns the authoritative upsert.
+        # Batch 7 S2: ALSO suppress in incremental mode — even a genuinely-new category
+        # here would full-replace away carried-only categories (built from this run's
+        # partial export). run_channels enumerates the FULL category_map, so it is the
+        # single authoritative (non-destructive) upsert in incremental runs.
         any_new_category = any(cid not in pre_existing_category_ids for cid, _ in unique_categories)
-        if stoat_categories and any_new_category:
+        if stoat_categories and any_new_category and not config.incremental:
             await api_upsert_categories(
                 session,
                 config.stoat_url,

@@ -910,3 +910,142 @@ async def test_rebuild_forum_indexes_reports_cumulative_counts(tmp_path: Path) -
     assert "<#stoat-fp1> — 47 messages migrated" not in content, (
         "Index showed delta count, not cumulative"
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch 7 S2 — non-destructive incremental category upsert
+# ---------------------------------------------------------------------------
+
+
+async def test_incremental_run_categories_skips_early_upsert(tmp_path: Path) -> None:
+    """SC-14: incremental run_categories does NOT fire the destructive early upsert.
+
+    This also closes the critique M2 concern: because run_categories never PATCHes in
+    incremental mode, there is no destructive intermediate state for a crash/cancel to
+    land in (carried-only categories stay live until run_channels' authoritative upsert),
+    even in the zero-channel edge where run_channels would skip its own upsert.
+    """
+    exports = [
+        _make_export(
+            channel_id="chNew", channel_name="new", category_id="catNew", category="NewCat"
+        ),
+    ]
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"catOld": "stoat-catOld"},  # carried-only, absent from this export
+        category_names={"catOld": "OldCat"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    patch_bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_categories(config, state, exports, lambda e: None)
+    assert patch_bodies == []  # no destructive early upsert in incremental mode
+    assert "catNew" in state.category_map  # map population still happens
+
+
+async def test_fresh_run_categories_fires_early_upsert(tmp_path: Path) -> None:
+    """SC-15: a fresh (non-incremental) run still fires run_categories' early upsert."""
+    exports = [
+        _make_export(
+            channel_id="chNew", channel_name="new", category_id="catNew", category="NewCat"
+        ),
+    ]
+    state = MigrationState(stoat_server_id="srv1")
+    config = _make_config(tmp_path, incremental=False)
+    patch_bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_categories(config, state, exports, lambda e: None)
+    assert patch_bodies, "fresh run must fire the early upsert (non-regression)"
+
+
+async def test_incremental_final_upsert_includes_carried_and_new(tmp_path: Path) -> None:
+    """SC-16: after run_channels, the authoritative upsert holds carried + new categories."""
+    exports = [
+        _make_export(
+            channel_id="chNew", channel_name="new", category_id="catNew", category="NewCat"
+        ),
+    ]
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"catOld": "stoat-catOld"},  # carried-only
+        channel_map={"chOld": "stoat-chOld"},
+        category_names={"catOld": "OldCat"},
+        channel_categories={"chOld": "catOld"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    patch_bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-chNew"}, repeat=True)
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_categories(config, state, exports, lambda e: None)
+        await run_channels(config, state, exports, lambda e: None)
+    assert patch_bodies, "run_channels must own the authoritative upsert"
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    assert "stoat-catOld" in by_id  # carried-only category survives
+    assert state.category_map["catNew"] in by_id  # new category materialized
+    assert "stoat-chOld" in by_id["stoat-catOld"]["channels"]  # carried channel re-attached
+
+
+async def test_incremental_multiple_carried_only_categories_survive(tmp_path: Path) -> None:
+    """SC-18: multiple simultaneously carried-only categories all survive (no contamination)."""
+    exports = [
+        _make_export(
+            channel_id="chNew", channel_name="new", category_id="catNew", category="NewCat"
+        ),
+    ]
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"catA": "stoat-catA", "catB": "stoat-catB"},  # two carried-only
+        channel_map={"chA": "stoat-chA", "chB": "stoat-chB"},
+        category_names={"catA": "Alpha", "catB": "Beta"},
+        channel_categories={"chA": "catA", "chB": "catB"},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    patch_bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-chNew"}, repeat=True)
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_categories(config, state, exports, lambda e: None)
+        await run_channels(config, state, exports, lambda e: None)
+    categories = patch_bodies[-1].get("categories", [])
+    by_id = {c["id"]: c for c in categories}  # type: ignore[index,union-attr]
+    assert "stoat-catA" in by_id and "stoat-catB" in by_id
+    assert by_id["stoat-catA"]["channels"] == ["stoat-chA"]
+    assert by_id["stoat-catB"]["channels"] == ["stoat-chB"]  # no cross-contamination
+
+
+async def test_incremental_gate_does_not_touch_dry_run(tmp_path: Path) -> None:
+    """SC-19: dry-run still maps categories and makes no HTTP (gate is after the return)."""
+    exports = [
+        _make_export(
+            channel_id="chNew", channel_name="new", category_id="catNew", category="NewCat"
+        ),
+    ]
+    state = MigrationState(stoat_server_id="srv1")
+    config = _make_config(tmp_path, incremental=True, dry_run=True)
+    with aioresponses():  # any HTTP would raise (none registered)
+        await run_categories(config, state, exports, lambda e: None)
+    assert state.category_map["catNew"] == "dry-cat-catNew"

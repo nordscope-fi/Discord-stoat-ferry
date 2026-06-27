@@ -907,3 +907,81 @@ def test_generate_report_reactions_dropped_lowers_score(tmp_path: Path) -> None:
     state = MigrationState(reactions_applied=3, reactions_dropped=1)  # pending empty
     report = generate_report(config, state, exports)
     assert report["fidelity"]["reactions"] == 75.0  # 3 / (3 + 1)
+
+
+# ---------------------------------------------------------------------------
+# Batch 7 S3 — clamp fidelity ratios to [0, 1]
+# ---------------------------------------------------------------------------
+
+
+def test_fidelity_messages_clamped_when_failed_exceeds_total() -> None:
+    """SC-20: failed_count > total_messages -> messages == 0.0 (not negative)."""
+    score = compute_fidelity_score(
+        total_messages=50, failed_count=80, attachments_uploaded=10, attachments_skipped=0
+    )
+    assert score["messages"] == 0.0
+
+
+def test_fidelity_all_subscores_in_bounds_for_overscope() -> None:
+    """SC-21: all sub-scores + overall stay within [0, 100] for over-scope inputs."""
+    score = compute_fidelity_score(
+        total_messages=50,
+        failed_count=80,
+        attachments_uploaded=10,
+        attachments_skipped=0,
+        embeds_total=5,
+        embeds_dropped=9,
+        replies_total=5,
+        replies_linked=9,
+        reactions_total=5,
+        reactions_applied=9,
+    )
+    for key in ("messages", "attachments", "embeds", "replies", "reactions", "overall"):
+        assert 0.0 <= score[key] <= 100.0
+
+
+def test_fidelity_in_range_is_identity() -> None:
+    """SC-22: a fully in-range vector is unchanged by the clamp (no-op non-regression)."""
+    score = compute_fidelity_score(
+        total_messages=100,
+        failed_count=5,
+        attachments_uploaded=90,
+        attachments_skipped=10,
+        embeds_total=10,
+        embeds_dropped=2,
+        replies_total=10,
+        replies_linked=7,
+        reactions_total=5,
+        reactions_applied=4,
+    )
+    assert score["messages"] == 95.0
+    assert score["attachments"] == 90.0
+    assert score["embeds"] == 80.0
+    assert score["replies"] == 70.0
+    assert score["reactions"] == 80.0
+
+
+def test_fidelity_total_zero_clamps() -> None:
+    """SC-23: total_messages=0 with failures -> messages clamped to 0.0, no error."""
+    score = compute_fidelity_score(
+        total_messages=0, failed_count=3, attachments_uploaded=0, attachments_skipped=0
+    )
+    assert score["messages"] == 0.0
+
+
+def test_fidelity_overall_not_depressed_by_clamped_messages() -> None:
+    """SC-25: a clamped (0) messages term contributes 0, no negative drag on overall."""
+    score = compute_fidelity_score(
+        total_messages=50,
+        failed_count=80,
+        attachments_uploaded=100,
+        attachments_skipped=0,
+        embeds_total=10,
+        embeds_dropped=0,
+        replies_total=10,
+        replies_linked=10,
+        reactions_total=10,
+        reactions_applied=10,
+    )
+    # messages=0 (*0.40); att/embed/reply/reaction = 1.0 -> 0.25+0.15+0.10+0.10 = 0.60
+    assert score["overall"] == 60.0
