@@ -14,13 +14,23 @@ import aiohttp
 import click
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.errors import MarkupError
 from rich.live import Live
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.errors import MigrationError, StateError
+from discord_ferry.migrator.api import (
+    api_create_channel,
+    api_create_role,
+    api_create_server,
+    api_edit_role,
+    api_set_role_permissions,
+    api_upsert_categories,
+)
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
 from discord_ferry.state import MigrationState, load_state
 from discord_ferry.stats import summarize_state
@@ -148,12 +158,12 @@ def _build_stats_table(summary: StateSummary) -> Table:
         table.add_row("  Errors", "0 (clean)")
     else:
         preview = textwrap.shorten(summary.last_error or "", width=80, placeholder="…")
-        table.add_row("  Errors", f"{summary.error_count} — last: {preview}")
+        table.add_row("  Errors", f"{summary.error_count} — last: {_safe(preview)}")
     if summary.warning_count == 0:
         table.add_row("  Warnings", "0 (clean)")
     else:
         preview = textwrap.shorten(summary.last_warning or "", width=80, placeholder="…")
-        table.add_row("  Warnings", f"{summary.warning_count} — last: {preview}")
+        table.add_row("  Warnings", f"{summary.warning_count} — last: {_safe(preview)}")
 
     # Elapsed
     table.add_row("[bold]Timing[/]", "")
@@ -214,6 +224,52 @@ def _build_rollback_table(summary: StateSummary) -> Table | None:
     return table
 
 
+def _safe(value: object) -> str:
+    """Escape a user-controlled value for safe Rich-markup interpolation.
+
+    Discord/blueprint names can contain Rich markup metacharacters (``[``, ``]``,
+    ``[/]``). Interpolating them raw into a markup string either corrupts the
+    rendered output or raises ``rich.errors.MarkupError`` — and since CLI event
+    handlers run synchronously inside the engine's ``emit``, that exception would
+    abort the whole migration. Escaping neutralises the metacharacters.
+    """
+    return escape(str(value))
+
+
+async def _build_blueprint_channel(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+    ch: Any,
+) -> str:
+    """Create a blueprint channel, retrying a failed Voice channel as Text (Stoat Bug #194).
+
+    Mirrors the migration path's voice fallback (``structure.py``). Only a ``"Voice"``-type
+    create failure is retried as ``"Text"``; any other ``MigrationError`` propagates. Returns
+    the created channel's Stoat ``_id``.
+    """
+    try:
+        result = await api_create_channel(
+            session, stoat_url, token, server_id, name=ch.name, channel_type=ch.type, nsfw=ch.nsfw
+        )
+    except MigrationError:
+        if ch.type == "Voice":
+            console.print(f"  [yellow]Voice channel '{_safe(ch.name)}' failed, retrying as text[/]")
+            result = await api_create_channel(
+                session,
+                stoat_url,
+                token,
+                server_id,
+                name=ch.name,
+                channel_type="Text",
+                nsfw=ch.nsfw,
+            )
+        else:
+            raise
+    return str(result["_id"])
+
+
 class _ProgressTracker:
     """Track migration progress and render Rich output with live progress bars."""
 
@@ -261,7 +317,7 @@ class _ProgressTracker:
             f"Warnings: {self.warning_count}"
         )
         if self._current_channel:
-            stats += f"  Channel: {self._current_channel}"
+            stats += f"  Channel: {_safe(self._current_channel)}"
         grid.add_row(stats)
         return grid
 
@@ -276,74 +332,85 @@ class _ProgressTracker:
         """Handle a migration event — update state and progress bars."""
         self.phase_status[event.phase] = event.status
 
-        match event.status:
-            case "started":
-                self._phase_progress.update(
-                    self._phase_task_id, description=f"Phase: {event.phase}"
-                )
-                self._log(f"[bold cyan][>>][/] {event.phase}: {event.message}")
-            case "completed":
-                completed = sum(1 for s in self.phase_status.values() if s == "completed")
-                self._phase_progress.update(self._phase_task_id, completed=completed)
-                self._log(f"[bold green][OK][/] {event.phase}: {event.message}")
-            case "skipped":
-                self._log(f"[dim][--][/] {event.phase}: {event.message}")
-            case "error":
-                self.error_count += 1
-                self._log(f"[bold red][!!][/] {event.phase}: {event.message}")
-            case "warning":
-                self.warning_count += 1
-                if self.verbose:
-                    self._log(f"[yellow][!!][/] {event.phase}: {event.message}")
-            case "confirm":
-                # Print review summary and ask for confirmation
-                if event.detail:
-                    self._log("\n[bold]Pre-Migration Review[/]")
-                    review_table = Table(show_header=True, header_style="bold")
-                    review_table.add_column("Item", style="cyan")
-                    review_table.add_column("Count", justify="right")
-                    detail = event.detail
-                    review_table.add_row("Server Name", str(detail.get("server_name", "")))
-                    review_table.add_row("Roles", str(detail.get("roles", 0)))
-                    review_table.add_row("Categories", str(detail.get("categories", 0)))
-                    review_table.add_row("Channels", str(detail.get("channels", 0)))
-                    review_table.add_row("Emoji", str(detail.get("emoji", 0)))
-                    review_table.add_row("Messages", f"{detail.get('messages', 0):,}")
-                    review_table.add_row("Threads", str(detail.get("threads", 0)))
-                    review_table.add_row(
-                        "Permissions", "Yes" if detail.get("has_permissions") else "No"
+        # User-controlled values (event.message, channel_name, server_name, warnings) are escaped
+        # before interpolation into Rich markup. The whole render is additionally guarded against
+        # MarkupError so a missed escape site can never propagate into the engine's synchronous
+        # emit() and abort an otherwise-healthy migration (defense-in-depth).
+        try:
+            match event.status:
+                case "started":
+                    self._phase_progress.update(
+                        self._phase_task_id, description=f"Phase: {event.phase}"
                     )
-                    if detail.get("nsfw_channels"):
-                        review_table.add_row("NSFW Channels", str(detail.get("nsfw_channels", 0)))
+                    self._log(f"[bold cyan][>>][/] {event.phase}: {_safe(event.message)}")
+                case "completed":
+                    completed = sum(1 for s in self.phase_status.values() if s == "completed")
+                    self._phase_progress.update(self._phase_task_id, completed=completed)
+                    self._log(f"[bold green][OK][/] {event.phase}: {_safe(event.message)}")
+                case "skipped":
+                    self._log(f"[dim][--][/] {event.phase}: {_safe(event.message)}")
+                case "error":
+                    self.error_count += 1
+                    self._log(f"[bold red][!!][/] {event.phase}: {_safe(event.message)}")
+                case "warning":
+                    self.warning_count += 1
+                    if self.verbose:
+                        self._log(f"[yellow][!!][/] {event.phase}: {_safe(event.message)}")
+                case "confirm":
+                    # Print review summary and ask for confirmation
+                    if event.detail:
+                        self._log("\n[bold]Pre-Migration Review[/]")
+                        review_table = Table(show_header=True, header_style="bold")
+                        review_table.add_column("Item", style="cyan")
+                        review_table.add_column("Count", justify="right")
+                        detail = event.detail
+                        review_table.add_row("Server Name", _safe(detail.get("server_name", "")))
+                        review_table.add_row("Roles", str(detail.get("roles", 0)))
+                        review_table.add_row("Categories", str(detail.get("categories", 0)))
+                        review_table.add_row("Channels", str(detail.get("channels", 0)))
+                        review_table.add_row("Emoji", str(detail.get("emoji", 0)))
+                        review_table.add_row("Messages", f"{detail.get('messages', 0):,}")
+                        review_table.add_row("Threads", str(detail.get("threads", 0)))
+                        review_table.add_row(
+                            "Permissions", "Yes" if detail.get("has_permissions") else "No"
+                        )
+                        if detail.get("nsfw_channels"):
+                            review_table.add_row(
+                                "NSFW Channels", str(detail.get("nsfw_channels", 0))
+                            )
+                        self._log("")
+                        console.print(review_table)
+                        raw_warnings = detail.get("warnings")
+                        warnings_list: list[object] = (
+                            raw_warnings if isinstance(raw_warnings, list) else []
+                        )
+                        for w in warnings_list:
+                            self._log(f"  [yellow]Warning: {_safe(w)}[/]")
                     self._log("")
-                    console.print(review_table)
-                    raw_warnings = detail.get("warnings")
-                    warnings_list: list[object] = (
-                        raw_warnings if isinstance(raw_warnings, list) else []
-                    )
-                    for w in warnings_list:
-                        self._log(f"  [yellow]Warning: {w}[/]")
-                self._log("")
-            case "progress":
-                if event.total > 0:
-                    self.messages_sent = event.current
-                    self._msg_progress.update(
-                        self._msg_task_id,
-                        total=event.total,
-                        completed=event.current,
-                    )
-                if event.channel_name:
-                    self._current_channel = event.channel_name
-                    self._msg_progress.update(
-                        self._msg_task_id,
-                        description=f"  {event.channel_name}",
-                    )
-                if self.verbose:
-                    self._log(f"[dim]    {event.message}[/]")
+                case "progress":
+                    if event.total > 0:
+                        self.messages_sent = event.current
+                        self._msg_progress.update(
+                            self._msg_task_id,
+                            total=event.total,
+                            completed=event.current,
+                        )
+                    if event.channel_name:
+                        self._current_channel = event.channel_name
+                        self._msg_progress.update(
+                            self._msg_task_id,
+                            description=f"  {_safe(event.channel_name)}",
+                        )
+                    if self.verbose:
+                        self._log(f"[dim]    {_safe(event.message)}[/]")
 
-        # Refresh live display if active.
-        if self._live is not None:
-            self._live.update(self._make_display())
+            # Refresh live display if active.
+            if self._live is not None:
+                self._live.update(self._make_display())
+        except MarkupError:
+            # A dynamic value slipped through un-escaped; surface it unstyled rather than abort.
+            sink = self._live.console if self._live is not None else console
+            sink.print(f"{event.phase}: {event.message}", markup=False)
 
     def print_summary(self) -> None:
         """Print a final summary line."""
@@ -546,7 +613,7 @@ def migrate(**kwargs: Any) -> None:
     try:
         config = _build_config(kwargs)
     except click.UsageError as exc:
-        console.print(f"[bold red]Error:[/] {exc}")
+        console.print(f"[bold red]Error:[/] {_safe(exc)}")
         sys.exit(1)
 
     if not config.skip_export and not kwargs.get("yes"):
@@ -567,7 +634,7 @@ def migrate(**kwargs: Any) -> None:
         with tracker.start_live():
             final_state = asyncio.run(run_migration(config, on_event=tracker.on_event))
     except MigrationError as exc:
-        console.print(f"\n[bold red]Migration failed:[/] {exc}")
+        console.print(f"\n[bold red]Migration failed:[/] {_safe(exc)}")
         sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/] State saved — use --resume to continue.")
@@ -605,7 +672,7 @@ def validate(export_dir: str, rate_limit: float) -> None:
         sys.exit(1)
 
     guild_name = exports[0].guild.name
-    console.print(f"[bold]Discord Ferry[/] — validating export for [cyan]{guild_name}[/]\n")
+    console.print(f"[bold]Discord Ferry[/] — validating export for [cyan]{_safe(guild_name)}[/]\n")
 
     table = _build_validate_table(exports)
     console.print(table)
@@ -615,7 +682,7 @@ def validate(export_dir: str, rate_limit: float) -> None:
     if warnings:
         console.print(f"[yellow bold]Warnings ({len(warnings)}):[/]")
         for w in warnings:
-            console.print(f"  [yellow]- {w['message']}[/]")
+            console.print(f"  [yellow]- {_safe(w['message'])}[/]")
         console.print()
 
     total_messages = sum(e.message_count for e in exports)
@@ -662,14 +729,6 @@ def build(
     import importlib.resources
 
     from discord_ferry.blueprint import ServerBlueprint, import_blueprint
-    from discord_ferry.migrator.api import (
-        api_create_channel,
-        api_create_role,
-        api_create_server,
-        api_edit_role,
-        api_set_role_permissions,
-        api_upsert_categories,
-    )
 
     if not template and not blueprint:
         console.print("[bold red]Error:[/] Provide --template or --blueprint")
@@ -688,22 +747,29 @@ def build(
     if name:
         bp.name = name
 
-    console.print(f"[bold]Discord Ferry[/] — building server '{bp.name}'\n")
+    console.print(f"[bold]Discord Ferry[/] — building server '{_safe(bp.name)}'\n")
 
     async def _build() -> None:
         async with aiohttp.ClientSession() as session:
             # Create server
             result = await api_create_server(session, stoat_url, token, bp.name)
             server_id = result["_id"]
-            console.print(f"  Created server '{bp.name}' ({server_id})")
+            console.print(f"  Created server '{_safe(bp.name)}' ({server_id})")
 
             # Create roles
             for role in bp.roles:
                 role_result = await api_create_role(session, stoat_url, token, server_id, role.name)
                 role_id = role_result["id"]
+                # Replay colour + rank in a single PATCH. Skip rank 0 (the default) so an
+                # unranked blueprint role keeps Stoat's default ordering rather than being pinned.
+                edit_kwargs: dict[str, Any] = {}
                 if role.colour:
+                    edit_kwargs["colour"] = role.colour
+                if role.rank:
+                    edit_kwargs["rank"] = role.rank
+                if edit_kwargs:
                     await api_edit_role(
-                        session, stoat_url, token, server_id, role_id, colour=role.colour
+                        session, stoat_url, token, server_id, role_id, **edit_kwargs
                     )
                 if role.permissions:
                     await api_set_role_permissions(
@@ -715,7 +781,7 @@ def build(
                         allow=role.permissions,
                         deny=0,
                     )
-                console.print(f"  Created role '{role.name}'")
+                console.print(f"  Created role '{_safe(role.name)}'")
 
             # Create categories and channels
             import uuid
@@ -725,17 +791,12 @@ def build(
                 cat_id = uuid.uuid4().hex[:26]
                 channel_ids: list[str] = []
                 for ch in category.channels:
-                    ch_result = await api_create_channel(
-                        session,
-                        stoat_url,
-                        token,
-                        server_id,
-                        name=ch.name,
-                        channel_type=ch.type,
-                        nsfw=ch.nsfw,
+                    channel_ids.append(
+                        await _build_blueprint_channel(session, stoat_url, token, server_id, ch)
                     )
-                    channel_ids.append(ch_result["_id"])
-                    console.print(f"  Created channel '{ch.name}' in '{category.name}'")
+                    console.print(
+                        f"  Created channel '{_safe(ch.name)}' in '{_safe(category.name)}'"
+                    )
                 all_categories.append(
                     {
                         "id": cat_id,
@@ -748,23 +809,15 @@ def build(
 
             # Create uncategorized channels
             for ch in bp.uncategorized_channels:
-                await api_create_channel(
-                    session,
-                    stoat_url,
-                    token,
-                    server_id,
-                    name=ch.name,
-                    channel_type=ch.type,
-                    nsfw=ch.nsfw,
-                )
-                console.print(f"  Created channel '{ch.name}'")
+                await _build_blueprint_channel(session, stoat_url, token, server_id, ch)
+                console.print(f"  Created channel '{_safe(ch.name)}'")
 
-            console.print(f"\n[bold green]Done![/] Server '{bp.name}' created ({server_id})")
+            console.print(f"\n[bold green]Done![/] Server '{_safe(bp.name)}' created ({server_id})")
 
     try:
         asyncio.run(_build())
     except MigrationError as exc:
-        console.print(f"\n[bold red]Build failed:[/] {exc}")
+        console.print(f"\n[bold red]Build failed:[/] {_safe(exc)}")
         sys.exit(1)
 
 
@@ -828,7 +881,7 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
 
     export_blueprint(bp, Path(output))
     console.print(
-        f"[bold green]Blueprint exported[/] to {output} "
+        f"[bold green]Blueprint exported[/] to {_safe(output)} "
         f"({len(bp.categories)} categories, "
         f"{sum(len(c.channels) for c in bp.categories) + len(uncategorized)} channels)"
     )
@@ -850,7 +903,7 @@ def stats(output_dir: str) -> None:
     try:
         state = load_state(Path(output_dir))
     except StateError as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {_safe(e)}")
         sys.exit(1)
 
     summary = summarize_state(state)
@@ -888,31 +941,43 @@ class _RollbackProgressTracker:
         self.last_summary: RollbackSummary | None = None
 
     def on_event(self, event: MigrationEvent) -> None:
-        match event.status:
-            case "started":
-                console.print(f"[bold cyan][>>][/] {event.message}")
-            case "confirm_rollback":
-                self._render_summary_and_prompt(event)
-            case "progress":
-                if self.verbose:
-                    console.print(f"[dim]    {event.message}[/]")
-            case "completed":
-                console.print(f"[bold green][OK][/] {event.message}")
-                if event.detail is not None:
-                    self._render_final(event.detail.get("summary"))
-            case "completed_with_failures":
-                console.print(f"[bold yellow][!!][/] {event.message}")
-                if event.detail is not None:
-                    self._render_final(event.detail.get("summary"))
-            case "cancelled":
-                console.print(f"[yellow][--][/] {event.message}")
-            case "warning":
-                self.warning_count += 1
-                if self.verbose:
-                    console.print(f"[yellow]    {event.message}[/]")
-            case "error":
-                self.error_count += 1
-                console.print(f"[bold red][!!][/] {event.message}")
+        # confirm_rollback renders a table AND gates control flow (pause_event / click.confirm).
+        # It self-escapes user values and is kept OUTSIDE the MarkupError guard below so a
+        # swallowed error could never skip pause_event.set() and hang the rollback — a clean crash
+        # there beats a silent hang.
+        if event.status == "confirm_rollback":
+            self._render_summary_and_prompt(event)
+            return
+
+        # The remaining cases only print (or render the final summary, which has no control flow).
+        # User-controlled values are escaped; the render is additionally guarded against a missed
+        # escape site so a MarkupError can't propagate into the engine's synchronous emit().
+        try:
+            match event.status:
+                case "started":
+                    console.print(f"[bold cyan][>>][/] {_safe(event.message)}")
+                case "progress":
+                    if self.verbose:
+                        console.print(f"[dim]    {_safe(event.message)}[/]")
+                case "completed":
+                    console.print(f"[bold green][OK][/] {_safe(event.message)}")
+                    if event.detail is not None:
+                        self._render_final(event.detail.get("summary"))
+                case "completed_with_failures":
+                    console.print(f"[bold yellow][!!][/] {_safe(event.message)}")
+                    if event.detail is not None:
+                        self._render_final(event.detail.get("summary"))
+                case "cancelled":
+                    console.print(f"[yellow][--][/] {_safe(event.message)}")
+                case "warning":
+                    self.warning_count += 1
+                    if self.verbose:
+                        console.print(f"[yellow]    {_safe(event.message)}[/]")
+                case "error":
+                    self.error_count += 1
+                    console.print(f"[bold red][!!][/] {_safe(event.message)}")
+        except MarkupError:
+            console.print(f"{event.message}", markup=False)
 
     def _render_summary_and_prompt(self, event: MigrationEvent) -> None:
         """Render the RollbackSummary table and gate on user confirmation."""
@@ -933,7 +998,7 @@ class _RollbackProgressTracker:
         table = Table(show_header=True, header_style="bold")
         table.add_column("Item", style="cyan")
         table.add_column("Count", justify="right")
-        table.add_row("Server", f"{summary.stoat_server_name} ({summary.stoat_server_id})")
+        table.add_row("Server", f"{_safe(summary.stoat_server_name)} ({summary.stoat_server_id})")
         table.add_row("Channels to delete", str(len(summary.channels_to_delete)))
         table.add_row("Roles to delete", str(len(summary.roles_to_delete)))
         table.add_row("Emoji to delete", str(len(summary.emoji_to_delete)))
@@ -958,7 +1023,7 @@ class _RollbackProgressTracker:
                 # Display-layer translation: None -> "unknown" so users don't see literal "None".
                 created = s.created_at_iso if s.created_at_iso is not None else "unknown"
                 name = s.name if s.name else "(no name available)"
-                suspect_table.add_row(name, created, s.stoat_id)
+                suspect_table.add_row(_safe(name), created, s.stoat_id)
             console.print(suspect_table)
 
         if self.skip_confirmations:
@@ -1014,7 +1079,7 @@ class _RollbackProgressTracker:
             for f in failures:
                 status = f.http_status if f.http_status is not None else "n/a"
                 console.print(
-                    f"  [red]- {f.entity_type} {f.stoat_id} (HTTP {status})[/]: {f.error}"
+                    f"  [red]- {f.entity_type} {f.stoat_id} (HTTP {status})[/]: {_safe(f.error)}"
                 )
 
 
@@ -1082,7 +1147,7 @@ def rollback_cmd(
     try:
         state = load_state(out_path)
     except StateError as exc:
-        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {exc}")
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
         sys.exit(2)
 
     config = FerryConfig(
@@ -1117,7 +1182,7 @@ def rollback_cmd(
     try:
         asyncio.run(_runner())
     except MigrationError as exc:
-        console.print(f"\n[bold red]Rollback failed:[/] {exc}")
+        console.print(f"\n[bold red]Rollback failed:[/] {_safe(exc)}")
         sys.exit(1)
     except click.exceptions.Abort:
         console.print("\n[yellow]Aborted.[/]")
