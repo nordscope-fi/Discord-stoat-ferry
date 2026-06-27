@@ -1091,3 +1091,214 @@ async def test_api_fetch_root_returns_empty_on_malformed_json():
         )
         async with aiohttp.ClientSession() as s:
             assert await api_fetch_root(s, "https://stoat.test") == {}
+
+
+# ---------------------------------------------------------------------------
+# Batch 6 — S1 (non-JSON 429 + Retry-After + breaker invariant) + S2 (non-JSON 2xx)
+# ---------------------------------------------------------------------------
+
+
+def _sleep_capture() -> tuple[list[float], AsyncMock]:
+    calls: list[float] = []
+    return calls, AsyncMock(side_effect=lambda d: calls.append(d))
+
+
+async def test_429_non_json_body_honors_header_no_breaker(
+    mock_aiohttp: aioresponses,
+) -> None:  # SC-1
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        body="<html>rl</html>",
+        content_type="text/html",
+        headers={"Retry-After": "2"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            result = await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert result["_id"] == "srv1"
+    assert _circuit_state.consecutive_failures == 0  # breaker NOT primed by a non-JSON 429
+    assert calls[0] == pytest.approx(2.0, abs=0.05)  # header seconds honored
+
+
+async def test_429_non_json_no_header_default_no_breaker(
+    mock_aiohttp: aioresponses,
+) -> None:  # SC-2
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1", status=429, body="<html>rl</html>", content_type="text/html"
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert _circuit_state.consecutive_failures == 0
+    assert calls[0] == pytest.approx(1.0, abs=0.05)  # default fallback
+
+
+async def test_429_header_beats_body(mock_aiohttp: aioresponses) -> None:  # SC-3
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        payload={"retry_after": 5000},
+        headers={"Retry-After": "2"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert calls[0] == pytest.approx(2.0, abs=0.05)  # header, not body 5.0s
+
+
+async def test_429_x_ratelimit_reset_after(mock_aiohttp: aioresponses) -> None:  # SC-4
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        body="<html>",
+        content_type="text/html",
+        headers={"X-RateLimit-Reset-After": "1.5"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert calls[0] == pytest.approx(1.5, abs=0.05)
+
+
+async def test_429_http_date_header_ignored(mock_aiohttp: aioresponses) -> None:  # SC-5
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        payload={"retry_after": 300},
+        headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert calls[0] == pytest.approx(0.3, abs=0.05)  # HTTP-date ignored → body 300ms
+
+
+async def test_429_delay_capped(mock_aiohttp: aioresponses) -> None:  # SC-6
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        body="<html>",
+        content_type="text/html",
+        headers={"Retry-After": "9999"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert calls[0] == 60  # _MAX_RETRY_DELAY_SECONDS
+
+
+async def test_429_exhausted_does_not_prime_breaker(mock_aiohttp: aioresponses) -> None:  # SC-7
+    for _ in range(3):
+        mock_aiohttp.get(
+            f"{BASE_URL}/servers/srv1", status=429, body="<html>", content_type="text/html"
+        )
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="after 3 retries: 429"):
+                await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert _circuit_state.consecutive_failures == 0  # 429 never primes, even exhausted
+
+
+async def test_502_exhausted_primes_breaker(mock_aiohttp: aioresponses) -> None:  # SC-8 (contrast)
+    for _ in range(3):
+        mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=502, body="Bad Gateway")
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="after 3 retries: 502"):
+                await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert _circuit_state.consecutive_failures == 3  # 5xx DOES prime (contrast SC-7)
+
+
+async def test_429_empty_body_falls_back(mock_aiohttp: aioresponses) -> None:  # SC-9
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, body="", content_type="text/html")
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert _circuit_state.consecutive_failures == 0
+    assert calls[0] == pytest.approx(1.0, abs=0.05)
+
+
+async def test_non_json_200_clear_error(mock_aiohttp: aioresponses) -> None:  # SC-10
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1", status=200, body="<html>nope</html>", content_type="text/html"
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert "Network error after 3 retries" not in str(exc.value)
+    assert "text/html" in str(exc.value)
+
+
+async def test_non_json_201_clear_error(mock_aiohttp: aioresponses) -> None:  # SC-11
+    mock_aiohttp.post(
+        f"{BASE_URL}/servers/create",
+        status=201,
+        body="<html>nope</html>",
+        content_type="text/html",
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_create_server(session, BASE_URL, TOKEN, "My Server")
+    assert "Network error after 3 retries" not in str(exc.value)
+    assert "text/html" in str(exc.value)
+
+
+async def test_json_200_unaffected(mock_aiohttp: aioresponses) -> None:  # SC-12
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+    async with aiohttp.ClientSession() as session:
+        result = await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert result == {"_id": "srv1", "name": "OK"}
+
+
+async def test_genuine_client_error_still_network_error(
+    mock_aiohttp: aioresponses,
+) -> None:  # SC-13
+    for _ in range(3):
+        mock_aiohttp.get(f"{BASE_URL}/servers/srv1", exception=aiohttp.ClientError("reset"))
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="Network error after 3 retries"):
+                await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert _circuit_state.consecutive_failures >= 1
+
+
+async def test_malformed_json_200_clear_error(mock_aiohttp: aioresponses) -> None:  # SC-14
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=200,
+        body="{not valid json",
+        content_type="application/json",
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert "Network error after 3 retries" not in str(exc.value)
+
+
+async def test_429_null_retry_after_falls_back(
+    mock_aiohttp: aioresponses,
+) -> None:  # SC-9b (review M2)
+    """A 429 body with retry_after=null must not crash; falls back to the default delay."""
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, payload={"retry_after": None})
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert _circuit_state.consecutive_failures == 0
+    assert calls[0] == pytest.approx(1.0, abs=0.05)

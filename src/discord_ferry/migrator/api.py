@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -16,7 +17,7 @@ import aiohttp  # noqa: TCH002
 from discord_ferry.errors import MigrationError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     from discord_ferry.config import FerryConfig
 
@@ -27,6 +28,8 @@ _RETRYABLE_STATUSES = {429, 502, 503, 504}
 
 _CIRCUIT_THRESHOLD = 5
 _CIRCUIT_PAUSE_SECONDS = 30
+
+_MAX_RETRY_DELAY_SECONDS = 60  # cap any server/body-advertised 429 retry delay
 
 
 @dataclass
@@ -141,6 +144,43 @@ async def _api_request(
     )
 
 
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Parse a rate-limit delay (seconds) from standard headers; None if absent/non-numeric.
+
+    ``Retry-After`` may be an HTTP-date rather than delta-seconds — a non-numeric value is
+    ignored (returns None) so the caller falls back to the body / default delay.
+    """
+    for name in ("Retry-After", "X-RateLimit-Reset-After"):
+        raw = headers.get(name)
+        if raw:
+            try:
+                return float(raw)
+            except ValueError:
+                continue
+    return None
+
+
+async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
+    """Resolve the 429 sleep in seconds: header → body ``retry_after`` (Stoat ms) → 1s; capped.
+
+    The body parse is content-type-guarded so a non-JSON 429 (proxy HTML) can't raise
+    ``ContentTypeError`` into the network-error path and prime the circuit breaker.
+    """
+    header_s = _retry_after_seconds(resp.headers)
+    if header_s is not None:
+        return min(header_s, _MAX_RETRY_DELAY_SECONDS)
+    try:
+        body = await resp.json(content_type=None)
+    except (json.JSONDecodeError, ValueError):
+        body = None
+    raw = body.get("retry_after") if isinstance(body, dict) else None
+    try:
+        retry_ms = float(raw)  # type: ignore[arg-type]  # None/non-numeric → fallback below
+    except (TypeError, ValueError):
+        retry_ms = 1000.0
+    return min(retry_ms / 1000, _MAX_RETRY_DELAY_SECONDS)
+
+
 async def _api_request_inner(
     session: aiohttp.ClientSession,
     method: str,
@@ -179,7 +219,13 @@ async def _api_request_inner(
                         time.monotonic() - t < 30 for t in _rate_429_window
                     ):
                         _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
-                    return await resp.json()  # type: ignore[no-any-return]
+                    try:
+                        return await resp.json()  # type: ignore[no-any-return]
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                        raise MigrationError(
+                            f"Unexpected non-JSON {resp.status} response "
+                            f"(content-type: {resp.content_type})"
+                        ) from exc
                 if resp.status == 204 or (resp.status == 404 and expected_404_ok):
                     _circuit_state.consecutive_failures = 0
                     # Decay the rate multiplier gradually on successful requests.
@@ -192,16 +238,19 @@ async def _api_request_inner(
                 if resp.status in _RETRYABLE_STATUSES:
                     if attempt == MAX_API_RETRIES - 1:
                         text = await resp.text()
-                        _circuit_state.consecutive_failures += 1
+                        # A 429 is rate-limiting, never a circuit-breaker failure — even on
+                        # budget exhaustion. A 5xx still primes the breaker.
+                        if resp.status != 429:
+                            _circuit_state.consecutive_failures += 1
                         raise MigrationError(
                             f"API request failed after {MAX_API_RETRIES} retries: "
                             f"{resp.status} {text}"
                         )
                     if resp.status == 429:
-                        # Rate-limited — NOT a circuit-breaker failure.
-                        body_data: dict[str, Any] = await resp.json()
-                        retry_ms = body_data.get("retry_after", 1000)
-                        await asyncio.sleep(retry_ms / 1000)
+                        # Rate-limited — NOT a circuit-breaker failure. The body parse is
+                        # content-type-guarded so a non-JSON 429 can't escape into the network
+                        # path and prime the breaker; honour Retry-After over the body delay.
+                        await asyncio.sleep(await _resolve_429_delay_seconds(resp))
                         # Track 429 frequency and ramp up the rate multiplier.
                         _rate_429_window.append(time.monotonic())
                         recent = sum(1 for t in _rate_429_window if time.monotonic() - t < 60)

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
 from discord_ferry.discord.models import DiscordChannel, DiscordRole, PermissionOverwrite
 from discord_ferry.errors import DiscordAuthError, MigrationError
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 DISCORD_API = "https://discord.com/api/v10"
 _MAX_RETRIES = 3
+_MAX_429_RETRIES = 5  # separate bounded budget for 429s (does not consume _MAX_RETRIES)
+_MAX_RETRY_DELAY_SECONDS = 60  # cap any server/body-advertised 429 retry delay
 
 
 async def fetch_guild(session: aiohttp.ClientSession, token: str, guild_id: str) -> dict[str, Any]:
@@ -74,18 +80,65 @@ async def fetch_guild_channels(
     return [_parse_channel(c) for c in data]
 
 
-async def _discord_get(
-    session: aiohttp.ClientSession, token: str, path: str
-) -> list[dict[str, Any]]:
-    """Make an authenticated GET request to the Discord API with retry on 429."""
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Parse a rate-limit delay (seconds) from standard headers; None if absent/non-numeric.
+
+    ``Retry-After`` may be an HTTP-date rather than delta-seconds — a non-numeric value is
+    ignored (returns None) so the caller falls back to the body / default delay.
+    """
+    for name in ("Retry-After", "X-RateLimit-Reset-After"):
+        raw = headers.get(name)
+        if raw:
+            try:
+                return float(raw)
+            except ValueError:
+                continue
+    return None
+
+
+async def _discord_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
+    """Resolve the 429 sleep (seconds): header → body ``retry_after`` (Discord secs) → 1s; capped.
+
+    The body parse is content-type-guarded so a non-JSON 429 (Cloudflare HTML) can't escape into
+    the network-error path.
+    """
+    header_s = _retry_after_seconds(resp.headers)
+    if header_s is not None:
+        return min(header_s, _MAX_RETRY_DELAY_SECONDS)
+    try:
+        body = await resp.json(content_type=None)
+    except (json.JSONDecodeError, ValueError):
+        body = None
+    raw = body.get("retry_after") if isinstance(body, dict) else None
+    try:
+        retry_after = float(raw)  # type: ignore[arg-type]  # None/non-numeric → fallback below
+    except (TypeError, ValueError):
+        retry_after = 1.0
+    return min(retry_after, _MAX_RETRY_DELAY_SECONDS)
+
+
+async def _discord_request(session: aiohttp.ClientSession, token: str, path: str) -> Any:
+    """GET the Discord API, honouring Retry-After with separate bounded 429/network budgets.
+
+    429s advance only ``rate_limit_retries`` (bounded by ``_MAX_429_RETRIES``); network errors
+    advance only ``network_attempts`` (bounded by ``_MAX_RETRIES``) — a 429 burst can no longer
+    exhaust the network budget and abort the metadata phase.
+    """
     url = f"{DISCORD_API}{path}"
     headers = {"Authorization": token, "Content-Type": "application/json"}
+    network_attempts = 0
+    rate_limit_retries = 0
 
-    for attempt in range(_MAX_RETRIES):
+    while True:
         try:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
-                    return await resp.json()  # type: ignore[no-any-return]
+                    try:
+                        return await resp.json()
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                        raise MigrationError(
+                            f"Unexpected non-JSON 200 response (content-type: {resp.content_type})"
+                        ) from exc
                 if resp.status == 401:
                     raise DiscordAuthError("Discord token is invalid or expired")
                 if resp.status == 403:
@@ -94,56 +147,36 @@ async def _discord_get(
                         "The token must belong to a member of the guild."
                     )
                 if resp.status == 429:
-                    body = await resp.json()
-                    retry_after = float(body.get("retry_after", 1))
-                    await asyncio.sleep(retry_after)
+                    rate_limit_retries += 1
+                    if rate_limit_retries >= _MAX_429_RETRIES:
+                        raise MigrationError(
+                            f"Discord API rate-limited after {_MAX_429_RETRIES} retries"
+                        )
+                    await asyncio.sleep(await _discord_429_delay_seconds(resp))
                     continue
                 text = await resp.text()
                 raise MigrationError(f"Discord API error {resp.status}: {text}")
         except (DiscordAuthError, MigrationError):
             raise
         except aiohttp.ClientError as exc:
-            if attempt == _MAX_RETRIES - 1:
+            network_attempts += 1
+            if network_attempts >= _MAX_RETRIES:
                 raise MigrationError(f"Discord API network error: {exc}") from exc
             await asyncio.sleep(1)
 
-    raise MigrationError(f"Discord API request failed after {_MAX_RETRIES} retries")
+
+async def _discord_get(
+    session: aiohttp.ClientSession, token: str, path: str
+) -> list[dict[str, Any]]:
+    """Make an authenticated GET request to the Discord API with retry on 429."""
+    return cast("list[dict[str, Any]]", await _discord_request(session, token, path))
 
 
 async def _discord_get_object(
     session: aiohttp.ClientSession, token: str, path: str
 ) -> dict[str, Any]:
     """Make an authenticated GET request returning a single JSON object."""
-    url = f"{DISCORD_API}{path}"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
-
-    for attempt in range(_MAX_RETRIES):
-        try:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    return await resp.json()  # type: ignore[no-any-return]
-                if resp.status == 401:
-                    raise DiscordAuthError("Discord token is invalid or expired")
-                if resp.status == 403:
-                    raise MigrationError(
-                        "Insufficient permissions to read guild metadata. "
-                        "The token must belong to a member of the guild."
-                    )
-                if resp.status == 429:
-                    body = await resp.json()
-                    retry_after = float(body.get("retry_after", 1))
-                    await asyncio.sleep(retry_after)
-                    continue
-                text = await resp.text()
-                raise MigrationError(f"Discord API error {resp.status}: {text}")
-        except (DiscordAuthError, MigrationError):
-            raise
-        except aiohttp.ClientError as exc:
-            if attempt == _MAX_RETRIES - 1:
-                raise MigrationError(f"Discord API network error: {exc}") from exc
-            await asyncio.sleep(1)
-
-    raise MigrationError(f"Discord API request failed after {_MAX_RETRIES} retries")
+    return cast("dict[str, Any]", await _discord_request(session, token, path))
 
 
 _ROLE_ICON_MAX_BYTES = 2_500_000  # Autumn "icons" tag limit (stoatchat Revolt.toml)

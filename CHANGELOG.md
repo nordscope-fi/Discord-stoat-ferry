@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.12] - 2026-06-27
+
+### Fixed
+
+Rate-limit hardening — the sixth batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt
+(`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 6). Two engine-side HTTP clients
+(`migrator/api.py`, `discord/client.py`); no GUI/CLI/state changes. Root cause: `await resp.json()`
+was called unguarded inside the 429 (and Stoat's 2xx) branch, so a non-JSON body from a proxy/CDN
+(Cloudflare HTML) raised `aiohttp.ContentTypeError` — a `ClientError` subclass — that escaped into
+the generic network-error path.
+
+- **A rate-limited Stoat request no longer trips the circuit breaker** (`migrator/api.py`, S1/F6a).
+  A 429 with a non-JSON body fell through to the network-error handler, incremented
+  `consecutive_failures`, and ignored the server's `Retry-After` — violating the code's own
+  "429 is not a circuit-breaker failure" invariant. The 429 delay is now resolved by a
+  content-type-guarded helper that honours the `Retry-After` / `X-RateLimit-Reset-After` headers
+  (seconds) first, then the JSON body `retry_after` (Stoat milliseconds), then a 1s fallback — all
+  capped at 60s. A 429 now never primes the breaker, **even when it exhausts the retry budget**
+  (the final-attempt failure bump is skipped for 429); a 5xx / genuine network error still primes it.
+- **A non-JSON Stoat 2xx now fails with a clear, correctly-classified error** (`migrator/api.py`,
+  S2/F6b). A 200/201 with an HTML body was retried and re-raised as "Network error after 3 retries",
+  hiding the real cause and mis-routing rollback classification. It now raises a distinct
+  `MigrationError` naming the content-type; the "Network error after 3 retries" message is preserved
+  for genuine connection errors.
+- **Discord rate limits are honoured with a separate, bounded budget** (`discord/client.py`, S3/F6c).
+  Both metadata getters read the 429 delay from the JSON body and shared the 3-attempt network-retry
+  budget, so a Cloudflare HTML 429 was retried with a fixed 1s (ignoring a 60s+ `Retry-After`) and
+  three such retries aborted the metadata-fetch phase. The two byte-identical getters are unified
+  into one `_discord_request` that honours the `Retry-After` header, retries 429s on a separate
+  bounded budget (`_MAX_429_RETRIES`) that no longer consumes the network-error budget, and
+  content-type-guards both the 429 and the 200 body parse.
+
+**Behaviour note:** behaviour-preserving for well-formed JSON responses and genuine network errors
+(the "Network error after 3 retries" message is unchanged for real `ClientError`s). The change makes
+the clients robust to non-JSON 429/2xx bodies from reverse proxies/CDNs and ensures the server's
+`Retry-After` is respected. The circuit-breaker thresholds and the adaptive rate-multiplier are
+unchanged. As a side benefit, an exhausted HTML-429 that was previously misclassified as a
+network error (no HTTP status) is now correctly classified as a 429.
+
 ## [2.6.11] - 2026-06-27
 
 ### Fixed
