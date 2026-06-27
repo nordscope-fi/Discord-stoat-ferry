@@ -438,3 +438,171 @@ async def test_capture_role_name_and_hex_color() -> None:
     assert meta.role_metadata["200"].name == "Mod"
     assert meta.role_metadata["200"].color == "#ff0000"  # 16711680 -> hex
     assert meta.role_metadata["201"].color == ""  # color 0 -> ""
+
+
+# ---------------------------------------------------------------------------
+# Batch 6 — S3: Discord 429 honors Retry-After + separate bounded budget + DRY
+# ---------------------------------------------------------------------------
+
+
+def _sleep_capture():  # type: ignore[no-untyped-def]
+    from unittest.mock import AsyncMock
+
+    calls: list[float] = []
+    return calls, AsyncMock(side_effect=lambda d: calls.append(d))
+
+
+async def test_discord_get_429_html_honors_header(mock_discord: aioresponses) -> None:  # SC-15
+    from unittest.mock import patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(
+        url,
+        status=429,
+        body="<html>rl</html>",
+        content_type="text/html",
+        headers={"Retry-After": "2"},
+    )
+    mock_discord.get(url, payload=[])
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.discord.client.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            roles = await fetch_guild_roles(session, TOKEN, GUILD_ID)
+    assert roles == []
+    assert calls[0] == pytest.approx(2.0, abs=0.05)  # header seconds, not fixed 1s
+
+
+async def test_discord_object_429_html_honors_header(mock_discord: aioresponses) -> None:  # SC-16
+    from unittest.mock import patch
+
+    from discord_ferry.discord.client import _discord_get_object
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}"
+    mock_discord.get(
+        url,
+        status=429,
+        body="<html>rl</html>",
+        content_type="text/html",
+        headers={"Retry-After": "2"},
+    )
+    mock_discord.get(url, payload={"id": GUILD_ID, "name": "G"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.discord.client.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            obj = await _discord_get_object(session, TOKEN, f"/guilds/{GUILD_ID}")
+    assert obj["id"] == GUILD_ID
+    assert calls[0] == pytest.approx(2.0, abs=0.05)  # DRY: same fix covers both getters
+
+
+async def test_discord_429_json_body_seconds(mock_discord: aioresponses) -> None:  # SC-17
+    from unittest.mock import patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=429, payload={"retry_after": 0.5})
+    mock_discord.get(url, payload=[])
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.discord.client.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await fetch_guild_roles(session, TOKEN, GUILD_ID)
+    assert calls[0] == pytest.approx(0.5, abs=0.05)  # Discord body = seconds (no ÷1000)
+
+
+async def test_discord_429_separate_budget(mock_discord: aioresponses) -> None:  # SC-18
+    from unittest.mock import AsyncMock, patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    for _ in range(4):  # 4 > _MAX_RETRIES(3) but < _MAX_429_RETRIES(5)
+        mock_discord.get(url, status=429, payload={"retry_after": 0.0})
+    mock_discord.get(url, payload=[])
+    with patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            roles = await fetch_guild_roles(session, TOKEN, GUILD_ID)
+    assert roles == []  # 429s did NOT exhaust the network budget
+
+
+async def test_discord_429_budget_bounded(mock_discord: aioresponses) -> None:  # SC-19
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.errors import MigrationError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    for _ in range(5):
+        mock_discord.get(url, status=429, payload={"retry_after": 0.0})
+    with patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="rate-limited after 5 retries"):
+                await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+
+async def test_discord_network_error_bounded(mock_discord: aioresponses) -> None:  # SC-20
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.errors import MigrationError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    for _ in range(3):
+        mock_discord.get(url, exception=aiohttp.ClientError("boom"))
+    with patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="Discord API network error"):
+                await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+
+async def test_discord_403_raises_migration_error(mock_discord: aioresponses) -> None:  # SC-21
+    from discord_ferry.errors import MigrationError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=403, body="Forbidden")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="Insufficient permissions"):
+            await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+
+async def test_discord_429_delay_capped(mock_discord: aioresponses) -> None:  # SC-22
+    from unittest.mock import patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(
+        url,
+        status=429,
+        body="<html>",
+        content_type="text/html",
+        headers={"Retry-After": "9999"},
+    )
+    mock_discord.get(url, payload=[])
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.discord.client.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await fetch_guild_roles(session, TOKEN, GUILD_ID)
+    assert calls[0] == 60  # _MAX_RETRY_DELAY_SECONDS
+
+
+async def test_discord_non_json_200_clear_error(
+    mock_discord: aioresponses,
+) -> None:  # SC-23 (review M1)
+    """A non-JSON 200 raises a clear content-type error, not a misclassified network error."""
+    from discord_ferry.errors import MigrationError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=200, body="<html>nope</html>", content_type="text/html")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await fetch_guild_roles(session, TOKEN, GUILD_ID)
+    assert "network error" not in str(exc.value).lower()
+    assert "text/html" in str(exc.value)
+
+
+async def test_discord_429_null_retry_after_falls_back(
+    mock_discord: aioresponses,
+) -> None:  # SC-24 (review M2)
+    """A 429 body with retry_after=null must not crash; falls back to the default delay."""
+    from unittest.mock import patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=429, payload={"retry_after": None})
+    mock_discord.get(url, payload=[])
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.discord.client.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await fetch_guild_roles(session, TOKEN, GUILD_ID)
+    assert calls[0] == pytest.approx(1.0, abs=0.05)
