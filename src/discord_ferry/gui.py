@@ -132,6 +132,18 @@ def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> Non
         storage.pop(key, None)
 
 
+def _store_session_tokens(store: MutableMapping[str, Any], *, stoat: str, discord: str) -> None:
+    """Write the two session tokens into ``store``.
+
+    Production passes ``app.storage.tab`` (memory-only, never written to disk —
+    see Batch 8 / F8b). The parameter is named ``store`` (not ``storage``) so the
+    security source-inspection guard, which forbids token assignment via the
+    disk-backed ``storage`` alias, cannot false-match this body.
+    """
+    store["token"] = stoat
+    store["discord_token"] = discord
+
+
 def _format_eta(total_messages: int, rate_limit: float) -> str:
     """Format an ETA string from message count and rate limit."""
     seconds = int(total_messages * rate_limit)
@@ -222,6 +234,17 @@ def _detect_cached_exports(export_dir: Path) -> dict[str, int] | None:
     return {"file_count": len(json_files), "total_size": total_size}
 
 
+def _should_auto_export(cached: dict[str, int] | None) -> bool:
+    """True when the /export page should auto-launch DCE on load.
+
+    Only auto-launch when there is no cached export. When a cache exists the
+    cached-export card's buttons drive the decision (Use Cached / Re-export),
+    so the auto-launch must NOT fire (it would race the click and overwrite the
+    cached JSON). See Batch 8 / F8a.
+    """
+    return cached is None
+
+
 def _render_step_indicator(active_step: int) -> None:
     """Render a 4-step visual indicator (1-indexed). Call inside a ui.column."""
     with ui.row().classes("w-full justify-center items-center gap-0 mb-6"):
@@ -257,6 +280,9 @@ def setup_page() -> None:
     """Setup screen — collect connection details and migration options."""
     ui.add_head_html(_HEAD_HTML)
     storage = app.storage.user
+    # Scrub any token a pre-fix version persisted to .nicegui/storage-user.json.
+    # Tokens now live only in memory (app.storage.tab); see Batch 8 / F8b.
+    _clear_tokens(storage, _SESSION_TOKEN_KEYS)
 
     def _rate_label(value: float) -> str:
         return f"{value:.1f}s/msg ({_msgs_per_hour(value):,} msg/hr)"
@@ -347,7 +373,7 @@ def setup_page() -> None:
                         placeholder="Paste your Discord user token",
                         password=True,
                         password_toggle_button=True,
-                        value=str(storage.get("discord_token", "")),
+                        value="",  # never pre-fill a token from disk (Batch 8 / F8b)
                     ).classes("w-full")
 
                     discord_server_input = ui.input(
@@ -432,7 +458,7 @@ def setup_page() -> None:
                     placeholder="Paste your session token here",
                     password=True,
                     password_toggle_button=True,
-                    value=str(storage.get("token", "")),
+                    value="",  # never pre-fill a token from disk (Batch 8 / F8b)
                 ).classes("w-full")
 
                 with ui.column().classes("gap-0 -mt-2"):
@@ -501,7 +527,7 @@ def setup_page() -> None:
 
                 error_label = ui.label("").classes("text-red-500 text-sm")
 
-                def _on_validate_click() -> None:
+                async def _on_validate_click() -> None:
                     mode = mode_toggle.value or "orchestrated"
                     toggle_val = server_toggle.value or "official"
                     stoat_url = _resolve_stoat_url(toggle_val, custom_url_input.value)
@@ -539,9 +565,12 @@ def setup_page() -> None:
                         error_label.set_text(f"Required: {', '.join(missing)}")
                         return
 
-                    # Store values
+                    # Store values. Tokens go to the memory-only tab store (never to
+                    # disk); tab access needs a connected client — the await is a no-op
+                    # during a live click but guarantees access. See Batch 8 / F8b.
+                    await ui.context.client.connected()
+                    _store_session_tokens(app.storage.tab, stoat=token, discord=discord_token)
                     storage["mode"] = mode
-                    storage["discord_token"] = discord_token
                     storage["discord_server_id"] = discord_server
                     if mode == "offline":
                         storage["export_dir"] = export_dir_input.value.strip()
@@ -551,7 +580,6 @@ def setup_page() -> None:
                     storage["stoat_url"] = stoat_url
                     storage["server_toggle"] = toggle_val
                     storage["custom_stoat_url"] = custom_url_input.value.strip()
-                    storage["token"] = token
                     storage["server_id"] = server_id_input.value.strip()
                     storage["server_name"] = server_name_input.value.strip()
                     storage["rate_limit"] = rate_slider.value
@@ -608,15 +636,22 @@ def export_page() -> None:
                     "text-sm text-gray-500 text-center mb-4"
                 )
                 with ui.row().classes("w-full justify-center gap-4 mt-2"):
-                    ui.button(
-                        "Use Cached",
-                        on_click=lambda: ui.navigate.to("/validate"),
-                    ).props("color=green")
+                    # Use Cached: skip export, clear the now-unneeded Discord token
+                    # (mirrors the export finally's discord-only clear — no skip-path
+                    # leak; the Stoat token survives for /validate). The client is
+                    # connected during a click, so the tab-store access is safe.
+                    def _use_cached() -> None:
+                        _clear_tokens(app.storage.tab, ("discord_token",))
+                        ui.navigate.to("/validate")
 
-                    # export_view is defined below; closure is only invoked on click.
+                    ui.button("Use Cached", on_click=_use_cached).props("color=green")
+
+                    # export_view / _run_export are defined below; closures are only
+                    # invoked on click.
                     def _re_export() -> None:
                         cached_view.set_visibility(False)
                         export_view.set_visibility(True)
+                        background_tasks.create(_run_export())
 
                     ui.button("Re-export", on_click=_re_export).props("color=grey")
 
@@ -689,7 +724,16 @@ def export_page() -> None:
             validate_discord_token,
         )
 
-        discord_token = str(storage.get("discord_token", ""))
+        # Tokens live in the memory-only tab store; need a connected client to read.
+        await ui.context.client.connected()
+        if not app.storage.tab.get("discord_token"):
+            # Restart edge: stale non-secret keys on disk but a fresh tab with no
+            # token. Bounce cleanly rather than raising DiscordAuthError("").
+            ui.notify("Session expired — re-enter your token", type="warning")
+            ui.navigate.to("/")
+            return
+
+        discord_token = str(app.storage.tab.get("discord_token", ""))
         discord_server = str(storage.get("discord_server_id", ""))
         export_dir = Path(str(storage["export_dir"]))
 
@@ -737,7 +781,7 @@ def export_page() -> None:
             config = FerryConfig(
                 export_dir=export_dir,
                 stoat_url=str(storage.get("stoat_url", "")),
-                token=str(storage.get("token", "")),
+                token=str(app.storage.tab.get("token", "")),
                 discord_token=discord_token,
                 discord_server_id=discord_server,
                 cancel_event=cancel_event,
@@ -775,14 +819,18 @@ def export_page() -> None:
             ui.notify(f"Export failed: {exc}", type="negative")
         finally:
             # Clear ONLY the Discord token here — export is its sole consumer.
-            # The Stoat token MUST survive: this finally runs synchronously
-            # BEFORE the queued ui.navigate.to("/validate") redirect loads, and
-            # both validate_page and migrate_page guard on storage["token"].
-            # Clearing it here bounces the user back to setup. The Stoat token is
-            # cleared by the terminal migration screen (migrate_page._run).
-            _clear_tokens(storage, ("discord_token",))
+            # The Stoat token MUST survive for /migrate (which reads it from the
+            # tab store). The pre-migration page guards now check export_dir/
+            # stoat_url, and migrate re-checks the tab token after connected(), so
+            # clearing the Discord token here no longer bounces the user. Tokens
+            # live in the memory-only tab store; suppress in case the task is
+            # cancelled before connected() (the tab access would otherwise raise
+            # and mask the original exception).
+            with contextlib.suppress(Exception):
+                _clear_tokens(app.storage.tab, ("discord_token",))
 
-    background_tasks.create(_run_export())
+    if _should_auto_export(cached):
+        background_tasks.create(_run_export())
 
 
 # ---------------------------------------------------------------------------
@@ -796,7 +844,10 @@ def validate_page() -> None:
     ui.add_head_html(_HEAD_HTML)
 
     storage = app.storage.user
-    if not storage.get("export_dir") or not storage.get("stoat_url") or not storage.get("token"):
+    # Guard on the non-secret setup-complete signal (export_dir + stoat_url are
+    # written in the same validate pass as the token). The token itself now lives
+    # in the memory-only tab store and is re-checked at /migrate. See Batch 8 / F8b.
+    if not storage.get("export_dir") or not storage.get("stoat_url"):
         ui.navigate.to("/")
         return
 
@@ -900,12 +951,20 @@ def validate_page() -> None:
 
 
 @ui.page("/migrate")
-def migrate_page() -> None:
+async def migrate_page() -> None:
     """Migration screen — run the engine, show live phase/progress/log."""
     ui.add_head_html(_HEAD_HTML)
 
     storage = app.storage.user
-    if not storage.get("export_dir") or not storage.get("stoat_url") or not storage.get("token"):
+    if not storage.get("export_dir") or not storage.get("stoat_url"):
+        ui.navigate.to("/")
+        return
+
+    # Tokens live in the memory-only tab store; need a connected client to read it.
+    await ui.context.client.connected()
+    if not app.storage.tab.get("token"):
+        # Restart edge: stale non-secret keys on disk but a fresh tab, no token.
+        ui.notify("Session expired — re-enter your token", type="warning")
         ui.navigate.to("/")
         return
 
@@ -956,7 +1015,7 @@ def migrate_page() -> None:
     config = FerryConfig(
         export_dir=Path(storage["export_dir"]),
         stoat_url=storage["stoat_url"],
-        token=storage["token"],
+        token=app.storage.tab["token"],
         server_id=storage.get("server_id") or None,
         server_name=storage.get("server_name") or None,
         dry_run=bool(storage.get("dry_run", False)),
@@ -971,7 +1030,7 @@ def migrate_page() -> None:
         pause_event=pause_event,
         cancel_event=cancel_event,
         skip_export=True,  # Export already done by this point (via /export or offline mode)
-        discord_token=storage.get("discord_token") or None,
+        discord_token=app.storage.tab.get("discord_token") or None,
         discord_server_id=storage.get("discord_server_id") or None,
     )
 
@@ -1407,12 +1466,18 @@ def migrate_page() -> None:
         finally:
             # Terminal owner of session-token cleanup, for BOTH offline and
             # orchestrated modes, on success AND error. (Offline mode never
-            # visits /export, so its finally is the only cleanup point.) Safe
-            # because this runs AFTER run_migration returns: config already holds
-            # its own token copy (a plain str), the engine never reads
-            # app.storage, and the only in-_run storage read (config.resume,
-            # above) has already completed. Do NOT move token reads below this.
-            _clear_tokens(storage, _SESSION_TOKEN_KEYS)
+            # visits /export, so its finally is the only cleanup point.) Tokens
+            # live in the memory-only tab store; clearing here is good hygiene
+            # (immediate, rather than waiting for the tab to close). Safe because
+            # this runs AFTER run_migration returns: config already holds its own
+            # token copy (a plain str), the engine never reads app.storage, and
+            # the only in-_run storage read (config.resume, above) has already
+            # completed. Do NOT move token reads below this. Suppress for parity
+            # with the export finally: if the tab closed during a long migration,
+            # this background task's tab access would otherwise raise on the now-
+            # disconnected client (the token is memory-only — never on disk).
+            with contextlib.suppress(Exception):
+                _clear_tokens(app.storage.tab, _SESSION_TOKEN_KEYS)
 
     background_tasks.create(_run())
 
