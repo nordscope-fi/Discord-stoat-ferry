@@ -1,8 +1,11 @@
 """Discord → Stoat permission bit translation."""
 
 # Discord permission bit position → Stoat permission bit position(s).
-# Discord bits not in this map are silently dropped (no Stoat equivalent).
+# Discord bits not in this map have no Stoat equivalent and are dropped.
 DISCORD_TO_STOAT: dict[int, int | list[int]] = {
+    0: 25,  # CREATE_INSTANT_INVITE → InviteOthers
+    1: 6,  # KICK_MEMBERS → KickMembers
+    2: 7,  # BAN_MEMBERS → BanMembers
     4: 0,  # MANAGE_CHANNELS → ManageChannel
     5: 1,  # MANAGE_GUILD → ManageServer
     28: [2, 3],  # MANAGE_ROLES → ManagePermissions + ManageRole
@@ -14,6 +17,11 @@ DISCORD_TO_STOAT: dict[int, int | list[int]] = {
     14: 26,  # EMBED_LINKS → SendEmbeds
     15: 27,  # ATTACH_FILES → UploadFiles
     6: 29,  # ADD_REACTIONS → React
+    # NOTE: MENTION_EVERYONE (Discord bit 17) has NO Stoat equivalent — the Stoat
+    # Permission enum has no MentionEveryone — so it is intentionally dropped.
+    26: 10,  # CHANGE_NICKNAME → ChangeNickname
+    27: 11,  # MANAGE_NICKNAMES → ManageNicknames
+    29: 24,  # MANAGE_WEBHOOKS → ManageWebhooks
 }
 
 ALL_STOAT_PERMISSIONS = (
@@ -22,10 +30,16 @@ ALL_STOAT_PERMISSIONS = (
     | 4
     | 8
     | 16  # bits 0-4
+    | 64
+    | 128  # bits 6-7 (KickMembers, BanMembers)
+    | 1_024
+    | 2_048  # bits 10-11 (ChangeNickname, ManageNicknames)
     | 1_048_576
     | 2_097_152  # bits 20-21
     | 4_194_304
     | 8_388_608  # bits 22-23
+    | 16_777_216
+    | 33_554_432  # bits 24-25 (ManageWebhooks, InviteOthers)
     | 67_108_864
     | 134_217_728  # bits 26-27
     | 268_435_456

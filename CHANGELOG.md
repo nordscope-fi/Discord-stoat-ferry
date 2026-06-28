@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.15] - 2026-06-28
+
+### Fixed
+
+Parser / exporter / sanitize correctness sweep — the ninth batch from the 2026-06-25 v2.6.6
+whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 9). Ten confirmed
+silent-correctness defects, grouped into five engine-side fixes; no GUI/CLI/state-schema/API change.
+
+- **Bold runs are no longer corrupted by underline stripping** (`parser/transforms.py`). `strip_underline`
+  collapsed every `****` in a message — so two adjacent bold spans (`**a****b**`) lost a delimiter
+  (`**a**b**`), and `****` inside code spans was mangled. It now converts the two nested bold+underline
+  forms explicitly and drops the blind global collapse, leaving pre-existing bold and code spans intact.
+- **Timezone-naive timestamps are read as UTC** (`parser/transforms.py`). `format_original_timestamp`
+  treated an offset-less DCE timestamp as host-local time (shifting the hour) and crashed on a
+  malformed string; it now assumes UTC for naive inputs and falls back to the raw string on a parse
+  error.
+- **Channels are no longer misclassified as threads** (`parser/dce_parser.py`). `_infer_thread_info`
+  treated any `Guild - Channel - Thread`-shaped filename as a thread, so a guild or channel name
+  containing ` - ` mis-tagged a normal channel as a thread (corrupting category placement, merge/
+  skip-threads handling, and forum grouping — and potentially dropping messages). It is now
+  authoritative on the parsed Discord channel type (10/11/12 = thread). The dead `_TWO_SEGMENT_RE`
+  regex was removed.
+- **A huge DCE stderr line no longer crashes the exporter** (`exporter/runner.py`). `_read_stderr`
+  used `async for`, which raised an uncaught `ValueError` on a stderr line over 64 KiB — stopping
+  stderr capture, discarding the fatal line (reported as "Unknown error"), and leaking a
+  "Task exception never retrieved". It now mirrors the stdout drain loop (truncating the over-long
+  line). Cancellation is also checked during a long drain, and over-long lines now count as activity
+  (no false "no new output" heartbeats).
+- **Emoji name de-duplication no longer collides** (`migrator/sanitize.py`). `sanitize_emoji_name`
+  truncated the disambiguating suffix off at the 32-char limit (returning a duplicate) and never
+  registered the generated name (so a later identical name re-collided). It now truncates the base to
+  make room for the suffix, registers the emitted name, and bumps until unique.
+- **Six dropped role permissions are now migrated** (`discord/permissions.py`). `DISCORD_TO_STOAT`
+  omitted Discord permissions that have Stoat equivalents, so migrated roles silently lost
+  invite / kick / ban / manage-webhooks / change-nickname / manage-nicknames authority. Those six are
+  now mapped (and added to the admin-grants-all set). (Discord's `MENTION_EVERYONE` has no Stoat
+  `Permission` equivalent and remains intentionally dropped.)
+
 ## [2.6.14] - 2026-06-28
 
 ### Fixed

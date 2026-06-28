@@ -148,3 +148,43 @@ def test_emoji_name_collision_suffix_truncated() -> None:
     second = sanitize_emoji_name(long_name, used)
     assert first == "a" * 32
     assert len(second) <= 32
+
+
+# ---------------------------------------------------------------------------
+# Batch 9 — S4 collision-correct emoji de-dup
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_emoji_registers_emitted_name() -> None:
+    """SC-23: two 'fire' → fire, fire_2; both registered in used_names."""
+    used: dict[str, int] = {}
+    a = sanitize_emoji_name("fire", used)
+    b = sanitize_emoji_name("fire", used)
+    assert (a, b) == ("fire", "fire_2")
+    assert "fire" in used and "fire_2" in used
+
+
+def test_sanitize_emoji_emitted_recollision() -> None:
+    """SC-24: a third emoji whose raw name sanitizes to 'fire_2' becomes a distinct fire_2_2."""
+    used: dict[str, int] = {}
+    sanitize_emoji_name("fire", used)
+    sanitize_emoji_name("fire", used)  # → fire_2
+    third = sanitize_emoji_name("fire_2", used)  # collides with the emitted fire_2
+    assert third not in ("fire", "fire_2")
+    assert third == "fire_2_2"
+
+
+def test_sanitize_emoji_near_limit_keeps_suffix() -> None:
+    """SC-25: two 32-char-identical names → distinct (suffix preserved, base truncated, ≤32)."""
+    used: dict[str, int] = {}
+    name = "a" * 40  # sanitizes/truncates to 32 'a'
+    a = sanitize_emoji_name(name, used)
+    b = sanitize_emoji_name(name, used)
+    assert a != b
+    assert len(a) <= 32 and len(b) <= 32
+
+
+def test_sanitize_emoji_non_colliding_unchanged() -> None:
+    """SC-26: a non-colliding name is unchanged."""
+    used: dict[str, int] = {}
+    assert sanitize_emoji_name("unique", used) == "unique"

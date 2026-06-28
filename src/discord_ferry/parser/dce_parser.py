@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 _CONTENT_EMOJI_RE = re.compile(r"<a?:[^:]+:(\d+)>")
 _THREE_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) - (.+?) \[(\d+)\]$")
-_TWO_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) \[(\d+)\]$")
+# Discord channel-type codes that are genuinely threads (incl. forum posts = 11).
+# Used to override the filename heuristic so a guild/channel name containing " - "
+# can't misclassify a normal channel as a thread.
+_THREAD_TYPE_CODES = frozenset({10, 11, 12})
 
 # DCE 2.47.1 emits enum-named channel types; pre-2.47 emitted integers.
 # Downstream callers (migrator/structure.py, migrator/messages.py, review.py)
@@ -105,7 +108,7 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         messages = [_parse_message(m) for m in raw["messages"]]
         messages.sort(key=lambda m: m.timestamp)
 
-    is_thread, parent_channel_name = _infer_thread_info(json_path.stem)
+    is_thread, parent_channel_name = _infer_thread_info(json_path.stem, channel.type)
 
     return DCEExport(
         guild=guild,
@@ -304,17 +307,25 @@ def validate_export(
     return warnings
 
 
-def _infer_thread_info(filename: str) -> tuple[bool, str]:
+def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[bool, str]:
     """Infer whether a filename represents a thread and return its parent channel name.
 
     Args:
         filename: The stem (without extension) of the DCE export file.
+        channel_type: The parsed Discord channel-type code. When known, it is
+            authoritative: a non-thread type is never a thread, regardless of
+            " - " in the guild/channel name. When ``None`` (e.g. filename-only
+            callers), the 3-segment filename heuristic alone is used.
 
     Returns:
         Tuple of (is_thread, parent_channel_name).
         For regular channels: (False, "").
         For threads/forum posts: (True, "<parent channel name>").
     """
+    # Type is authoritative when known: a non-thread Discord type is never a
+    # thread, even if the guild/channel name contains " - ".
+    if channel_type is not None and channel_type not in _THREAD_TYPE_CODES:
+        return False, ""
     match = _THREE_SEGMENT_RE.match(filename)
     if match:
         parent_channel_name = match.group(2)

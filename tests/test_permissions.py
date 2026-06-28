@@ -41,8 +41,9 @@ def test_administrator_with_other_bits() -> None:
 
 
 def test_unmapped_bits_dropped() -> None:
-    # Discord KICK_MEMBERS = bit 1, no Stoat equivalent → dropped
-    assert translate_permissions(1 << 1) == 0
+    # Discord USE_EXTERNAL_EMOJIS = bit 12, no Stoat equivalent → dropped
+    # (KICK_MEMBERS bit 1 is now mapped as of Batch 9; use a still-unmapped bit.)
+    assert translate_permissions(1 << 12) == 0
 
 
 def test_multiple_mapped_bits() -> None:
@@ -65,17 +66,24 @@ def test_all_mapped_bits() -> None:
 
 
 def test_all_stoat_permissions_value() -> None:
-    # Verify ALL_STOAT_PERMISSIONS matches the documented sum
+    # Verify ALL_STOAT_PERMISSIONS matches the documented sum (incl. the 6
+    # Batch 9 additions: bits 6,7,10,11,24,25).
     expected = (
         1
         | 2
         | 4
         | 8
         | 16
+        | 64
+        | 128
+        | 1_024
+        | 2_048
         | 1_048_576
         | 2_097_152
         | 4_194_304
         | 8_388_608
+        | 16_777_216
+        | 33_554_432
         | 67_108_864
         | 134_217_728
         | 268_435_456
@@ -111,7 +119,8 @@ def test_deny_multiple_bits() -> None:
 
 def test_deny_unmapped_bits_dropped() -> None:
     """Unmapped Discord bits in deny context are silently dropped."""
-    assert translate_permissions(1 << 1, is_deny=True) == 0
+    # bit 12 (USE_EXTERNAL_EMOJIS) has no Stoat equivalent (bit 1 is now mapped).
+    assert translate_permissions(1 << 12, is_deny=True) == 0
 
 
 def test_deny_administrator_with_other_bits_preserves_others() -> None:
@@ -119,3 +128,35 @@ def test_deny_administrator_with_other_bits_preserves_others() -> None:
     discord_bits = (1 << 3) | (1 << 10)  # ADMINISTRATOR + VIEW_CHANNEL
     result = translate_permissions(discord_bits, is_deny=True)
     assert result == 1 << 20  # Only ViewChannel deny, ADMIN stripped
+
+
+# ---------------------------------------------------------------------------
+# Batch 9 — S5 perm-map fidelity (7 newly-mapped Discord permissions)
+# ---------------------------------------------------------------------------
+
+
+def test_new_permission_mappings() -> None:
+    """SC-29: each newly-added Discord→Stoat permission maps correctly."""
+    pairs = [
+        (0, 25),  # CREATE_INSTANT_INVITE → InviteOthers
+        (1, 6),  # KICK_MEMBERS → KickMembers
+        (2, 7),  # BAN_MEMBERS → BanMembers
+        (26, 10),  # CHANGE_NICKNAME → ChangeNickname
+        (27, 11),  # MANAGE_NICKNAMES → ManageNicknames
+        (29, 24),  # MANAGE_WEBHOOKS → ManageWebhooks
+    ]
+    for discord_bit, stoat_bit in pairs:
+        assert translate_permissions(1 << discord_bit) == 1 << stoat_bit
+
+
+def test_mention_everyone_dropped() -> None:
+    """MENTION_EVERYONE (bit 17) has no Stoat equivalent → dropped."""
+    assert translate_permissions(1 << 17) == 0
+
+
+def test_admin_grants_new_bits() -> None:
+    """SC-30: the ADMIN short-circuit now includes the 7 new bits."""
+    result = translate_permissions(1 << 3)
+    assert result == ALL_STOAT_PERMISSIONS
+    for bit in (6, 7, 10, 11, 24, 25):
+        assert result & (1 << bit)
