@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.17] - 2026-06-28
+
+### Security
+
+Cleared 3 high-severity Dependabot alerts — denial-of-service vulnerabilities in transitive
+dependencies pulled by `nicegui[asyncio-client]` (the GUI shell). `uv.lock`-only bump; no
+`pyproject.toml`, source, or API change.
+
+- **`python-socketio` 5.16.1 → 5.16.3** — binary-attachment accumulation DoS
+  (GHSA-5w7q-77mv-v69f, patched 5.16.2).
+- **`python-engineio` 4.13.1 → 4.13.3** — unbound thread allocation DoS
+  (GHSA-cgwc-pv48-fhj5, patched 4.13.2) + maximum payload size sometimes not enforced DoS
+  (GHSA-m9gh-vj53-gvh9, patched 4.13.2).
+
 ## [2.6.16] - 2026-06-28
 
 ### Fixed
