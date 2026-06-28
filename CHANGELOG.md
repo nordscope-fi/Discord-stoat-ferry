@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.16] - 2026-06-28
+
+### Fixed
+
+Defense-in-depth & misc lows — the tenth and FINAL batch from the 2026-06-25 v2.6.6
+whole-codebase bug-hunt (`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 10), closing the
+hunt. Four latent-gap fixes; no GUI/CLI/state-schema/API change.
+
+- **Engine exception strings are token-redacted everywhere they are emitted or persisted**
+  (`core/engine.py`). A new `_safe(config, text)` helper wraps every raw-exception interpolation in
+  the engine event stream and in persisted `state.warnings` / `RollbackFailure.error` — honoring
+  `safe_sanitize`'s persist-or-emit contract. Previously only two sites were sanitized, leaving a
+  latent path for a future token-in-URL or echoed-4xx-body to leak a credential to the GUI/CLI log
+  or `state.json`. A new `_ensure_token_store` helper wires the token store in **both**
+  `run_migration` and `run_rollback` (the shells call rollback directly and never set it), so the
+  rollback-path redaction is actually effective. No behaviour change when no token store is set.
+- **Concurrent uploads of the same file no longer duplicate** (`uploader/autumn.py`).
+  `upload_with_cache` had a check-then-act race: two parallel channel workers requesting the same
+  physical file (an author's avatar / identical attachment) both missed the cache and both uploaded,
+  wasting the per-tag Autumn budget and orphaning a file. A self-cleaning in-flight `asyncio.Future`
+  registry now coalesces concurrent same-key callers onto a single upload. A failed upload is not
+  cached and does not poison the key (a later run retries); concurrent same-key callers share the
+  originator's outcome.
+- **Avatar checkpoint cadence is now time-based** (`migrator/avatars.py`). The phase saved state only
+  every 10th upload, so a sub-10 tail (and a hard-kill between two saves) lost up to 9 `avatar_cache`
+  entries, re-uploading those avatars as untracked orphans on resume. It now saves on a 5s wall-clock
+  throttle (mirroring `messages.py`), bounding crash loss by time.
+- **Repaired a dead test assertion** (`tests/test_thread_strategy.py`). `test_merge_mode_separator_sent`
+  defined a capture callback that aioresponses never invoked, so the thread separator payload was
+  never actually asserted. Converted to the `_capture_keys` idiom asserting the separator's
+  idempotency key — a broken separator send now fails the test.
+
 ## [2.6.15] - 2026-06-28
 
 ### Fixed

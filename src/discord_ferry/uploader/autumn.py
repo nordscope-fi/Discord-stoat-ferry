@@ -27,6 +27,12 @@ TAG_SIZE_LIMITS: dict[str, int] = {
     "emojis": 500 * 1024,
 }
 
+# Single-flight registry: coalesces concurrent first-uploads of the same cache key
+# (keyed by str(file_path), the same key upload_with_cache caches under) so two
+# parallel channel workers requesting the same physical file upload it only once.
+# Self-cleaning — every entry is popped on completion (success or failure).
+_inflight_uploads: dict[str, asyncio.Future[str]] = {}
+
 
 async def _retry_after_ms(response: aiohttp.ClientResponse) -> float:
     """429 backoff in ms: body ``retry_after`` -> ``Retry-After`` header (int seconds) -> 1000ms."""
@@ -191,14 +197,30 @@ async def upload_with_cache(
     if key in cache:
         return cache[key]
 
-    await asyncio.sleep(delay)
-    file_id = await upload_to_autumn(
-        session,
-        autumn_url,
-        tag,
-        file_path,
-        token,
-        verify_size=verify_size,
-    )
-    cache[key] = file_id
-    return file_id
+    # Coalesce concurrent first-uploads of the same key (check-then-act race): a
+    # second caller awaits the first uploader's result instead of re-uploading.
+    inflight = _inflight_uploads.get(key)
+    if inflight is not None:
+        return await inflight
+
+    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    _inflight_uploads[key] = future
+    try:
+        await asyncio.sleep(delay)
+        file_id = await upload_to_autumn(
+            session,
+            autumn_url,
+            tag,
+            file_path,
+            token,
+            verify_size=verify_size,
+        )
+        cache[key] = file_id
+        future.set_result(file_id)
+        return file_id
+    except BaseException as exc:
+        future.set_exception(exc)
+        future.exception()  # mark retrieved -> silence "exception never retrieved"
+        raise
+    finally:
+        _inflight_uploads.pop(key, None)

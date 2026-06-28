@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -136,6 +137,7 @@ async def run_avatars(
     total = len(to_upload)
     uploaded = 0
     failed = 0
+    _last_save_time = time.monotonic()
 
     # Sort deterministically by author ID.
     sorted_authors = sorted(to_upload.items(), key=lambda item: item[0])
@@ -215,9 +217,13 @@ async def run_avatars(
                 state.referenced_autumn_ids.add(autumn_id)
                 uploaded += 1
 
-                # Periodic state save every 10 avatars for crash recovery.
-                if uploaded % 10 == 0:
+                # Periodic state save on a 5s wall-clock cadence (mirrors messages.py)
+                # so a hard kill loses at most ~5s of avatar_cache work — not up to 9
+                # entries (the old count-gate never checkpointed a sub-10 tail).
+                now = time.monotonic()
+                if now - _last_save_time >= 5.0:
                     save_state(state, config.output_dir)
+                    _last_save_time = now
 
             except Exception as exc:  # noqa: BLE001
                 state.warnings.append(
