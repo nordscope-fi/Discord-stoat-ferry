@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.6.14] - 2026-06-28
+
+### Fixed
+
+GUI lifecycle — the eighth batch from the 2026-06-25 v2.6.6 whole-codebase bug-hunt
+(`docs/plans/audits/2026-06-25-bug-hunt.md`, §4 Batch 8). Two GUI-shell-only fixes in
+`gui.py`; no engine/parser/CLI/state-schema changes. Both close documented residuals of the
+v2.6.1 token-lifecycle rework.
+
+- **The cached-export choice is now honoured** (`gui.py`, S1/F8a). On `/export`, the
+  "Use Cached"/"Re-export" choice card was inert: `background_tasks.create(_run_export())` ran
+  unconditionally on page load, racing the click — re-validating the token, re-downloading DCE,
+  re-running the export and overwriting the cached JSON, then navigating away. The auto-launch is now
+  gated behind `_should_auto_export(cached)` (fires only when no cache exists); "Use Cached" goes
+  straight to `/validate` (and clears the now-unneeded Discord token — no skip-path leak), while
+  "Re-export" launches the export explicitly. The cached fast-path works and the cached JSON is no
+  longer clobbered.
+
+- **Session tokens are never persisted to disk** (`gui.py`, S2/F8b, security). The Stoat and Discord
+  tokens were written to `app.storage.user`, which NiceGUI persists to `.nicegui/storage-user.json`
+  on disk; the only clear ran at the terminal migration screen, so abandoning the flow (or a crash)
+  before migration started stranded a plaintext token on disk — and the setup form even pre-filled
+  the token fields from that on-disk copy. Both token values now live only in NiceGUI's memory-only
+  per-tab store (`app.storage.tab`): never written to disk, dropped when the tab closes, and
+  surviving in-tab navigation so the setup→export→validate→migrate handoff is preserved. This closes
+  the abandonment window in every mode, including a hard crash. The token input fields no longer
+  pre-fill (re-enter each launch — the `security.md`-aligned norm), a setup-load scrub removes any
+  token left on disk by a pre-fix version, and missing-token restart edges bounce cleanly to setup
+  with a "session expired" notice. Engine/shell separation is unchanged (the engine never reads
+  `app.storage`).
+
 ## [2.6.13] - 2026-06-27
 
 ### Fixed

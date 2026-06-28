@@ -354,3 +354,184 @@ def test_session_token_keys_pinned() -> None:
     # Constant-pin: the security-critical key list must never silently shrink.
     # This is the load-bearing CI guard against the recurring token-leak vector.
     assert _SESSION_TOKEN_KEYS == ("token", "discord_token")
+
+
+# ---------------------------------------------------------------------------
+# Batch 8 — S1 cached-export gating
+# ---------------------------------------------------------------------------
+
+
+def test_should_auto_export_none_is_true() -> None:
+    """SC-1: no cached export -> auto-launch (orchestrated happy path, non-regression)."""
+    from discord_ferry.gui import _should_auto_export
+
+    assert _should_auto_export(None) is True
+
+
+def test_should_auto_export_with_cache_is_false() -> None:
+    """SC-2: cached export present -> do NOT auto-run (buttons drive; cached JSON preserved)."""
+    from discord_ferry.gui import _should_auto_export
+
+    assert _should_auto_export({"file_count": 3, "total_size": 1_000_000}) is False
+
+
+def test_use_cached_clears_only_discord_token() -> None:
+    """SC-3: 'Use Cached' clears discord_token only (Stoat token survives for /validate).
+
+    Two-part guard: (1) the _clear_tokens semantics the handler relies on, and
+    (2) source-inspection pinning that the _use_cached handler itself clears the
+    discord-only tuple — NOT _SESSION_TOKEN_KEYS, which would wipe the Stoat token
+    and break the /validate handoff.
+    """
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    # (1) the relied-upon semantics
+    store: dict[str, Any] = {"token": "stoat-tok", "discord_token": "disc-tok"}
+    _clear_tokens(store, ("discord_token",))
+    assert "discord_token" not in store
+    assert store["token"] == "stoat-tok"
+
+    # (2) the handler's actual clear-set is pinned — slice the _use_cached body so
+    # this stays specific even after T3 adds the same literal to the export finally.
+    source = inspect.getsource(gui_mod)
+    idx = source.index("def _use_cached() -> None:")
+    use_cached_body = source[idx : idx + 200]
+    assert "_clear_tokens(app.storage.tab" in use_cached_body
+    assert '("discord_token",)' in use_cached_body
+    assert "_SESSION_TOKEN_KEYS" not in use_cached_body
+
+
+def test_export_launch_is_gated() -> None:
+    """SC-4: the /export auto-launch is behind _should_auto_export(cached)."""
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    assert "if _should_auto_export(cached):" in source
+    # The ungated module-level auto-launch (4-space indented) must no longer exist.
+    assert "\n    background_tasks.create(_run_export())\n" not in source
+
+
+def test_reexport_button_launches_export() -> None:
+    """SC-5: 'Re-export' triggers _run_export (exactly one launch per intent)."""
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    # The re-export handler both toggles visibility AND launches the export.
+    assert "def _re_export() -> None:" in source
+    # Exactly two launch sites: the cached-absent gate + the re-export handler.
+    assert source.count("background_tasks.create(_run_export())") == 2
+
+
+# ---------------------------------------------------------------------------
+# Batch 8 — S2 token lifecycle (memory-only app.storage.tab)
+# ---------------------------------------------------------------------------
+
+
+def test_store_session_tokens_writes_exactly_two_keys() -> None:
+    """SC-7: _store_session_tokens writes exactly token + discord_token, nothing else."""
+    from discord_ferry.gui import _store_session_tokens
+
+    d: dict[str, Any] = {}
+    _store_session_tokens(d, stoat="s", discord="dt")
+    assert d == {"token": "s", "discord_token": "dt"}
+
+
+def test_store_session_tokens_roundtrip_then_clear() -> None:
+    """SC-8: written tokens are readable (data-level handoff); terminal clear wipes both."""
+    from discord_ferry.gui import _store_session_tokens
+
+    d: dict[str, Any] = {}
+    _store_session_tokens(d, stoat="s", discord="dt")
+    assert d["token"] == "s"
+    assert d["discord_token"] == "dt"
+    _clear_tokens(d, _SESSION_TOKEN_KEYS)
+    assert "token" not in d
+    assert "discord_token" not in d
+
+
+def test_legacy_scrub_removes_tokens_keeps_nonsecrets() -> None:
+    """SC-9: the setup-load scrub removes on-disk tokens, leaves non-secret keys."""
+    user: dict[str, Any] = {
+        "token": "old",
+        "discord_token": "old",
+        "export_dir": "/p",
+        "stoat_url": "https://x",
+    }
+    _clear_tokens(user, _SESSION_TOKEN_KEYS)  # the setup-load scrub
+    assert "token" not in user
+    assert "discord_token" not in user
+    assert user["export_dir"] == "/p"
+    assert user["stoat_url"] == "https://x"
+
+
+def test_tokens_never_disk_backed() -> None:
+    """SC-10 (load-bearing): tokens go to app.storage.tab, never to app.storage.user.
+
+    Brittle-by-design CI guard against the recurring token-leak vector: if any
+    future refactor reverts a token write to the disk-backed app.storage.user
+    alias, or restores a token pre-fill, this fails loudly.
+    """
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    # (a) token writes target the memory-only tab store
+    assert "_store_session_tokens(app.storage.tab" in source
+    # (b) the disk-backed app.storage.user alias is NEVER a token assignment target
+    assert 'storage["token"] =' not in source
+    assert 'storage["discord_token"] =' not in source
+    # (c) the token input fields do NOT pre-fill from storage (value="" — no disk read)
+    assert 'value=str(storage.get("token"' not in source
+    assert 'value=str(storage.get("discord_token"' not in source
+
+
+def test_token_access_uses_connected_client() -> None:
+    """SC-11: token read/write sites await a connected client (tab access is then valid)."""
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    assert "async def _on_validate_click() -> None:" in source
+    assert "async def migrate_page() -> None:" in source
+    # validate-click, _run_export, migrate_page each await a connected client.
+    assert source.count("await ui.context.client.connected()") >= 3
+    # _run_export restart-bounce on a missing tab discord_token.
+    assert 'app.storage.tab.get("discord_token")' in source
+
+
+def test_page_guards_drop_token_term() -> None:
+    """SC-12: validate/migrate top-guards no longer read storage.get('token')."""
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    # The old 3-term guard (…or not storage.get("token")) must be gone.
+    assert 'or not storage.get("token")' not in source
+    # migrate re-checks the token in the tab store after connected().
+    assert 'if not app.storage.tab.get("token"):' in source
+
+
+def test_export_finally_suppresses_tab_clear() -> None:
+    """SC-13 (M4): the export finally tab clear is exception-suppressed.
+
+    Anchored on the export finally's unique comment and sliced, so it stays
+    specific to THIS site (contextlib.suppress is used at several other places).
+    """
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    idx = source.index("# and mask the original exception).")
+    region = source[idx : idx + 200]
+    assert "with contextlib.suppress(Exception):" in region
+    assert '_clear_tokens(app.storage.tab, ("discord_token",))' in region
