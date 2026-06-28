@@ -1862,3 +1862,150 @@ async def test_run_migration_messages_crash_keeps_phase_for_resume(tmp_path: Pat
 
     saved = load_state(tmp_path)
     assert saved.current_phase == "messages"
+
+
+# ---------------------------------------------------------------------------
+# Batch 10 / S1 — engine exception-sanitization sweep (_safe)
+# ---------------------------------------------------------------------------
+
+
+async def test_rollback_event_message_redacts_token(tmp_path: Path) -> None:
+    """SC-1: an emitted rollback-delete event message redacts a token in the exc."""
+    from discord_ferry.core.engine import _delete_one_channel
+    from discord_ferry.core.security import SecureTokenStore
+    from discord_ferry.errors import MigrationError
+    from discord_ferry.state import RollbackProgress
+
+    config = _make_config(tmp_path, token_store=SecureTokenStore({"stoat": "SEKRET-TOKEN-abcd"}))
+    state = MigrationState()
+    state.rollback_progress = RollbackProgress()
+    events: list[MigrationEvent] = []
+    sem = asyncio.BoundedSemaphore(1)
+
+    async def _boom(*args: object, **kwargs: object) -> None:
+        raise MigrationError("HTTP 500 at https://h/x?token=SEKRET-TOKEN-abcd")
+
+    with patch("discord_ferry.core.engine.api_delete_channel", _boom):
+        async with aiohttp.ClientSession() as session:
+            await _delete_one_channel("42", sem, config, state, session, events.append)
+
+    messages = [e.message or "" for e in events]
+    assert not any("SEKRET-TOKEN-abcd" in m for m in messages)
+    assert any("****abcd" in m for m in messages)
+
+
+async def test_rollback_failure_error_redacts_token(tmp_path: Path) -> None:
+    """SC-2: the persisted RollbackFailure.error redacts the token (state.json-bound)."""
+    from discord_ferry.core.engine import _delete_one_channel
+    from discord_ferry.core.security import SecureTokenStore
+    from discord_ferry.errors import MigrationError
+    from discord_ferry.state import RollbackProgress
+
+    config = _make_config(tmp_path, token_store=SecureTokenStore({"stoat": "SEKRET-TOKEN-abcd"}))
+    state = MigrationState()
+    state.rollback_progress = RollbackProgress()
+    sem = asyncio.BoundedSemaphore(1)
+
+    async def _boom(*args: object, **kwargs: object) -> None:
+        raise MigrationError("token=SEKRET-TOKEN-abcd")
+
+    with patch("discord_ferry.core.engine.api_delete_channel", _boom):
+        async with aiohttp.ClientSession() as session:
+            await _delete_one_channel("42", sem, config, state, session, lambda e: None)
+
+    assert state.rollback_progress is not None
+    error = state.rollback_progress.failures[0].error
+    assert "SEKRET-TOKEN-abcd" not in error
+    assert "****abcd" in error
+
+
+async def test_rollback_event_message_none_store_unchanged(tmp_path: Path) -> None:
+    """SC-3: with no token store, the message is byte-identical (None-safe no-op)."""
+    from discord_ferry.core.engine import _delete_one_channel
+    from discord_ferry.errors import MigrationError
+    from discord_ferry.state import RollbackProgress
+
+    config = _make_config(tmp_path)  # token_store defaults to None
+    assert config.token_store is None
+    state = MigrationState()
+    state.rollback_progress = RollbackProgress()
+    events: list[MigrationEvent] = []
+    sem = asyncio.BoundedSemaphore(1)
+
+    async def _boom(*args: object, **kwargs: object) -> None:
+        raise MigrationError("plain failure detail")
+
+    with patch("discord_ferry.core.engine.api_delete_channel", _boom):
+        async with aiohttp.ClientSession() as session:
+            await _delete_one_channel("42", sem, config, state, session, events.append)
+
+    assert any(e.message == "Failed to delete channel 42: plain failure detail" for e in events)
+
+
+async def test_rollback_success_message_not_sanitized(tmp_path: Path) -> None:
+    """SC-4: a non-exception event message is NOT wrapped (negative control).
+
+    The success-path "Deleted channel {id}" message is deliberately left unwrapped.
+    A token whose value is a substring of that literal must NOT be redacted — proving
+    the sweep did not over-wrap non-exception sites.
+    """
+    from discord_ferry.core.engine import _delete_one_channel
+    from discord_ferry.core.security import SecureTokenStore
+    from discord_ferry.state import RollbackProgress
+
+    config = _make_config(tmp_path, token_store=SecureTokenStore({"x": "Deleted"}))
+    state = MigrationState()
+    state.rollback_progress = RollbackProgress()
+    events: list[MigrationEvent] = []
+    sem = asyncio.BoundedSemaphore(1)
+
+    async def _ok(*args: object, **kwargs: object) -> None:
+        return None
+
+    with patch("discord_ferry.core.engine.api_delete_channel", _ok):
+        async with aiohttp.ClientSession() as session:
+            await _delete_one_channel("42", sem, config, state, session, events.append)
+
+    assert any(e.message == "Deleted channel 42" for e in events)
+
+
+def test_ensure_token_store_populates_and_redacts(tmp_path: Path) -> None:
+    """_ensure_token_store sets a store that redacts the configured token."""
+    from discord_ferry.core.engine import _ensure_token_store
+
+    config = _make_config(tmp_path, token="SEKRET-TOKEN-abcd")
+    assert config.token_store is None
+    _ensure_token_store(config)
+    assert config.token_store is not None
+    assert "SEKRET-TOKEN-abcd" not in config.token_store.sanitize("a SEKRET-TOKEN-abcd b")
+
+
+def test_ensure_token_store_idempotent(tmp_path: Path) -> None:
+    """_ensure_token_store does not replace an already-set store."""
+    from discord_ferry.core.engine import _ensure_token_store
+    from discord_ferry.core.security import SecureTokenStore
+
+    existing = SecureTokenStore({"stoat": "other"})
+    config = _make_config(tmp_path, token="SEKRET", token_store=existing)
+    _ensure_token_store(config)
+    assert config.token_store is existing  # unchanged
+
+
+async def test_run_rollback_initializes_token_store(tmp_path: Path) -> None:
+    """Ship-review fix: run_rollback wires config.token_store so rollback _safe works.
+
+    The store is populated BEFORE input validation, so even an early validation failure
+    leaves a populated store — proving the rollback path is no longer redaction-inert.
+    """
+    from discord_ferry.core.engine import run_rollback
+    from discord_ferry.errors import MigrationError
+
+    config = _make_config(tmp_path, token="SEKRET-TOKEN-abcd")
+    assert config.token_store is None
+    state = MigrationState()  # no stoat_server_id + config has no server_id → validate raises
+
+    with pytest.raises(MigrationError):
+        await run_rollback(config, state, [], lambda e: None)
+
+    assert config.token_store is not None
+    assert "SEKRET-TOKEN-abcd" not in config.token_store.sanitize("x SEKRET-TOKEN-abcd y")

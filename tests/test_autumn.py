@@ -184,6 +184,136 @@ def test_icons_limit_matches_stoat_autumn_config() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Batch 10 / S2 — upload_with_cache single-flight concurrency
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_with_cache_coalesces_same_key(tmp_path: Path) -> None:
+    """SC-5: concurrent same-key calls upload exactly once and share the id."""
+    import asyncio
+    from unittest.mock import patch
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    cache: dict[str, str] = {}
+    calls = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return "id-1"
+
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", _slow):
+        async with aiohttp.ClientSession() as session:
+            task = asyncio.gather(
+                upload_with_cache(session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0),
+                upload_with_cache(session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0),
+            )
+            await entered.wait()  # leader registered the in-flight future + entered upload
+            await asyncio.sleep(0)  # let the follower reach `await inflight`
+            release.set()
+            results = await task
+
+    assert calls == 1
+    assert results == ["id-1", "id-1"]
+    assert cache[str(f)] == "id-1"
+
+
+async def test_upload_with_cache_distinct_keys_concurrent(tmp_path: Path) -> None:
+    """SC-6: distinct keys upload independently (no global serialization)."""
+    import asyncio
+    from unittest.mock import patch
+
+    f1 = tmp_path / "a.png"
+    f2 = tmp_path / "b.png"
+    f1.write_bytes(b"x" * 10)
+    f2.write_bytes(b"y" * 10)
+    cache: dict[str, str] = {}
+    calls = 0
+
+    async def _up(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        return f"id-{calls}"
+
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", _up):
+        async with aiohttp.ClientSession() as session:
+            results = await asyncio.gather(
+                upload_with_cache(session, AUTUMN_URL, "avatars", f1, TOKEN, cache, delay=0),
+                upload_with_cache(session, AUTUMN_URL, "avatars", f2, TOKEN, cache, delay=0),
+            )
+
+    assert calls == 2
+    assert len(set(results)) == 2
+
+
+async def test_upload_with_cache_hit_skips_upload_and_inflight(tmp_path: Path) -> None:
+    """SC-7: a cache hit returns without uploading or registering an in-flight future."""
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.uploader.autumn import _inflight_uploads
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    cache = {str(f): "cached-id"}
+    mock = AsyncMock(return_value="should-not-be-used")
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            result = await upload_with_cache(
+                session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0
+            )
+
+    assert result == "cached-id"
+    assert mock.call_count == 0
+    assert str(f) not in _inflight_uploads
+
+
+async def test_upload_with_cache_failure_does_not_poison_key(tmp_path: Path) -> None:
+    """SC-8: a failed upload pops the key; a later call retries; no stray warning."""
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.uploader.autumn import _inflight_uploads
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    cache: dict[str, str] = {}
+    mock = AsyncMock(side_effect=[AutumnUploadError("boom"), "id-2"])
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(AutumnUploadError):
+                await upload_with_cache(session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0)
+            assert str(f) not in _inflight_uploads  # not poisoned
+            result = await upload_with_cache(
+                session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0
+            )
+
+    assert result == "id-2"
+    assert mock.call_count == 2
+
+
+async def test_upload_with_cache_self_cleans_inflight(tmp_path: Path) -> None:
+    """SC-9: the in-flight entry is popped after a successful upload."""
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.uploader.autumn import _inflight_uploads
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    cache: dict[str, str] = {}
+    mock = AsyncMock(return_value="id-1")
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            await upload_with_cache(session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0)
+
+    assert str(f) not in _inflight_uploads
+    assert cache[str(f)] == "id-1"
+
+
+# ---------------------------------------------------------------------------
 # S1 — malformed 200 -> AutumnUploadError
 # ---------------------------------------------------------------------------
 

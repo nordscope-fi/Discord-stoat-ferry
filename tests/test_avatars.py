@@ -355,3 +355,70 @@ async def test_avatar_upload_tracked_and_referenced(tmp_path: Path) -> None:
     assert state.autumn_uploads["autumn_av1"] == "user1"
     # Avatar is immediately referenced (avatars are always used via masquerade)
     assert "autumn_av1" in state.referenced_autumn_ids
+
+
+# ---------------------------------------------------------------------------
+# Batch 10 / S3 — time-based checkpoint cadence (replaces the %10 count-gate)
+# ---------------------------------------------------------------------------
+
+
+def _three_avatar_export(tmp_path: Path) -> DCEExport:
+    """Three local-avatar authors in a single export (sub-10, exercises the throttle)."""
+    messages = []
+    for i in range(3):
+        f = tmp_path / f"avatar_u{i}.webp"
+        f.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+        author = _make_author(f"u{i}", f"User{i}", avatar_url=f"avatar_u{i}.webp")
+        messages.append(_make_message(f"m{i}", author))
+    return _make_export(messages)
+
+
+async def test_avatars_time_throttle_saves_sub_ten_run(tmp_path: Path) -> None:
+    """SC-10: a <10-avatar run checkpoints mid-loop once the monotonic clock crosses 5s."""
+    import itertools
+    from unittest.mock import Mock
+
+    export = _three_avatar_export(tmp_path)
+    config = _make_config(tmp_path)
+    state = _make_state()
+    save_mock = Mock()
+    # Every monotonic reading jumps 100s ahead, so each per-iteration check crosses the
+    # 5s threshold (robust even if other code also reads the clock).
+    monotonic = Mock(side_effect=itertools.count(0, 100))
+
+    with (
+        patch(
+            "discord_ferry.migrator.avatars.upload_with_cache",
+            new=AsyncMock(side_effect=["a0", "a1", "a2"]),
+        ),
+        patch("discord_ferry.migrator.avatars.save_state", save_mock),
+        patch("discord_ferry.migrator.avatars.time.monotonic", monotonic),
+    ):
+        await run_avatars(config, state, [export], lambda e: None)
+
+    assert save_mock.call_count >= 1  # checkpointed mid-loop, not only at engine phase-end
+    assert set(state.avatar_cache.values()) == {"a0", "a1", "a2"}
+
+
+async def test_avatars_time_throttle_no_premature_save(tmp_path: Path) -> None:
+    """SC-11: no mid-loop save while the clock has not advanced past 5s (no write storm)."""
+    from unittest.mock import Mock
+
+    export = _three_avatar_export(tmp_path)
+    config = _make_config(tmp_path)
+    state = _make_state()
+    save_mock = Mock()
+    monotonic = Mock(return_value=1.0)  # constant — never crosses +5.0
+
+    with (
+        patch(
+            "discord_ferry.migrator.avatars.upload_with_cache",
+            new=AsyncMock(side_effect=["a0", "a1", "a2"]),
+        ),
+        patch("discord_ferry.migrator.avatars.save_state", save_mock),
+        patch("discord_ferry.migrator.avatars.time.monotonic", monotonic),
+    ):
+        await run_avatars(config, state, [export], lambda e: None)
+
+    assert save_mock.call_count == 0
+    assert set(state.avatar_cache.values()) == {"a0", "a1", "a2"}

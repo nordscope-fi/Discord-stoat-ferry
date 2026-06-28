@@ -15,7 +15,7 @@ import aiohttp
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.core.security import safe_sanitize
+from discord_ferry.core.security import SecureTokenStore, safe_sanitize
 from discord_ferry.discord import (
     fetch_and_translate_guild_metadata,
     load_discord_metadata,
@@ -114,6 +114,32 @@ _DEFAULT_PHASES: dict[str, PhaseFunction] = {
 }
 
 
+def _safe(config: FerryConfig, text: str) -> str:
+    """Redact any known token values from *text* before it is emitted or persisted.
+
+    Thin wrapper around :func:`safe_sanitize` (None-safe) so every engine event or
+    warning that interpolates a raw exception ``repr`` honors safe_sanitize's
+    persist-or-emit contract.
+    """
+    return safe_sanitize(config.token_store, text)
+
+
+def _ensure_token_store(config: FerryConfig) -> None:
+    """Populate ``config.token_store`` from the configured tokens if not already set.
+
+    Both :func:`run_migration` and :func:`run_rollback` call this so that every error
+    message emitted/persisted during either flow is token-redacted via :func:`_safe`.
+    ``run_rollback`` is invoked directly by the CLI/GUI shells, which never set the
+    store — without this the rollback-path ``_safe`` calls would be inert.
+    """
+    if config.token_store is not None:
+        return
+    tokens: dict[str, str] = {"stoat": config.token}
+    if config.discord_token:
+        tokens["discord"] = config.discord_token
+    config.token_store = SecureTokenStore(tokens)
+
+
 async def run_migration(
     config: FerryConfig,
     on_event: EventCallback,
@@ -137,13 +163,8 @@ async def run_migration(
     """
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create token store for sanitizing error messages at output boundaries.
-    from discord_ferry.core.security import SecureTokenStore
-
-    tokens: dict[str, str] = {"stoat": config.token}
-    if config.discord_token:
-        tokens["discord"] = config.discord_token
-    config.token_store = SecureTokenStore(tokens)
+    # Ensure error messages emitted/persisted are token-redacted at output boundaries.
+    _ensure_token_store(config)
 
     if config.resume and config.incremental:
         raise MigrationError("--resume and --incremental are mutually exclusive.")
@@ -327,9 +348,10 @@ async def run_migration(
                     {
                         "phase": "export",
                         "type": "discord_metadata_fetch_failed",
-                        "message": (
+                        "message": _safe(
+                            config,
                             f"Could not fetch Discord metadata: {exc}. "
-                            "Permissions will not be migrated."
+                            "Permissions will not be migrated.",
                         ),
                     }
                 )
@@ -337,7 +359,9 @@ async def run_migration(
                     MigrationEvent(
                         phase="export",
                         status="warning",
-                        message=f"Discord metadata fetch failed: {exc}. Permissions skipped.",
+                        message=_safe(
+                            config, f"Discord metadata fetch failed: {exc}. Permissions skipped."
+                        ),
                     )
                 )
     else:
@@ -578,7 +602,7 @@ async def run_migration(
                 MigrationEvent(
                     phase="validate_migration",
                     status="warning",
-                    message=f"Validation skipped: {exc}",
+                    message=_safe(config, f"Validation skipped: {exc}"),
                 )
             )
         save_state(state, config.output_dir)
@@ -722,7 +746,7 @@ async def _acquire_migration_lock(
             MigrationEvent(
                 phase="connect",
                 status="warning",
-                message=f"Could not fetch server for lock check: {exc}",
+                message=_safe(config, f"Could not fetch server for lock check: {exc}"),
             )
         )
         return False
@@ -789,7 +813,7 @@ async def _acquire_migration_lock(
             MigrationEvent(
                 phase="connect",
                 status="warning",
-                message=f"Could not acquire migration lock: {exc}",
+                message=_safe(config, f"Could not acquire migration lock: {exc}"),
             )
         )
         return False
@@ -833,7 +857,7 @@ async def _release_migration_lock(
             MigrationEvent(
                 phase="connect",
                 status="warning",
-                message=f"Could not release migration lock: {exc}",
+                message=_safe(config, f"Could not release migration lock: {exc}"),
             )
         )
 
@@ -927,14 +951,18 @@ async def _rebuild_forum_indexes(
                     {
                         "phase": "report",
                         "type": "forum_index_rebuild_failed",
-                        "message": f"Failed to rebuild forum index for '{forum_name}': {exc}",
+                        "message": _safe(
+                            config, f"Failed to rebuild forum index for '{forum_name}': {exc}"
+                        ),
                     }
                 )
                 on_event(
                     MigrationEvent(
                         phase="report",
                         status="warning",
-                        message=f"Forum index rebuild for '{forum_name}' failed: {exc}",
+                        message=_safe(
+                            config, f"Forum index rebuild for '{forum_name}' failed: {exc}"
+                        ),
                     )
                 )
 
@@ -1232,13 +1260,13 @@ async def _delete_one_channel(
                 RollbackFailure(
                     entity_type="channel",
                     stoat_id=channel_id,
-                    error=str(exc),
+                    error=_safe(config, str(exc)),
                     http_status=http_status,
                 )
             )
             save_state(state, config.output_dir)
             severity = "error" if http_status == 401 else "warning"
-            msg = f"Failed to delete channel {channel_id}: {exc}"
+            msg = _safe(config, f"Failed to delete channel {channel_id}: {exc}")
             if http_status == 401:
                 msg += " (session token may be invalid)"
             on_event(MigrationEvent(phase="rollback", status=severity, message=msg))
@@ -1280,13 +1308,13 @@ async def _delete_one_role(
             RollbackFailure(
                 entity_type="role",
                 stoat_id=role_id,
-                error=str(exc),
+                error=_safe(config, str(exc)),
                 http_status=http_status,
             )
         )
         save_state(state, config.output_dir)
         severity = "error" if http_status == 401 else "warning"
-        msg = f"Failed to delete role {role_id}: {exc}"
+        msg = _safe(config, f"Failed to delete role {role_id}: {exc}")
         if http_status == 401:
             msg += " (session token may be invalid)"
         on_event(MigrationEvent(phase="rollback", status=severity, message=msg))
@@ -1317,13 +1345,13 @@ async def _delete_one_emoji(
             RollbackFailure(
                 entity_type="emoji",
                 stoat_id=emoji_id,
-                error=str(exc),
+                error=_safe(config, str(exc)),
                 http_status=http_status,
             )
         )
         save_state(state, config.output_dir)
         severity = "error" if http_status == 401 else "warning"
-        msg = f"Failed to delete emoji {emoji_id}: {exc}"
+        msg = _safe(config, f"Failed to delete emoji {emoji_id}: {exc}")
         if http_status == 401:
             msg += " (session token may be invalid)"
         on_event(MigrationEvent(phase="rollback", status=severity, message=msg))
@@ -1364,7 +1392,7 @@ async def _clean_categories(
             RollbackFailure(
                 entity_type="category",
                 stoat_id="<all>",
-                error=f"Could not fetch server for category cleanup: {exc}",
+                error=_safe(config, f"Could not fetch server for category cleanup: {exc}"),
                 http_status=_parse_http_status(str(exc)),
             )
         )
@@ -1373,7 +1401,7 @@ async def _clean_categories(
             MigrationEvent(
                 phase="rollback",
                 status="warning",
-                message=f"Category cleanup skipped: {exc}",
+                message=_safe(config, f"Category cleanup skipped: {exc}"),
             )
         )
         return
@@ -1388,7 +1416,7 @@ async def _clean_categories(
             RollbackFailure(
                 entity_type="category",
                 stoat_id="<all>",
-                error=str(exc),
+                error=_safe(config, str(exc)),
                 http_status=_parse_http_status(str(exc)),
             )
         )
@@ -1397,7 +1425,7 @@ async def _clean_categories(
             MigrationEvent(
                 phase="rollback",
                 status="warning",
-                message=f"Category cleanup PATCH failed: {exc}",
+                message=_safe(config, f"Category cleanup PATCH failed: {exc}"),
             )
         )
         return
@@ -1451,6 +1479,10 @@ async def run_rollback(
             is set, or if the migration lock cannot be acquired (a concurrent
             operation is in progress).
     """
+    # Token-redact error messages emitted/persisted during rollback (the CLI/GUI
+    # shells call run_rollback directly and never set the store).
+    _ensure_token_store(config)
+
     server_id = _validate_rollback_inputs(state, config)
     # Ensure the lock helpers use the resolved server ID.
     config.server_id = server_id
@@ -1493,7 +1525,7 @@ async def run_rollback(
                     MigrationEvent(
                         phase="rollback",
                         status="error",
-                        message=f"Could not fetch server {server_id}: {exc}",
+                        message=_safe(config, f"Could not fetch server {server_id}: {exc}"),
                     )
                 )
                 raise

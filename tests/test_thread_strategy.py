@@ -198,24 +198,18 @@ async def test_merge_mode_separator_sent(tmp_path: Path) -> None:
         message_count=1,
     )
 
-    sent_payloads: list[dict[str, object]] = []
+    from unittest.mock import patch
 
-    with aioresponses() as m:
-        # Capture all POST calls to the messages endpoint.
-        def capture_send(url: str, **kwargs: object) -> None:
-            sent_payloads.append(kwargs.get("json", {}))  # type: ignore[arg-type]
+    keys: list[str] = []
 
-        # Allow multiple sends to any channel.
-        for _ in range(10):
-            m.post(
-                f"{STOAT_URL}/channels/stoat-ch-100/messages",
-                payload={"_id": "msg-result"},
-                repeat=True,
-            )
-
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], events.append)
 
-    # Verify the separator message was sent (check event messages).
+    # The separator message was actually sent (idempotency_key ferry-thread-sep-{channel_id}).
+    # Pins the separator payload at the send level — a broken separator now fails this test.
+    assert "ferry-thread-sep-200" in keys
+
+    # Existing event-level assertion preserved.
     event_msgs = [e.message for e in events]
     assert any("Merged thread" in msg and "my-thread" in msg for msg in event_msgs)
 
