@@ -42,7 +42,12 @@ jobs:
         run: uv run mypy src/
 
       - name: Tests
-        run: uv run pytest
+        # Exclude the DCE contract test from the version matrix: it downloads the
+        # real DCE binary from GitHub's unauthenticated API, so running it across
+        # 3 Python versions concurrently trips the API rate limit (intermittent
+        # 403 flake). The dedicated cached `contract-test` job below is its sole
+        # owner; the matrix only needs the pure-Python suite.
+        run: uv run pytest --ignore=tests/test_dce_contract.py
 
   contract-test:
     name: Contract test (DCE binary)
