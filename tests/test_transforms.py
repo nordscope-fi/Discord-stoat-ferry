@@ -749,3 +749,67 @@ def test_multiple_links() -> None:
     assert "<#stoat_ch1>" in result
     assert "<#stoat_ch2>" in result
     assert "[Discord invite — no longer valid]" in result
+
+
+# ---------------------------------------------------------------------------
+# Batch 9 — S1a bold-safe underline strip
+# ---------------------------------------------------------------------------
+
+
+def test_strip_underline_preserves_adjacent_bold() -> None:
+    """SC-1: pre-existing **a****b** (no underscores) is untouched."""
+    assert strip_underline("**a****b**") == "**a****b**"
+
+
+def test_strip_underline_preserves_literal_stars() -> None:
+    """SC-2: ****literal**** and a **** b unchanged (no underscores)."""
+    assert strip_underline("****literal****") == "****literal****"
+    assert strip_underline("a **** b") == "a **** b"
+
+
+def test_strip_underline_nested_collapses() -> None:
+    """SC-3: nested bold+underline → single bold."""
+    assert strip_underline("**__x__**") == "**x**"
+    assert strip_underline("__**x**__") == "**x**"
+
+
+def test_strip_underline_standalone() -> None:
+    """SC-4: __u__ → **u**."""
+    assert strip_underline("__u__") == "**u**"
+
+
+def test_strip_underline_compound_preserves_existing_seam() -> None:
+    """SC-5: convert underline AND preserve a pre-existing **** elsewhere."""
+    assert strip_underline("__u__ **a****b**") == "**u** **a****b**"
+
+
+def test_strip_underline_abutting_new_contract() -> None:
+    """SC-6: non-nested abutting __a__**b** → **a****b** (both bold preserved; NEW contract)."""
+    assert strip_underline("__a__**b**") == "**a****b**"
+
+
+def test_strip_underline_protects_code_spans() -> None:
+    """SC-7: **** inside a code span is not collapsed."""
+    assert strip_underline("`**a****b**`") == "`**a****b**`"
+
+
+# ---------------------------------------------------------------------------
+# Batch 9 — S1b tz-safe timestamp
+# ---------------------------------------------------------------------------
+
+
+def test_format_timestamp_offset_unchanged() -> None:
+    """SC-9: offset-bearing timestamps convert as today."""
+    assert format_original_timestamp("2024-01-15T12:00:00+00:00") == "*[2024-01-15 12:00 UTC]*"
+    assert format_original_timestamp("2024-01-15T12:00:00+05:30") == "*[2024-01-15 06:30 UTC]*"
+
+
+def test_format_timestamp_naive_is_utc() -> None:
+    """SC-10: a tz-naive timestamp is treated as UTC (no host-TZ shift)."""
+    # Host-TZ-independent: naive 12:00 must render 12:00 UTC, never shifted.
+    assert format_original_timestamp("2024-01-15T12:00:00") == "*[2024-01-15 12:00 UTC]*"
+
+
+def test_format_timestamp_malformed_returns_raw() -> None:
+    """SC-11: a non-ISO string returns the raw input (no raise)."""
+    assert format_original_timestamp("not-a-date") == "not-a-date"

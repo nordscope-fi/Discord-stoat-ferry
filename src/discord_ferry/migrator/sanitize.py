@@ -65,9 +65,18 @@ def sanitize_emoji_name(
 
     if used_names is not None:
         if sanitized in used_names:
-            used_names[sanitized] += 1
-            suffixed = f"{sanitized}_{used_names[sanitized]}"
-            sanitized = suffixed[:_DEFAULT_MAX_LENGTH]
+            count = used_names[sanitized] + 1
+            suffix = f"_{count}"
+            candidate = sanitized[: _DEFAULT_MAX_LENGTH - len(suffix)] + suffix
+            # Bump until unique among ALL emitted names (handles a raw name that
+            # equals a previously auto-generated suffixed name).
+            while candidate in used_names:
+                count += 1
+                suffix = f"_{count}"
+                candidate = sanitized[: _DEFAULT_MAX_LENGTH - len(suffix)] + suffix
+            used_names[sanitized] = count  # advance the base counter
+            used_names[candidate] = 1  # register the EMITTED name so it can't re-collide
+            sanitized = candidate
         else:
             used_names[sanitized] = 1
     return sanitized

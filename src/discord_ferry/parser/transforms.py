@@ -45,6 +45,10 @@ _DISCORD_INVITE_RE = re.compile(
 
 _SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
 _UNDERLINE_RE = re.compile(r"__([^_]+?)__")
+# Nested bold+underline: collapse to a single bold directly (before the general
+# underline sub) so a pre-existing adjacent-bold run (**a****b**) is never touched.
+_BOLD_WRAPS_UNDERLINE_RE = re.compile(r"\*\*__([^_]+?)__\*\*")
+_UNDERLINE_WRAPS_BOLD_RE = re.compile(r"__\*\*([^_]+?)\*\*__")
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
@@ -329,7 +333,12 @@ def format_original_timestamp(iso_timestamp: str) -> str:
     Returns:
         Formatted string like ``*[2024-01-15 12:00 UTC]*``.
     """
-    dt = datetime.fromisoformat(iso_timestamp)
+    try:
+        dt = datetime.fromisoformat(iso_timestamp)
+    except ValueError:
+        return iso_timestamp  # malformed → raw fallback, never abort the message
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)  # naive DCE timestamp → UTC (no host-TZ shift)
     utc_dt = dt.astimezone(UTC)
     return f"*[{utc_dt.strftime('%Y-%m-%d %H:%M')} UTC]*"
 
@@ -377,6 +386,12 @@ def strip_underline(content: str) -> str:
     Returns:
         Content with underline syntax converted to bold outside code spans.
     """
-    result = _transform_outside_code(content, lambda s: _UNDERLINE_RE.sub(r"**\1**", s))
-    # Collapse **** sequences that arise when underline wraps bold: **__text__** → ****text****
-    return result.replace("****", "**")
+
+    def _underline_to_bold(s: str) -> str:
+        # Collapse nested bold+underline directly (Stoat has no underline), BEFORE the
+        # general sub, so a pre-existing **a****b** is never blindly collapsed.
+        s = _BOLD_WRAPS_UNDERLINE_RE.sub(r"**\1**", s)  # **__x__** → **x**
+        s = _UNDERLINE_WRAPS_BOLD_RE.sub(r"**\1**", s)  # __**x**__ → **x**
+        return _UNDERLINE_RE.sub(r"**\1**", s)  # standalone __x__ → **x**
+
+    return _transform_outside_code(content, _underline_to_bold)

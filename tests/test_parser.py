@@ -715,3 +715,33 @@ def test_validate_export_counts_expired_urls(tmp_path: Path) -> None:
     assert len(expired_warnings) == 1
     assert "2" in expired_warnings[0]["message"]
     assert "--media" in expired_warnings[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Batch 9 — S2 type-aware thread classification
+# ---------------------------------------------------------------------------
+
+
+def test_infer_thread_type_overrides_dash_guild() -> None:
+    """SC-12: a dash-guild text channel (type 0) is NOT a thread."""
+    assert _infer_thread_info("Acme - Community - general [123]", channel_type=0) == (False, "")
+
+
+def test_infer_thread_real_thread_type() -> None:
+    """SC-13: a real thread (type 11) is a thread with the right parent."""
+    assert _infer_thread_info("Guild - Channel - Thread [123]", channel_type=11) == (
+        True,
+        "Channel",
+    )
+
+
+def test_infer_thread_plain_channel_type() -> None:
+    """SC-14: a plain 2-segment channel (type 0) is not a thread."""
+    assert _infer_thread_info("Guild - general [123]", channel_type=0) == (False, "")
+
+
+def test_two_segment_re_removed() -> None:
+    """SC-17: the dead _TWO_SEGMENT_RE is gone (no compiled-but-unused regex)."""
+    import discord_ferry.parser.dce_parser as p
+
+    assert not hasattr(p, "_TWO_SEGMENT_RE")

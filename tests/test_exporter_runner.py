@@ -20,7 +20,7 @@ from discord_ferry.exporter.runner import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from discord_ferry.core.events import MigrationEvent
@@ -39,12 +39,22 @@ def _make_config(tmp_path: Path) -> FerryConfig:
     )
 
 
-async def _empty_stderr_iter() -> AsyncGenerator[bytes, None]:
-    for _ in ():
-        yield b""
+def _make_stream_reader(lines: list[bytes]) -> asyncio.StreamReader:
+    """A real StreamReader pre-loaded with lines (supports readuntil + EOF).
+
+    An empty list yields an EOF reader: readuntil() raises
+    IncompleteReadError(partial=b"") → _read_stderr breaks cleanly.
+    """
+    reader = asyncio.StreamReader()
+    for line in lines:
+        reader.feed_data(line)
+    reader.feed_eof()
+    return reader
 
 
-def _make_process(stdout_lines: list[bytes], returncode: int = 0) -> MagicMock:
+def _make_process(
+    stdout_lines: list[bytes], returncode: int = 0, stderr_lines: list[bytes] | None = None
+) -> MagicMock:
     """Build a MagicMock subprocess that yields stdout_lines via readuntil()."""
     process = MagicMock()
     queue: list[bytes] = list(stdout_lines)
@@ -57,7 +67,7 @@ def _make_process(stdout_lines: list[bytes], returncode: int = 0) -> MagicMock:
     stdout = MagicMock()
     stdout.readuntil = _readuntil
     process.stdout = stdout
-    process.stderr = _empty_stderr_iter()
+    process.stderr = _make_stream_reader(stderr_lines or [])
     process.wait = AsyncMock(return_value=returncode)
     process.returncode = returncode
     process.terminate = MagicMock()
@@ -759,3 +769,92 @@ class TestHeartbeat:
         assert heartbeats, "no heartbeat events emitted"
         for e in heartbeats:
             assert e.phase == "export", f"expected phase='export', got {e.phase!r}"
+
+
+# ---------------------------------------------------------------------------
+# Batch 9 — S3 symmetric stderr drain + cancel + activity
+# ---------------------------------------------------------------------------
+
+
+class TestStderrOverlongLine:
+    @pytest.mark.asyncio
+    async def test_overlong_stderr_line_captured_not_crashed(self, tmp_path: Path) -> None:
+        """SC-19: a >64 KiB stderr line is captured (truncated marker), not a ValueError crash."""
+        from discord_ferry.errors import ExportError
+
+        process = _make_process([], returncode=1)
+        stderr = asyncio.StreamReader(limit=64)
+        stderr.feed_data(b"x" * 200)  # one >64-byte line, no newline
+        stderr.feed_eof()
+        process.stderr = stderr
+        cfg = _make_config(tmp_path)
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(ExportError, match="exceeded 64 KiB"),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+    @pytest.mark.asyncio
+    async def test_normal_stderr_accumulates(self, tmp_path: Path) -> None:
+        """SC-22: normal stderr lines accumulate (surfaced in the ExportError)."""
+        from discord_ferry.errors import ExportError
+
+        process = _make_process([], returncode=1, stderr_lines=[b"a real error\n"])
+        cfg = _make_config(tmp_path)
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(ExportError, match="a real error"),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+
+class TestDrainCancel:
+    @pytest.mark.asyncio
+    async def test_drain_overlong_line_respects_cancel(self) -> None:
+        """SC-20: _drain_overlong_line returns promptly when cancel_event is already set."""
+        reader = asyncio.StreamReader(limit=64)
+        reader.feed_data(b"x" * 1000)  # many 64-byte chunks
+        reader.feed_eof()
+        with pytest.raises(asyncio.LimitOverrunError):
+            await reader.readuntil(b"\n")
+
+        cancel = asyncio.Event()
+        cancel.set()
+        # With cancel pre-set, the drain must break early rather than consume to EOF.
+        consumed = await _drain_overlong_line(reader, cancel)
+        assert consumed >= 0
+        assert not reader.at_eof()  # did NOT drain everything
+
+
+class TestOverlongStdoutActivity:
+    @pytest.mark.asyncio
+    async def test_overlong_stdout_emits_truncation_event(self, tmp_path: Path) -> None:
+        """SC-21: an overlong stdout line emits a truncation event and the run completes.
+
+        Proves the overlong-stdout branch (which now also records activity) executes
+        through to its emit + continue without crashing.
+        """
+        stdout = asyncio.StreamReader(limit=64)
+        stdout.feed_data(b"y" * 200)  # overlong line (no newline before 64 KiB)
+        stdout.feed_data(b"general: 50%\n")  # a normal line after the drain
+        stdout.feed_eof()
+        process = _make_process([])
+        process.stdout = stdout
+        cfg = _make_config(tmp_path)
+
+        events: list[MigrationEvent] = []
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", events.append)
+
+        assert any("truncated" in (e.message or "") for e in events)

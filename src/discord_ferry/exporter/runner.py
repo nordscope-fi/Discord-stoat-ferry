@@ -290,7 +290,9 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
         await process.wait()
 
 
-async def _drain_overlong_line(reader: asyncio.StreamReader) -> int:
+async def _drain_overlong_line(
+    reader: asyncio.StreamReader, cancel_event: asyncio.Event | None = None
+) -> int:
     r"""Consume bytes from `reader` until we reach `\n` (or EOF).
 
     Used after `readuntil(b"\n")` raised LimitOverrunError to ensure the
@@ -301,9 +303,13 @@ async def _drain_overlong_line(reader: asyncio.StreamReader) -> int:
       - `readuntil` finds the next `\n` (returns tail, total + len(tail))
       - EOF is hit (IncompleteReadError, total + len(exc.partial))
       - Another LimitOverrunError fires (consume that 64KiB chunk and keep going)
+      - `cancel_event` is set (stop draining promptly so cancellation isn't
+        deferred until a multi-MB line ends)
     """
     total = 0
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return total
         try:
             tail = await reader.readuntil(b"\n")
             total += len(tail)
@@ -402,7 +408,19 @@ async def run_dce_export(
 
     async def _read_stderr() -> None:
         assert process.stderr is not None
-        async for raw_line in process.stderr:
+        # Mirror the stdout loop: an explicit readuntil loop so a >64 KiB stderr
+        # line is drained (not crashed via `async for`'s readline → ValueError).
+        while True:
+            try:
+                raw_line = await process.stderr.readuntil(b"\n")
+            except asyncio.IncompleteReadError as exc:
+                raw_line = exc.partial
+                if not raw_line:
+                    break
+            except asyncio.LimitOverrunError:
+                consumed = await _drain_overlong_line(process.stderr)
+                stderr_lines.append(f"<truncated {consumed} bytes; stderr line exceeded 64 KiB>")
+                continue
             line = raw_line.decode("utf-8", errors="replace").strip()
             if line:
                 stderr_lines.append(line)
@@ -414,6 +432,12 @@ async def run_dce_export(
 
     try:
         while True:
+            # Check cancel at the top so a cancel during a long drain (below) or a
+            # huge blocking read isn't deferred until the next full line.
+            if config.cancel_event and config.cancel_event.is_set():
+                await _terminate_process(process)
+                raise asyncio.CancelledError("Export cancelled by user")
+
             try:
                 raw_line = await process.stdout.readuntil(b"\n")
             except asyncio.IncompleteReadError as exc:
@@ -423,7 +447,7 @@ async def run_dce_export(
             except asyncio.LimitOverrunError:
                 # Line longer than 64 KiB -- drain to next \n entirely so the
                 # remainder does not get parsed as a separate "line".
-                consumed = await _drain_overlong_line(process.stdout)
+                consumed = await _drain_overlong_line(process.stdout, config.cancel_event)
                 on_event(
                     MigrationEvent(
                         phase="export",
@@ -431,6 +455,7 @@ async def run_dce_export(
                         message=(f"[dce] <truncated {consumed} bytes; line exceeded 64 KiB>"),
                     )
                 )
+                _record_activity()  # real output flowed — don't let the heartbeat cry "silent"
                 continue
 
             if config.cancel_event and config.cancel_event.is_set():
@@ -444,7 +469,7 @@ async def run_dce_export(
             logger.debug("DCE: %s", line)
             parsed = parse_dce_line(line)
             _emit_for_parsed(parsed, on_event, state)
-            if isinstance(parsed, (PerChannel, Phase, Success, Raw)):
+            if isinstance(parsed, (PerChannel, Phase, Success, Raw, Banner, StatusDot)):
                 _record_activity()
 
         await process.wait()
