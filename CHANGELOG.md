@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Documentation
+
+- README and docs landing page gained a "Tunable performance" reliability bullet pointing at
+  the v2.7.0 flags (concurrency, reaction mode, thread filtering, checkpointing). Docs-only;
+  no version bump.
+
 ## [2.7.0] - 2026-07-06
 
 ### Added
