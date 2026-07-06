@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Documentation
+
+- **User-facing docs caught up with the code (v2.2.3 → v2.6.17).** The README, CLI reference,
+  and guides had drifted ~14 releases behind. Highlights: the `ferry probe` command and
+  post-migration invite generation are now documented; the "what gets migrated" tables include
+  the native-fidelity work (role hoist/icons/live discovery, server description & NSFW,
+  category ordering, slowmode, voice user limits); "role icons not migrated" and "slowmode
+  not supported" removed from known limitations (both migrated since v2.5.0); all references
+  to GUI Advanced Options controls that do not exist (reaction mode, min thread messages,
+  checkpoint interval, concurrency, skip avatars, validate after) replaced with an honest
+  "internal defaults, not currently configurable" note; wrong report filename `report.json`
+  corrected to `migration_report.json`; `export-blueprint` options corrected (`--output` is
+  required; `--name` exists); README gained badges and a section on the non-migration
+  commands. Docs-only; no version bump.
+
+### Internal
+
+- **Removed dead `_patch_checksums` test helper** (`tests/test_exporter_manager.py`). It was defined but never called (every `TestVerifyDceChecksum` test inlines its own `patch("importlib.resources.files")`), and was broken anyway — it built a `_Ctx` context manager then ignored it and returned a fresh, unconfigured patcher, papered over with `# type: ignore[return]`. No behavior change; suite stays at 926 passed.
+
 ## [2.6.17] - 2026-06-28
 
 ### Security
@@ -417,12 +438,6 @@ Autumn upload robustness cluster — the first batch from the 2026-06-25 v2.6.6 
 - **Extracted `_stoat_channel_type(int) -> str`** in `migrator/structure.py` as the single source of truth for the Discord-type → Stoat-type mapping (type 2 → Voice, else Text), replacing the inline match in `run_channels`.
 - All three new metadata fields round-trip through `discord_metadata.json` with `.get()`-defaulted decodes, so pre-upgrade metadata files load forward-compatibly and trigger the graceful-skip path. Locked by a deep-equality round-trip test in `tests/test_metadata.py`.
 - The **end-of-run server invite** (S4) originally scoped alongside these features was dropped from this release: `api_create_invite` belongs to the in-progress probe-and-invites feature, so invite generation will ship there rather than be duplicated here.
-
-## [Unreleased]
-
-### Internal
-
-- **Removed dead `_patch_checksums` test helper** (`tests/test_exporter_manager.py`). It was defined but never called (every `TestVerifyDceChecksum` test inlines its own `patch("importlib.resources.files")`), and was broken anyway — it built a `_Ctx` context manager then ignored it and returned a fresh, unconfigured patcher, papered over with `# type: ignore[return]`. No behavior change; suite stays at 926 passed.
 
 ## [2.2.12] - 2026-06-07
 

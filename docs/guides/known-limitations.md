@@ -10,14 +10,14 @@ These limitations relate to how channels, threads, and server organization are r
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel, or `--thread-strategy archive` to export as a markdown attachment. In the GUI, use the **Min thread messages** setting to filter out low-activity threads and reduce channel count. |
+| Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel, or `--thread-strategy archive` to export as a markdown attachment. Both are also available in the GUI's thread strategy setting. |
 | Forum posts | Each post becomes a text channel inside a `forum-*` category, with an auto-generated index channel listing all posts | None — this is the closest structural equivalent |
 | Stage Channels | Not migrated (no Stoat equivalent) | None |
 | Scheduled Events | Not migrated | None |
-| Channel ordering | Display order may differ from the original Discord layout | Manually reorder channels in Stoat after migration |
+| Channel ordering | Categories follow the original Discord order (since v2.3.0, requires a Discord token), but channels *inside* a category may appear in a different order | Manually reorder channels within categories in Stoat after migration |
 
 !!! note "Thread handling and channel limits"
-    With the default `flatten` strategy, every thread becomes a channel. A busy Discord server with hundreds of threads can easily exceed Stoat's 200-channel limit. Use `--thread-strategy merge` or `archive` to avoid creating extra channels, set a minimum message count in the GUI's **Min thread messages** setting, or use `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md).
+    With the default `flatten` strategy, every thread becomes a channel. A busy Discord server with hundreds of threads can easily exceed Stoat's 200-channel limit. Use `--thread-strategy merge` or `archive` to avoid creating extra channels, or use `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md).
 
 ---
 
@@ -30,7 +30,7 @@ These limitations affect how individual messages and their content appear after 
 | Embeds | Flattened to markdown text; inline fields use `\|` separators | None — Stoat embeds have a different structure and cannot replicate Discord embeds exactly |
 | Polls | Rendered as plain text showing the question and options | None |
 | Stickers | Uploaded as image attachments where the source file is available; Lottie (animated) stickers receive a text fallback | None — Lottie format is not supported by Stoat |
-| Reactions | Text summary appended to the message by default (`reaction_mode="text"`). Shows emoji and count. | In the GUI, set **Reaction mode** to **Native** for per-emoji reactions added via the Stoat API (slower, limited to 20 per message) |
+| Reactions | Text summary appended to the message by default. Shows emoji and count. Stoat allows at most 20 reactions per message; anything beyond that is dropped and counted in the migration report. | None — reaction handling is currently fixed to text mode (see [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable)) |
 | Forwarded messages | Skipped entirely | None — this is a DiscordChatExporter limitation; forwarded messages export as empty content |
 | Long messages (>2000 chars) | Split into sequential parts with `[continued K/N]` markers (e.g. `[continued 2/3]`). Original content is fully preserved across parts. | None needed — splitting is automatic and lossless |
 | Author names >32 chars | Truncated to 29 chars with a `#XXXX` discriminator suffix derived from the author's Discord ID. Ensures uniqueness while fitting the Stoat masquerade name limit. | None — the suffix preserves attributability even after truncation |
@@ -46,6 +46,8 @@ These limitations affect role and permission migration.
 |-----------------|----------------|------------|
 | Per-member channel overrides | Not supported by Stoat; only role-based overrides are migrated | Create a single-user role for each member who had individual overrides, then apply the override to that role |
 | Managed roles (bot roles) | Not migrated — these are auto-created by Discord for each bot integration | None needed — bot integrations do not carry over |
+| Role membership | Roles are recreated, but members are **not** assigned to them — there is no reliable way to map Discord accounts to Stoat accounts | Members re-join via invite and assign roles manually (or with a Stoat bot) |
+| "Mention @everyone" permission | Dropped — Stoat has no equivalent permission | None |
 
 ---
 
@@ -74,20 +76,30 @@ These limitations affect use cases involving large servers or non-standard expor
 
 ---
 
+## Incremental Migration
+
+`--incremental` copies messages that are **new** since the last completed run. Two things to know:
+
+| Limitation | Detail | Workaround |
+|------------|--------|------------|
+| New messages only | Incremental detects messages *added* after the last run. Messages that were **edited or deleted** on Discord in the meantime are not updated on Stoat. | None — full edit/delete sync is out of scope |
+| Failed messages | Messages that failed to send in a previous run are re-sent automatically by the next `--incremental` run. | None needed — this is automatic |
+
+---
+
 ## Platform Features
 
 These limitations relate to platform-level features that either work differently or have no equivalent in Stoat.
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Voice channels | Created, but functionality may be limited due to a known upstream issue (Stoat Bug #194) | Verify channel types in the Stoat web interface after migration; voice requires the Vortex or LiveKit service |
+| Voice channels | Created, but functionality may be limited due to a known upstream issue (Stoat Bug #194) | Verify channel types in the Stoat web interface after migration; voice requires the Vortex or LiveKit service. Run `ferry probe` to check whether your instance supports voice before migrating. |
 | AutoMod | Not supported by Stoat | Configure moderation manually after migration |
 | Welcome Screen | Not migrated | None |
 | Soundboard | Not supported by Stoat | None |
-| Role icons | Not migrated — Stoat roles do not support icons | None |
+| Role icons | Image icons are migrated (since v2.5.0, requires a Discord token). Emoji-only role icons cannot be migrated. | None for emoji icons — Stoat only supports image icons |
 | Animated emoji | Static fallback uploaded where possible; some animated emoji may be skipped | None — Stoat does not support animated emoji |
 | Server boosts | Not applicable — Stoat uses a different model | None |
-| Slowmode | Not supported by Stoat | None |
 
 ---
 

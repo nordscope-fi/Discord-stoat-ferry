@@ -78,23 +78,18 @@ For powerful self-hosted instances, you can increase concurrency to speed up mig
 | `max_concurrent_channels` | 3 | Channels processed in parallel during the message phase |
 | `max_concurrent_requests` | 5 | Total concurrent API calls across all channel workers |
 
-These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both can be raised for self-hosted instances with relaxed rate limits.
+These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls.
 
-=== "GUI"
-    On the Setup screen, expand **Advanced Options** to find the concurrency settings. Try 6 concurrent channels and 12 concurrent requests for a powerful self-hosted instance.
-
-=== "CLI"
-    These concurrency settings are currently available through the GUI only. CLI flags are planned for a future release. The defaults (3 channels, 5 requests) are safe for most setups.
-
-Monitor your Stoat server load and reduce these values if you encounter frequent 429 errors.
+!!! info "Fixed defaults"
+    These concurrency settings are internal defaults and cannot currently be changed from the GUI or CLI. See [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable) in the CLI reference. To adjust migration speed, use the `--rate-limit` and `--upload-delay` flags (or the GUI's rate-limit slider) instead.
 
 ---
 
 ## Ferry GUI Storage Secret
 
-The Ferry GUI uses a storage secret to persist session data (such as your API URL and token between page navigations). By default, a random secret is generated each time Ferry starts.
+The Ferry GUI uses a storage secret to persist non-sensitive session settings (such as your Stoat API URL) between page navigations. Tokens are never part of this — they are held in memory only and are never written to disk. By default, a random secret is generated each time Ferry starts.
 
-To persist sessions across restarts, set the `FERRY_STORAGE_SECRET` environment variable:
+To persist settings across restarts, set the `FERRY_STORAGE_SECRET` environment variable:
 
 ```bash
 export FERRY_STORAGE_SECRET="your-random-secret-here"
