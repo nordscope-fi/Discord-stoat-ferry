@@ -9,6 +9,7 @@ import textwrap
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import urlparse
 
 import aiohttp
 import click
@@ -513,6 +514,57 @@ _common_options = [
         default=False,
         help="Override a stale migration lock on the target server (S17)",
     ),
+    click.option(
+        "--reaction-mode",
+        type=click.Choice(["text", "native", "skip"]),
+        default="text",
+        help=(
+            "How reactions migrate: text = summary appended to the message (fast, default); "
+            "native = per-emoji API calls (slow, Stoat cap 20/message); skip = none"
+        ),
+    ),
+    click.option(
+        "--min-thread-messages",
+        type=click.IntRange(min=0),
+        default=0,
+        help=(
+            "Exclude threads with fewer messages (0 = include all); "
+            "applies to every thread strategy"
+        ),
+    ),
+    click.option(
+        "--checkpoint-interval",
+        type=click.IntRange(min=1),
+        default=50,
+        help="Save state every N messages (lower = safer, more disk I/O)",
+    ),
+    click.option(
+        "--max-concurrent-channels",
+        type=click.IntRange(min=1),
+        default=3,
+        help="Channels migrated in parallel — raise only on self-hosted instances",
+    ),
+    click.option(
+        "--max-concurrent-requests",
+        type=click.IntRange(min=1),
+        default=5,
+        help="Concurrent API calls across all workers — raise only on self-hosted instances",
+    ),
+    click.option(
+        "--skip-avatars",
+        is_flag=True,
+        default=False,
+        help="Skip the avatar pre-flight phase; avatars still upload on demand during messages",
+    ),
+    click.option(
+        "--validate-after",
+        is_flag=True,
+        default=False,
+        help=(
+            "After migration, fetch the server and compare channel/role counts "
+            "(results in state.json)"
+        ),
+    ),
 ]
 
 
@@ -584,6 +636,13 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
         force_unlock=kwargs.get("force_unlock", False),
         create_invite=kwargs.get("create_invite", True),
         invite_channel_id=kwargs.get("invite_channel_id"),
+        reaction_mode=kwargs.get("reaction_mode", "text"),
+        min_thread_messages=kwargs.get("min_thread_messages", 0),
+        checkpoint_interval=kwargs.get("checkpoint_interval", 50),
+        max_concurrent_channels=kwargs.get("max_concurrent_channels", 3),
+        max_concurrent_requests=kwargs.get("max_concurrent_requests", 5),
+        skip_avatars=kwargs.get("skip_avatars", False),
+        validate_after=kwargs.get("validate_after", False),
     )
 
 
@@ -615,6 +674,16 @@ def migrate(**kwargs: Any) -> None:
     except click.UsageError as exc:
         console.print(f"[bold red]Error:[/] {_safe(exc)}")
         sys.exit(1)
+
+    host = urlparse(config.stoat_url).hostname if config.stoat_url else None
+    if host == "api.stoat.chat" and (
+        config.max_concurrent_channels > 3 or config.max_concurrent_requests > 5
+    ):
+        console.print(
+            "[yellow]Warning:[/] raising concurrency on the official Stoat service usually "
+            "makes runs slower — its rate limits trigger 429 backoff. These flags are "
+            "intended for self-hosted instances."
+        )
 
     if not config.skip_export and not kwargs.get("yes"):
         try:

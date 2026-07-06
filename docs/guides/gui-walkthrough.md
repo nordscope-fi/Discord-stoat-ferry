@@ -52,7 +52,29 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
 | Server name | *(empty)* | Name for the new Stoat server. Defaults to the Discord server's name. |
 
-A few settings (checkpoint interval, reaction mode, minimum thread messages, and others) are fixed to safe internal defaults and cannot currently be changed from the GUI or CLI — see [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable) in the CLI reference.
+Below these, three labelled groups hold the tuning settings (since v2.7.0):
+
+**Speed**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| Concurrent channels | 3 | Channels migrated in parallel. Raise only on self-hosted instances — the GUI warns if you raise it while targeting the official service. |
+| Concurrent API requests | 5 | Total concurrent API calls across all channel workers. Same self-hosted caveat. |
+
+**Content**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| Reaction mode | Text | **Text** appends a reaction summary to each message (fast). **Native** adds per-emoji reactions via the API (slow, Stoat caps 20 per message). **Skip** drops reactions. |
+| Min thread messages | 0 | Exclude threads with fewer messages than this (0 = include all). Useful for servers with hundreds of low-activity threads. |
+| Skip avatar pre-flight | Off | Skip the avatar batch-upload phase; avatars still upload on demand during messages. |
+
+**Safety**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more disk I/O. |
+| Validate after migration | Off | After migration, fetch the server and compare channel/role counts against expectations. |
 
 !!! tip "Running into 'Too Many Requests' errors?"
     That error (code 429) means Stoat is asking Ferry to slow down. Increase the rate limit slider to 2.0 or 3.0 seconds. This slows the migration but eliminates the errors.

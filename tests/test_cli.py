@@ -1261,3 +1261,172 @@ def test_export_blueprint_keeps_voice_type(runner: CliRunner, tmp_path: Path) ->
     types = {c["name"]: c["type"] for c in all_ch}
     assert types.get("General Voice") == "Voice"  # A1: export unchanged
     assert types.get("general") == "Text"
+
+
+# ---------------------------------------------------------------------------
+# Issue #99 — seven exposed settings
+# ---------------------------------------------------------------------------
+
+_BASE_MIGRATE_ARGS = [
+    "migrate",
+    "--export-dir",
+    FIXTURES_DIR,
+    "--stoat-url",
+    "http://localhost",
+    "--token",
+    "t",
+]
+
+_EXPOSED_FIELDS = (
+    "reaction_mode",
+    "min_thread_messages",
+    "checkpoint_interval",
+    "max_concurrent_channels",
+    "max_concurrent_requests",
+    "skip_avatars",
+    "validate_after",
+)
+
+
+def test_migrate_exposed_settings_land_on_config(runner: CliRunner) -> None:
+    """SC-1: every new flag reaches FerryConfig."""
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            [
+                *_BASE_MIGRATE_ARGS,
+                "--reaction-mode",
+                "native",
+                "--min-thread-messages",
+                "5",
+                "--checkpoint-interval",
+                "100",
+                "--max-concurrent-channels",
+                "6",
+                "--max-concurrent-requests",
+                "12",
+                "--skip-avatars",
+                "--validate-after",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.reaction_mode == "native"
+    assert config.min_thread_messages == 5
+    assert config.checkpoint_interval == 100
+    assert config.max_concurrent_channels == 6
+    assert config.max_concurrent_requests == 12
+    assert config.skip_avatars is True
+    assert config.validate_after is True
+
+
+def test_migrate_no_flags_preserves_defaults(runner: CliRunner) -> None:
+    """SC-2: omitting all seven flags produces dataclass-default values."""
+    from discord_ferry.config import FerryConfig as RuntimeFerryConfig
+
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(main, _BASE_MIGRATE_ARGS, catch_exceptions=False)
+    assert result.exit_code == 0
+    config: FerryConfig = mock_engine.call_args[0][0]
+    defaults = RuntimeFerryConfig(export_dir=Path(FIXTURES_DIR), stoat_url="x", token="x")
+    for field in _EXPOSED_FIELDS:
+        assert getattr(config, field) == getattr(defaults, field), field
+
+
+def test_migrate_help_documents_exposed_settings(runner: CliRunner) -> None:
+    """SC-3: --help lists every new flag."""
+    result = runner.invoke(main, ["migrate", "--help"])
+    assert result.exit_code == 0
+    for flag in (
+        "--reaction-mode",
+        "--min-thread-messages",
+        "--checkpoint-interval",
+        "--max-concurrent-channels",
+        "--max-concurrent-requests",
+        "--skip-avatars",
+        "--validate-after",
+    ):
+        assert flag in result.output, flag
+
+
+def test_other_commands_unchanged_by_exposed_settings(runner: CliRunner) -> None:
+    """SC-8: the seven flags are migrate-only; rollback keeps its own concurrency flag."""
+    for command in ("rollback", "build", "probe", "validate"):
+        result = runner.invoke(main, [command, "--help"])
+        assert result.exit_code == 0
+        for flag in (
+            "--reaction-mode",
+            "--min-thread-messages",
+            "--checkpoint-interval",
+            "--max-concurrent-channels",
+            "--skip-avatars",
+            "--validate-after",
+        ):
+            assert flag not in result.output, f"{flag} leaked into {command}"
+    rollback_help = runner.invoke(main, ["rollback", "--help"]).output
+    assert "--max-concurrent-requests" in rollback_help  # its own, unrelated flag
+
+
+def test_migrate_rejects_out_of_range_settings(runner: CliRunner) -> None:
+    """SC-10: Choice/IntRange reject bad values at parse time; engine never invoked."""
+    mock_engine = _make_mock_engine()
+    bad_args = [
+        ["--reaction-mode", "emoji"],
+        ["--min-thread-messages", "-1"],
+        ["--checkpoint-interval", "0"],
+        ["--max-concurrent-channels", "0"],
+        ["--max-concurrent-requests", "0"],
+    ]
+    for extra in bad_args:
+        with patch("discord_ferry.cli.run_migration", mock_engine):
+            result = runner.invoke(main, [*_BASE_MIGRATE_ARGS, *extra])
+        assert result.exit_code != 0, extra
+        mock_engine.assert_not_called()
+
+
+def test_migrate_warns_on_official_service_concurrency(runner: CliRunner) -> None:
+    """SC-11: warning fires only for official host + raised concurrency; never blocks."""
+    cases = [
+        # (stoat_url, extra_args, expect_warning)
+        ("https://api.stoat.chat", ["--max-concurrent-channels", "6"], True),
+        ("https://api.stoat.chat", ["--max-concurrent-requests", "12"], True),
+        ("https://api.stoat.chat", [], False),
+        ("https://stoat.example.com", ["--max-concurrent-channels", "6"], False),
+    ]
+    for stoat_url, extra, expect in cases:
+        mock_engine = _make_mock_engine()
+        with patch("discord_ferry.cli.run_migration", mock_engine):
+            result = runner.invoke(
+                main,
+                [
+                    "migrate",
+                    "--export-dir",
+                    FIXTURES_DIR,
+                    "--stoat-url",
+                    stoat_url,
+                    "--token",
+                    "t",
+                    *extra,
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0, (stoat_url, extra)  # informational — never blocks
+        mock_engine.assert_called_once()
+        has_warning = "self-hosted" in result.output
+        assert has_warning is expect, (stoat_url, extra, result.output)
+
+
+def test_state_roundtrip_excludes_exposed_settings(tmp_path: Path) -> None:
+    """SC-12: the seven settings are per-run config, never persisted state."""
+    import json
+
+    from discord_ferry.state import save_state
+
+    state = MigrationState()
+    save_state(state, tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    for key in _EXPOSED_FIELDS:
+        assert key not in raw

@@ -78,10 +78,15 @@ For powerful self-hosted instances, you can increase concurrency to speed up mig
 | `max_concurrent_channels` | 3 | Channels processed in parallel during the message phase |
 | `max_concurrent_requests` | 5 | Total concurrent API calls across all channel workers |
 
-These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls.
+These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both are adjustable since v2.7.0 — try 6 concurrent channels and 12 concurrent requests on a powerful self-hosted instance:
 
-!!! info "Fixed defaults"
-    These concurrency settings are internal defaults and cannot currently be changed from the GUI or CLI. See [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable) in the CLI reference. To adjust migration speed, use the `--rate-limit` and `--upload-delay` flags (or the GUI's rate-limit slider) instead.
+```bash
+ferry migrate --export-dir ./export \
+  --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
+  --max-concurrent-channels 6 --max-concurrent-requests 12
+```
+
+In the GUI, the same settings live under Advanced Options → **Speed**. Monitor your Stoat server load and reduce the values if you encounter frequent 429 errors. Ferry warns if you raise them while targeting the official `api.stoat.chat` (where they usually make runs slower, not faster).
 
 ---
 
