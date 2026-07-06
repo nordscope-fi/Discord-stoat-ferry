@@ -67,6 +67,7 @@ Ferry is built to handle large migrations safely:
 
 - **Pause and resume** — close Ferry anytime, pick up where you left off
 - **Parallel channel sends** — processes multiple channels concurrently (3x–5x faster)
+- **Tunable performance** — concurrency, reaction mode, thread filtering, and checkpointing are all adjustable via CLI flags or the GUI's Advanced Options — see the [CLI reference](guides/cli-reference.md#ferry-migrate)
 - **Incremental migration** — only migrate new messages since the last completed run
 - **Pre-creation review** — summary and confirmation before anything is created on Stoat
 - **Migration report** — human-readable `migration_report.md` with a fidelity score
