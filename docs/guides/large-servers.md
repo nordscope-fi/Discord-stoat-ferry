@@ -68,10 +68,16 @@ v2.0.0 processes multiple channels concurrently, dramatically reducing migration
 | `max_concurrent_channels` | 3 | Channels processed simultaneously |
 | `max_concurrent_requests` | 5 | Total concurrent API calls across all workers |
 
-These settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent API calls.
+These settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent API calls. Since v2.7.0 both are adjustable — `--max-concurrent-channels` and `--max-concurrent-requests` on the CLI, or the **Speed** group in the GUI's Advanced Options:
 
-!!! info "Fixed defaults"
-    These concurrency settings are internal defaults and cannot currently be changed from the GUI or CLI. See [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable) in the CLI reference.
+```bash
+ferry migrate --export-dir ./export \
+  --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
+  --max-concurrent-channels 6 --max-concurrent-requests 12
+```
+
+!!! warning "Self-hosted only"
+    Raising these against the official `api.stoat.chat` usually makes runs **slower** — its rate limits trigger 429 backoff, and Ferry warns when you try. Monitor your own server's load and dial back if you see frequent 429 errors.
 
 ---
 
@@ -162,18 +168,14 @@ If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted insta
 
 ## Keeping Thread Channels Under Control
 
-With the default `flatten` strategy, every thread becomes its own channel — a busy server with hundreds of threads can blow past Stoat's 200-channel limit. Two options avoid that:
+With the default `flatten` strategy, every thread becomes its own channel — a busy server with hundreds of threads can blow past Stoat's 200-channel limit. Three options avoid that:
 
+- `--min-thread-messages 5` (since v2.7.0) skips threads with fewer than 5 messages — most "dead" threads disappear while active ones survive. Works with every thread strategy. In the GUI: **Min thread messages** under Advanced Options → Content.
 - `--thread-strategy merge` appends thread messages into the parent channel instead of creating new channels.
 - `--skip-threads` omits threads entirely.
 
-Both are available in the GUI's Advanced Options too (thread strategy dropdown and skip-threads toggle).
-
 !!! tip "Check first"
     Run `ferry validate` on your export — the counts table shows how many threads it contains, so you can see whether the channel limit is a risk before migrating.
-
-!!! info "Minimum-message filtering is not configurable"
-    Ferry has an internal `min_thread_messages` setting for filtering out low-activity threads, but there is currently no GUI control or CLI flag for it. See [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable).
 
 ---
 
@@ -189,11 +191,13 @@ By default, Ferry uses `reaction_mode='text'`, which appends reaction counts to 
 
 For a 10,000-message server with 20,000 reactions, `text` mode saves roughly 5 hours compared to `native` mode.
 
-!!! info "Fixed to text mode"
-    Reaction mode is an internal default and cannot currently be changed from the GUI or CLI — Ferry always uses `text` mode. To leave reactions out entirely, use `--skip-reactions` (or the GUI's skip-reactions toggle).
+Since v2.7.0 the mode is selectable: `--reaction-mode text|native|skip` on the CLI, or the **Reaction mode** dropdown in the GUI's Advanced Options. For the fastest large-server run use the default `text`, or `--skip-reactions` to drop reactions entirely.
 
 ---
 
-## Checkpoints
+## Checkpoint Tuning
 
-Ferry saves migration state every 50 messages. If a migration is interrupted, resuming replays at most those 50 messages — nothing else is lost. This interval is an internal default and cannot currently be changed from the GUI or CLI; it works well for migrations of any size.
+Ferry saves migration state every 50 messages. If a migration is interrupted, resuming replays at most that many messages — nothing else is lost. For very large servers (100,000+ messages) you can raise the interval to reduce disk I/O: `--checkpoint-interval 200` on the CLI, or **Checkpoint interval** in the GUI's Advanced Options (since v2.7.0).
+
+!!! info "Trade-off"
+    A higher interval means slightly faster throughput but more re-sent messages if the migration is interrupted — Ferry replays up to one interval on resume. 200 is a good balance for large migrations; the default 50 is fine for everything else.

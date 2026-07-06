@@ -4,11 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.7.0] - 2026-07-06
+
+### Added
+
+- **The seven internal settings are now user-configurable (closes #99).** `ferry migrate` gains
+  `--reaction-mode [text|native|skip]`, `--min-thread-messages` (≥0), `--checkpoint-interval`
+  (≥1), `--max-concurrent-channels` (≥1), `--max-concurrent-requests` (≥1), `--skip-avatars`,
+  and `--validate-after` — wired through `_common_options`/`_build_config` with parse-time
+  `Choice`/`IntRange` validation and unchanged defaults (text/0/50/3/5/off/off). The GUI's
+  Advanced Options panel gains the same seven controls under Speed / Content / Safety group
+  labels, persisted like the existing controls and normalised by a new
+  `_coerce_advanced_settings` helper (clamps stale/out-of-range disk-backed storage values,
+  handles `ui.number`'s float-or-None, falls back to `text` on unknown reaction modes).
+  Migrate's `--max-concurrent-requests` is unrelated to rollback's same-named
+  delete-concurrency flag.
+- **Official-service concurrency warning.** Raising either concurrency value above its default
+  while targeting `api.stoat.chat` prints a CLI warning / shows a GUI notify (informational,
+  never blocks): the official rate limits make higher concurrency slower, not faster.
+
+### Fixed
+
+- **`max_concurrent_channels <= 0` no longer deadlocks the message phase.**
+  `migrator/messages.py` built `asyncio.Semaphore(config.max_concurrent_channels)` unguarded —
+  `Semaphore(0)` admits no worker and hangs forever. Now clamped `max(x, 1)`, matching the
+  existing defensive clamps for `checkpoint_interval` and `max_concurrent_requests`. Locked by
+  a `wait_for`-bounded regression test.
 
 ### Documentation
 
-- **User-facing docs caught up with the code (v2.2.3 → v2.6.17).** The README, CLI reference,
+- CLI reference: the "Internal defaults (not currently configurable)" section is gone — the
+  seven settings are documented as real `migrate` flags. `gui-walkthrough` documents the
+  16-control Advanced Options panel. `large-servers`, `pre-flight-checklist`, and
+  `self-hosted-tips` regain the concurrency/reaction/checkpoint/thread-filter tuning advice
+  that PR #98 had to remove, now phrased against real flags.
+- **User-facing docs caught up with the code (v2.2.3 → v2.6.17)** (shipped unversioned as
+  PR #98, folded into this release). The README, CLI reference,
   and guides had drifted ~14 releases behind. Highlights: the `ferry probe` command and
   post-migration invite generation are now documented; the "what gets migrated" tables include
   the native-fidelity work (role hoist/icons/live discovery, server description & NSFW,
@@ -19,7 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   "internal defaults, not currently configurable" note; wrong report filename `report.json`
   corrected to `migration_report.json`; `export-blueprint` options corrected (`--output` is
   required; `--name` exists); README gained badges and a section on the non-migration
-  commands. Docs-only; no version bump.
+  commands.
 
 ### Internal
 

@@ -354,7 +354,10 @@ async def run_messages(
 
         eligible_exports.append(export)
 
-    channel_sem = asyncio.Semaphore(config.max_concurrent_channels)
+    # Clamp ≥1: Semaphore(0) never admits a worker (silent deadlock) and a
+    # negative value raises ValueError. Shell inputs are validated, but a stale
+    # GUI storage value or direct FerryConfig construction can bypass them.
+    channel_sem = asyncio.Semaphore(max(config.max_concurrent_channels, 1))
     save_lock = asyncio.Lock()
 
     async with get_session(config) as session:

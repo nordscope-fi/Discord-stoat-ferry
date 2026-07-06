@@ -535,3 +535,106 @@ def test_export_finally_suppresses_tab_clear() -> None:
     region = source[idx : idx + 200]
     assert "with contextlib.suppress(Exception):" in region
     assert '_clear_tokens(app.storage.tab, ("discord_token",))' in region
+
+
+# ---------------------------------------------------------------------------
+# Issue #99 — advanced-settings coercion helper
+# ---------------------------------------------------------------------------
+
+_EXPOSED_DEFAULTS = {
+    "reaction_mode": "text",
+    "min_thread_messages": 0,
+    "checkpoint_interval": 50,
+    "max_concurrent_channels": 3,
+    "max_concurrent_requests": 5,
+    "skip_avatars": False,
+    "validate_after": False,
+}
+
+
+def test_coerce_advanced_settings_empty_storage_yields_defaults() -> None:
+    """SC-4a: untouched storage produces exact FerryConfig defaults."""
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    assert _coerce_advanced_settings({}) == _EXPOSED_DEFAULTS
+
+
+def test_coerce_advanced_settings_passes_valid_values() -> None:
+    """SC-4b: valid stored values flow through unchanged (ui.number floats included)."""
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    result = _coerce_advanced_settings(
+        {
+            "reaction_mode": "native",
+            "min_thread_messages": 5,
+            "checkpoint_interval": 100.0,  # ui.number stores floats
+            "max_concurrent_channels": 6,
+            "max_concurrent_requests": 12,
+            "skip_avatars": True,
+            "validate_after": True,
+        }
+    )
+    assert result["reaction_mode"] == "native"
+    assert result["min_thread_messages"] == 5
+    assert result["checkpoint_interval"] == 100
+    assert result["max_concurrent_channels"] == 6
+    assert result["max_concurrent_requests"] == 12
+    assert result["skip_avatars"] is True
+    assert result["validate_after"] is True
+
+
+def test_coerce_advanced_settings_clamps_stale_out_of_range() -> None:
+    """SC-5: disk-backed storage can hold values the controls never produced."""
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    result = _coerce_advanced_settings(
+        {
+            "max_concurrent_channels": 0,  # would deadlock Semaphore(0)
+            "max_concurrent_requests": -3,
+            "checkpoint_interval": 0,
+            "min_thread_messages": -1,
+        }
+    )
+    assert result["max_concurrent_channels"] == 1
+    assert result["max_concurrent_requests"] == 1
+    assert result["checkpoint_interval"] == 1
+    assert result["min_thread_messages"] == 0
+
+
+def test_coerce_advanced_settings_handles_junk() -> None:
+    """SC-5b/SC-6: None (cleared ui.number), non-numeric strings, invalid mode → defaults."""
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    result = _coerce_advanced_settings(
+        {
+            "reaction_mode": "emoji",
+            "min_thread_messages": None,
+            "checkpoint_interval": "fifty",
+            "max_concurrent_channels": None,
+            "max_concurrent_requests": "many",
+        }
+    )
+    assert result["reaction_mode"] == "text"
+    assert result["min_thread_messages"] == 0
+    assert result["checkpoint_interval"] == 50
+    assert result["max_concurrent_channels"] == 3
+    assert result["max_concurrent_requests"] == 5
+
+
+def test_exposed_settings_wiring_pins() -> None:
+    """SC-9: pin the GUI wiring for the seven exposed settings (no render harness exists)."""
+    import inspect
+
+    import discord_ferry.gui as gui_mod
+
+    source = inspect.getsource(gui_mod)
+    # (a) _run's config construction consumes the coercion helper
+    assert "**_coerce_advanced_settings(storage)" in source
+    # (b) every control persists its storage key at Continue-click
+    for key in _EXPOSED_DEFAULTS:
+        assert f'storage["{key}"] =' in source, key
+    # (c) SC-11 GUI: the official-service notify branch exists
+    assert 'host == "api.stoat.chat"' in source
+    # (d) tokens still never touch app.storage.user (existing invariant re-pinned)
+    assert 'storage["token"] =' not in source
+    assert 'storage["discord_token"] =' not in source

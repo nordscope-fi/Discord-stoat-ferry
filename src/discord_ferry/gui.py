@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from nicegui import app, background_tasks, ui
 
@@ -29,7 +30,7 @@ except ImportError:
     pass
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, MutableMapping
+    from collections.abc import Iterable, Mapping, MutableMapping
 
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
@@ -130,6 +131,40 @@ def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> Non
     """
     for key in keys:
         storage.pop(key, None)
+
+
+_EXPOSED_REACTION_MODES = ("text", "native", "skip")
+
+
+def _coerce_advanced_settings(storage: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the seven exposed settings from storage, defaulting and clamping.
+
+    ``app.storage.user`` is disk-backed: a stale or hand-edited file can hold
+    None / out-of-range / wrong-type values that the UI controls never produced,
+    and ``ui.number`` yields float-or-None. Every value is normalised here so
+    ``FerryConfig`` only ever sees engine-safe input (issue #99).
+    """
+
+    def _as_int(key: str, default: int, floor: int) -> int:
+        raw = storage.get(key, default)
+        try:
+            value = int(raw) if raw is not None else default
+        except (TypeError, ValueError):
+            value = default
+        return max(value, floor)
+
+    mode = str(storage.get("reaction_mode") or "text")
+    if mode not in _EXPOSED_REACTION_MODES:
+        mode = "text"
+    return {
+        "reaction_mode": mode,
+        "min_thread_messages": _as_int("min_thread_messages", 0, 0),
+        "checkpoint_interval": _as_int("checkpoint_interval", 50, 1),
+        "max_concurrent_channels": _as_int("max_concurrent_channels", 3, 1),
+        "max_concurrent_requests": _as_int("max_concurrent_requests", 5, 1),
+        "skip_avatars": bool(storage.get("skip_avatars", False)),
+        "validate_after": bool(storage.get("validate_after", False)),
+    }
 
 
 def _store_session_tokens(store: MutableMapping[str, Any], *, stoat: str, discord: str) -> None:
@@ -525,6 +560,55 @@ def setup_page() -> None:
                         value=bool(storage.get("dry_run", False)),
                     ).classes("mt-2")
 
+                    adv_stored = _coerce_advanced_settings(storage)
+
+                    ui.label("Speed").classes("text-xs font-bold text-gray-500 mt-4")
+                    max_channels_num = ui.number(
+                        label="Concurrent channels",
+                        value=adv_stored["max_concurrent_channels"],
+                        min=1,
+                        step=1,
+                        precision=0,
+                    ).classes("w-48")
+                    max_requests_num = ui.number(
+                        label="Concurrent API requests",
+                        value=adv_stored["max_concurrent_requests"],
+                        min=1,
+                        step=1,
+                        precision=0,
+                    ).classes("w-48")
+
+                    ui.label("Content").classes("text-xs font-bold text-gray-500 mt-4")
+                    reaction_mode_select = ui.select(
+                        label="Reaction mode",
+                        options=["text", "native", "skip"],
+                        value=adv_stored["reaction_mode"],
+                    ).classes("w-48")
+                    min_thread_num = ui.number(
+                        label="Min thread messages",
+                        value=adv_stored["min_thread_messages"],
+                        min=0,
+                        step=1,
+                        precision=0,
+                    ).classes("w-48")
+                    skip_avatars_cb = ui.checkbox(
+                        "Skip avatar pre-flight (avatars upload on demand)",
+                        value=adv_stored["skip_avatars"],
+                    )
+
+                    ui.label("Safety").classes("text-xs font-bold text-gray-500 mt-4")
+                    checkpoint_num = ui.number(
+                        label="Checkpoint interval (messages)",
+                        value=adv_stored["checkpoint_interval"],
+                        min=1,
+                        step=1,
+                        precision=0,
+                    ).classes("w-48")
+                    validate_after_cb = ui.checkbox(
+                        "Validate after migration (compare server counts)",
+                        value=adv_stored["validate_after"],
+                    )
+
                 error_label = ui.label("").classes("text-red-500 text-sm")
 
                 async def _on_validate_click() -> None:
@@ -589,7 +673,27 @@ def setup_page() -> None:
                     storage["skip_threads"] = skip_threads_cb.value
                     storage["thread_strategy"] = thread_strategy_select.value
                     storage["dry_run"] = dry_run_check.value
+                    storage["reaction_mode"] = reaction_mode_select.value
+                    storage["min_thread_messages"] = min_thread_num.value
+                    storage["checkpoint_interval"] = checkpoint_num.value
+                    storage["max_concurrent_channels"] = max_channels_num.value
+                    storage["max_concurrent_requests"] = max_requests_num.value
+                    storage["skip_avatars"] = skip_avatars_cb.value
+                    storage["validate_after"] = validate_after_cb.value
                     storage["skip_export"] = mode == "offline"
+
+                    adv_chosen = _coerce_advanced_settings(storage)
+                    host = urlparse(stoat_url).hostname if stoat_url else None
+                    if host == "api.stoat.chat" and (
+                        adv_chosen["max_concurrent_channels"] > 3
+                        or adv_chosen["max_concurrent_requests"] > 5
+                    ):
+                        ui.notify(
+                            "Raising concurrency on the official Stoat service usually makes "
+                            "runs slower (rate-limit backoff). Intended for self-hosted "
+                            "instances.",
+                            type="warning",
+                        )
 
                     if mode == "orchestrated":
                         ui.navigate.to("/export")
@@ -1032,6 +1136,7 @@ async def migrate_page() -> None:
         skip_export=True,  # Export already done by this point (via /export or offline mode)
         discord_token=app.storage.tab.get("discord_token") or None,
         discord_server_id=storage.get("discord_server_id") or None,
+        **_coerce_advanced_settings(storage),
     )
 
     # ---------------------------------------------------------------------------

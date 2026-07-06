@@ -3308,3 +3308,35 @@ async def test_process_message_unmapped_reaction_direct_state_counts(tmp_path: P
 
     assert state.reactions_dropped == 1
     assert any(w["type"] == "unmapped_emoji_reaction" for w in state.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Issue #99 — concurrency clamp (SC-7)
+# ---------------------------------------------------------------------------
+
+
+async def test_zero_concurrent_channels_does_not_deadlock(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """max_concurrent_channels=0 must not hang the channel loop.
+
+    Semaphore(0) never admits a worker, so without the clamp at the semaphore
+    construction site the phase blocks forever. Regression for issue #99: the
+    GUI can feed a stale storage value that bypasses the ui.number min
+    constraint; the engine clamp turns 0 into 1.
+    """
+    import asyncio
+
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg_1"})
+
+    state = _make_state()
+    config = _make_config(tmp_path, max_concurrent_channels=0)
+    msg = _make_message(id="msg1", content="hello world")
+    export = _make_export(messages=[msg])
+
+    await asyncio.wait_for(
+        run_messages(config, state, [export], lambda e: None),
+        timeout=5.0,
+    )
+
+    assert state.message_map["msg1"] == "stoat_msg_1"

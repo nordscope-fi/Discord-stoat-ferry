@@ -85,6 +85,13 @@ ferry migrate [OPTIONS]
 | `--max-channels INT` | | 200 | Channel limit; raise for self-hosted instances with custom limits |
 | `--max-emoji INT` | | 100 | Emoji limit; raise for self-hosted instances with custom limits |
 | `--verify-uploads` | | false | Post-upload file size verification for Autumn uploads |
+| `--reaction-mode [text\|native\|skip]` | | `text` | How reactions migrate: `text` appends a summary to the message (fast); `native` adds per-emoji reactions via API (slow, Stoat caps 20 per message); `skip` drops them |
+| `--min-thread-messages INT` | | 0 | Exclude threads with fewer messages (0 = include all). Applies to every thread strategy. |
+| `--checkpoint-interval INT` | | 50 | Save state every N messages. Lower = safer but more disk I/O; on resume Ferry replays at most this many messages. |
+| `--max-concurrent-channels INT` | | 3 | Channels migrated in parallel. Raise only on self-hosted instances. |
+| `--max-concurrent-requests INT` | | 5 | Concurrent API calls across all channel workers. Raise only on self-hosted instances. |
+| `--skip-avatars` | | false | Skip the avatar pre-flight phase; avatars still upload on demand during messages |
+| `--validate-after` | | false | After migration, fetch the server and compare channel/role counts against expectations (results in `state.json` and the run log) |
 | `--cleanup-orphans` | | false | Detect and report unreferenced Autumn uploads after migration (report-only; no files are deleted) |
 | `--force-unlock` | | false | Override a stale migration lock on the target Stoat server |
 | `--skip-dce-verify` | | false | Skip SHA-256 verification of DCE binary downloads (for self-built binaries) |
@@ -110,19 +117,11 @@ STOAT_TOKEN=your_stoat_token_here
 
 ---
 
-### Internal defaults (not currently configurable)
+!!! warning "Concurrency on the official service"
+    Raising `--max-concurrent-channels` / `--max-concurrent-requests` against `api.stoat.chat` usually makes runs **slower** — the official rate limits trigger 429 backoff. Ferry prints a warning when you try. These flags are for self-hosted instances with relaxed limits.
 
-These settings exist inside Ferry with the defaults below, but there is currently no CLI flag or GUI control to change them:
-
-| Setting | Default | Description |
-|---|---|---|
-| `skip_avatars` | False | Skip avatar pre-flight phase |
-| `validate_after` | False | Run post-migration validation comparing Stoat server against source |
-| `max_concurrent_channels` | 3 | Channels processed in parallel during message migration |
-| `max_concurrent_requests` | 5 | Total concurrent API calls across all channel workers |
-| `reaction_mode` | `"text"` | How reactions are migrated: `"text"` (append to content), `"native"` (API calls), `"skip"` |
-| `min_thread_messages` | 0 | Exclude threads with fewer than this many messages (0 = include all) |
-| `checkpoint_interval` | 50 | How often state is saved during messages (every N messages) |
+!!! note "Two flags named --max-concurrent-requests"
+    `ferry migrate --max-concurrent-requests` controls migration API calls. `ferry rollback` has an unrelated flag of the same name that controls concurrent channel deletions.
 
 ---
 
