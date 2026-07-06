@@ -245,15 +245,9 @@ Before creating anything on Stoat, Ferry shows a review summary.
 
 === "GUI (Windows / macOS)"
 
-    When all 12 phases complete, Ferry shows a summary card with:
+    When all phases complete, Ferry shows a completion card with the error count and — when a Discord token was used — a native-fidelity line (slowmode settings, voice user limits, and role icons applied).
 
-    - Total channels created
-    - Total messages migrated
-    - Total attachments uploaded
-    - Error count (click to view details)
-    - **Fidelity score** — a quantified measure of migration quality
-
-    Click **Open Report** to view the full migration report in your browser.
+    Click **Open Report** to view the full migration report, including message counts, attachment counts, and the **fidelity score** — a quantified measure of migration quality.
 
     <!-- screenshot: ferry-complete-screen -->
 
@@ -262,7 +256,7 @@ Before creating anything on Stoat, Ferry shows a review summary.
     Ferry prints a summary table when it finishes, including a **fidelity score** — a quantified measure of migration quality (messages migrated vs. source total, attachment success rate, and other factors). The full report is saved to:
 
     ```
-    ferry-output/report.json
+    ferry-output/migration_report.json
     ```
 
     Other files written to the output directory:
@@ -273,7 +267,7 @@ Before creating anything on Stoat, Ferry shows a review summary.
     | `message_map.json` | Discord message ID → Stoat message ID mapping (used for reply linking and incremental runs) |
     | `discord_metadata.json` | Server structure and permission data fetched from Discord API |
     | `migration_report.md` | Human-readable summary with fidelity score and per-channel stats |
-    | `report.json` | Machine-readable full report including error details |
+    | `migration_report.json` | Machine-readable full report including error details |
 
 ---
 
@@ -318,7 +312,7 @@ After a successful migration:
 
 **Seeing errors in the log?**
 
-Most errors are non-fatal. Ferry logs them and continues. A failed attachment upload or a skipped message does not stop the whole migration. Check `ferry-output/report.json` for a list of everything that was skipped and why.
+Most errors are non-fatal. Ferry logs them and continues. A failed attachment upload or a skipped message does not stop the whole migration. Check `ferry-output/migration_report.json` for a list of everything that was skipped and why.
 
 **Rate limit warnings?**
 

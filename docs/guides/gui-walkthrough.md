@@ -50,11 +50,9 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Thread strategy | Flatten | How to handle threads and forum posts. **Flatten** (default) creates a dedicated channel for each thread. **Merge** appends thread messages into the parent channel. **Archive** exports the thread as a markdown attachment in the parent channel. |
 | Dry run | Off | Run all migration phases without actually contacting the Stoat server. Useful for validating your export before committing to a full migration. |
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
-| Checkpoint interval | 50 | How often migration state is saved (every N messages). Lower = safer but more I/O. Minimum 1. |
-| Skip avatars | Off | Skip the avatar pre-flight phase. Avatars will be uploaded on-demand during messages instead. |
-| Reaction mode | Text | How to handle reactions: **Text** (default) appends `[Reactions: emoji count]` to message content — zero extra API calls. **Native** applies reactions via API (slower). **Skip** ignores reactions entirely. |
-| Min thread messages | 0 | Exclude threads with fewer than this many messages. 0 includes all threads. Useful for servers with hundreds of low-activity threads. |
-| Validate after | Off | Run a post-migration validation that compares Stoat server against the migration state. Reports discrepancies. |
+| Server name | *(empty)* | Name for the new Stoat server. Defaults to the Discord server's name. |
+
+A few settings (checkpoint interval, reaction mode, minimum thread messages, and others) are fixed to safe internal defaults and cannot currently be changed from the GUI or CLI — see [Internal defaults](cli-reference.md#internal-defaults-not-currently-configurable) in the CLI reference.
 
 !!! tip "Running into 'Too Many Requests' errors?"
     That error (code 429) means Stoat is asking Ferry to slow down. Increase the rate limit slider to 2.0 or 3.0 seconds. This slows the migration but eliminates the errors.
@@ -131,7 +129,7 @@ Ferry runs through three steps automatically:
 
 If Ferry detects cached export files from a previous run, it shows a summary (file count and total size) and offers two choices:
 
-- **Use cached exports** — skip re-exporting and go straight to validation.
+- **Use Cached** — skip re-exporting and go straight to validation.
 - **Re-export** — discard cached files and export fresh.
 
 This is useful when resuming after a crash or when you want to re-run the migration without re-downloading everything.
@@ -240,14 +238,14 @@ Click **Cancel** to stop the migration entirely. Ferry saves its state to disk b
 
 ## Completion Screen
 
-When all phases finish, the Completion screen shows a summary card with final statistics: messages sent, attachments uploaded, errors, elapsed time, and a **fidelity score** — a 0–100 measure of migration quality based on messages, attachments, embeds, replies, and reactions.
+When all phases finish, the Completion screen shows a card with the error count and — when a Discord token was used — a native-fidelity line showing how many slowmode settings, voice user limits, and role icons were applied.
 
 <!-- screenshot: completion screen with summary card -->
 
-Click **Open Report** to open the migration report in your browser. Two report files are saved to the `ferry-output/` folder:
+For the full statistics (message counts, attachments, and the **fidelity score** — a 0–100 measure of migration quality), click **Open Report**. Two report files are saved to the `ferry-output/` folder:
 
 - `migration_report.md` — a human-readable summary you can share with your community
-- `report.json` — a machine-readable report with full error details and ID mappings
+- `migration_report.json` — a machine-readable report with full error details and ID mappings
 
 ### Rollback this migration
 

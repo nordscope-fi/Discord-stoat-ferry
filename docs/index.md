@@ -37,16 +37,19 @@ Ferry can **pause and resume** — close it anytime and pick up where you left o
 | Discord feature | What happens |
 |-----------------|-------------|
 | Text channels | Recreated on Stoat with the same names and topics |
-| Categories | Recreated — channels grouped the same way |
-| Roles | Recreated with colours and Discord permissions translated to Stoat equivalents |
+| Categories | Recreated in the same order as on Discord, with channels grouped the same way |
+| Roles | All server roles recreated — even roles nobody posted with — with colours, hierarchy, hoisting ("display separately"), image icons, and Discord permissions translated to Stoat equivalents |
 | Channel permissions | Per-role and @everyone overrides migrated |
 | NSFW channels | NSFW flag preserved |
+| Server description & NSFW flag | Copied to the new Stoat server |
+| Slowmode | Per-channel slowmode settings preserved |
+| Voice user limits | Per-channel user limits preserved |
 | Messages + authors | Each message shows the original author's name and avatar |
 | File attachments | Uploaded to Stoat's file storage |
-| Custom emoji | Uploaded (up to 100) |
+| Custom emoji | Uploaded (up to 100 — the most-used, uploadable emoji are kept) |
 | Pinned messages | Re-pinned in the correct channels |
 | Replies | Reply links preserved between messages |
-| Reactions | Shown as text summary by default, or applied via API |
+| Reactions | Shown as text summary by default, or applied via API (Stoat allows at most 20 reactions per message) |
 | Embeds | Flattened to Stoat format with thumbnails and images uploaded |
 | Polls | Rendered as formatted text |
 | Threads | Converted to text channels, merged into parent, or archived as markdown — your choice |
@@ -56,6 +59,8 @@ Ferry can **pause and resume** — close it anytime and pick up where you left o
 | Server banner | Uploaded from Discord API when a Discord token is provided |
 | Original timestamps | Shown at the start of each message (e.g. `*[2024-01-15 12:00 UTC]*`) |
 
+> Some of these need a Discord token to read live server data: role hoisting and icons, roles nobody posted with, server description, category ordering, slowmode, and voice user limits. In offline mode (export folder only), Ferry migrates what the export contains and skips the rest with a warning.
+
 ### Reliability Features
 
 Ferry is built to handle large migrations safely:
@@ -63,11 +68,10 @@ Ferry is built to handle large migrations safely:
 - **Pause and resume** — close Ferry anytime, pick up where you left off
 - **Parallel channel sends** — processes multiple channels concurrently (3x–5x faster)
 - **Incremental migration** — only migrate new messages since the last completed run
-- **Thread filtering** — exclude low-activity threads by minimum message count
 - **Pre-creation review** — summary and confirmation before anything is created on Stoat
 - **Migration report** — human-readable `migration_report.md` with a fidelity score
-- **Dead-letter queue** — failed messages tracked and retryable without re-running
-- **Post-migration validation** — verifies Stoat server structure matches the source
+- **Invite link** — Ferry creates an invite to your new Stoat server when the migration finishes (on by default; turn off with `--no-create-invite`)
+- **Failed-message recovery** — messages that fail to send are tracked and automatically re-sent on the next `--incremental` run
 - **Message splitting** — messages over 2000 characters are split, not truncated
 - **Migration lock** — prevents two Ferry instances from targeting the same server
 - **Circuit breaker** — automatic backoff on API failures, no indefinite blocking

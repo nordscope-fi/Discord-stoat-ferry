@@ -9,7 +9,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has six top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, and `stats`.
+Ferry has seven top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, and `probe`.
 
 ---
 
@@ -68,6 +68,8 @@ ferry migrate [OPTIONS]
 | `--token TEXT` | `STOAT_TOKEN` | *(required)* | Your Stoat user token (copied from your browser — see [setup guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token)) |
 | `--server-id TEXT` | | | Migrate into an existing Stoat server by ID |
 | `--server-name TEXT` | | | Name for the new server (defaults to the Discord server name) |
+| `--create-invite` / `--no-create-invite` | | on | Create an invite link to the migrated server when the migration finishes. The invite URL is printed in the completion summary and included in the reports. |
+| `--invite-channel-id TEXT` | | | Discord channel ID to base the invite on. By default Ferry picks the first eligible text channel. |
 | `--skip-messages` | | false | Import structure only — no messages sent |
 | `--skip-emoji` | | false | Do not upload custom emoji |
 | `--skip-reactions` | | false | Do not add reactions |
@@ -108,11 +110,11 @@ STOAT_TOKEN=your_stoat_token_here
 
 ---
 
-### GUI Only Options
+### Internal defaults (not currently configurable)
 
-These options are available in the GUI's Advanced Options panel but are not yet exposed as CLI flags. They will be added as CLI options in a future release:
+These settings exist inside Ferry with the defaults below, but there is currently no CLI flag or GUI control to change them:
 
-| Config Field | Default | Description |
+| Setting | Default | Description |
 |---|---|---|
 | `skip_avatars` | False | Skip avatar pre-flight phase |
 | `validate_after` | False | Run post-migration validation comparing Stoat server against source |
@@ -121,9 +123,6 @@ These options are available in the GUI's Advanced Options panel but are not yet 
 | `reaction_mode` | `"text"` | How reactions are migrated: `"text"` (append to content), `"native"` (API calls), `"skip"` |
 | `min_thread_messages` | 0 | Exclude threads with fewer than this many messages (0 = include all) |
 | `checkpoint_interval` | 50 | How often state is saved during messages (every N messages) |
-
-!!! tip "Using these settings from the CLI"
-    These options are available in the GUI's Advanced Options section today. CLI flags for them are planned for a future release.
 
 ---
 
@@ -273,7 +272,8 @@ ferry export-blueprint [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--from PATH` | Path to DCE export directory *(required)* |
-| `--output PATH` | Output path for the blueprint JSON file (default: `blueprint.json`) |
+| `--output PATH` / `-o` | Output path for the blueprint JSON file *(required)* |
+| `--name TEXT` | Override the server name stored in the blueprint |
 
 **Example:**
 
@@ -394,3 +394,52 @@ ferry stats ~/migrations/my-server-2026-05-15/
 
 !!! note "What stats does NOT do"
     `ferry stats` is read-only. It does not write to `state.json`, does not call any API, and does not modify the Stoat server. For a richer Markdown report including the original Discord export context, use the `migration_report.md` file written into the output directory by `ferry migrate` — it includes fields that require the original DCE exports to compute.
+
+---
+
+## `ferry probe`
+
+Check what a live Stoat instance actually supports before you migrate to it. Probe measures upload size limits, checks whether voice channels can be created (Stoat Bug #194), checks webhook availability, and inspects rate-limit behaviour. It is most useful for self-hosted instances, where limits differ from the official service.
+
+```
+ferry probe --test-server-id <id> [OPTIONS]
+```
+
+Probe creates its test entities (channels, uploads) on the server you point it at, and deletes everything it created before exiting. Use a throwaway server, not your production server. It never writes a migration state file.
+
+### Options
+
+| Flag | Environment Variable | Description |
+|------|----------------------|-------------|
+| `--stoat-url TEXT` | `STOAT_URL` | Stoat API base URL *(required)* |
+| `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)* |
+| `--test-server-id TEXT` | | ID of a throwaway Stoat server to create test entities on *(required)* |
+| `--deep` | | Reserved for a deeper upload-boundary probe — currently reports "not yet implemented" |
+| `--json` | | Print results as machine-readable JSON instead of a table |
+| `--verbose` / `-v` | | Verbose output |
+
+### What it checks
+
+- **Upload size limits** — the limits the instance's file server (Autumn) advertises per upload category, compared against the values Ferry assumes. A mismatch is reported as a warning.
+- **Voice channels** — creates a test voice channel and checks whether the instance actually supports voice (Stoat Bug #194). If not, Discord voice channels will become text channels.
+- **Webhooks** — creates a test channel and checks whether webhooks can be created on the instance.
+- **Rate limiting** — what rate-limit information the instance exposes in its responses.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Probe ran and results were printed |
+| `1` | Missing `--stoat-url` or `--token` |
+
+### Examples
+
+```bash
+# Probe the official hosted service
+ferry probe --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN" \
+  --test-server-id 01ABCDEF234567890ABCDEFGH
+
+# Probe a self-hosted instance and save the results as JSON
+ferry probe --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
+  --test-server-id 01ABCDEF234567890ABCDEFGH --json > probe-results.json
+```
