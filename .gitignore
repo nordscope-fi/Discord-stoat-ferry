@@ -39,6 +39,7 @@ ferry-output/
 
 # Claude Code (all internal tooling)
 .claude/
+.claude-session-lock
 CLAUDE.md
 claude_log/
 .mcp.json

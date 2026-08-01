@@ -6,11 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-08-01
+
+### Security
+
+- **Cleared the two open medium Dependabot alerts (#42, #43) — `uv.lock`-only, no source change.**
+  `setuptools` 82.0.1 → 83.0.0 (MANIFEST.in exclusion bypass in sdist via NFC/NFD Unicode
+  normalization collision on macOS APFS/HFS+; transitive via `pyinstaller` +
+  `pyinstaller-hooks-contrib`, `dev` extra) and `pymdown-extensions` 10.21.3 → 11.0.1 (path
+  traversal in the `b64` extension letting `<img src>` read files outside `base_path`;
+  transitive via `mkdocs-material`, `docs` extra). Neither package ships in the installed
+  wheel or the PyInstaller binary — exposure was limited to the CI/build host — but both are
+  now off the alert board. The `pymdown-extensions` fix is a major bump that Dependabot would
+  not raise automatically; `mkdocs-material` 9.7.6 accepts the v11 line, so no dependency
+  override was needed.
+
 ### Documentation
 
 - README and docs landing page gained a "Tunable performance" reliability bullet pointing at
-  the v2.7.0 flags (concurrency, reaction mode, thread filtering, checkpointing). Docs-only;
-  no version bump.
+  the v2.7.0 flags (concurrency, reaction mode, thread filtering, checkpointing).
+
+### Internal
+
+- `.gitignore` now covers `.claude-session-lock`, which sat untracked next to the already-ignored
+  `.claude/` directory and showed up in every `git status`.
 
 ## [2.7.0] - 2026-07-06
 
