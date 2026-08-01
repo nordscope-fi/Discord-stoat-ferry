@@ -606,3 +606,34 @@ async def test_discord_429_null_retry_after_falls_back(
         async with aiohttp.ClientSession() as session:
             await fetch_guild_roles(session, TOKEN, GUILD_ID)
     assert calls[0] == pytest.approx(1.0, abs=0.05)
+
+
+async def test_discord_reset_after_header_is_seconds_not_milliseconds(
+    mock_discord: aioresponses,
+) -> None:
+    """UNIT PIN: Discord's ``X-RateLimit-Reset-After`` is delta-SECONDS.
+
+    Stoat's identically-named header is MILLISECONDS, and is parsed by a
+    deliberately differently-named function (``migrator.api._stoat_rate_delay_seconds``).
+    The two parsers look like duplicates and MUST NOT be merged: unifying them
+    silently breaks one side by a factor of 1000. This test fails if the Discord
+    side is ever "tidied up" to divide by 1000.
+
+    The sibling test ``test_discord_get_429_html_honors_header`` covers
+    ``Retry-After``, which is seconds on both services and so cannot detect the
+    hazard; only this header distinguishes them.
+    """
+    from unittest.mock import patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=429, headers={"X-RateLimit-Reset-After": "5"})
+    mock_discord.get(url, payload=[])
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.discord.client.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            roles = await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    assert roles == []
+    assert calls[0] == pytest.approx(5.0, abs=0.05), (
+        "Discord's X-RateLimit-Reset-After is delta-seconds: 5 must mean 5s, not 0.005s"
+    )
