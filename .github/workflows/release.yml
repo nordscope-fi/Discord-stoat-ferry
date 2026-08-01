@@ -17,6 +17,12 @@ jobs:
   build-windows:
     name: Build Windows executable
     runs-on: windows-latest
+    # Only a non-secret boolean is hoisted to job level. A step cannot read its
+    # own step-level `env` from its own `if:`, so the guard has to resolve above
+    # the step — but the certificate itself stays scoped to the signing step so
+    # checkout/build steps never see it.
+    env:
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_PFX != '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -34,7 +40,7 @@ jobs:
         run: uv run --extra dev pyinstaller ferry.spec
 
       - name: Sign Windows binary
-        if: env.WINDOWS_CERT_PFX != ''
+        if: env.HAS_WINDOWS_CERT == 'true'
         env:
           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -54,8 +60,18 @@ jobs:
           retention-days: 1
 
   build-macos:
-    name: Build macOS executable
-    runs-on: macos-14
+    name: Build macOS executable (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          # Last x86_64 image GitHub offers; support ends August 2027, after
+          # which Intel Macs need a universal2 cross-build or get dropped.
+          - runner: macos-15-intel
+            arch: x86_64
     steps:
       - uses: actions/checkout@v6
 
@@ -72,21 +88,20 @@ jobs:
       - name: Build executable
         run: uv run --extra dev pyinstaller ferry.spec
 
-      - name: Sign macOS binary
-        if: env.APPLE_IDENTITY != ''
-        env:
-          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
-        run: |
-          codesign --deep --force --sign "$APPLE_IDENTITY" dist/Ferry.app
-          codesign --verify dist/Ferry.app
+      # Developer ID signing + notarization land here. Until then PyInstaller's
+      # ad-hoc signature is all the bundle carries, so Gatekeeper rejects it on
+      # first launch and users must approve the app via System Settings. See
+      # docs/getting-started/install.md. Notarization additionally requires
+      # `--options runtime` plus an entitlements plist; signing alone does not
+      # clear the warning, which is why no signing step runs here today.
 
       - name: Zip .app bundle
-        run: cd dist && zip -r ../Ferry-macos-arm64.zip Ferry.app
+        run: cd dist && zip -r ../Ferry-macos-${{ matrix.arch }}.zip Ferry.app
 
       - uses: actions/upload-artifact@v6
         with:
-          name: ferry-macos
-          path: Ferry-macos-arm64.zip
+          name: ferry-macos-${{ matrix.arch }}
+          path: Ferry-macos-${{ matrix.arch }}.zip
           retention-days: 1
 
   release:
@@ -109,10 +124,16 @@ jobs:
           name: ferry-windows
           path: release-assets/
 
-      - name: Download macOS artifact
+      - name: Download macOS artifact (Apple Silicon)
         uses: actions/download-artifact@v7
         with:
-          name: ferry-macos
+          name: ferry-macos-arm64
+          path: release-assets/
+
+      - name: Download macOS artifact (Intel)
+        uses: actions/download-artifact@v7
+        with:
+          name: ferry-macos-x86_64
           path: release-assets/
 
       - name: Create GitHub Release
@@ -122,6 +143,7 @@ jobs:
           files: |
             release-assets/Ferry-windows-x86_64.exe
             release-assets/Ferry-macos-arm64.zip
+            release-assets/Ferry-macos-x86_64.zip
 
       - name: Build Python distributions
         run: uv build

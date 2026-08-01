@@ -16,9 +16,12 @@
 
 | Platform | Download | Size |
 |----------|----------|------|
-| **Windows** | [Ferry.exe](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-windows-x86_64.exe) | ~25 MB |
-| **macOS** | [Ferry.zip](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-macos-arm64.zip) | ~25 MB |
+| **Windows** | [Ferry.exe](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-windows-x86_64.exe) | ~48 MB |
+| **macOS** — Apple Silicon (M1–M4) | [Ferry.zip](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-macos-arm64.zip) | ~48 MB |
+| **macOS** — Intel | [Ferry.zip](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-macos-x86_64.zip) | ~48 MB |
 | **Linux / pip** | `pipx install discord-ferry` | ~2 MB |
+
+> **macOS:** the first launch is blocked by Gatekeeper because Ferry is not notarized. Click **Done** — *not* "Move to Bin" — then approve it once under **System Settings → Privacy & Security → Open Anyway**. Full walkthrough in the [installation guide](https://nordscope-fi.github.io/Discord-stoat-ferry/getting-started/install/).
 
 ---
 
