@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "discord-ferry"
-version = "2.8.0"
+version = "2.8.1"
 description = "Migrate Discord servers to Stoat (formerly Revolt)"
 readme = "README.md"
 license = "MIT"
@@ -64,6 +64,14 @@ docs = [
 # part of the installable package. See docs/plans/designs/2026-05-16-issue-35-*.md.
 [tool.hatch.build.targets.wheel]
 packages = ["src/discord_ferry"]
+
+[tool.hatch.build.targets.sdist]
+# release.yml downloads the built binaries into release-assets/ and only then
+# runs `uv build`, so an unconfigured sdist swept them in: every published sdist
+# was ~91.5 MB against a 0.2 MB wheel. Adding the third (Intel) artifact in
+# v2.8.0 pushed it past PyPI's 100 MB project limit and the upload started
+# failing. The wheel was never affected — it is scoped to src/ above.
+exclude = ["release-assets"]
 
 [tool.ruff]
 line-length = 100

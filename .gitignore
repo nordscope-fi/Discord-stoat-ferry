@@ -8,6 +8,7 @@ __pycache__/
 dist/
 build/
 *.whl
+release-assets/
 
 # Virtual environments
 venv/

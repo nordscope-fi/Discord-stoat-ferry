@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-08-02
+
+### Fixed
+
+- **Every published sdist since at least v2.6.17 has shipped the release binaries inside it.**
+  `release.yml` downloads the built artifacts into `release-assets/` and only afterwards runs
+  `uv build`, and with no `[tool.hatch.build.targets.sdist]` config hatchling swept that
+  directory into the source distribution. The result on PyPI: a **91.5 MB** `.tar.gz` against
+  a **0.2 MB** wheel, for 2.6.17, 2.7.0 and 2.7.1 alike.
+
+  Adding the third (Intel) artifact in v2.8.0 pushed the sdist past PyPI's 100 MB per-project
+  limit, so the upload failed with `400 File too large` — which is how a long-standing bug
+  finally surfaced. The v2.8.0 GitHub Release itself published normally; only the PyPI step
+  failed, so **v2.8.0 exists on GitHub but not on PyPI**.
+
+  Fixed by excluding `release-assets` from the sdist target and gitignoring the directory.
+  The wheel was never affected — it is scoped to `src/discord_ferry` — so `pip install
+  discord-ferry` always resolved to the 0.2 MB wheel on any normal platform. Verified by
+  planting 137 MB of incompressible data in `release-assets/` and rebuilding: 0 members
+  leak, sdist stays at 0.7 MB.
+
 ## [2.8.0] - 2026-08-01
 
 ### Fixed
