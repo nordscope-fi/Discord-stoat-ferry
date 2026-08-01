@@ -106,26 +106,33 @@ This page covers the most common problems encountered during migration, their ca
 | **Cause** | Ferry is packaged as a single-file app using PyInstaller (a Python packaging tool). These self-extracting apps are frequently flagged as false positives by antivirus software because the extraction technique resembles some malware behavior. |
 | **Solution** | Add `ferry.exe` to your antivirus exclusion list. If your organization's policy prevents this, use the Python source distribution instead: clone the [GitHub repository](https://github.com/nordscope-fi/Discord-stoat-ferry) and install with `uv pip install .`, then run with `ferry` directly. The source distribution is not affected by this issue. |
 
+### macOS "Apple could not verify Ferry is free of malware"
+
+| | |
+|---|---|
+| **Symptom** | Double-clicking `Ferry.app` shows a dialog reading *"Apple could not verify 'Ferry' is free of malware that may harm your Mac or compromise your privacy."* The only buttons are **Done** and **Move to Bin**. |
+| **Cause** | Ferry is not notarized through Apple's paid developer program, so Gatekeeper blocks the first launch. It is not a fault in the app. |
+| **Solution** | Click **Done** — never **Move to Bin**, which deletes Ferry. Then open **System Settings → Privacy & Security**, scroll to the **Security** section, and click **Open Anyway** next to *"Ferry" was blocked to protect your Mac*. Confirm with **Open Anyway** again and enter your password. See [Installation](../getting-started/install.md) for the illustrated walkthrough. |
+
+!!! warning "The Open Anyway button is time-limited"
+    It appears only after macOS has blocked Ferry, and it disappears again after about an hour. If it is not there, double-click `Ferry.app` again and return to **Privacy & Security**.
+
+!!! failure "Right-clicking no longer works"
+    Older guides tell you to right-click (or Control-click) the app and choose **Open**. Apple removed that shortcut in **macOS 15 Sequoia**. On macOS 15 and later, the System Settings route above is the only way through the dialog.
+
 ### macOS "app is damaged and can't be opened"
 
 | | |
 |---|---|
-| **Symptom** | macOS refuses to open `ferry` with a message that the app is damaged or cannot be opened |
+| **Symptom** | macOS refuses to open `Ferry.app` with a message that the app is damaged or cannot be opened |
 | **Cause** | macOS automatically marks files downloaded from the internet as untrusted. This is a built-in security check called Gatekeeper — it is not an actual problem with Ferry. |
 | **Solution** | Run the following command in Terminal, then try opening Ferry again: |
 
 ```bash
-xattr -d com.apple.quarantine /path/to/ferry
+xattr -dr com.apple.quarantine /Applications/Ferry.app
 ```
 
-Replace `/path/to/ferry` with the actual path to the downloaded binary. If you moved it to `/Applications`, the command would be:
-
-```bash
-xattr -d com.apple.quarantine /Applications/ferry
-```
-
-!!! info "Right-click workaround"
-    Alternatively, right-click (or Control-click) the `ferry` file, choose **Open**, and click **Open** in the dialog that appears. macOS will remember this choice and not prompt again.
+The `-r` flag matters. Without it the quarantine flag is cleared only from the bundle folder, while the executable inside it stays blocked and the app still refuses to open. If you kept Ferry somewhere other than `/Applications`, substitute that path.
 
 ---
 

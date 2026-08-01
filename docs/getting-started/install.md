@@ -9,8 +9,8 @@ Pick your operating system below to get started.
 === "Windows"
 
     1. Go to the [Discord Ferry releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases) on GitHub.
-    2. Under the latest release, click **Ferry.exe** to download it.
-    3. Double-click **Ferry.exe** to run it. Your browser will open automatically.
+    2. Under the latest release, click **Ferry-windows-x86_64.exe** to download it.
+    3. Double-click the downloaded file to run it. Your browser will open automatically.
 
     <!-- screenshot: windows-smartscreen-warning -->
 
@@ -26,22 +26,48 @@ Pick your operating system below to get started.
 
 === "macOS"
 
+    First, check which Mac you have. Click the Apple menu in the top-left corner and choose **About This Mac**:
+
+    | What you see | Download this file |
+    |---|---|
+    | **Chip:** Apple M1 / M2 / M3 / M4 | `Ferry-macos-arm64.zip` |
+    | **Processor:** Intel | `Ferry-macos-x86_64.zip` |
+
+    Then:
+
     1. Go to the [Discord Ferry releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases) on GitHub.
-    2. Under the latest release, click **Ferry-macos-arm64.zip** to download it.
+    2. Under the latest release, click the file that matches your Mac.
     3. Unzip the downloaded file.
     4. Drag the **Ferry.app** icon into your **Applications** folder.
-
-    !!! warning "First launch — do NOT double-click"
-        The first time you open Ferry, you must right-click (or Control-click) the app icon and select **Open**. If you double-click instead, macOS will refuse to run it.
+    5. Double-click **Ferry.app**. macOS blocks it the first time. This is expected — keep reading.
 
     <!-- screenshot: macos-gatekeeper-warning -->
 
-    !!! warning "Gatekeeper warning"
-        macOS may show a dialog saying **"Ferry can't be opened because Apple cannot check it for malicious software."**
+    !!! danger "Click Done, not Move to Bin"
+        macOS shows a dialog reading **"Apple could not verify 'Ferry' is free of malware that may harm your Mac or compromise your privacy."** It offers two buttons: **Done** and **Move to Bin**.
 
-        Click **Open** to proceed. This message appears because Ferry is not notarized through Apple's paid developer program. The source code is publicly available on GitHub.
+        Click **Done**. The highlighted **Move to Bin** button deletes Ferry.
 
-        After the first launch, you can open Ferry normally by double-clicking it.
+    !!! warning "Approving Ferry (once)"
+        Ferry is not notarized through Apple's paid developer program, so macOS asks you to approve it by hand the first time:
+
+        1. Open **System Settings** from the Apple menu.
+        2. Go to **Privacy & Security** and scroll down to the **Security** section.
+        3. You will see **"Ferry" was blocked to protect your Mac**. Click **Open Anyway**.
+        4. Click **Open Anyway** once more to confirm, then enter your Mac password.
+
+        Ferry opens. From now on you can launch it with a normal double-click.
+
+        **Not seeing the button?** It only appears *after* macOS has blocked Ferry, and it disappears again after about an hour. Double-click **Ferry.app** once more, then go straight back to **Privacy & Security**.
+
+    !!! tip "Faster, if you are comfortable with Terminal"
+        This single command clears the download quarantine flag, which stops macOS blocking the app in the first place:
+
+        ```bash
+        xattr -dr com.apple.quarantine /Applications/Ferry.app
+        ```
+
+        Then open Ferry normally. The source code is publicly available on GitHub if you would like to check it first.
 
 === "Linux"
 
@@ -93,10 +119,14 @@ PyInstaller (the packaging tool used to create Ferry's single `.exe` file) can t
 This sometimes happens if macOS quarantined the file during download. Open **Terminal** (search for it in Spotlight) and run:
 
 ```bash
-xattr -d com.apple.quarantine /Applications/Ferry.app
+xattr -dr com.apple.quarantine /Applications/Ferry.app
 ```
 
-Then try opening Ferry again.
+Then try opening Ferry again. The `-r` is important: without it the flag is only cleared from the folder, and the app inside stays blocked.
+
+**macOS says it "could not verify Ferry is free of malware"**
+
+This is the normal first-launch prompt, not a fault. Follow the **Approving Ferry** steps in the macOS tab above. Whatever you do, do not click **Move to Bin** — that deletes the app.
 
 **"Python not found" or "python3: command not found" (Linux)**
 

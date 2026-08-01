@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-08-01
+
+### Fixed
+
+- **The documentation site never rendered its own markup.** `mkdocs.yml` carried no
+  `markdown_extensions` block, so `admonition` and `pymdownx.tabbed` were never enabled —
+  Material for MkDocs does not turn them on implicitly. All 87 admonitions across the 15
+  published pages printed as literal `!!! warning "…"` text, and all 27 content tabs printed
+  as literal `=== "macOS"`. On the installation page that meant the per-OS tabs did not
+  exist: Windows, macOS and Linux instructions ran together on one page, so a Mac user read
+  Windows steps first. `toc` and `tables` are listed alongside the new extensions so the full
+  set the docs depend on is visible in one place, though both remain on by default.
+
+- **macOS install instructions told users to do something Apple removed two years ago.**
+  The guide instructed right-click → **Open**; that bypass was removed in **macOS 15
+  Sequoia** (August 2024). Users following it found no such option, and the dialog they were
+  left staring at offers only **Done** and a highlighted **Move to Bin** — the prominent
+  button deletes the app. Rewritten around the System Settings → Privacy & Security →
+  **Open Anyway** flow, with an explicit warning not to click Move to Bin, and a note that
+  the button only appears after a blocked launch and expires after about an hour.
+
+- `xattr -d com.apple.quarantine` → `xattr -dr` in both install and troubleshooting guides.
+  Without `-r` the flag is cleared from the bundle directory only while the executable inside
+  stays quarantined, so the documented command silently did nothing for an `.app`.
+
+- **Neither code-signing step in `release.yml` could ever have run.** Both gated on
+  `if: env.<SECRET> != ''` while defining that variable in the same step's `env:` block; a
+  step cannot read its own step-level `env` from its own `if:`, so the condition was
+  permanently false. The Windows guard now resolves a non-secret boolean at job level while
+  the certificate itself stays scoped to the signing step, so the gate works without widening
+  the secret to checkout and build steps.
+
+- README download table understated the artifact sizes by roughly half (`~25 MB` against a
+  real 48 MB), and pointed Windows users at a filename the release does not publish.
+
+### Added
+
+- **Intel Mac builds.** `release.yml`'s macOS job is now a matrix over `macos-14` (arm64) and
+  `macos-15-intel` (x86_64), publishing `Ferry-macos-x86_64.zip` alongside the existing
+  `Ferry-macos-arm64.zip`. Releases were previously arm64-only, so Intel Macs could not run
+  Ferry at all. `macos-15-intel` is the last x86_64 image GitHub offers and is supported
+  through August 2027.
+
+- Troubleshooting entry for the actual dialog users hit — *"Apple could not verify Ferry is
+  free of malware"* — including an explicit note that the right-click workaround found in
+  older guides no longer works.
+
+### Known limitations
+
+- Ferry is still **not notarized**, so macOS continues to require the one-time Open Anyway
+  approval. Clearing the warning outright requires a Developer ID certificate plus
+  notarization, which needs a paid Apple Developer Program membership. The removed macOS
+  signing step is marked in `release.yml` where that work belongs; note it also needs
+  `--options runtime` and an entitlements plist, as signing alone does not satisfy Gatekeeper.
+
 ## [2.7.1] - 2026-08-01
 
 ### Security

@@ -26,6 +26,23 @@ exclude_docs: |
   plans/
   superpowers/
   discord-ferry-claude-code-brief.md
+# `toc` and `tables` are on by default and are listed anyway, so the full set
+# the docs depend on is visible in one place. Verified by building with
+# `tables` removed: the tables still rendered, so this key extends the
+# built-in defaults rather than replacing them.
+markdown_extensions:
+  - toc
+  - tables
+  # Without `admonition` and `pymdownx.tabbed`, every `!!! warning` and
+  # `=== "macOS"` in docs/ renders as literal markup on the published site.
+  - admonition
+  - pymdownx.tabbed:
+      alternate_style: true
+  # Supersedes `fenced_code`; required for code fences nested inside tabs
+  # and admonitions, which is where most of ours live.
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
 nav:
   - Home: index.md
   - Getting Started:

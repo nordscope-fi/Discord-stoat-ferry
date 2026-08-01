@@ -1,3 +1,3 @@
 """Discord Ferry — Migrate Discord servers to Stoat."""
 
-__version__ = "2.7.1"
+__version__ = "2.8.0"
