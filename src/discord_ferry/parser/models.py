@@ -64,6 +64,27 @@ class DCEReference:
     message_id: str
     channel_id: str = ""
     guild_id: str = ""
+    #: DCE's ``MessageReferenceKind``: "Default" (a reply) or "Forward". Empty string
+    #: means the export predates DCE 2.47, which never wrote this field -- which is a
+    #: meaningfully different case from "Default", so do not default it to that.
+    type: str = ""
+
+
+@dataclass
+class DCEForwardedMessage:
+    """The payload of a forwarded message (DCE 2.47+, PR #1451).
+
+    Carries **no author**: upstream writes exactly these six fields
+    (``JsonMessageWriter.cs:550-592`` at 2.47.1). Recovered content is therefore
+    necessarily attributed to whoever forwarded it, not to whoever wrote it.
+    """
+
+    timestamp: str = ""
+    timestamp_edited: str | None = None
+    content: str = ""
+    attachments: list[DCEAttachment] = field(default_factory=list)
+    embeds: list[dict[str, object]] = field(default_factory=list)
+    stickers: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -84,6 +105,7 @@ class DCEMessage:
     mentions: list[dict[str, str]] = field(default_factory=list)
     reference: DCEReference | None = None
     poll: dict[str, Any] | None = None
+    forwarded_message: DCEForwardedMessage | None = None
 
 
 @dataclass

@@ -14,8 +14,10 @@ from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
     DCEExport,
+    DCEForwardedMessage,
     DCEGuild,
     DCEMessage,
+    DCEReference,
 )
 from discord_ferry.state import FailedMessage, MigrationState
 
@@ -51,14 +53,17 @@ def _make_author(author_id: str = "u1") -> DCEAuthor:
 def _make_message(
     msg_id: str = "m1",
     content: str = "hello",
+    **overrides: object,
 ) -> DCEMessage:
-    return DCEMessage(
-        id=msg_id,
-        type="Default",
-        timestamp="2024-01-15T12:00:00+00:00",
-        content=content,
-        author=_make_author(),
-    )
+    defaults: dict[str, object] = {
+        "id": msg_id,
+        "type": "Default",
+        "timestamp": "2024-01-15T12:00:00+00:00",
+        "content": content,
+        "author": _make_author(),
+    }
+    defaults.update(overrides)
+    return DCEMessage(**defaults)  # type: ignore[arg-type]
 
 
 def _make_export(
@@ -821,3 +826,83 @@ async def test_merge_non_numeric_id_failure_recorded(tmp_path: Path) -> None:
         await run_messages(config, state, [parent, thread], lambda e: None)
     assert any(fm.discord_msg_id == "sys-x" for fm in state.failed_messages)
     assert state.channel_high_water["200"] == "30"  # max over numeric ids only
+
+
+# ---------------------------------------------------------------------------
+# Forwarded messages must be recovered on EVERY path that renders a message,
+# not only the main send path.
+# ---------------------------------------------------------------------------
+
+
+def _forwarded_msg(msg_id: str = "fwd1") -> DCEMessage:
+    return _make_message(
+        msg_id,
+        content="",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=DCEForwardedMessage(content="recovered thread text"),
+    )
+
+
+async def test_merge_strategy_recovers_forwarded_content(tmp_path: Path) -> None:
+    """A forward inside a merged thread must not arrive empty.
+
+    `_merge_threads` builds content directly and never enters `_process_message`, so the
+    recovery has to be applied on this path too — otherwise `--thread-strategy merge`
+    silently sends an empty message and the feature's headline claim is false for it.
+    """
+    from unittest.mock import patch
+
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+
+    parent = _make_export(
+        channel_id="100", channel_name="general", messages=[_make_message("m1")], message_count=1
+    )
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_forwarded_msg()],
+        message_count=1,
+    )
+
+    sent: list[str] = []
+
+    async def _capture(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        sent.append(str(kwargs.get("content", "")))
+        return {"_id": "stoat-x"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    merged = "\n".join(sent)
+    assert "recovered thread text" in merged
+    assert "[forwarded]" in merged
+
+
+async def test_archive_strategy_writes_forwarded_content(tmp_path: Path) -> None:
+    """Archive writes messages to markdown, so a forward must not archive as empty."""
+    config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+
+    parent = _make_export(
+        channel_id="100", channel_name="general", messages=[_make_message("m1")], message_count=1
+    )
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_forwarded_msg()],
+        message_count=1,
+    )
+
+    await run_messages(config, state, [parent, thread], lambda e: None)
+
+    md = (tmp_path / "threads" / "general" / "my-thread.md").read_text()
+    assert "recovered thread text" in md

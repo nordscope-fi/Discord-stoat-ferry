@@ -72,7 +72,7 @@ This page covers the most common problems encountered during migration, their ca
 |---|---|
 | **Symptom** | Some messages in Stoat appear with the placeholder `[empty message]` |
 | **Cause** | The original Discord message had no text content — for example, a message that was only a sticker, a forwarded message, or a system event with no body. This is normal behavior. |
-| **Solution** | No action needed. These are faithfully representing messages that had no text in Discord. Forwarded messages are logged separately as "forwarded message skipped" in the migration report. |
+| **Solution** | No action needed. These are faithfully representing messages that had no text in Discord. Forwarded messages are no longer among them — their content is migrated and marked `[forwarded]`. If your export was made with DiscordChatExporter older than 2.47 the forwarded content is not in the export at all; those are skipped with a warning in the migration report, and re-exporting recovers them. |
 
 ### Messages show [continued 1/3] markers
 

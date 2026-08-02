@@ -26,6 +26,7 @@ from discord_ferry.parser.models import (
     DCEChannel,
     DCEEmoji,
     DCEExport,
+    DCEForwardedMessage,
     DCEGuild,
     DCEMessage,
     DCEReaction,
@@ -3344,3 +3345,280 @@ async def test_zero_concurrent_channels_does_not_deadlock(
     )
 
     assert state.message_map["msg1"] == "stoat_msg_1"
+
+
+# ---------------------------------------------------------------------------
+# Forwarded message recovery (DCE 2.47+)
+# ---------------------------------------------------------------------------
+
+
+def _forwarded(**overrides: Any) -> DCEForwardedMessage:
+    defaults: dict[str, Any] = {
+        "timestamp": "2024-02-01T09:00:00+00:00",
+        "timestamp_edited": None,
+        "content": "the original text",
+        "attachments": [],
+        "embeds": [],
+        "stickers": [],
+    }
+    defaults.update(overrides)
+    return DCEForwardedMessage(**defaults)
+
+
+async def test_forwarded_payload_is_recovered_not_skipped(tmp_path: Path) -> None:
+    """SC-19: a DCE 2.47+ forward reaches the destination instead of being dropped.
+
+    The payload has been in every export we produce since DCE 2.47 (2026-02-27), and we
+    pin 2.47.1 — it was being discarded on an "exporter limitation" that had stopped
+    being true.
+    """
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="fwd_new",
+        content="",
+        msg_type="Default",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(),
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert "fwd_new" in state.message_map
+    assert len(sent) == 1
+    content = sent[0]["content"]
+    assert "[forwarded]" in content
+    assert "the original text" in content
+
+
+async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
+    """SC-19: an attachment inside the forwarded block goes through the normal upload path.
+
+    The merge promotes it onto the message, so `_upload_attachments` needs no knowledge
+    of forwarding at all.
+    """
+    att_file = tmp_path / "fwd.png"
+    att_file.write_bytes(b"data")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "fwd_att_id"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="fwd_att",
+        content="",
+        msg_type="Default",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(
+            attachments=[DCEAttachment(id="a1", url="fwd.png", file_name="fwd.png")]
+        ),
+    )
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "fwd_att" in state.message_map
+    assert state.attachments_uploaded == 1
+
+
+async def test_forwarded_with_empty_content_but_attachment_still_sends(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """SC-22: an attachment-only forward must not be swallowed by the empty-message guard.
+
+    The marker is what keeps the content non-empty, which is why it is prepended rather
+    than used to replace the content.
+    """
+    att_file = tmp_path / "only.png"
+    att_file.write_bytes(b"data")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "only_id"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="fwd_empty",
+        content="",
+        msg_type="Default",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(
+            content="",
+            attachments=[DCEAttachment(id="a1", url="only.png", file_name="only.png")],
+        ),
+    )
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], lambda e: None)
+
+    assert "fwd_empty" in state.message_map
+    # Assert the payload actually travelled, not merely that nothing was skipped:
+    # "not skipped" alone still passes when the merge is a no-op and an empty message
+    # is sent.
+    assert state.attachments_uploaded == 1
+
+
+async def test_forwarded_attachments_over_the_cap_are_reported_not_dropped_silently(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Merging past Stoat's 5-attachment cap produces the overflow notice, not silence.
+
+    The merge runs BEFORE the overflow check deliberately, so the check sees the combined
+    list and the user is told what did not travel. Were the order reversed, the check
+    would run on the pre-merge list and the excess would vanish without a word.
+    """
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    for name in [f"o{i}.png" for i in range(4)] + [f"f{i}.png" for i in range(2)]:
+        (tmp_path / name).write_bytes(b"data")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "up"}, repeat=True)
+    own = [DCEAttachment(id=f"o{i}", url=f"o{i}.png", file_name=f"o{i}.png") for i in range(4)]
+    fwd = [DCEAttachment(id=f"f{i}", url=f"f{i}.png", file_name=f"f{i}.png") for i in range(2)]
+    msg = _make_message(
+        id="fwd_over",
+        content="carrier comment",
+        msg_type="Default",
+        attachments=own,
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(attachments=fwd),
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert state.attachments_skipped == 1
+    assert any(w["type"] == "attachment_overflow" for w in state.warnings)
+    assert "f1.png" in sent[0]["content"]  # the dropped one is named to the user
+
+
+async def test_forwarded_content_posts_under_the_forwarder(tmp_path: Path) -> None:
+    """SC-23: recovered content is attributed to whoever forwarded it, not the author.
+
+    Pinned deliberately. This is a real fidelity limitation, not a preference: DCE's
+    forwarded block carries no author field at all (JsonMessageWriter.cs writes six
+    fields and an author is not among them), so the original writer is simply not in the
+    export. Asserting it here means the limitation cannot change silently.
+    """
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="fwd_author",
+        content="",
+        msg_type="Default",
+        author=DCEAuthor(id="u_b", name="forwarder-b", nickname="forwarder-b"),
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(),
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert sent[0]["masquerade"]["name"] == "forwarder-b"
+
+
+async def test_recovered_forward_is_not_treated_as_a_reply(tmp_path: Path) -> None:
+    """A forward's reference points at its SOURCE, which is not a reply relationship.
+
+    Left in place it corrupts three things at once: `replies_total` counts the forward
+    toward reply fidelity, a source that happens to be in `message_map` makes Stoat
+    render the message as an actual reply-quote, and a cross-channel source appends
+    "[Replying to message in #X]" right next to the `[forwarded]` marker — one message
+    claiming to be both.
+    """
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    # The forward's source IS in the map — the same-server forward case, which is when
+    # the reply payload would actually be emitted.
+    state.message_map["orig1"] = "stoat_orig1"
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="fwd_ref",
+        content="",
+        msg_type="Default",
+        reference=DCEReference(message_id="orig1", channel_id="other_ch", type="Forward"),
+        forwarded_message=_forwarded(),
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert state.replies_total == 0
+    assert state.replies_linked == 0
+    assert not sent[0].get("replies")
+    assert "Replying to" not in sent[0]["content"]
+
+
+async def test_reference_type_discriminates_forward_from_reply(tmp_path: Path) -> None:
+    """SC-21: a "Default" reference is a reply and is left entirely alone."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    reply = _make_message(
+        id="reply1",
+        content="a normal reply",
+        msg_type="Default",
+        reference=DCEReference(message_id="orig1", type="Default"),
+    )
+    export = _make_export(messages=[reply])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert "reply1" in state.message_map
+    assert "[forwarded]" not in sent[0]["content"]
+
+
+async def test_sticker_only_reply_is_not_mistaken_for_a_forward(tmp_path: Path) -> None:
+    """A reply whose whole payload is a sticker must not be discarded.
+
+    The old detector keyed on empty content, which is not unique to forwards: a reply
+    carrying only a sticker or only an embed matched it exactly and was skipped as
+    "forwarded". `reference.type` distinguishes them, so the heuristic is now only a
+    fallback for exports too old to carry the kind.
+    """
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="sticker_reply",
+        content="",
+        msg_type="Default",
+        stickers=[{"id": "s1", "name": "wave", "format": "Png", "sourceUrl": "https://x/s.png"}],
+        reference=DCEReference(message_id="orig1", type="Default"),
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert "sticker_reply" in state.message_map
+
+
+async def test_pre_247_export_still_skips_and_warns(tmp_path: Path) -> None:
+    """SC-20: an export too old to carry the payload is unchanged — skipped with a warning.
+
+    `reference.type` is empty (DCE never wrote it before 2.47), so the old empty-content
+    heuristic still applies. The warning now names the cause and the remedy.
+    """
+    events: list[MigrationEvent] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="fwd_old",
+        content="",
+        msg_type="Default",
+        reference=DCEReference(message_id="orig1"),  # no `type` — a pre-2.47 export
+    )
+    export = _make_export(messages=[msg])
+
+    await run_messages(config, state, [export], _collect_events(events))
+
+    assert "fwd_old" not in state.message_map
+    assert any("fwd_old" in e.message for e in events if e.status == "warning")
