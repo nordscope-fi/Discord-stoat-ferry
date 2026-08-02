@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-08-02
+
+### Fixed
+
+- **The macOS app could be force-quit as "not responding", leaving a window that said
+  "Connection lost. Trying to reconnect…" forever.** Two defects compounded.
+
+  `ferry.spec` built *onefile*, so the process macOS registered with LaunchServices was
+  the PyInstaller bootloader — which unpacks ~200 MB to a temp directory (measured **18
+  seconds** from double-click to window) and then waits in `usleep()`. macOS wrote a hang
+  report against v2.7.1 (`Event: hang`, `Duration: 99.18s`, `Unresponsive for 97
+  seconds`), the Dock offered Force Quit, and `launchd` logged `exited due to SIGTERM`.
+  macOS builds are now *onedir*: one process, and the window is serving in **~2 seconds**.
+
+  Separately, NiceGUI's native mode runs the pywebview window as a `daemon=True`
+  multiprocessing child. SIGTERM kills Python without running `atexit`, so
+  `multiprocessing._exit_function` — the only thing that terminates daemon children —
+  never ran, and the window outlived its server. Ferry now runs a bounded, idempotent
+  teardown ladder (`destroy` → `terminate` → `kill`) from both the shutdown hook and a
+  `finally:` around the server, so no window can outlive the process that feeds it. This
+  matters beyond tidiness: a surviving child would otherwise hang the interpreter in
+  multiprocessing's *unbounded* atexit join while still holding port 8765.
+
+- **The macOS release archive would have shipped a broken bundle.** The onedir `.app`
+  contains 119 symlinks; `zip -r` follows them, producing a 91 MB archive instead of
+  45 MB and extracting real files where the code signature recorded links — which
+  Gatekeeper reports as "Ferry.app is damaged". The release workflow now archives with
+  `ditto` and verifies the *extracted* artifact (symlink count, size, `codesign`, bundled
+  data files). It also gained `workflow_dispatch`, so packaging can be exercised before a
+  tag exists rather than on one.
+
+- **The GUI's folder picker had never worked in the packaged app.** It called
+  `webview.windows[0]` in the server process, but the window is created in a different
+  process, so that list is always empty and every click raised `IndexError` into a
+  "requires native mode" toast. It now goes through `app.native.main_window`, which
+  marshals the dialog across the process boundary.
+
+- The socket.io heartbeat now tolerates a 12-second stall instead of 6
+  (`reconnect_timeout=10.0`), so a brief hiccup no longer flashes the reconnect banner,
+  and uvicorn's graceful-shutdown wait is bounded at 1 second rather than unbounded.
+  Interrupting Ferry with Ctrl-C shuts it down cleanly, leaving no stray processes and
+  no traceback.
+
 ## [2.8.3] - 2026-08-02
 
 ### Fixed

@@ -98,19 +98,27 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+# ---------------------------------------------------------------------------
+# Packaging
+#
+# macOS builds ONEDIR. Onefile would put a PyInstaller bootloader in front of
+# Python, and that bootloader -- not the app -- is what LaunchServices registers
+# as "Ferry". It spends its life in usleep() waiting for the child, so macOS
+# flags the app as unresponsive (v2.7.1 produced a 99-second hang report), the
+# user force-quits it, and the SIGTERM orphans the pywebview window, which then
+# shows "Connection lost. Trying to reconnect..." forever. Onedir also cuts
+# launch from ~18s to ~2s because there is no unpack step.
+#
+# Windows stays ONEFILE so the release keeps shipping a single .exe.
+# ---------------------------------------------------------------------------
+
+_EXE_COMMON = dict(
     name="Ferry",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -120,10 +128,27 @@ exe = EXE(
     icon=icon,
 )
 
-# macOS .app bundle (only when building on macOS)
 if sys.platform == "darwin":
-    app = BUNDLE(
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        **_EXE_COMMON,
+    )
+
+    coll = COLLECT(
         exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name="Ferry",
+    )
+
+    app = BUNDLE(
+        coll,
         name="Ferry.app",
         icon=icon_mac,
         bundle_identifier="com.discord-ferry.Ferry",
@@ -131,4 +156,14 @@ if sys.platform == "darwin":
             "NSHighResolutionCapable": True,
             "CFBundleShortVersionString": VERSION,
         },
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        runtime_tmpdir=None,
+        **_EXE_COMMON,
     )

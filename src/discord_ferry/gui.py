@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import multiprocessing
 import os
 import secrets
 import subprocess
@@ -29,8 +31,10 @@ try:
 except ImportError:
     pass
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, MutableMapping
+    from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
@@ -323,19 +327,16 @@ def setup_page() -> None:
         return f"{value:.1f}s/msg ({_msgs_per_hour(value):,} msg/hr)"
 
     async def _on_browse() -> None:
-        if not _HAS_WEBVIEW:
-            ui.notify("Folder picker requires pywebview — install it with: pip install pywebview")
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG),
-            )
-            if result and result[0]:
-                export_dir_input.set_value(result[0])
-        except Exception:
+        # app.native.main_window is NiceGUI's proxy to the window process; it is None
+        # in browser mode. Do not reach for webview.windows here -- the window lives
+        # in another process, so that list is always empty on this side.
+        window = getattr(app.native, "main_window", None)
+        if window is None:
             ui.notify("Folder picker requires native mode (pywebview window)")
+            return
+        folder = await _pick_folder(window)
+        if folder:
+            export_dir_input.set_value(folder)
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         # Step indicator
@@ -1588,28 +1589,199 @@ async def migrate_page() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Native window lifecycle
+# ---------------------------------------------------------------------------
+
+# Each rung of the teardown ladder waits at most this long. A healthy teardown was
+# measured at ~16ms; this budget only bites when a child is wedged, and it must stay
+# small because macOS escalates a force-quit SIGTERM to SIGKILL within seconds.
+_TEARDOWN_JOIN_TIMEOUT = 0.5
+
+
+def _terminate_children(
+    children: Sequence[Any],
+    window: Any | None,
+    join_timeout: float = _TEARDOWN_JOIN_TIMEOUT,
+) -> None:
+    """Tear down the native window child: destroy -> terminate -> kill, all bounded.
+
+    Idempotent: returns immediately when no child is alive, *without touching the
+    window proxy*. That precondition matters because NiceGUI's ``check_shutdown``
+    thread closes the proxy's method queues as soon as the server stops, so an
+    unconditional ``destroy()`` would raise on every healthy shutdown.
+
+    ``children`` and ``window`` are injected so the ladder is testable without a real
+    window; :func:`_teardown_native_window` supplies the production values.
+    """
+    alive = [child for child in children if child.is_alive()]
+    if not alive:
+        return
+
+    # Rung 1: the supported path. NiceGUI's own app.shutdown() closes the window this
+    # way, and the child's method-executor thread keeps polling every 16ms even while
+    # its Cocoa main thread is parked.
+    if window is not None:
+        try:
+            window.destroy()
+        except Exception:  # noqa: BLE001 - a closed queue must not abort the ladder
+            logger.debug("native window destroy() failed", exc_info=True)
+        for child in alive:
+            child.join(timeout=join_timeout)
+        alive = [child for child in alive if child.is_alive()]
+        if not alive:
+            return
+
+    # Rung 2: SIGTERM, which is sufficient in practice (measured: child gone in 16ms).
+    for child in alive:
+        try:
+            child.terminate()
+        except Exception:  # noqa: BLE001 - best effort; rung 3 is the backstop
+            logger.debug("terminate() failed for pid %s", child.pid, exc_info=True)
+    for child in alive:
+        child.join(timeout=join_timeout)
+    alive = [child for child in alive if child.is_alive()]
+    if not alive:
+        return
+
+    # Rung 3: SIGKILL. A belt rather than a measured necessity -- but a child that
+    # outlives this ladder would hang the interpreter in multiprocessing's atexit
+    # join, which has no timeout at all.
+    for child in alive:
+        try:
+            child.kill()
+        except Exception:  # noqa: BLE001 - nothing left to escalate to
+            logger.debug("kill() failed for pid %s", child.pid, exc_info=True)
+    for child in alive:
+        child.join(timeout=join_timeout)
+
+    survivors = [child.pid for child in alive if child.is_alive()]
+    if survivors:
+        logger.warning("native window child(ren) survived teardown: %s", survivors)
+
+
+def _teardown_native_window() -> None:
+    """Tear down everything alive at shutdown -- today, only the native window child.
+
+    ``active_children()`` is deliberately broad: NiceGUI's native mode creates exactly one
+    ``mp.Process`` (the window), and ``nicegui.run``'s process pool spawns workers only on
+    the first ``run.cpu_bound`` call, which Ferry never makes. If that ever changes, this
+    must filter, or pool workers will be killed ahead of NiceGUI's own ``run.tear_down()``.
+
+
+    Never raises. Both call sites are shutdown paths -- ``app.on_shutdown`` (where an
+    exception would propagate into uvicorn's lifespan shutdown and skip NiceGUI's
+    remaining handlers) and the ``finally:`` in :func:`_run_gui` (where it would mask
+    whatever exception was already unwinding). The inner ladder guards the calls it
+    makes on the window and the children; this guards everything else, including
+    ``active_children()``, ``is_alive()`` and ``join()``.
+    """
+    try:
+        _terminate_children(
+            multiprocessing.active_children(),
+            getattr(app.native, "main_window", None),
+        )
+    except Exception:  # noqa: BLE001 - a shutdown path must not raise
+        logger.warning("native window teardown failed", exc_info=True)
+
+
+async def _teardown_native_window_async() -> None:
+    """Async wrapper for ``app.on_shutdown``, so the joins never block the event loop."""
+    await asyncio.to_thread(_teardown_native_window)
+
+
+def _folder_dialog_type() -> int:
+    """Resolve pywebview's folder-dialog constant.
+
+    Resolved lazily, never at import time: ``webview`` is an unbound name when the
+    optional dependency is missing. Prefers ``FileDialog.FOLDER``; falls back to the
+    deprecated ``FOLDER_DIALOG`` because pyproject floors pywebview at >=5.0.
+    """
+    file_dialog = getattr(webview, "FileDialog", None)
+    if file_dialog is not None:
+        return int(file_dialog.FOLDER)
+    return int(webview.FOLDER_DIALOG)
+
+
+async def _pick_folder(window: Any | None) -> str | None:
+    """Ask the native window for a folder; None when unavailable or cancelled.
+
+    Must go through NiceGUI's ``WindowProxy`` (``app.native.main_window``), which
+    marshals the call to the child over the method queue. ``webview.windows`` is always
+    empty in this process -- the window is created in another one -- so the previous
+    ``webview.windows[0]`` could only ever raise IndexError.
+    """
+    if window is None:
+        return None
+    try:
+        result = await window.create_file_dialog(_folder_dialog_type())
+    except Exception:  # noqa: BLE001 - a dead window must not break the page
+        logger.debug("native folder dialog failed", exc_info=True)
+        return None
+    if not result:
+        return None
+    return str(result[0])
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
+def _run_gui() -> None:
+    """Start the UI and guarantee the native window child dies with the server."""
+    native = _HAS_WEBVIEW
+
+    if native:
+        # Fires on every path that reaches the ASGI lifespan shutdown: window close,
+        # Cmd-Q, Dock quit, force quit (SIGTERM) and a single Ctrl-C.
+        app.on_shutdown(_teardown_native_window_async)
+
+    try:
+        ui.run(
+            title="Discord Ferry",
+            host="127.0.0.1",
+            port=8765,
+            native=native,
+            reload=False,
+            storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
+            # NiceGUI derives ping_interval = max(rt * 0.8, 4) and
+            # ping_timeout = max(rt * 0.4, 2) from this, so the 3.0 default leaves the
+            # browser only ~6s of tolerance before it shows "Connection lost".
+            # 10.0 -> 8s/4s = 12s, still prompt about a genuinely dead server.
+            reconnect_timeout=10.0,
+            # uvicorn's graceful drain is unbounded by default and runs BEFORE the
+            # shutdown hook. The only connection is the local websocket, which closes
+            # immediately, so keep this short: a force-quit SIGKILL landing mid-drain
+            # would orphan the window, which is the whole failure this prevents.
+            timeout_graceful_shutdown=1,
+        )
+    finally:
+        # Covers what the lifespan hook cannot: uvicorn's force_exit path (double
+        # Ctrl-C) and a failure during startup. Without it a surviving daemon child
+        # would hang the interpreter in multiprocessing's atexit join, which has no
+        # timeout -- a hung Ferry still holding port 8765, worse than an orphan.
+        if native:
+            _teardown_native_window()
+
+
 def main() -> None:
     """Launch the NiceGUI local web UI."""
-    native = False
+    # MUST be the first statement. PyInstaller's rthook only rebinds
+    # multiprocessing.freeze_support(); the diversion to spawn_main happens when it is
+    # called, and NiceGUI only calls it deep inside ui.run(). Without this, the frozen
+    # window child re-runs everything above ui.run() before diverting.
+    multiprocessing.freeze_support()
+
     try:
-        import webview  # noqa: F401
-
-        native = True
-    except ImportError:
-        pass
-
-    ui.run(
-        title="Discord Ferry",
-        host="127.0.0.1",
-        port=8765,
-        native=native,
-        reload=False,
-        storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
-    )
+        _run_gui()
+    except KeyboardInterrupt:
+        # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
+        # SIGINT after restoring the default handler, and NiceGUI's check_shutdown thread
+        # calls _thread.interrupt_main() ~0-100ms after the window closes -- so even a
+        # clean window close can land here. Measured behaviour today is that neither
+        # surfaces as a KeyboardInterrupt (the app exits 0); this is the defensive path
+        # for when one does, and 130 is the conventional SIGINT status.
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
