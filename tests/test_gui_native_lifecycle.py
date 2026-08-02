@@ -134,6 +134,25 @@ class TestTeardownLadder:
         _terminate_children([child], None)
         assert child.terminate_calls == 1
 
+    def test_teardown_never_raises_into_the_shutdown_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both call sites are shutdown paths, so nothing may escape.
+
+        On ``app.on_shutdown`` an exception would propagate into uvicorn's lifespan
+        shutdown and skip NiceGUI's remaining handlers; in ``_run_gui``'s ``finally:``
+        it would mask whatever exception was already unwinding. The inner ladder only
+        guards the calls it makes ON the child -- is_alive()/join()/active_children()
+        are guarded here.
+        """
+
+        class ExplodingChild(FakeChild):
+            def is_alive(self) -> bool:
+                raise OSError("process table went away")
+
+        monkeypatch.setattr(gui.multiprocessing, "active_children", lambda: [ExplodingChild()])
+        gui._teardown_native_window()  # must not raise
+
 
 class TestMainLifecycle:
     def test_freeze_support_is_the_first_statement_of_main(self) -> None:

@@ -1660,11 +1660,22 @@ def _terminate_children(
 
 
 def _teardown_native_window() -> None:
-    """Synchronous teardown against the live process table. Safe to call anywhere."""
-    _terminate_children(
-        multiprocessing.active_children(),
-        getattr(app.native, "main_window", None),
-    )
+    """Synchronous teardown against the live process table. Safe to call anywhere.
+
+    Never raises. Both call sites are shutdown paths -- ``app.on_shutdown`` (where an
+    exception would propagate into uvicorn's lifespan shutdown and skip NiceGUI's
+    remaining handlers) and the ``finally:`` in :func:`_run_gui` (where it would mask
+    whatever exception was already unwinding). The inner ladder guards the calls it
+    makes on the window and the children; this guards everything else, including
+    ``active_children()``, ``is_alive()`` and ``join()``.
+    """
+    try:
+        _terminate_children(
+            multiprocessing.active_children(),
+            getattr(app.native, "main_window", None),
+        )
+    except Exception:  # noqa: BLE001 - a shutdown path must not raise
+        logger.warning("native window teardown failed", exc_info=True)
 
 
 async def _teardown_native_window_async() -> None:
