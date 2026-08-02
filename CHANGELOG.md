@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.3] - 2026-08-02
+
+### Fixed
+
+- **Autumn retried uploads nine seconds too early after a rate-limit hit**
+  (`uploader/autumn.py`). Autumn sits behind the same rate-limit middleware as the Stoat API and
+  advertises `X-RateLimit-Reset-After: 10000` (**milliseconds**) on a 429 — verified live against
+  `cdn.stoatusercontent.com` — but `_retry_after_ms` never read that header. A real Autumn 429
+  carries no body `retry_after` and no `Retry-After`, so every one of them fell through to the
+  1000 ms default and retried into a bucket that was still shut. With `MAX_RETRIES = 3`, all three
+  attempts could burn inside a single 10-second window and the upload failed outright.
+  This is the mirror image of the 2.8.2 defect: the same header and the same unit, but where
+  `migrator/api.py` read it and over-waited by 6×, `uploader/autumn.py` never read it and
+  under-waited by 10×. Neither client's tests knew the other existed.
+
+### Changed
+
+- **Autumn's 429 backoff is now bounded to [0, 60] seconds** (`uploader/autumn.py`), matching the
+  cap `migrator/api.py` already applied. Flagged rather than shipped quietly because it changes
+  behaviour for inputs no correct server sends: the delay is remote-supplied, and making the header
+  load-bearing is what made that matter. A negative `retry_after` made `asyncio.sleep` return
+  immediately and turned the retry loop hot; an `X-RateLimit-Reset-After` of `3600000` slept a
+  literal hour.
+- **Non-finite and boolean advertised delays are rejected** rather than clamped
+  (`uploader/autumn.py`), falling back to the 1000 ms default. A clamp alone cannot catch `NaN`:
+  every comparison against it is False, so it survives `min`/`max`, and `asyncio.sleep(nan)` then
+  **never returns** — one such response would hang an upload forever. (`time.sleep(nan)` raises
+  `ValueError`; asyncio's silence here is CPython #105331.) It needs no malice to arrive: Python's
+  `json` module parses bare `NaN`/`Infinity` by default, so `{"retry_after": NaN}` from a sloppy
+  server reaches us as a float. Separately, `bool` is a subclass of `int` in Python, so a JSON
+  `true` was accepted as a 1 ms delay — beneath the clamp's floor, and so effectively no backoff.
+
 ### Internal
 
 - `.gitignore` now covers `.worktrees/`. The directory already existed at the repo root but was

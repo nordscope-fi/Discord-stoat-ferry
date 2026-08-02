@@ -540,3 +540,213 @@ async def test_429_exhausted_raises(
     async with aiohttp.ClientSession() as session:
         with pytest.raises(AutumnUploadError, match="Upload failed after"):
             await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+
+
+# ---------------------------------------------------------------------------
+# X-RateLimit-Reset-After (MILLISECONDS) + delay clamp
+# ---------------------------------------------------------------------------
+
+
+async def test_429_x_ratelimit_reset_after_is_milliseconds(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """Autumn's X-RateLimit-Reset-After is MILLISECONDS, not the 1000 ms default.
+
+    Autumn rides the same rate-limit middleware as the Stoat API, so a real Autumn 429
+    advertises ``x-ratelimit-reset-after: 10000`` (verified live against
+    cdn.stoatusercontent.com) with no body and no Retry-After. Falling through to the
+    default made every Autumn 429 retry nine seconds early, into a bucket still shut.
+    """
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        body=b"",
+        headers={"X-RateLimit-Reset-After": "10000"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 10.0
+
+
+async def test_429_negative_retry_after_floors_at_zero(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A negative advertised delay must not disable backoff.
+
+    asyncio.sleep() of a negative value returns immediately, which would turn the retry
+    loop hot and burn all three attempts against a still-closed bucket.
+    """
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": -5000})
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 0.0
+
+
+async def test_429_absurd_retry_after_is_capped(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """An hour-long advertised delay is capped at 60 s rather than presenting as a hang."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        body=b"",
+        headers={"X-RateLimit-Reset-After": "3600000"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 60.0
+
+
+async def test_429_unparseable_reset_after_falls_back_to_default(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A non-numeric X-RateLimit-Reset-After is ignored, not fatal."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        body=b"",
+        headers={"X-RateLimit-Reset-After": "soon"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 1.0
+
+
+async def test_429_body_retry_after_outranks_reset_after_header(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """The body stays the most specific source when both it and the ms header are present."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        payload={"retry_after": 100},
+        headers={"X-RateLimit-Reset-After": "10000"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 0.1
+
+
+async def test_429_retry_after_header_outranks_reset_after_header(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A proxy's Retry-After (delta-SECONDS) outranks the origin's ms header.
+
+    The two are different units on the same response -- 2 s against 10000 ms. Asserting
+    2.0 rather than 10.0 proves the seconds branch ran, so a future reorder of the
+    precedence chain cannot silently swap the units.
+    """
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        body=b"",
+        headers={"Retry-After": "2", "X-RateLimit-Reset-After": "10000"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 2.0
+
+
+async def test_429_nan_reset_after_header_falls_back_to_default(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A NaN delay must be rejected, not clamped -- the clamp cannot catch it.
+
+    float("nan") parses fine, and every comparison against NaN is False, so it passes
+    straight through min()/max(). asyncio.sleep(nan) then poisons the event loop's
+    timer heap. Guards the clamp against giving false assurance.
+    """
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        body=b"",
+        headers={"X-RateLimit-Reset-After": "nan"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 1.0
+
+
+async def test_429_infinite_reset_after_header_falls_back_to_default(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """An infinite delay is treated as garbage, not as "wait the maximum"."""
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=429,
+        body=b"",
+        headers={"X-RateLimit-Reset-After": "inf"},
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 1.0
+
+
+async def test_429_nan_body_retry_after_falls_back_to_default(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """The body route reaches NaN too -- Python's json parses bare NaN by default.
+
+    This is the more reachable of the two NaN paths: it needs only a sloppy server
+    serialising a float, not a hand-written header.
+    """
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": float("nan")}
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 1.0
+
+
+async def test_429_boolean_body_retry_after_is_ignored(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A JSON `true` is not a delay of 1 ms.
+
+    bool is a subclass of int, so an isinstance check accepts it and float(True) gives
+    1.0 ms -- below the clamp's floor, so it would slip past as effectively no backoff.
+    """
+    file = tmp_path / "x.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": True})
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert result == "ok"
+    assert slept[0] == 1.0
