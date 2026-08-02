@@ -94,6 +94,14 @@ def test_release_workflow_can_be_dispatched_manually() -> None:
     workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     triggers = workflow.split("jobs:", 1)[0]
     assert "workflow_dispatch:" in triggers, "release.yml must allow manual dispatch"
+    # workflow_dispatch alone is not enough: GitHub only offers it from the default
+    # branch's copy, and auto-tag.yml pushes the tag the moment a version bump lands on
+    # main, so there is no window between "dispatch available" and "tag created". The
+    # pull_request trigger is what actually exercises packaging before a tag exists.
+    assert "pull_request:" in triggers, (
+        "release.yml must build on PRs that touch the packaging path"
+    )
+    assert "ferry.spec" in triggers, "the PR trigger must watch ferry.spec"
 
 
 def test_ferry_spec_keeps_onefile_off_darwin() -> None:

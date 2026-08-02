@@ -4,9 +4,16 @@ on:
   push:
     tags:
       - "v*.*.*"
-  # Manual runs exist so the packaging path can be exercised BEFORE a tag. A
-  # packaging failure discovered on a tag means deleting and re-cutting a published
-  # release; a dispatch run costs nothing.
+  # Exercise the packaging path on PRs that touch it. workflow_dispatch alone could
+  # never do this: GitHub only offers it from the default branch's copy of a workflow,
+  # and auto-tag.yml pushes the tag the instant a version bump lands on main -- so
+  # there is no window between "dispatch available" and "tag created". A packaging
+  # failure found on a tag means deleting and re-cutting a published release.
+  # The release job is tag-gated, so these runs build and verify only.
+  pull_request:
+    paths:
+      - "ferry.spec"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 concurrency:
