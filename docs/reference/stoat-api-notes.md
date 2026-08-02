@@ -122,23 +122,62 @@ PATCH. Forgetting to include a channel in any category leaves it uncategorised.
 ## Permission Bits
 
 Stoat has no single ADMINISTRATOR permission. Every capability must be granted individually via
-bitmask. The authoritative list from `developers.stoat.chat`:
+bitmask.
 
-| Name | Bit | Value | Notes |
-|------|-----|-------|-------|
-| ManageChannel | 0 | 1 | |
-| ManageServer | 1 | 2 | |
-| ManagePermissions | 2 | 4 | |
-| ManageRole | 3 | 8 | Also required for masquerade `colour` |
-| ManageCustomisation | 4 | 16 | Required to create/manage emoji |
-| ViewChannel | 20 | 1,048,576 | |
-| ReadMessageHistory | 21 | 2,097,152 | |
-| SendMessage | 22 | 4,194,304 | |
-| ManageMessages | 23 | 8,388,608 | Required to pin messages |
-| SendEmbeds | 26 | 67,108,864 | |
-| UploadFiles | 27 | 134,217,728 | |
-| Masquerade | 28 | 268,435,456 | Required for masquerade name and avatar |
-| React | 29 | 536,870,912 | |
+> **Read the source, not the docs site.** The authoritative list is the `ChannelPermission` enum in
+> `stoatchat/stoatchat` at `crates/core/permissions/src/models/channel.rs`. `developers.stoat.chat`
+> has lagged it, and an earlier revision of this page reproduced a 13-bit subset from that site —
+> which is how Ferry came to drop `MentionEveryone` as "nonexistent" and to ship voice channels that
+> granted no voice permissions. Verified against source 2026-08-02 (commit `502203d3`).
+
+All **34** defined bits:
+
+| Name | Bit | Notes |
+|------|-----|-------|
+| ManageChannel | 0 | |
+| ManageServer | 1 | |
+| ManagePermissions | 2 | |
+| ManageRole | 3 | Also required for masquerade `colour` |
+| ManageCustomisation | 4 | Required to create/manage emoji |
+| KickMembers | 6 | |
+| BanMembers | 7 | |
+| TimeoutMembers | 8 | |
+| AssignRoles | 9 | Split out of `ManageRole` |
+| ChangeNickname | 10 | |
+| ManageNicknames | 11 | |
+| ChangeAvatar | 12 | No Discord analogue |
+| RemoveAvatars | 13 | No Discord analogue |
+| ViewChannel | 20 | |
+| ReadMessageHistory | 21 | |
+| SendMessage | 22 | |
+| ManageMessages | 23 | Required to pin messages — Stoat has no pin-only bit |
+| ManageWebhooks | 24 | |
+| InviteOthers | 25 | |
+| SendEmbeds | 26 | |
+| UploadFiles | 27 | Send attachments and media |
+| Masquerade | 28 | Required for masquerade name and avatar |
+| React | 29 | |
+| Connect | 30 | Join a voice channel |
+| Speak | 31 | Publish microphone |
+| Video | 32 | Publish camera / screen share |
+| MuteMembers | 33 | |
+| DeafenMembers | 34 | |
+| MoveMembers | 35 | |
+| Listen | 36 | **Receive** audio and video — see below |
+| MentionEveryone | 37 | |
+| MentionRoles | 38 | |
+| BypassSlowmode | 39 | |
+| ViewAuditLogs | 40 | |
+
+Bit 5 and bits 14–19 are undefined gaps. Bits **41–52 are a declared "free area"** and 53–64 are
+marked do-not-use, so never derive an "all permissions" value from Stoat's `GrantAllSafe`
+(`0x000F_FFFF_FFFF_FFFF`) — it spans the free area, and Stoat computes it for server owners without
+ever persisting it to a role.
+
+**`Connect` alone does not give you a working voice channel.** Stoat gates *joining* on `Connect`
+(`voice_join.rs:52`) but builds the LiveKit token's `can_subscribe` from `Listen`
+(`voice_client.rs:95`), so a member with `Connect` and `Speak` but no `Listen` joins the call and
+hears nobody. Discord's single `CONNECT` permission covers both, so Ferry maps it to both bits.
 
 **Ferry account minimum permission value:**
 

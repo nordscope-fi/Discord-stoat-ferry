@@ -565,22 +565,12 @@ This applies to masquerade payloads, embed objects, role objects, and permission
 ### Permission Bits
 
 Stoat has **no single ADMINISTRATOR permission**. Every capability must be granted individually.
+Stoat defines **34** permission bits; the complete list lives in one place, in
+[Stoat API Notes → Permission Bits](stoat-api-notes.md#permission-bits).
 
-| Name | Bit | Value | Notes |
-|------|-----|-------|-------|
-| ManageChannel | 0 | 1 | |
-| ManageServer | 1 | 2 | |
-| ManagePermissions | 2 | 4 | |
-| ManageRole | 3 | 8 | Also required for masquerade `colour` |
-| ManageCustomisation | 4 | 16 | Required to create/manage emoji |
-| ViewChannel | 20 | 1,048,576 | |
-| ReadMessageHistory | 21 | 2,097,152 | |
-| SendMessage | 22 | 4,194,304 | |
-| ManageMessages | 23 | 8,388,608 | Required to pin messages |
-| SendEmbeds | 26 | 67,108,864 | |
-| UploadFiles | 27 | 134,217,728 | |
-| Masquerade | 28 | 268,435,456 | Required for masquerade name and avatar |
-| React | 29 | 536,870,912 | |
+This page deliberately does **not** copy that table. It used to, and the copy went stale: it
+carried a 13-bit subset long after Stoat's enum had grown to 34, and the resulting blind spot is
+what let Ferry ship voice channels that granted no voice permissions. One table, one owner.
 
 **Ferry minimum permissions** (bits 3, 4, 20–23, 26–29):
 
@@ -735,22 +725,43 @@ the equivalent Stoat bitfield.
 
 | Discord Permission | Discord Bit | Stoat Permission | Stoat Bit |
 |-------------------|-------------|-----------------|-----------|
+| CREATE_INSTANT_INVITE | 0 | InviteOthers | 25 |
+| KICK_MEMBERS | 1 | KickMembers | 6 |
+| BAN_MEMBERS | 2 | BanMembers | 7 |
 | MANAGE_CHANNELS | 4 | ManageChannel | 0 |
 | MANAGE_GUILD | 5 | ManageServer | 1 |
-| MANAGE_ROLES | 28 | ManagePermissions + ManageRole | 2, 3 |
-| MANAGE_EMOJIS | 30 | ManageCustomisation | 4 |
+| ADD_REACTIONS | 6 | React | 29 |
+| VIEW_AUDIT_LOG | 7 | ViewAuditLogs | 40 |
+| STREAM | 9 | Video | 32 |
 | VIEW_CHANNEL | 10 | ViewChannel | 20 |
-| READ_MESSAGE_HISTORY | 16 | ReadMessageHistory | 21 |
 | SEND_MESSAGES | 11 | SendMessage | 22 |
 | MANAGE_MESSAGES | 13 | ManageMessages | 23 |
 | EMBED_LINKS | 14 | SendEmbeds | 26 |
 | ATTACH_FILES | 15 | UploadFiles | 27 |
-| ADD_REACTIONS | 6 | React | 29 |
+| READ_MESSAGE_HISTORY | 16 | ReadMessageHistory | 21 |
+| MENTION_EVERYONE | 17 | MentionEveryone + MentionRoles | 37, 38 |
+| CONNECT | 20 | Connect + Listen | 30, 36 |
+| SPEAK | 21 | Speak | 31 |
+| MUTE_MEMBERS | 22 | MuteMembers | 33 |
+| DEAFEN_MEMBERS | 23 | DeafenMembers | 34 |
+| MOVE_MEMBERS | 24 | MoveMembers | 35 |
+| CHANGE_NICKNAME | 26 | ChangeNickname | 10 |
+| MANAGE_NICKNAMES | 27 | ManageNicknames | 11 |
+| MANAGE_ROLES | 28 | ManagePermissions + ManageRole + AssignRoles | 2, 3, 9 |
+| MANAGE_WEBHOOKS | 29 | ManageWebhooks | 24 |
+| MANAGE_EMOJIS | 30 | ManageCustomisation | 4 |
+| MODERATE_MEMBERS | 40 | TimeoutMembers | 8 |
+| BYPASS_SLOWMODE | 52 | BypassSlowmode | 39 |
 
 **Special cases**:
 
-- **ADMINISTRATOR** (Discord bit 3): Expands to `ALL_STOAT_PERMISSIONS` — every Stoat bit set
-- **MANAGE_ROLES** maps to **two** Stoat bits (ManagePermissions + ManageRole)
+- **ADMINISTRATOR** (Discord bit 3): Expands to `ALL_STOAT_PERMISSIONS`, derived from
+  `STOAT_PERMISSION_BITS` — every one of the 34 bits Stoat defines, and nothing from its
+  reserved 41–52 free area
+- **CONNECT** maps to **two** bits: Stoat gates joining a voice channel on `Connect` but gates
+  hearing anyone on `Listen`, and Discord's single permission covers both
+- **PIN_MESSAGES** (51) is deliberately unmapped — Stoat has no pin-only bit, and its nearest
+  equivalent (`ManageMessages`) also permits deletion
 - **Unmapped Discord bits**: Silently dropped (no Stoat equivalent)
 - **Managed/bot roles**: Permissions skipped (role still created for mention remapping)
 

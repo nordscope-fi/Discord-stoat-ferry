@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-08-02
+
+### Fixed
+
+- **Migrated voice channels now grant voice permissions.** Nobody could connect, speak or hear in
+  a migrated voice channel, because none of Discord's voice permissions had a mapping — they all
+  translated to zero.
+
+  The permission map covered 17 Discord permissions, reaching 18 Stoat bits out of the **34**
+  Stoat actually defines. Newly mapped: `VIEW_AUDIT_LOG`, `STREAM`, `CONNECT`, `SPEAK`, `MUTE_MEMBERS`,
+  `DEAFEN_MEMBERS`, `MOVE_MEMBERS`, `MODERATE_MEMBERS`, `BYPASS_SLOWMODE`, `MENTION_EVERYONE`, and
+  `AssignRoles` alongside the existing `MANAGE_ROLES` targets.
+
+  `CONNECT` maps to **two** Stoat bits, `Connect` and `Listen`. Stoat gates *joining* a voice
+  channel on `Connect` but gates *receiving* anyone's audio or video on `Listen`, so granting
+  `Connect` alone would still have left members in a silent room.
+
+- **Migrated ADMINISTRATOR roles no longer lose permissions.** The expansion applied to a Discord
+  admin role was a hand-written list covering only the bits that happened to be mapped, so admins
+  arrived without any voice, mention, timeout, audit-log or role-assignment rights. It is now
+  derived from Stoat's full enum, which means extending the map can no longer leave it behind.
+
+### Changed
+
+- **Roles that could mention `@everyone` in Discord can do so in Stoat.** A code comment claimed
+  Stoat had no equivalent permission and that the mapping was intentionally dropped. That was
+  false — `MentionEveryone` is bit 37 and `MentionRoles` is bit 38. This restores what Discord
+  granted at source, but it is a real new capability for those roles: **review which roles hold
+  "Mention @everyone" before migrating a large server.**
+
+- `docs/reference/stoat-api-notes.md` now lists all 34 permission bits and states plainly that the
+  authoritative source is stoatchat's `ChannelPermission` enum, not `developers.stoat.chat`. The
+  page previously reproduced a 13-bit subset from that site, which is where the missing mappings
+  came from in the first place.
+
 ## [2.9.0] - 2026-08-02
 
 ### Added

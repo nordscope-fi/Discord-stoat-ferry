@@ -1784,6 +1784,19 @@ async def test_run_roles_applies_permissions(tmp_path: Path) -> None:
     assert perm_bodies[0] == {"permissions": {"allow": 4_194_304, "deny": 0}}
 
 
+def test_ferry_min_permissions_value_pinned() -> None:
+    """SC-27: Ferry's operating floor is deliberately narrow.
+
+    It is what the Ferry account needs to *perform* a migration, not a fidelity
+    surface — so it grants no voice, mention or audit-log bits even though batch 5
+    (#109) made those translatable. Widening it must be a deliberate, reviewed act
+    rather than a side effect of extending the Discord→Stoat map.
+    """
+    assert FERRY_MIN_PERMISSIONS == 1_022_361_624
+    for bit in (30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40):
+        assert not FERRY_MIN_PERMISSIONS & (1 << bit), f"unexpected bit {bit} in Ferry's floor"
+
+
 async def test_run_roles_applies_server_defaults(tmp_path: Path) -> None:
     """ROLES phase applies server default permissions merged with FERRY_MIN_PERMISSIONS."""
     events: list[MigrationEvent] = []
