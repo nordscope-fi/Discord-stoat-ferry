@@ -13,6 +13,12 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Anchored to column 0 on purpose: ferry.spec also contains an indented
+# `elif sys.platform == "darwin":` in the icon-selection block, and an unanchored
+# split matches THAT first -- which made an earlier draft of these tests inspect
+# icon code and pass vacuously.
+_DARWIN_BRANCH = '\nif sys.platform == "darwin":'
+
 
 def test_ferry_spec_bundles_dce_checksums() -> None:
     """ferry.spec must bundle dce_checksums.json into the frozen binary.
@@ -33,3 +39,31 @@ def test_ferry_spec_bundles_dce_checksums() -> None:
         "ferry.spec must map dce_checksums.json -> the 'discord_ferry' package dir in "
         "all_datas, else the frozen binary skips DCE checksum verification."
     )
+
+
+def test_ferry_spec_builds_onedir_on_darwin() -> None:
+    """macOS must build onedir, not onefile.
+
+    Onefile puts a PyInstaller bootloader in front of Python; that bootloader is the
+    process macOS registers with LaunchServices, and it waits in usleep() while the
+    real app runs. macOS flags it unresponsive (a 99s hang report was recorded against
+    v2.7.1), users force-quit it, and the SIGTERM orphans the pywebview window child,
+    which then shows "Connection lost. Trying to reconnect..." forever.
+    """
+    spec_text = (_REPO_ROOT / "ferry.spec").read_text(encoding="utf-8")
+    parts = spec_text.split(_DARWIN_BRANCH, 1)
+    assert len(parts) == 2, "ferry.spec must branch packaging on sys.platform"
+    body = parts[1]
+    assert "exclude_binaries=True" in body, "darwin EXE must exclude binaries (onedir)"
+    assert "COLLECT(" in body, "darwin build must COLLECT into a directory"
+    assert "BUNDLE(" in body and "coll," in body, "BUNDLE must wrap the COLLECT output"
+
+
+def test_ferry_spec_keeps_onefile_off_darwin() -> None:
+    """Windows must keep shipping a single Ferry-windows-x86_64.exe."""
+    spec_text = (_REPO_ROOT / "ferry.spec").read_text(encoding="utf-8")
+    non_darwin = spec_text.split(_DARWIN_BRANCH, 1)[1].split("\nelse:", 1)
+    assert len(non_darwin) == 2, "ferry.spec must keep an else: branch for other platforms"
+    body = non_darwin[1]
+    assert "runtime_tmpdir=None" in body, "non-darwin build must stay onefile"
+    assert "exclude_binaries" not in body, "non-darwin build must not become onedir"
