@@ -217,7 +217,15 @@ class TestMainLifecycle:
         assert calls == []
 
     def test_keyboard_interrupt_exits_130(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Returning 0 on Ctrl-C would lie to a supervisor or a shell script."""
+        """main()'s contract: an escaping KeyboardInterrupt becomes exit 130.
+
+        This is a defensive path, NOT the observed end-to-end behaviour. Measured on
+        both a source run and the built bundle: a real SIGINT is consumed by uvicorn's
+        handle_exit, the graceful shutdown runs, and the re-raised signal never surfaces
+        as a KeyboardInterrupt here -- the process exits 0, cleanly, with no orphans and
+        no traceback. The handler still matters for an interrupt during the boot window,
+        before uvicorn installs its handlers.
+        """
 
         def _interrupt() -> None:
             raise KeyboardInterrupt
