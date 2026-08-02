@@ -820,8 +820,13 @@ subsequent messages reuse the cached file ID from `state.avatar_cache`.
 ### Idempotency-Key Deduplication
 
 Every message send includes an `Idempotency-Key` HTTP header set to `ferry-{discord_msg_id}`.
-If the same key is submitted twice (e.g. after resume), Stoat returns the existing message
-rather than creating a duplicate. This makes the MESSAGES phase safe to re-run.
+
+**It does not make the MESSAGES phase safe to re-run**, and an earlier revision of this page said
+it did. Stoat's store is a 1000-entry, in-memory, process-local LRU with no TTL that is emptied on
+restart, and a repeated key returns **HTTP 409**, not the original message. Treat it as a guard
+against an immediate double-send inside one run and nothing more — see
+[Stoat API Notes → Message Deduplication](stoat-api-notes.md#message-deduplication-with-idempotency-key)
+for the source-verified contract and for which client-side marker actually covers each strategy.
 
 ### Reply Reference Resolution
 
@@ -873,8 +878,13 @@ The MESSAGES phase has finer granularity (v2.0.0+):
 
 - `state.completed_channel_ids`: set of Discord channel IDs whose messages were fully sent
 - `state.channel_message_offsets`: maps a partially-processed channel ID to the last Discord
-  message ID successfully sent — the phase resumes within that channel from that offset
-- Messages already sent are additionally deduplicated by `Idempotency-Key` header
+  message ID **checkpointed** — the phase resumes within that channel from that offset. Note
+  "checkpointed", not "successfully sent": the counter advances on a failed send too, so a
+  failure can sit below the offset. Such a message stays in `state.failed_messages` and is
+  re-attempted by `--incremental` (not by `--resume`, which is a pure continuation)
+- Under `--thread-strategy merge` the same pair of markers is kept per *thread*, keyed by the
+  thread's own channel ID (batch 6, #107) — that path writes no `message_map`, so the markers
+  are the only protection against a re-run duplicating the thread into its parent
 
 **v1→v2 automatic migration**: On `--resume` with a v1 state file, Ferry detects the old
 `last_completed_channel` / `last_completed_message` fields, converts them to the new set/dict
@@ -1105,8 +1115,11 @@ call `stream_messages()` when `metadata_only=True`).
 Stoat has no bulk message import API. Every message must be sent individually via the Ferry
 account. Masquerade makes each message display the original Discord author's name and avatar,
 preserving conversation readability. The `Idempotency-Key` header (`ferry-{discord_msg_id}`)
-prevents duplicate messages on resume — Stoat returns the existing message if the same key
-was already used.
+guards against an immediate double-send within a single run. It does **not** protect a resume:
+Stoat's cache holds 1000 entries in memory, is cleared on restart, and returns HTTP 409 rather
+than the original message. Resume safety comes from Ferry's own markers — `state.message_map` and
+`completed_channel_ids` under `flatten`, `channel_high_water` and `channel_message_offsets` under
+`merge`.
 
 ### Why Separate discord_metadata.json?
 
