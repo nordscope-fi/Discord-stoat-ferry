@@ -188,15 +188,37 @@ bot/webhook's display name and avatar.
 
 ### Forwarded Messages
 
-Discord message forwarding (introduced 2024) is not fully represented in DCE exports. A forwarded
-message appears as:
+Since **DCE 2.47** (February 2026, PR #1451) a forwarded message exports its full payload in a
+`forwardedMessage` object, and `reference.type` distinguishes a forward from a reply:
 
-- `content`: empty string
-- `attachments`: empty array
-- `reference`: non-null (points to the original message)
+```jsonc
+"reference": {
+  "type": "Forward",          // MessageReferenceKind: "Default" (a reply) or "Forward"
+  "messageId": "...", "channelId": "...", "guildId": "..."
+},
+"forwardedMessage": {
+  "timestamp": "...",
+  "timestampEdited": "..." | null,
+  "content": "...",
+  "attachments": [ /* same shape as a top-level attachment */ ],
+  "embeds":      [ /* same shape as a top-level embed */ ],
+  "stickers":    [ /* same shape as a top-level sticker */ ]
+}
+```
 
-This combination is DCE bug #1322. Ferry detects it during the MESSAGES phase and logs a skip:
-`"forwarded message skipped (DCE bug #1322)"`.
+The message's own `content` is usually empty — the payload lives entirely in the block.
+
+**There is no author field.** Ferry therefore posts recovered content under whoever forwarded it;
+the original writer is not present in the export.
+
+Ferry merges the block into the message and marks it `[forwarded]`, so the ordinary attachment,
+embed and sticker paths handle it.
+
+**Exports older than DCE 2.47** wrote neither `forwardedMessage` nor `reference.type`. Those
+messages carry no recoverable content and are still skipped with a warning naming the cause.
+An empty `reference.type` is the signal for "this export predates 2.47" and is meaningfully
+different from `"Default"` — Ferry falls back to the old empty-content heuristic only in that case,
+because the heuristic alone also matches an ordinary reply carrying just a sticker or an embed.
 
 ### System Messages with Empty Content
 

@@ -10,6 +10,7 @@ from discord_ferry.parser.dce_parser import (
     _infer_thread_info,
     _parse_author,
     _parse_guild,
+    _parse_message,
     _parse_reaction,
     check_cdn_url_expiry,
     parse_export_directory,
@@ -238,10 +239,11 @@ def test_infer_thread_info_forum() -> None:
 def test_parse_export_directory(fixtures_dir: Path) -> None:
     """Directory parse returns one DCEExport per valid JSON file."""
     exports = parse_export_directory(fixtures_dir)
-    # 6 valid DCE JSON files: simple_channel, edge_cases, markdown_rendered,
-    # plus the three real DCE captures (general, Cool Thread, Bug Report).
+    # 7 valid DCE JSON files: simple_channel, edge_cases, markdown_rendered,
+    # forwarded_message_synthetic, plus the three real DCE captures (general,
+    # Cool Thread, Bug Report).
     # rollback_state.json is JSON but not DCE-shaped and is silently skipped.
-    assert len(exports) == 6
+    assert len(exports) == 7
     assert all(isinstance(e, DCEExport) for e in exports)
 
 
@@ -263,8 +265,10 @@ def test_parse_export_directory_skips_invalid(fixtures_dir: Path, tmp_path: Path
     (temp_dir / "also_bad.json").write_text("this is not json at all{{{")
 
     exports = parse_export_directory(temp_dir)
-    # Still 6 valid exports, bad files are silently skipped
-    assert len(exports) == 6
+    # The assertion is "the bad files changed nothing", so compare against the clean
+    # directory rather than a hardcoded count — otherwise every new fixture breaks this
+    # test for a reason unrelated to what it checks.
+    assert len(exports) == len(parse_export_directory(fixtures_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -745,3 +749,125 @@ def test_two_segment_re_removed() -> None:
     import discord_ferry.parser.dce_parser as p
 
     assert not hasattr(p, "_TWO_SEGMENT_RE")
+
+
+# ---------------------------------------------------------------------------
+# Forwarded messages (DCE 2.47+)
+# ---------------------------------------------------------------------------
+
+
+def _forward_raw() -> dict:
+    """A raw message carrying a forwarded payload, in the verified DCE 2.47.1 shape.
+
+    Field names taken from DiscordChatExporter.Core/Exporting/JsonMessageWriter.cs:538-592
+    at tag 2.47.1 — the version this project pins. The nested attachments/embeds/stickers
+    are written by the same writers as their top-level counterparts, so their shapes match.
+    """
+    return {
+        "id": "900000000000000099",
+        "type": "Default",
+        "timestamp": "2024-03-01T10:00:00+00:00",
+        "content": "",
+        "author": {"id": "1", "name": "forwarder", "nickname": "forwarder", "isBot": False},
+        "reference": {
+            "type": "Forward",
+            "messageId": "800000000000000001",
+            "channelId": "222222222222222222",
+            "guildId": "111111111111111111",
+        },
+        "forwardedMessage": {
+            "timestamp": "2024-02-01T09:00:00+00:00",
+            "timestampEdited": None,
+            "content": "the original text",
+            "attachments": [
+                {
+                    "id": "att1",
+                    "url": "https://cdn.discordapp.com/a.png",
+                    "fileName": "a.png",
+                    "fileSizeBytes": 1234,
+                }
+            ],
+            "embeds": [{"title": "embed title", "description": "embed body"}],
+            "stickers": [
+                {"id": "s1", "name": "sticker", "format": "Png", "sourceUrl": "https://x/s.png"}
+            ],
+        },
+    }
+
+
+def test_parse_forwarded_message_payload() -> None:
+    """The forwarded block is parsed in full, reusing the normal attachment parser."""
+    msg = _parse_message(_forward_raw())
+
+    assert msg.reference is not None
+    assert msg.reference.type == "Forward"
+
+    fwd = msg.forwarded_message
+    assert fwd is not None
+    assert fwd.content == "the original text"
+    assert fwd.timestamp == "2024-02-01T09:00:00+00:00"
+    assert fwd.timestamp_edited is None
+    assert len(fwd.attachments) == 1
+    assert fwd.attachments[0].file_name == "a.png"
+    assert fwd.attachments[0].file_size_bytes == 1234
+    assert fwd.embeds == [{"title": "embed title", "description": "embed body"}]
+    assert fwd.stickers[0]["name"] == "sticker"
+
+
+def test_parse_message_without_forward_leaves_fields_empty() -> None:
+    """A plain message has no forwarded payload and an empty reference kind.
+
+    Empty (not "Default") is the marker for "this export predates DCE 2.47", which the
+    migrator needs to distinguish an old export from a genuine reply.
+    """
+    raw = _forward_raw()
+    del raw["forwardedMessage"]
+    del raw["reference"]
+    msg = _parse_message(raw)
+    assert msg.forwarded_message is None
+    assert msg.reference is None
+
+
+def test_forwarded_block_with_unexpected_types_is_survivable() -> None:
+    """A malformed forwarded block must not crash or corrupt.
+
+    Two distinct traps, both verified against the pre-hardening code:
+    a non-string `content` survived as an int and raised TypeError inside the join in
+    `_merge_forwarded`; and `list(some_dict)` yields the dict's KEYS rather than raising,
+    so `embeds` arriving as an object silently became `["title", "description"]`.
+    """
+    raw = _forward_raw()
+    raw["forwardedMessage"]["content"] = 123
+    raw["forwardedMessage"]["embeds"] = {"title": "x", "description": "y"}
+    raw["forwardedMessage"]["attachments"] = "not-a-list"
+    raw["forwardedMessage"]["stickers"] = None
+
+    msg = _parse_message(raw)
+    fwd = msg.forwarded_message
+    assert fwd is not None
+    assert fwd.content == "123"  # coerced, not left as an int
+    assert fwd.embeds == []  # not ["title", "description"]
+    assert fwd.attachments == []
+    assert fwd.stickers == []
+
+
+def test_parse_forwarded_fixture_end_to_end(fixtures_dir: Path) -> None:
+    """The synthetic fixture parses through the real file path, not just the dict path.
+
+    Exercises `parse_single_export`, so the whole-file shape is covered — a dict-level
+    test alone would not catch a required top-level key being wrong.
+    """
+    export = parse_single_export(fixtures_dir / "forwarded_message_synthetic.json")
+    assert export.message_count == 2
+
+    forward, reply = export.messages
+    assert forward.forwarded_message is not None
+    assert forward.forwarded_message.content == "the original text that used to be discarded"
+    assert forward.forwarded_message.attachments[0].file_name == "forwarded.png"
+    assert forward.reference is not None
+    assert forward.reference.type == "Forward"
+
+    # The second message is an ordinary reply and must stay one.
+    assert reply.forwarded_message is None
+    assert reply.reference is not None
+    assert reply.reference.type == "Default"

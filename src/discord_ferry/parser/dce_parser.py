@@ -17,6 +17,7 @@ from discord_ferry.parser.models import (
     DCEChannel,
     DCEEmoji,
     DCEExport,
+    DCEForwardedMessage,
     DCEGuild,
     DCEMessage,
     DCEReaction,
@@ -373,6 +374,16 @@ def _parse_channel(raw: Any) -> DCEChannel:
     )
 
 
+def _as_list(value: Any) -> list[Any]:
+    """``value`` when it is a list, else ``[]``.
+
+    Not the same as ``list(value or [])``: ``list()`` accepts any iterable, so a dict
+    where a list was expected yields its **keys** instead of raising -- silent corruption
+    rather than a loud failure.
+    """
+    return value if isinstance(value, list) else []
+
+
 def _parse_message(raw: Any) -> DCEMessage:
     author = _parse_author(raw["author"])
     attachments = [_parse_attachment(a) for a in (raw.get("attachments") or [])]
@@ -387,6 +398,30 @@ def _parse_message(raw: Any) -> DCEMessage:
             message_id=str(ref_raw.get("messageId") or ""),
             channel_id=str(ref_raw.get("channelId") or ""),
             guild_id=str(ref_raw.get("guildId") or ""),
+            # "Default" | "Forward". Absent in pre-2.47 exports -> "", which the
+            # migrator treats as "unknown kind", NOT as "Default".
+            type=str(ref_raw.get("type") or ""),
+        )
+
+    # DCE 2.47+ (PR #1451) exports the full payload of a forwarded message. Nested
+    # attachments/embeds/stickers use the same writers as their top-level counterparts,
+    # so the same parsers apply.
+    forwarded: DCEForwardedMessage | None = None
+    fwd_raw = raw.get("forwardedMessage")
+    if isinstance(fwd_raw, dict):
+        forwarded = DCEForwardedMessage(
+            timestamp=str(fwd_raw.get("timestamp") or ""),
+            timestamp_edited=(
+                str(fwd_raw["timestampEdited"]) if fwd_raw.get("timestampEdited") else None
+            ),
+            # str(): a non-string content would otherwise survive as e.g. an int and
+            # raise TypeError inside the join in migrator.messages._merge_forwarded.
+            content=str(fwd_raw.get("content") or ""),
+            # isinstance(): `list(some_dict)` yields its KEYS rather than raising, so an
+            # unexpected shape would corrupt silently rather than fail.
+            attachments=[_parse_attachment(a) for a in _as_list(fwd_raw.get("attachments"))],
+            embeds=list(_as_list(fwd_raw.get("embeds"))),
+            stickers=list(_as_list(fwd_raw.get("stickers"))),
         )
 
     embeds: list[dict[str, object]] = list(raw.get("embeds") or [])
@@ -409,6 +444,7 @@ def _parse_message(raw: Any) -> DCEMessage:
         mentions=mentions,
         reference=reference,
         poll=poll,
+        forwarded_message=forwarded,
     )
 
 

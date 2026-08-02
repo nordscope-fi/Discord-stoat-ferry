@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-08-02
+
+### Added
+
+- **Forwarded messages are migrated instead of discarded.** Their content, attachments, embeds
+  and stickers now arrive, marked `[forwarded]`.
+
+  Ferry skipped every forwarded message and logged it as a DiscordChatExporter limitation. That
+  was true when written, and stopped being true in **February 2026**: DCE 2.47 added a
+  `forwardedMessage` object carrying the whole payload, and Ferry has pinned 2.47.1 since. The
+  data has been present in every export we produce and we were throwing it away.
+
+  **If you migrated with an earlier version, those messages were lost.** Re-running the migration
+  against the same export recovers them — nothing needs re-exporting unless your export predates
+  DCE 2.47.
+
+  This applies on every path that renders a message, including `--thread-strategy merge` (which
+  builds its own content) and `--thread-strategy archive` (which writes markdown files) — under
+  both of those a forward previously archived or sent as an empty message with no warning at all.
+
+  Two limits are worth knowing. Recovered content posts under the name of whoever **forwarded**
+  it, because DCE's forwarded block carries no author field — the original writer is not in the
+  export at all. And exports made before DCE 2.47 contain no forwarded content to recover; those
+  are still skipped, now with a warning that names the cause and says re-exporting fixes it.
+
+### Fixed
+
+- **Replies carrying only a sticker or only an embed were discarded as forwarded messages.** The
+  old detector keyed on empty content, which is not unique to forwards: a reply whose entire
+  payload is a sticker has empty content, no attachments and a reference, matching the heuristic
+  exactly. DCE's `reference.type` (`"Default"` or `"Forward"`) distinguishes them properly, so the
+  heuristic is now only a fallback for exports too old to carry that field. Separate silent data
+  loss from the above, found while fixing it.
+- **A recovered forward is no longer treated as a reply.** A forward's reference points at the
+  message it came *from*, which is not a "replying to" relationship, but the reply step treats any
+  reference as one. That counted every forward toward the reply-fidelity figures in the migration
+  report; made Stoat render an actual reply-quote whenever the source was itself part of the
+  migration (the common case for forwards within one server); and appended
+  `[Replying to message in #…]` beside the `[forwarded]` marker for a cross-channel source, so a
+  single message claimed to be both.
+
 ## [2.8.5] - 2026-08-02
 
 ### Fixed

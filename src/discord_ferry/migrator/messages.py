@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
@@ -47,6 +47,10 @@ _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
 # Edited-message marker appended by _build_content; shared with the empty-message
 # guard so the two stay byte-identical. Changing this changes migrated content.
 _EDITED_MARKER = " *(edited)*"
+# Stoat has no native forward, so a recovered forward is marked inline. Kept on its own
+# line so it survives the 2000-char split and reads correctly when a forward also
+# carries a comment of its own.
+_FORWARD_MARKER = "[forwarded]"
 
 # ---------------------------------------------------------------------------
 # Message splitting
@@ -572,7 +576,10 @@ async def _merge_threads(
                 if _would_skip and msg.id not in _failed_ids_here:
                     continue
 
-                content = _build_content(msg, state)
+                # This path never enters _process_message, so the forwarded payload has
+                # to be promoted here too -- otherwise a forward inside a merged thread
+                # is sent as an empty message with no warning.
+                content = _build_content(_merge_forwarded(msg), state)
                 masquerade = await _build_masquerade(msg.author, session, state, config)
                 parts = _split_message(content)
 
@@ -695,7 +702,9 @@ def _archive_threads(
             ts_display = ts.replace("T", " ")[:16] + " UTC"
             author_name = msg.author.nickname or msg.author.name
             lines.append(f"## {author_name} \u2014 {ts_display}")
-            lines.append(msg.content)
+            # A forward carries its text in the forwarded block, not in `content`, so
+            # archiving it raw would write an empty entry.
+            lines.append(_merge_forwarded(msg).content)
             lines.append("")  # blank line between messages
             msg_count += 1
 
@@ -1025,19 +1034,19 @@ async def _process_message(
                 )
         return
 
-    # Forwarded message detection:
-    # empty content + no attachments + non-null reference + type "Default"
-    if (
-        msg.content == ""
-        and len(msg.attachments) == 0
-        and msg.reference is not None
-        and msg.type == "Default"
-    ):
+    # DCE 2.47+ exports carry the forwarded payload; recover it rather than skip.
+    if msg.forwarded_message is not None:
+        msg = _merge_forwarded(msg)
+    elif _is_unrecoverable_forward(msg):
         acc_warnings.append(
             {
                 "phase": "messages",
                 "type": "forwarded_message",
-                "message": f"Forwarded message {msg.id} skipped (DCE limitation).",
+                "message": (
+                    f"Forwarded message {msg.id} skipped: this export predates "
+                    f"DiscordChatExporter 2.47 and does not carry the forwarded content. "
+                    f"Re-exporting with a current DCE recovers it."
+                ),
             }
         )
         on_event(
@@ -1408,6 +1417,73 @@ def _resolve_attachment_path(export_dir: Path, url: str) -> Path | None:
     if url.startswith(("http://", "https://")):
         return None
     return export_dir / url
+
+
+def _merge_forwarded(msg: DCEMessage) -> DCEMessage:
+    """Promote a forwarded payload into the message's own fields.
+
+    Everything downstream -- attachment upload, sticker handling, embed flattening, the
+    content transforms -- then operates on it unmodified. Deliberately NOT a second
+    sender: Stoat has no native forward, so a forward is just a message whose contents
+    came from somewhere else.
+
+    The marker is *prepended* rather than replacing the content, because a forward may
+    carry a comment of its own, and because it keeps the message non-empty when the
+    forwarded block holds only attachments -- which would otherwise trip the
+    empty-message guard and be dropped a second way.
+
+    ``author`` is deliberately untouched. The forwarded block carries none (upstream
+    exports six fields and an author is not among them), so this necessarily posts under
+    whoever forwarded it. See docs/guides/known-limitations.md.
+    """
+    fwd = msg.forwarded_message
+    if fwd is None:
+        return msg
+    parts = [part for part in (msg.content, _FORWARD_MARKER, fwd.content) if part]
+    return replace(
+        msg,
+        content="\n".join(parts),
+        # Stoat caps attachments at 5; the existing overflow notice handles the excess.
+        attachments=[*msg.attachments, *fwd.attachments],
+        embeds=[*msg.embeds, *fwd.embeds],
+        stickers=[*msg.stickers, *fwd.stickers],
+        # A forward's reference points at its SOURCE; that is not a reply relationship,
+        # and the reply step downstream treats any reference as one. Left set, it counts
+        # the forward toward reply fidelity, makes Stoat render a reply-quote whenever
+        # the source happens to be in message_map, and appends "[Replying to message in
+        # #X]" beside the [forwarded] marker for a cross-channel source -- one message
+        # claiming to be both. Clearing it here keeps the invariant in one place rather
+        # than requiring every downstream consumer to re-check the kind.
+        reference=None,
+    )
+
+
+def _is_unrecoverable_forward(msg: DCEMessage) -> bool:
+    """A forward whose payload this export does not carry.
+
+    **Only reached when ``msg.forwarded_message is None``** -- the caller merges first and
+    consults this in the ``elif``. So a ``"Forward"`` reference arriving here has already
+    been established to have no payload, which is exactly the unrecoverable case: either
+    a pre-2.47 export, or one where upstream could not resolve the original (deleted, or
+    not visible to the exporting account). Either way there is nothing to send, and a
+    warning is the honest outcome.
+
+    NOTE two different fields are both spelled "type" here: ``msg.type`` is the *message*
+    kind ("Default"), while ``msg.reference.type`` is the *reference* kind
+    (DCE's ``MessageReferenceKind``: "Default" or "Forward").
+
+    Pre-2.47 exports never wrote the reference kind, so an empty one falls back to the
+    old empty-content heuristic. Where the kind IS present we trust it instead, because
+    that heuristic also matches an ordinary **reply** carrying only a sticker or only an
+    embed -- which was being discarded as though it were a forward.
+    """
+    if msg.reference is None:
+        return False
+    if msg.reference.type == "Forward":
+        return True
+    if msg.reference.type:  # a known, non-Forward kind: an ordinary reply
+        return False
+    return msg.content == "" and not msg.attachments and msg.type == "Default"
 
 
 def _build_content(msg: DCEMessage, state: MigrationState) -> str:

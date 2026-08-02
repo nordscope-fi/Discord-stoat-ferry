@@ -1,0 +1,111 @@
+{
+  "guild": {
+    "id": "111111111111111111",
+    "name": "Test Server",
+    "iconUrl": "media/guild_icon.png"
+  },
+  "channel": {
+    "id": "222222222222222222",
+    "type": 0,
+    "categoryId": "333333333333333333",
+    "category": "Text Channels",
+    "name": "synthetic-forwarded-hand-authored-not-a-real-capture",
+    "topic": "SYNTHETIC fixture. Hand-authored against DiscordChatExporter 2.47.1 source (DiscordChatExporter.Core/Exporting/JsonMessageWriter.cs:538-592 and Discord/Data/MessageReferenceKind.cs), NOT produced by running DCE. Real capture needs interactive Discord auth and is human-run, so no genuine export of this shape exists in-repo. If DCE's forwardedMessage shape changes, re-derive this from source rather than editing it to make a test pass."
+  },
+  "dateRange": { "after": null, "before": null },
+  "exportedAt": "2026-08-02T12:00:00+00:00",
+  "messages": [
+    {
+      "id": "900000000000000101",
+      "type": "Default",
+      "timestamp": "2024-03-01T10:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "",
+      "author": {
+        "id": "500000000000000002",
+        "name": "forwarder",
+        "discriminator": "0000",
+        "nickname": "forwarder",
+        "color": null,
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": ""
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": {
+        "type": "Forward",
+        "messageId": "800000000000000001",
+        "channelId": "222222222222222222",
+        "guildId": "111111111111111111"
+      },
+      "forwardedMessage": {
+        "timestamp": "2024-02-01T09:00:00+00:00",
+        "timestampEdited": null,
+        "content": "the original text that used to be discarded",
+        "attachments": [
+          {
+            "id": "700000000000000001",
+            "url": "https://cdn.discordapp.com/attachments/1/2/forwarded.png",
+            "fileName": "forwarded.png",
+            "fileSizeBytes": 2048
+          }
+        ],
+        "embeds": [
+          {
+            "title": "forwarded embed title",
+            "description": "forwarded embed description"
+          }
+        ],
+        "stickers": [
+          {
+            "id": "600000000000000001",
+            "name": "forwarded-sticker",
+            "format": "Png",
+            "sourceUrl": "https://media.discordapp.net/stickers/600000000000000001.png"
+          }
+        ]
+      },
+      "interaction": null,
+      "poll": null
+    },
+    {
+      "id": "900000000000000102",
+      "type": "Default",
+      "timestamp": "2024-03-01T10:05:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "an ordinary reply, not a forward",
+      "author": {
+        "id": "500000000000000003",
+        "name": "replier",
+        "discriminator": "0000",
+        "nickname": "replier",
+        "color": null,
+        "isBot": false,
+        "roles": [],
+        "avatarUrl": ""
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "reference": {
+        "type": "Default",
+        "messageId": "900000000000000101",
+        "channelId": "222222222222222222",
+        "guildId": "111111111111111111"
+      },
+      "interaction": null,
+      "poll": null
+    }
+  ],
+  "messageCount": 2
+}
