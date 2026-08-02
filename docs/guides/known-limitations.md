@@ -47,7 +47,8 @@ These limitations affect role and permission migration.
 | Per-member channel overrides | Not supported by Stoat; only role-based overrides are migrated | Create a single-user role for each member who had individual overrides, then apply the override to that role |
 | Managed roles (bot roles) | Not migrated — these are auto-created by Discord for each bot integration | None needed — bot integrations do not carry over |
 | Role membership | Roles are recreated, but members are **not** assigned to them — there is no reliable way to map Discord accounts to Stoat accounts | Members re-join via invite and assign roles manually (or with a Stoat bot) |
-| "Mention @everyone" permission | Dropped — Stoat has no equivalent permission | None |
+| "Pin messages" permission | Not migrated on its own — Stoat has no pin-only permission. Pinning lives under `ManageMessages`, which also allows deletion, so Ferry will not grant it from a pin-only Discord role | Grant `ManageMessages` manually to roles that should be able to pin |
+| Discord permissions with no Stoat counterpart | Dropped — threads, events, polls, soundboard, stickers, application commands, server insights, TTS, priority speaker and voice activity detection have no Stoat equivalent to grant | None needed — the underlying features do not exist on Stoat |
 
 ---
 
