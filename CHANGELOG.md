@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **New guide: "Was my earlier migration affected?"** (`docs/guides/earlier-migrations.md`) — a
+  disclosure covering the five silent bugs fixed between v2.8.2 and v2.10.0.
+
+  Every one of them failed without an error: discarded forwarded messages, sticker- and embed-only
+  replies dropped alongside them, attachments rejected by the server because Ferry's own size check
+  used binary megabytes where Stoat uses decimal, uploads abandoned during rate limiting, and voice
+  channels that granted nobody the right to connect, speak or hear. A migration could report
+  complete success and still be missing content, which is why nobody reported them.
+
+  The guide gives the exact `migration_report.json` searches that identify each one, and is explicit
+  about the limits of recovery: **`--resume`, `--incremental` and `ferry retry` will not backfill
+  any of it** — the affected content was recorded as warnings, never as failures, and sits below the
+  high-water mark those modes skip. Permissions can be fixed in place; missing content currently
+  cannot, short of migrating the export again into a fresh server. The planned repair tool is
+  described honestly, including what it will not be able to do.
+
 ## [2.10.0] - 2026-08-02
 
 ### Fixed
