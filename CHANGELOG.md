@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Internal
+
+- `.gitignore` now covers `.worktrees/`. The directory already existed at the repo root but was
+  untracked *and* unignored, so anyone creating a git worktree there would have committed an entire
+  second checkout into the repository.
+
 ## [2.8.2] - 2026-08-02
 
 ### Fixed

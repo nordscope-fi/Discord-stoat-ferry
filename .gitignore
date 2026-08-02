@@ -45,6 +45,9 @@ CLAUDE.md
 claude_log/
 .mcp.json
 
+# Git worktrees — an unignored worktree dir commits an entire second checkout
+.worktrees/
+
 # Internal design docs (kept locally, not in public repo)
 docs/plans/
 docs/superpowers/
