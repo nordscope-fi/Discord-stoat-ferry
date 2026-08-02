@@ -153,6 +153,24 @@ class TestTeardownLadder:
         monkeypatch.setattr(gui.multiprocessing, "active_children", lambda: [ExplodingChild()])
         gui._teardown_native_window()  # must not raise
 
+    def test_production_wiring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pins WHAT the production entry point feeds the ladder.
+
+        The ladder takes its collaborators as arguments for testability, which means a
+        mis-wired call site would leave every ladder test green while the real teardown
+        operated on the wrong objects.
+        """
+        seen: dict[str, Any] = {}
+        monkeypatch.setattr(gui.multiprocessing, "active_children", lambda: ["child"])
+        monkeypatch.setattr(gui.app.native, "main_window", "window")
+        monkeypatch.setattr(
+            gui,
+            "_terminate_children",
+            lambda children, window: seen.update(children=children, window=window),
+        )
+        gui._teardown_native_window()
+        assert seen == {"children": ["child"], "window": "window"}
+
 
 class TestMainLifecycle:
     def test_freeze_support_is_the_first_statement_of_main(self) -> None:

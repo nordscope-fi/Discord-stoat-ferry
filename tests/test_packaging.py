@@ -13,10 +13,11 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Anchored to column 0 on purpose: ferry.spec also contains an indented
-# `elif sys.platform == "darwin":` in the icon-selection block, and an unanchored
-# split matches THAT first -- which made an earlier draft of these tests inspect
-# icon code and pass vacuously.
+# Anchored with a leading newline on purpose. ferry.spec's icon block contains
+# `elif sys.platform == "darwin":`, whose text CONTAINS `if sys.platform == "darwin":`
+# as a substring, so an unanchored split matches there first -- which made an earlier
+# draft of these tests inspect icon code and pass vacuously. The `\n` cannot match
+# inside `elif` because the character before `if` is `l`, not a newline.
 _DARWIN_BRANCH = '\nif sys.platform == "darwin":'
 
 
@@ -103,3 +104,47 @@ def test_ferry_spec_keeps_onefile_off_darwin() -> None:
     body = non_darwin[1]
     assert "runtime_tmpdir=None" in body, "non-darwin build must stay onefile"
     assert "exclude_binaries" not in body, "non-darwin build must not become onedir"
+    # Without these the branch still "looks onefile" while shipping an executable with
+    # no bundled assets at all.
+    assert "a.binaries" in body and "a.datas" in body, (
+        "the onefile EXE must still receive the collected binaries and data files"
+    )
+
+
+def test_exe_common_carries_every_shared_argument() -> None:
+    """Both branches build their EXE from _EXE_COMMON, which the branch-body tests
+    never see -- so a silently dropped argument (icon, console, codesign_identity...)
+    would change the shipped binary with a green suite."""
+    spec_text = (_REPO_ROOT / "ferry.spec").read_text(encoding="utf-8")
+    common = spec_text.split("_EXE_COMMON = dict(", 1)[1].split("\n)", 1)[0]
+    for arg in (
+        "name=",
+        "debug=",
+        "bootloader_ignore_signals=",
+        "strip=",
+        "upx=",
+        "upx_exclude=",
+        "console=",
+        "disable_windowed_traceback=",
+        "argv_emulation=",
+        "target_arch=",
+        "codesign_identity=",
+        "entitlements_file=",
+        "icon=",
+    ):
+        assert arg in common, f"{arg} dropped from the shared EXE arguments"
+
+
+def test_release_job_only_publishes_on_a_tag() -> None:
+    """workflow_dispatch runs must not reach the publish step.
+
+    On a dispatch, github.ref is a branch ref and softprops/action-gh-release hard-fails
+    ("GitHub Releases requires a tag"), which would make every manual run go red at the
+    publish step -- indistinguishable at a glance from the packaging failure the dispatch
+    exists to detect.
+    """
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    release_job = workflow.split("\n  release:", 1)[1].split("steps:", 1)[0]
+    assert "startsWith(github.ref, 'refs/tags/')" in release_job, (
+        "the release job must be gated on a tag ref"
+    )

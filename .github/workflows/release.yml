@@ -129,11 +129,13 @@ jobs:
             exit 1
           }
           codesign --verify --deep --strict "$APP"
-          find "$APP" -name dce_checksums.json | grep -q . || {
+          # -print -quit rather than `| grep -q .`: under pipefail a SIGPIPE'd find
+          # would surface as a bogus "missing" failure.
+          test -n "$(find "$APP" -name dce_checksums.json -print -quit)" || {
             echo "::error::dce_checksums.json missing from the bundle"
             exit 1
           }
-          find "$APP" -path "*discord_ferry/templates/*.json" | grep -q . || {
+          test -n "$(find "$APP" -path '*discord_ferry/templates/*.json' -print -quit)" || {
             echo "::error::template JSON missing from the bundle"
             exit 1
           }
@@ -147,6 +149,11 @@ jobs:
   release:
     name: Create release and publish
     needs: [build-windows, build-macos]
+    # Tag runs only. On a workflow_dispatch, github.ref is a branch ref and
+    # softprops/action-gh-release hard-fails ("GitHub Releases requires a tag"), so
+    # without this guard every manual run goes red at the publish step -- which looks
+    # exactly like the packaging failure the dispatch exists to detect.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: release
     steps:

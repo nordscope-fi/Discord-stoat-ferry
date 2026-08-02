@@ -143,7 +143,7 @@ The `-r` flag matters. Without it the quarantine flag is cleared only from the b
 |  |  |
 |---|---|
 | **Symptom** | A grey box appears over the Ferry window reading **"Connection lost. Trying to reconnect..."**, and it never goes away |
-| **Cause** | Ferry's window is a viewer for a small server that runs inside the app. This message means that server stopped, so the window has nothing left to talk to and will keep retrying forever. On versions before 2.8.3 this happened after force-quitting Ferry: the window survived the quit. |
+| **Cause** | Ferry's window is a viewer for a small server that runs inside the app. This message means that server stopped, so the window has nothing left to talk to and will keep retrying forever. On versions before 2.8.4 this happened after force-quitting Ferry: the window survived the quit. |
 | **Solution** | Close the Ferry window, then reopen Ferry. |
 
 If the window will not close, or Ferry does not start again, quit the leftovers by hand:

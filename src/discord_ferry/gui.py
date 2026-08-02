@@ -1660,7 +1660,13 @@ def _terminate_children(
 
 
 def _teardown_native_window() -> None:
-    """Synchronous teardown against the live process table. Safe to call anywhere.
+    """Tear down everything alive at shutdown -- today, only the native window child.
+
+    ``active_children()`` is deliberately broad: NiceGUI's native mode creates exactly one
+    ``mp.Process`` (the window), and ``nicegui.run``'s process pool spawns workers only on
+    the first ``run.cpu_bound`` call, which Ferry never makes. If that ever changes, this
+    must filter, or pool workers will be killed ahead of NiceGUI's own ``run.tear_down()``.
+
 
     Never raises. Both call sites are shutdown paths -- ``app.on_shutdown`` (where an
     exception would propagate into uvicorn's lifespan shutdown and skip NiceGUI's
@@ -1769,9 +1775,12 @@ def main() -> None:
     try:
         _run_gui()
     except KeyboardInterrupt:
-        # The interrupt can arrive after uvicorn restores the default SIGINT handler,
-        # or from NiceGUI's check_shutdown thread calling _thread.interrupt_main().
-        # Exit with the conventional SIGINT status rather than a silent 0.
+        # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
+        # SIGINT after restoring the default handler, and NiceGUI's check_shutdown thread
+        # calls _thread.interrupt_main() ~0-100ms after the window closes -- so even a
+        # clean window close can land here. Measured behaviour today is that neither
+        # surfaces as a KeyboardInterrupt (the app exits 0); this is the defensive path
+        # for when one does, and 130 is the conventional SIGINT status.
         raise SystemExit(130) from None
 
 
