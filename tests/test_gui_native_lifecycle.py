@@ -241,3 +241,55 @@ class TestMainLifecycle:
         gui._run_gui()
         assert captured["reconnect_timeout"] == 10.0
         assert captured["timeout_graceful_shutdown"] == 1
+
+
+class TestFolderPicker:
+    """The picker has never worked in the packaged app.
+
+    gui.py called ``webview.windows[0]`` in the SERVER process, but
+    ``webview.create_window()`` only ever runs in the child (native_mode._open_window),
+    so the list is permanently empty and every click raised IndexError straight into
+    the "requires native mode" toast.
+    """
+
+    async def test_returns_the_chosen_path(self) -> None:
+        class Window:
+            async def create_file_dialog(self, _dialog_type: int) -> tuple[str, ...]:
+                return ("/Users/pete/export",)
+
+        assert await gui._pick_folder(Window()) == "/Users/pete/export"
+
+    async def test_cancelled_dialog_returns_none(self) -> None:
+        class Window:
+            async def create_file_dialog(self, _dialog_type: int) -> tuple[str, ...] | None:
+                return None
+
+        assert await gui._pick_folder(Window()) is None
+
+    async def test_empty_tuple_returns_none(self) -> None:
+        """Guards an IndexError regression of exactly the kind being fixed."""
+
+        class Window:
+            async def create_file_dialog(self, _dialog_type: int) -> tuple[str, ...]:
+                return ()
+
+        assert await gui._pick_folder(Window()) is None
+
+    async def test_raising_window_returns_none(self) -> None:
+        class Window:
+            async def create_file_dialog(self, _dialog_type: int) -> tuple[str, ...]:
+                raise RuntimeError("window is gone")
+
+        assert await gui._pick_folder(Window()) is None
+
+    async def test_browser_mode_returns_none(self) -> None:
+        assert await gui._pick_folder(None) is None
+
+    def test_dialog_type_prefers_the_modern_enum(self) -> None:
+        """FOLDER_DIALOG still resolves to 20 on pywebview 6.2.1 but emits a
+        DeprecationWarning; FileDialog.FOLDER is the supported spelling."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert gui._folder_dialog_type() == 20

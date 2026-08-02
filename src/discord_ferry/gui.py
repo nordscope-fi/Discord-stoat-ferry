@@ -327,19 +327,16 @@ def setup_page() -> None:
         return f"{value:.1f}s/msg ({_msgs_per_hour(value):,} msg/hr)"
 
     async def _on_browse() -> None:
-        if not _HAS_WEBVIEW:
-            ui.notify("Folder picker requires pywebview — install it with: pip install pywebview")
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG),
-            )
-            if result and result[0]:
-                export_dir_input.set_value(result[0])
-        except Exception:
+        # app.native.main_window is NiceGUI's proxy to the window process; it is None
+        # in browser mode. Do not reach for webview.windows here -- the window lives
+        # in another process, so that list is always empty on this side.
+        window = getattr(app.native, "main_window", None)
+        if window is None:
             ui.notify("Folder picker requires native mode (pywebview window)")
+            return
+        folder = await _pick_folder(window)
+        if folder:
+            export_dir_input.set_value(folder)
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         # Step indicator
@@ -1673,6 +1670,39 @@ def _teardown_native_window() -> None:
 async def _teardown_native_window_async() -> None:
     """Async wrapper for ``app.on_shutdown``, so the joins never block the event loop."""
     await asyncio.to_thread(_teardown_native_window)
+
+
+def _folder_dialog_type() -> int:
+    """Resolve pywebview's folder-dialog constant.
+
+    Resolved lazily, never at import time: ``webview`` is an unbound name when the
+    optional dependency is missing. Prefers ``FileDialog.FOLDER``; falls back to the
+    deprecated ``FOLDER_DIALOG`` because pyproject floors pywebview at >=5.0.
+    """
+    file_dialog = getattr(webview, "FileDialog", None)
+    if file_dialog is not None:
+        return int(file_dialog.FOLDER)
+    return int(webview.FOLDER_DIALOG)
+
+
+async def _pick_folder(window: Any | None) -> str | None:
+    """Ask the native window for a folder; None when unavailable or cancelled.
+
+    Must go through NiceGUI's ``WindowProxy`` (``app.native.main_window``), which
+    marshals the call to the child over the method queue. ``webview.windows`` is always
+    empty in this process -- the window is created in another one -- so the previous
+    ``webview.windows[0]`` could only ever raise IndexError.
+    """
+    if window is None:
+        return None
+    try:
+        result = await window.create_file_dialog(_folder_dialog_type())
+    except Exception:  # noqa: BLE001 - a dead window must not break the page
+        logger.debug("native folder dialog failed", exc_info=True)
+        return None
+    if not result:
+        return None
+    return str(result[0])
 
 
 # ---------------------------------------------------------------------------
