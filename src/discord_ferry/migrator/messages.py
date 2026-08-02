@@ -1478,8 +1478,9 @@ async def _upload_attachments(
         if att.file_size_bytes > 0 and limit > 0 and att.file_size_bytes > limit:
             reason = (
                 f"File too large: {att.file_name} "
-                f"({att.file_size_bytes / 1_048_576:.1f} MB, "
-                f"limit: {limit / 1_048_576:.1f} MB)"
+                # Decimal MB, matching TAG_SIZE_LIMITS (see autumn.py).
+                f"({att.file_size_bytes / 1_000_000:.1f} MB, "
+                f"limit: {limit / 1_000_000:.1f} MB)"
             )
             if channel_result is not None:
                 placeholder = _skip_attachment_to_result(channel_result, att.file_name, reason)

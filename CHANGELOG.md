@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.5] - 2026-08-02
+
+### Fixed
+
+- **Five of the six upload size limits were too permissive, so oversized files were uploaded
+  and then rejected by the server** (`uploader/autumn.py`). Autumn's limits are *decimal*
+  megabytes, as written in stoatchat's `Revolt.toml`, but ours were binary:
+
+  | tag | was | now | too big by |
+  |---|---|---|---|
+  | attachments | 20,971,520 | 20,000,000 | 971,520 |
+  | avatars | 4,194,304 | 4,000,000 | 194,304 |
+  | backgrounds | 6,291,456 | 6,000,000 | 291,456 |
+  | banners | 6,291,456 | 6,000,000 | 291,456 |
+  | emojis | 512,000 | 500,000 | 12,000 |
+
+  `TAG_SIZE_LIMITS` is the *pre-upload* guard, so ours being looser than the server's meant a
+  file in the gap band passed our check, was uploaded in full, and came back a 413. Worst for
+  attachments, where the band is ~971 KB wide. Such files are now declined locally with an
+  accurate message instead of costing the bandwidth first. `icons` was already correct — it
+  had been diagnosed and fixed on its own, with a comment naming this exact trap, while the
+  other five were left standing.
+
+- **The probe's Autumn drift detector could not fail** (`migrator/probe.py`). It read a `tags`
+  key from the Autumn root, which returns only `{"autumn": ..., "version": ...}` — so it
+  compared nothing and reported "matches assumptions" on every run. Worse than no check: it
+  asserted the very thing it never tested, and that silence is why the five wrong limits above
+  went unnoticed. It now reads `features.limits.<new_user|default>.file_upload_size_limits`
+  from the Stoat root and reports a per-tier, per-tag diff. When the limits cannot be read at
+  all it says so explicitly rather than passing.
+
+  It also now warns on the two cases it previously counted as clean passes: a tag we assume
+  that the instance never advertises (unverified is not the same as matching — the original
+  sin in miniature), and a bucket the instance advertises that we hold no limit for.
+
+### Security
+
+- **`ferry probe` can no longer be aborted by a malformed instance response**
+  (`migrator/probe.py`). It parses JSON from a server it does not control, and `run_probe`
+  wraps its four checks in `try`/`finally` with no `except` — so a single unexpected type
+  (say `features.limits.default` arriving as a string rather than an object) raised an
+  `AttributeError` that killed every remaining check and propagated to the caller. Truthy
+  non-dicts were the dangerous shape, because the `x or {}` idiom does not catch them. Each
+  hop of the parse is now type-guarded.
+
+### Changed
+
+- **`ferry probe` reports Autumn reachability as its own check** (`autumn_reachable`), separate
+  from the limits diff, so an unreachable file server cannot mask the limits result — and a
+  non-200 from it is now a failure rather than a silent "ok".
+- Size-limit messages are rendered in decimal MB to match the limits themselves. They divided
+  by 1,048,576, which would have described the 20,000,000-byte cap as "limit: 19.1 MB".
+
 ### Internal
 
 - **The release workflow now builds on pull requests that touch the packaging path**

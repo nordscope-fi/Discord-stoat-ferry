@@ -21,13 +21,18 @@ _MAX_RETRY_DELAY_MS = 60_000.0  # Mirrors migrator.api._MAX_RETRY_DELAY_SECONDS.
 _DEFAULT_RETRY_DELAY_MS = 1000.0
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
 
+# Autumn's limits are DECIMAL megabytes, as written in stoatchat's Revolt.toml -- never
+# N * 1024 * 1024. Getting that wrong makes our pre-upload guard LOOSER than the server's,
+# so a file in the gap band is uploaded and then rejected with a 413. Verified 2026-08-02
+# against `features.limits.default.file_upload_size_limits` on https://api.stoat.chat/;
+# `ferry probe` re-checks it against whatever instance you point it at.
 TAG_SIZE_LIMITS: dict[str, int] = {
-    "attachments": 20 * 1024 * 1024,
-    "avatars": 4 * 1024 * 1024,
-    "backgrounds": 6 * 1024 * 1024,
-    "icons": 2_500_000,  # Autumn enforces a flat 2.5MB (stoatchat Revolt.toml), not 2560*1024
-    "banners": 6 * 1024 * 1024,
-    "emojis": 500 * 1024,
+    "attachments": 20_000_000,
+    "avatars": 4_000_000,
+    "backgrounds": 6_000_000,
+    "icons": 2_500_000,
+    "banners": 6_000_000,
+    "emojis": 500_000,
 }
 
 # Single-flight registry: coalesces concurrent first-uploads of the same cache key
@@ -125,7 +130,9 @@ async def upload_to_autumn(
 
     Args:
         session: An active aiohttp ClientSession to use for the request.
-        autumn_url: Autumn server base URL (e.g. "https://autumn.stoat.chat").
+        autumn_url: Autumn server base URL (e.g. "https://cdn.stoatusercontent.com" —
+            the old autumn.stoat.chat host 301-redirects there; we discover it at runtime
+            from the Stoat root's features.autumn.url).
         tag: Upload tag determining the bucket (attachments, avatars, icons, banners, emojis, etc.).
         file_path: Local path to the file to upload.
         token: Stoat session token for the x-session-token header.
@@ -212,8 +219,10 @@ async def upload_to_autumn(
                     limit = TAG_SIZE_LIMITS.get(tag, 0)
                     raise AutumnUploadError(
                         f"File too large: {file_path.name} "
-                        f"({file_path.stat().st_size / 1_048_576:.1f} MB, "
-                        f"limit: {limit / 1_048_576:.1f} MB)"
+                        # Decimal MB, matching TAG_SIZE_LIMITS -- dividing by 1_048_576
+                        # would render the 20_000_000 cap as "limit: 19.1 MB".
+                        f"({file_path.stat().st_size / 1_000_000:.1f} MB, "
+                        f"limit: {limit / 1_000_000:.1f} MB)"
                     )
 
                 text = await response.text()
