@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import multiprocessing
 import os
 import secrets
 import subprocess
@@ -29,8 +31,10 @@ try:
 except ImportError:
     pass
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, MutableMapping
+    from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.parser.models import DCEExport
@@ -1585,6 +1589,90 @@ async def migrate_page() -> None:
                 _clear_tokens(app.storage.tab, _SESSION_TOKEN_KEYS)
 
     background_tasks.create(_run())
+
+
+# ---------------------------------------------------------------------------
+# Native window lifecycle
+# ---------------------------------------------------------------------------
+
+# Each rung of the teardown ladder waits at most this long. A healthy teardown was
+# measured at ~16ms; this budget only bites when a child is wedged, and it must stay
+# small because macOS escalates a force-quit SIGTERM to SIGKILL within seconds.
+_TEARDOWN_JOIN_TIMEOUT = 0.5
+
+
+def _terminate_children(
+    children: Sequence[Any],
+    window: Any | None,
+    join_timeout: float = _TEARDOWN_JOIN_TIMEOUT,
+) -> None:
+    """Tear down the native window child: destroy -> terminate -> kill, all bounded.
+
+    Idempotent: returns immediately when no child is alive, *without touching the
+    window proxy*. That precondition matters because NiceGUI's ``check_shutdown``
+    thread closes the proxy's method queues as soon as the server stops, so an
+    unconditional ``destroy()`` would raise on every healthy shutdown.
+
+    ``children`` and ``window`` are injected so the ladder is testable without a real
+    window; :func:`_teardown_native_window` supplies the production values.
+    """
+    alive = [child for child in children if child.is_alive()]
+    if not alive:
+        return
+
+    # Rung 1: the supported path. NiceGUI's own app.shutdown() closes the window this
+    # way, and the child's method-executor thread keeps polling every 16ms even while
+    # its Cocoa main thread is parked.
+    if window is not None:
+        try:
+            window.destroy()
+        except Exception:  # noqa: BLE001 - a closed queue must not abort the ladder
+            logger.debug("native window destroy() failed", exc_info=True)
+        for child in alive:
+            child.join(timeout=join_timeout)
+        alive = [child for child in alive if child.is_alive()]
+        if not alive:
+            return
+
+    # Rung 2: SIGTERM, which is sufficient in practice (measured: child gone in 16ms).
+    for child in alive:
+        try:
+            child.terminate()
+        except Exception:  # noqa: BLE001 - best effort; rung 3 is the backstop
+            logger.debug("terminate() failed for pid %s", child.pid, exc_info=True)
+    for child in alive:
+        child.join(timeout=join_timeout)
+    alive = [child for child in alive if child.is_alive()]
+    if not alive:
+        return
+
+    # Rung 3: SIGKILL. A belt rather than a measured necessity -- but a child that
+    # outlives this ladder would hang the interpreter in multiprocessing's atexit
+    # join, which has no timeout at all.
+    for child in alive:
+        try:
+            child.kill()
+        except Exception:  # noqa: BLE001 - nothing left to escalate to
+            logger.debug("kill() failed for pid %s", child.pid, exc_info=True)
+    for child in alive:
+        child.join(timeout=join_timeout)
+
+    survivors = [child.pid for child in alive if child.is_alive()]
+    if survivors:
+        logger.warning("native window child(ren) survived teardown: %s", survivors)
+
+
+def _teardown_native_window() -> None:
+    """Synchronous teardown against the live process table. Safe to call anywhere."""
+    _terminate_children(
+        multiprocessing.active_children(),
+        getattr(app.native, "main_window", None),
+    )
+
+
+async def _teardown_native_window_async() -> None:
+    """Async wrapper for ``app.on_shutdown``, so the joins never block the event loop."""
+    await asyncio.to_thread(_teardown_native_window)
 
 
 # ---------------------------------------------------------------------------
