@@ -2,6 +2,12 @@
 
 Every migration involves trade-offs. Discord and Stoat are different platforms with different capabilities, and some Discord features have no direct equivalent in Stoat. This page documents what changes, what gets lost, and what workarounds are available.
 
+!!! warning "Already migrated with an older version?"
+    Everything on this page is a deliberate limitation. Ferry also had five **bugs** that lost
+    content silently, fixed between v2.8.2 and v2.10.0 — missing forwarded messages, missing
+    attachments, and voice channels nobody could use. If you migrated before v2.10.0, see
+    [Was my earlier migration affected?](earlier-migrations.md).
+
 ---
 
 ## Structural

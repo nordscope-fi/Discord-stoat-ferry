@@ -38,6 +38,11 @@ This page covers the most common problems encountered during migration, their ca
 
 ## Export and File Problems
 
+!!! warning "Content missing from a migration you already ran?"
+    If the migration finished cleanly and content is missing anyway, the cause may be a Ferry bug
+    rather than anything in this page — five silent ones were fixed between v2.8.2 and v2.10.0.
+    See [Was my earlier migration affected?](earlier-migrations.md).
+
 ### Attachment file missing
 
 | | |
