@@ -136,6 +136,30 @@ The `-r` flag matters. Without it the quarantine flag is cleared only from the b
 
 ---
 
+## The Window Stops Responding
+
+### "Connection lost. Trying to reconnect..."
+
+|  |  |
+|---|---|
+| **Symptom** | A grey box appears over the Ferry window reading **"Connection lost. Trying to reconnect..."**, and it never goes away |
+| **Cause** | Ferry's window is a viewer for a small server that runs inside the app. This message means that server stopped, so the window has nothing left to talk to and will keep retrying forever. On versions before 2.8.3 this happened after force-quitting Ferry: the window survived the quit. |
+| **Solution** | Close the Ferry window, then reopen Ferry. |
+
+If the window will not close, or Ferry does not start again, quit the leftovers by hand:
+
+1. Open **Activity Monitor** (press ⌘ Space, type "Activity Monitor", press Return).
+2. Type `Ferry` in the search box.
+3. Select each result and click the **⊗** button in the toolbar, then **Force Quit**.
+4. Open Ferry again.
+
+!!! tip "You will not lose a migration in progress"
+    Ferry saves a checkpoint as it works. Start it again and choose **Resume** — it
+    picks up from the last completed step rather than starting over. Messages already
+    copied are not copied twice.
+
+---
+
 ## Migration Locks
 
 ### Another migration is in progress

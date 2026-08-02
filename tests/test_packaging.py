@@ -59,6 +59,12 @@ def test_ferry_spec_builds_onedir_on_darwin() -> None:
     assert "BUNDLE(" in body and "coll," in body, "BUNDLE must wrap the COLLECT output"
 
 
+def test_troubleshooting_covers_the_connection_lost_banner() -> None:
+    """Users search for the exact banner text when the window goes dead."""
+    guide = (_REPO_ROOT / "docs" / "guides" / "troubleshooting.md").read_text(encoding="utf-8")
+    assert "Connection lost" in guide
+
+
 def test_release_workflow_archives_macos_bundle_with_ditto() -> None:
     """The macOS artifact must be archived with a symlink-preserving tool.
 
