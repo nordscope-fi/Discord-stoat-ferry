@@ -1154,12 +1154,19 @@ async def test_429_header_beats_body(mock_aiohttp: aioresponses) -> None:  # SC-
 
 
 async def test_429_x_ratelimit_reset_after(mock_aiohttp: aioresponses) -> None:  # SC-4
+    """A non-JSON 429 still honours the header rather than the default delay.
+
+    The advertised value is MILLISECONDS (1500 -> 1.5s). This test previously sent
+    "1.5" and asserted 1.5s, which codified the unit bug fixed in v2.7.2 — the
+    header was being read as seconds. Value corrected; the test's original intent
+    (header honoured even when the body is unparseable HTML) is unchanged.
+    """
     mock_aiohttp.get(
         f"{BASE_URL}/servers/srv1",
         status=429,
         body="<html>",
         content_type="text/html",
-        headers={"X-RateLimit-Reset-After": "1.5"},
+        headers={"X-RateLimit-Reset-After": "1500"},
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
     calls, sleep = _sleep_capture()
@@ -1302,3 +1309,156 @@ async def test_429_null_retry_after_falls_back(
             await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
     assert _circuit_state.consecutive_failures == 0
     assert calls[0] == pytest.approx(1.0, abs=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit header units (batch 1)
+#
+# Stoat documents X-RateLimit-Reset-After as MILLISECONDS:
+#   developers.stoat.chat/developers/api/ratelimits
+#   "Milliseconds left until calls are replenished"
+# Discord's identically-named header is delta-SECONDS. Before batch 1 both were
+# parsed by same-named, same-bodied functions in migrator/api.py and
+# discord/client.py — one correct, one not.
+#
+# The header branch was not merely untested: test_429_x_ratelimit_reset_after
+# above ASSERTED the wrong unit ("1.5" -> 1.5s), so the suite actively locked the
+# bug in. Anyone who suspected it would have seen a red test and backed off. That
+# test's value is corrected to milliseconds; the cases below pin the semantics
+# that actually distinguish the two services.
+# ---------------------------------------------------------------------------
+
+
+async def test_429_reset_after_header_is_milliseconds(mock_aiohttp: aioresponses) -> None:
+    """SC-1: X-RateLimit-Reset-After is MILLISECONDS — 10000 means 10s, not 10000s.
+
+    Read as seconds it becomes 10000, which the 60s cap clamps to a full minute:
+    a 6x over-sleep on every rate-limit hit, worst in the message phase.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        headers={"X-RateLimit-Reset-After": "10000"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1", "name": "OK"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            result = await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert result["name"] == "OK"
+    assert calls[0] == pytest.approx(10.0, abs=0.05)
+
+
+async def test_429_retry_after_header_is_seconds(mock_aiohttp: aioresponses) -> None:
+    """SC-2: Retry-After is RFC 9110 delta-seconds even in front of Stoat.
+
+    Stoat itself never sends it, but a proxy or CDN in front of Stoat may.
+    """
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, headers={"Retry-After": "5"})
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert calls[0] == pytest.approx(5.0, abs=0.05)
+
+
+async def test_429_header_takes_precedence_over_body(mock_aiohttp: aioresponses) -> None:
+    """SC-4: the header wins over the body, and is still converted from ms."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        headers={"X-RateLimit-Reset-After": "10000"},
+        payload={"retry_after": 250},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert calls[0] == pytest.approx(10.0, abs=0.05)
+
+
+async def test_429_retry_after_beats_reset_after(mock_aiohttp: aioresponses) -> None:
+    """SC-2b: with BOTH headers present, Retry-After wins — and keeps its own unit.
+
+    Pins the precedence inside _stoat_rate_delay_seconds: a proxy's delta-seconds
+    Retry-After is authoritative over Stoat's millisecond header, and must not be
+    divided by 1000 on the way out.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        headers={"Retry-After": "3", "X-RateLimit-Reset-After": "10000"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert calls[0] == pytest.approx(3.0, abs=0.05)
+
+
+async def test_429_http_date_retry_after_falls_through(mock_aiohttp: aioresponses) -> None:
+    """SC-5: a non-numeric Retry-After (HTTP-date) is ignored, not crashed on."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        headers={"Retry-After": "Wed, 01 Aug 2026 12:00:00 GMT"},
+        payload={"retry_after": 300},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert calls[0] == pytest.approx(0.3, abs=0.05)
+
+
+async def test_429_negative_advertised_delay_is_floored(mock_aiohttp: aioresponses) -> None:
+    """SC-6b: a negative advertised delay is floored at 0, never passed through.
+
+    A negative value parses fine as a float, and asyncio.sleep() of a negative
+    number returns immediately — so without the floor a hostile or buggy header
+    would disable backoff and turn the retry loop hot.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        headers={"X-RateLimit-Reset-After": "-5000"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert calls[0] == 0.0
+
+
+async def test_429_reset_after_is_capped(mock_aiohttp: aioresponses) -> None:
+    """SC-6: an absurd advertised delay is still clamped to the 60s cap."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        headers={"X-RateLimit-Reset-After": "999999999"},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert calls[0] == pytest.approx(60.0, abs=0.05)

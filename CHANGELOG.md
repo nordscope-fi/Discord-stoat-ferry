@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.2] - 2026-08-02
+
+### Fixed
+
+- **Stoat rate-limit recovery waited 60 seconds instead of ~10** (`migrator/api.py`). Stoat sends
+  `X-RateLimit-Reset-After` in **milliseconds** — documented at
+  [developers.stoat.chat](https://developers.stoat.chat/developers/api/ratelimits) as "Milliseconds
+  left until calls are replenished" — on every response including 429s. Ferry read it as seconds, so
+  `min(10000, 60)` clamped to the 60-second cap on every rate-limit hit. Worst in the message phase,
+  which hits Stoat's 10-per-10s bucket hardest. The correct body-`retry_after` path (already divided
+  by 1000, and carrying the same value) had become unreachable because the header is checked first.
+  This was a regression caused by upstream: the code was correct when written, before Stoat began
+  exposing these headers.
+- **A test was locking the bug in.** `test_429_x_ratelimit_reset_after` asserted that a header value
+  of `"1.5"` meant 1.5 seconds, so the wrong unit had test coverage — anyone who suspected the defect
+  would have hit a red test and backed off. Corrected to `"1500"` -> 1.5s, preserving the test's
+  original intent (header honoured even when the 429 body is unparseable HTML).
+
+- **A negative advertised delay no longer disables backoff.** A negative header or body value parses
+  cleanly as a float, and `asyncio.sleep()` of a negative number returns immediately — so a hostile
+  or buggy value would have turned the retry loop hot. Both delay paths are now floored at 0
+  alongside the existing 60-second ceiling.
+
+### Internal
+
+- The Stoat-side parser is renamed `_stoat_rate_delay_seconds` and documents its unit contract.
+  `discord/client.py` contains a function that was identical in name, signature and body but whose
+  header genuinely *is* delta-seconds; the two were indistinguishable on sight, and merging them
+  would silently break one side by a factor of 1000. Discord's semantics are now pinned by
+  `test_discord_reset_after_header_is_seconds_not_milliseconds`, which fails if that merge is ever
+  attempted. `Retry-After` remains delta-seconds on both, for proxies in front of Stoat.
+
 ## [2.8.1] - 2026-08-02
 
 ### Fixed

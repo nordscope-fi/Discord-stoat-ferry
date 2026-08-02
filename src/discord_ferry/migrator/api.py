@@ -144,31 +144,57 @@ async def _api_request(
     )
 
 
-def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
-    """Parse a rate-limit delay (seconds) from standard headers; None if absent/non-numeric.
+def _stoat_rate_delay_seconds(headers: Mapping[str, str]) -> float | None:
+    """Resolve a 429 delay from Stoat's rate-limit headers, returned in SECONDS.
 
-    ``Retry-After`` may be an HTTP-date rather than delta-seconds — a non-numeric value is
-    ignored (returns None) so the caller falls back to the body / default delay.
+    UNIT HAZARD — do NOT merge this with ``discord.client._retry_after_seconds``.
+    The two look like duplicates and are not. Stoat documents
+    ``X-RateLimit-Reset-After`` as MILLISECONDS ("Milliseconds left until calls are
+    replenished", developers.stoat.chat/developers/api/ratelimits), while Discord
+    sends the identically-named header as delta-seconds. Unifying them silently
+    breaks one side by a factor of 1000.
+    ``tests/test_discord_client.py::test_discord_reset_after_header_is_seconds_not_milliseconds``
+    pins the Discord side against exactly that refactor.
+
+    ``Retry-After`` (RFC 9110 delta-seconds) is honoured first: Stoat itself does not
+    send it, but a proxy or CDN in front of Stoat may. A non-numeric value (an
+    HTTP-date form) is ignored so the caller falls back to the body.
+
+    Returns None when no usable header is present.
     """
-    for name in ("Retry-After", "X-RateLimit-Reset-After"):
-        raw = headers.get(name)
-        if raw:
-            try:
-                return float(raw)
-            except ValueError:
-                continue
+    raw_retry_after = headers.get("Retry-After")
+    if raw_retry_after:
+        try:
+            return float(raw_retry_after)
+        except ValueError:
+            pass  # HTTP-date form — fall through to the Stoat header, then the body.
+
+    raw_reset_after = headers.get("X-RateLimit-Reset-After")
+    if raw_reset_after:
+        try:
+            return float(raw_reset_after) / 1000
+        except ValueError:
+            pass
+
     return None
 
 
 async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
-    """Resolve the 429 sleep in seconds: header → body ``retry_after`` (Stoat ms) → 1s; capped.
+    """Resolve the 429 sleep in seconds: headers → body ``retry_after`` (ms) → 1s; capped.
+
+    Every Stoat-side source is millisecond-based except ``Retry-After``; see
+    :func:`_stoat_rate_delay_seconds` for the unit rules and why this must stay
+    separate from the Discord client's same-named parser.
 
     The body parse is content-type-guarded so a non-JSON 429 (proxy HTML) can't raise
     ``ContentTypeError`` into the network-error path and prime the circuit breaker.
     """
-    header_s = _retry_after_seconds(resp.headers)
+    header_s = _stoat_rate_delay_seconds(resp.headers)
     if header_s is not None:
-        return min(header_s, _MAX_RETRY_DELAY_SECONDS)
+        # Floor at 0: a negative advertised delay parses fine as a float and would
+        # otherwise disable backoff entirely (asyncio.sleep of a negative value
+        # returns immediately, so we would retry in a hot loop).
+        return max(0.0, min(header_s, _MAX_RETRY_DELAY_SECONDS))
     try:
         body = await resp.json(content_type=None)
     except (json.JSONDecodeError, ValueError):
@@ -178,7 +204,7 @@ async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
         retry_ms = float(raw)  # type: ignore[arg-type]  # None/non-numeric → fallback below
     except (TypeError, ValueError):
         retry_ms = 1000.0
-    return min(retry_ms / 1000, _MAX_RETRY_DELAY_SECONDS)
+    return max(0.0, min(retry_ms / 1000, _MAX_RETRY_DELAY_SECONDS))
 
 
 async def _api_request_inner(
