@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Internal
+
+- **The release workflow now builds on pull requests that touch the packaging path**
+  (`ferry.spec` or `release.yml`). The `workflow_dispatch` trigger added in 2.8.4 could
+  never serve its stated purpose: GitHub only offers it from the default branch's copy of
+  a workflow, and `auto-tag.yml` pushes the tag the instant a version bump lands on main,
+  so there was no window between "dispatch available" and "tag created". A packaging
+  failure would first have surfaced on an already-published tag. The `release` job stays
+  gated on a tag ref, so these runs build and verify only.
+
 ## [2.8.4] - 2026-08-02
 
 ### Fixed
