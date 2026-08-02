@@ -59,6 +59,36 @@ def test_ferry_spec_builds_onedir_on_darwin() -> None:
     assert "BUNDLE(" in body and "coll," in body, "BUNDLE must wrap the COLLECT output"
 
 
+def test_release_workflow_archives_macos_bundle_with_ditto() -> None:
+    """The macOS artifact must be archived with a symlink-preserving tool.
+
+    The onedir bundle contains ~119 symlinks cross-linking Contents/MacOS,
+    Contents/Frameworks and Contents/Resources. `zip -r` follows them: measured
+    91 MB instead of 45 MB, and the extracted tree has real files where
+    Contents/_CodeSignature/CodeResources recorded symlinks -- an invalid seal,
+    which for a quarantined ad-hoc-signed app is the "Ferry.app is damaged"
+    dialog rather than the Gatekeeper flow documented in install.md.
+    """
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    macos_job = workflow.split("build-macos:", 1)[1].split("\n  release:", 1)[0]
+    assert "ditto -c -k --sequesterRsrc --keepParent Ferry.app" in macos_job, (
+        "macOS archive step must use ditto (symlink-preserving), naming Ferry.app "
+        "explicitly so COLLECT's dist/Ferry/ directory is not swept in"
+    )
+    assert "zip -r" not in macos_job, "zip -r dereferences the bundle's symlinks"
+
+
+def test_release_workflow_can_be_dispatched_manually() -> None:
+    """The packaging path must be runnable before a tag exists.
+
+    release.yml otherwise triggers only on tag push, so a packaging failure would
+    first surface on an already-published tag.
+    """
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    triggers = workflow.split("jobs:", 1)[0]
+    assert "workflow_dispatch:" in triggers, "release.yml must allow manual dispatch"
+
+
 def test_ferry_spec_keeps_onefile_off_darwin() -> None:
     """Windows must keep shipping a single Ferry-windows-x86_64.exe."""
     spec_text = (_REPO_ROOT / "ferry.spec").read_text(encoding="utf-8")
