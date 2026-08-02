@@ -16,11 +16,27 @@ from discord_ferry.migrator.api import (
     api_execute_webhook,
     api_fetch_channel,
 )
-from discord_ferry.migrator.connect import _discover_autumn_url
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# Tiers on the Stoat root that may carry upload limits. `global` carries none today; it
+# is listed so that it would be compared rather than missed if it ever gained them.
+_LIMIT_TIERS = ("global", "new_user", "default")
+
+
+def _sub_dict(obj: Any, key: str) -> dict[str, Any]:
+    """``obj[key]`` when both it and ``obj`` are dicts, else ``{}``.
+
+    This module parses JSON from an instance we do not control, and ``run_probe`` wraps
+    its four checks in ``try/finally`` with **no** ``except`` -- so an ``AttributeError``
+    from something like ``limits["new_user"]`` being a string would abort every remaining
+    check and propagate to the caller. Guarding each hop makes the parse total, which is
+    safer than catching afterwards.
+    """
+    value = obj.get(key) if isinstance(obj, dict) else None
+    return value if isinstance(value, dict) else {}
 
 
 @dataclass
@@ -69,24 +85,99 @@ async def run_probe(
 
 
 async def _check_autumn(sess: aiohttp.ClientSession, stoat_url: str, report: ProbeReport) -> None:
+    """Diff our assumed upload limits against the ones this instance advertises.
+
+    The limits live on the **Stoat** root under
+    ``features.limits.<tier>.file_upload_size_limits`` -- not on the Autumn root, which
+    returns only ``{"autumn": ..., "version": ...}``. Until v2.8.5 this read a ``tags``
+    key from the Autumn root; that key does not exist, so the diff list was always empty
+    and the check reported "matches assumptions" unconditionally. That is worse than no
+    check, because it asserted the very thing it never tested -- and it hid five wrong
+    values in ``TAG_SIZE_LIMITS`` for months.
+
+    One GET serves both halves: the limits, and the Autumn URL for the reachability
+    check. Reported as two independent checks so an unreachable Autumn cannot mask the
+    limits result.
+    """
     try:
-        autumn_url = await _discover_autumn_url(sess, stoat_url)
-        # Best-effort: GET the autumn root for advertised per-tag limits.
-        async with sess.get(f"{autumn_url.rstrip('/')}/") as resp:
-            data: dict[str, Any] = await resp.json() if resp.status == 200 else {}
-        advertised = data.get("tags") or {}
-        diffs = [
-            f"{tag}: advertised {advertised.get(tag)} vs assumed {assumed}"
+        async with sess.get(f"{stoat_url.rstrip('/')}/") as resp:
+            root: Any = await resp.json() if resp.status == 200 else {}
+    except Exception as exc:  # noqa: BLE001 — probe must continue
+        detail = f"{type(exc).__name__}: {exc}"
+        report.add("autumn_limits", "fail", detail)
+        report.add("autumn_reachable", "fail", f"Stoat root unreachable: {detail}")
+        return
+
+    features = _sub_dict(root, "features")
+    _report_autumn_limits(features, report)
+    await _report_autumn_reachable(sess, features, report)
+
+
+def _report_autumn_limits(features: dict[str, Any], report: ProbeReport) -> None:
+    """Compare ``TAG_SIZE_LIMITS`` per tier, or say plainly that we could not read them."""
+    limits = _sub_dict(features, "limits")
+    tiers_read: list[str] = []
+    diffs: list[str] = []
+    for tier in _LIMIT_TIERS:
+        advertised = _sub_dict(limits, tier).get("file_upload_size_limits")
+        if not isinstance(advertised, dict) or not advertised:
+            continue
+        tiers_read.append(tier)
+        diffs += [
+            f"{tier}/{tag}: advertised {advertised[tag]} vs assumed {assumed}"
             for tag, assumed in TAG_SIZE_LIMITS.items()
-            if tag in advertised and advertised.get(tag) != assumed
+            if tag in advertised and advertised[tag] != assumed
         ]
+        # A tag we assume but the instance never advertises is UNVERIFIED, not matching.
+        # Counting it as a pass would repeat this check's original sin.
+        diffs += [
+            f"{tier}/{tag}: assumed {assumed} but not advertised"
+            for tag, assumed in TAG_SIZE_LIMITS.items()
+            if tag not in advertised
+        ]
+        # A bucket we have no limit for is drift too -- it may be one we should support.
+        diffs += [
+            f"{tier}/{tag}: advertised {value}, we assume nothing"
+            for tag, value in sorted(advertised.items())
+            if tag not in TAG_SIZE_LIMITS
+        ]
+
+    if not tiers_read:
+        # Never "matches assumptions" here -- we compared nothing.
         report.add(
             "autumn_limits",
-            "warn" if diffs else "ok",
-            "; ".join(diffs) or "matches assumptions",
+            "warn",
+            "could not read advertised limits (features.limits."
+            f"<{'|'.join(_LIMIT_TIERS)}>.file_upload_size_limits absent)",
         )
+        return
+
+    report.add(
+        "autumn_limits",
+        "warn" if diffs else "ok",
+        "; ".join(diffs) or f"matches assumptions for tier(s): {', '.join(tiers_read)}",
+    )
+
+
+async def _report_autumn_reachable(
+    sess: aiohttp.ClientSession, features: dict[str, Any], report: ProbeReport
+) -> None:
+    """Reachability/version signal only -- the Autumn root advertises no limits."""
+    autumn_url = _sub_dict(features, "autumn").get("url") or ""
+    if not isinstance(autumn_url, str) or not autumn_url:
+        report.add("autumn_reachable", "warn", "features.autumn.url absent from the Stoat root")
+        return
+    try:
+        async with sess.get(f"{autumn_url.rstrip('/')}/") as resp:
+            if resp.status != 200:
+                # Reporting a non-200 as "ok" would repeat this check's original sin:
+                # asserting health it never established.
+                report.add("autumn_reachable", "fail", f"{autumn_url}: HTTP {resp.status}")
+                return
+            body: dict[str, Any] = await resp.json(content_type=None)
+        report.add("autumn_reachable", "ok", f"{autumn_url} (version {body.get('version', '?')})")
     except Exception as exc:  # noqa: BLE001 — probe must continue
-        report.add("autumn_limits", "fail", f"{type(exc).__name__}: {exc}")
+        report.add("autumn_reachable", "fail", f"{autumn_url}: {type(exc).__name__}: {exc}")
 
 
 async def _check_voice_bug(

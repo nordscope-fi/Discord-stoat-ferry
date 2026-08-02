@@ -176,11 +176,29 @@ async def test_upload_with_cache_miss(tmp_path: Path, mock_aiohttp: aioresponses
     assert cache[str(file)] == "new_file_id"
 
 
-def test_icons_limit_matches_stoat_autumn_config() -> None:
-    """Autumn enforces a flat 2_500_000 for icons (Revolt.toml), not 2560*1024."""
+def test_tag_size_limits_match_the_live_instance() -> None:
+    """Every limit is DECIMAL megabytes, matching what the instance advertises.
+
+    Measured 2026-08-02 from `features.limits.default.file_upload_size_limits` on
+    https://api.stoat.chat/. Autumn's config is written in decimal (20_000_000), so
+    every `N * 1024 * 1024` here was too permissive: files in the gap band passed our
+    pre-upload guard, were uploaded, and were rejected by Autumn with a 413.
+
+    `icons` was already correct — it had been diagnosed and fixed in isolation, with the
+    comment "Autumn enforces a flat 2.5MB (Revolt.toml), not 2560*1024", while the other
+    five were left. This pin covers all six so that cannot recur. `ferry probe` now
+    checks the same thing against a live instance.
+    """
     from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
-    assert TAG_SIZE_LIMITS["icons"] == 2_500_000
+    assert TAG_SIZE_LIMITS == {
+        "attachments": 20_000_000,
+        "avatars": 4_000_000,
+        "backgrounds": 6_000_000,
+        "icons": 2_500_000,
+        "banners": 6_000_000,
+        "emojis": 500_000,
+    }
 
 
 # ---------------------------------------------------------------------------

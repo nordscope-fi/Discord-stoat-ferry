@@ -32,6 +32,7 @@ from discord_ferry.parser.models import (
     DCEReference,
 )
 from discord_ferry.state import FailedMessage, MigrationState
+from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1437,7 +1438,10 @@ async def test_attachment_exactly_at_limit_proceeds(
         id="att1",
         url="exact.bin",
         file_name="exact.bin",
-        file_size_bytes=20 * 1024 * 1024,  # Exactly at limit
+        # Track the constant, not a literal: this test pins `>` vs `>=`, and a hardcoded
+        # 20 * 1024 * 1024 silently stopped being "the limit" when it was corrected to
+        # decimal MB in v2.8.5.
+        file_size_bytes=TAG_SIZE_LIMITS["attachments"],  # Exactly at limit
     )
     msg = _make_message(id="msg1", content="exact limit", attachments=[att])
 
