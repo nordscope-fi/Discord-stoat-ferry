@@ -11,8 +11,14 @@ process while it still holds port 8765.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from typing import Any
+from unittest.mock import MagicMock
 
+import pytest
+
+from discord_ferry import gui
 from discord_ferry.gui import _terminate_children
 
 
@@ -127,3 +133,111 @@ class TestTeardownLadder:
         child = FakeChild(alive_sequence=[True, True, False])
         _terminate_children([child], None)
         assert child.terminate_calls == 1
+
+
+class TestMainLifecycle:
+    def test_freeze_support_is_the_first_statement_of_main(self) -> None:
+        """PyInstaller's rthook only REBINDS multiprocessing.freeze_support; the
+        diversion to spawn_main happens when it is CALLED, and NiceGUI calls it deep
+        inside native_mode.activate(). So in the frozen app the spawned window child
+        runs every statement of main() above ui.run(). Calling freeze_support first
+        makes the child divert immediately.
+
+        No source test can prove the child actually diverts -- that rides on the
+        built-bundle check. This pins placement only.
+        """
+        tree = ast.parse(inspect.getsource(gui.main))
+        func = tree.body[0]
+        assert isinstance(func, ast.FunctionDef)
+        body = [
+            node
+            for node in func.body
+            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+        ]
+        first = body[0]
+        assert isinstance(first, ast.Expr), "first statement of main() must be a call"
+        call = first.value
+        assert isinstance(call, ast.Call)
+        assert ast.unparse(call.func) == "multiprocessing.freeze_support"
+
+    def test_finally_runs_the_sync_teardown_on_normal_return(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The anti-inertness test.
+
+        An un-awaited coroutine in that finally: would be a silent no-op on the one
+        path where nothing else cleans up (uvicorn's force_exit, or a boot failure).
+        """
+        calls: list[str] = []
+        monkeypatch.setattr(gui, "_HAS_WEBVIEW", True)
+        monkeypatch.setattr(gui.ui, "run", lambda **_kwargs: calls.append("ran"))
+        monkeypatch.setattr(gui, "_teardown_native_window", lambda: calls.append("torn down"))
+        monkeypatch.setattr(gui.app, "on_shutdown", MagicMock())
+        gui._run_gui()
+        assert calls == ["ran", "torn down"]
+
+    def test_finally_runs_the_sync_teardown_when_ui_run_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+
+        def _boom(**_kwargs: object) -> None:
+            raise RuntimeError("server exploded during startup")
+
+        monkeypatch.setattr(gui, "_HAS_WEBVIEW", True)
+        monkeypatch.setattr(gui.ui, "run", _boom)
+        monkeypatch.setattr(gui, "_teardown_native_window", lambda: calls.append("torn down"))
+        monkeypatch.setattr(gui.app, "on_shutdown", MagicMock())
+        with pytest.raises(RuntimeError):
+            gui._run_gui()
+        assert calls == ["torn down"]
+
+    def test_shutdown_handler_registered_in_native_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_shutdown = MagicMock()
+        monkeypatch.setattr(gui, "_HAS_WEBVIEW", True)
+        monkeypatch.setattr(gui.ui, "run", lambda **_kwargs: None)
+        monkeypatch.setattr(gui, "_teardown_native_window", lambda: None)
+        monkeypatch.setattr(gui.app, "on_shutdown", on_shutdown)
+        gui._run_gui()
+        on_shutdown.assert_called_once_with(gui._teardown_native_window_async)
+
+    def test_no_handler_and_no_teardown_in_browser_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_shutdown = MagicMock()
+        calls: list[str] = []
+        monkeypatch.setattr(gui, "_HAS_WEBVIEW", False)
+        monkeypatch.setattr(gui.ui, "run", lambda **_kwargs: None)
+        monkeypatch.setattr(gui, "_teardown_native_window", lambda: calls.append("torn down"))
+        monkeypatch.setattr(gui.app, "on_shutdown", on_shutdown)
+        gui._run_gui()
+        on_shutdown.assert_not_called()
+        assert calls == []
+
+    def test_keyboard_interrupt_exits_130(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Returning 0 on Ctrl-C would lie to a supervisor or a shell script."""
+
+        def _interrupt() -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(gui, "_run_gui", _interrupt)
+        with pytest.raises(SystemExit) as excinfo:
+            gui.main()
+        assert excinfo.value.code == 130
+
+    def test_normal_return_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gui, "_run_gui", lambda: None)
+        gui.main()
+
+    def test_ui_run_is_called_with_tuned_timings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """NiceGUI derives the socket.io heartbeat from reconnect_timeout; its 3.0
+        default gives the browser only ~6s before the "Connection lost" banner."""
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(gui, "_HAS_WEBVIEW", False)
+        monkeypatch.setattr(gui.ui, "run", lambda **kwargs: captured.update(kwargs))
+        monkeypatch.setattr(gui, "_teardown_native_window", lambda: None)
+        gui._run_gui()
+        assert captured["reconnect_timeout"] == 10.0
+        assert captured["timeout_graceful_shutdown"] == 1

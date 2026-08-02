@@ -1680,24 +1680,58 @@ async def _teardown_native_window_async() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _run_gui() -> None:
+    """Start the UI and guarantee the native window child dies with the server."""
+    native = _HAS_WEBVIEW
+
+    if native:
+        # Fires on every path that reaches the ASGI lifespan shutdown: window close,
+        # Cmd-Q, Dock quit, force quit (SIGTERM) and a single Ctrl-C.
+        app.on_shutdown(_teardown_native_window_async)
+
+    try:
+        ui.run(
+            title="Discord Ferry",
+            host="127.0.0.1",
+            port=8765,
+            native=native,
+            reload=False,
+            storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
+            # NiceGUI derives ping_interval = max(rt * 0.8, 4) and
+            # ping_timeout = max(rt * 0.4, 2) from this, so the 3.0 default leaves the
+            # browser only ~6s of tolerance before it shows "Connection lost".
+            # 10.0 -> 8s/4s = 12s, still prompt about a genuinely dead server.
+            reconnect_timeout=10.0,
+            # uvicorn's graceful drain is unbounded by default and runs BEFORE the
+            # shutdown hook. The only connection is the local websocket, which closes
+            # immediately, so keep this short: a force-quit SIGKILL landing mid-drain
+            # would orphan the window, which is the whole failure this prevents.
+            timeout_graceful_shutdown=1,
+        )
+    finally:
+        # Covers what the lifespan hook cannot: uvicorn's force_exit path (double
+        # Ctrl-C) and a failure during startup. Without it a surviving daemon child
+        # would hang the interpreter in multiprocessing's atexit join, which has no
+        # timeout -- a hung Ferry still holding port 8765, worse than an orphan.
+        if native:
+            _teardown_native_window()
+
+
 def main() -> None:
     """Launch the NiceGUI local web UI."""
-    native = False
+    # MUST be the first statement. PyInstaller's rthook only rebinds
+    # multiprocessing.freeze_support(); the diversion to spawn_main happens when it is
+    # called, and NiceGUI only calls it deep inside ui.run(). Without this, the frozen
+    # window child re-runs everything above ui.run() before diverting.
+    multiprocessing.freeze_support()
+
     try:
-        import webview  # noqa: F401
-
-        native = True
-    except ImportError:
-        pass
-
-    ui.run(
-        title="Discord Ferry",
-        host="127.0.0.1",
-        port=8765,
-        native=native,
-        reload=False,
-        storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
-    )
+        _run_gui()
+    except KeyboardInterrupt:
+        # The interrupt can arrive after uvicorn restores the default SIGINT handler,
+        # or from NiceGUI's check_shutdown thread calling _thread.interrupt_main().
+        # Exit with the conventional SIGINT status rather than a silent 0.
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
