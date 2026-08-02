@@ -273,9 +273,34 @@ await api_send_message(
 )
 ```
 
-If the same idempotency key is submitted twice (e.g. after an interrupted migration resumes), Stoat
-returns the existing message rather than creating a duplicate. This makes the MESSAGES phase safe to
-re-run.
+!!! danger "This does NOT make the MESSAGES phase safe to re-run"
+    An earlier revision of this page claimed that submitting the same key twice makes Stoat return
+    the existing message instead of creating a duplicate. **Both halves of that are wrong**, and the
+    claim mattered — it was the stated reason resume was considered safe.
+
+    Verified against `crates/core/database/src/util/idempotency.rs` (2026-08-02):
+
+    - The store is `Lazy<Mutex<lru::LruCache<String, ()>>>` with a capacity of **1000 entries**. It
+      is **in-memory, process-local, has no TTL, and is emptied whenever the server restarts.**
+    - A key that is still cached returns **HTTP 409 `DuplicateNonce`** (`Status::Conflict`). It does
+      **not** return the original message, so there is nothing to reconcile against.
+    - Keys longer than **64 characters** are rejected. Ferry's are ~25–31 (`ferry-{id}`,
+      `ferry-merge-{id}`, `_p{n}` suffix), so this is not currently a constraint.
+
+    A 1000-entry window is a handful of seconds of migration traffic. By the time any resume, retry
+    or repair runs, every relevant key is long gone — and after a server restart, immediately.
+
+**What actually prevents duplicates is entirely client-side**, and each strategy has its own
+mechanism:
+
+| Path | What stops a re-run duplicating | Where |
+|---|---|---|
+| `flatten` | `state.message_map` (source id → Stoat id), plus `completed_channel_ids` and the transient `channel_message_offsets` | `messages.py` |
+| `merge` | `channel_high_water` per thread (durable) and `channel_message_offsets` (transient, mid-thread). **`merge` never writes `message_map`** | `messages.py` |
+| `--incremental` | the durable `channel_high_water` marker, with previously-failed ids deliberately re-attempted | `messages.py` |
+
+Treat the idempotency key as a cheap guard against an immediate double-send within one run — a
+retried request, a duplicated task — and nothing more.
 
 !!! note "Deprecated: nonce body field"
     The old `nonce` body field on message sends is deprecated. Use the `Idempotency-Key` HTTP header

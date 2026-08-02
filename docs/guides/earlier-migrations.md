@@ -145,8 +145,10 @@ Be aware of what does **not** work, because both look like they should:
   stopped; it does not revisit messages it has already passed.
 - **`--incremental` will not backfill it either.** It skips everything below the high-water mark it
   recorded for each channel, and all of the content above sits below that mark.
-- **`ferry retry` cannot find it.** These were recorded as *warnings*, not as failed messages.
-  Nothing was ever added to the retry queue.
+- **The retry machinery cannot find it either.** These were recorded as *warnings*, not as failed
+  messages, so nothing ever entered the retry queue. (There is also no `ferry retry` command today —
+  the retry code exists inside the engine but has no command-line surface yet. Exposing it is part of
+  the same planned work as the repair tool.)
 
 That leaves:
 

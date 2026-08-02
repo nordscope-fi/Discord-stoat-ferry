@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-08-02
+
+### Fixed
+
+- **A crash during `--thread-strategy merge` no longer duplicates thread messages on the next run.**
+
+  The merge path wrote nothing to disk until the entire MESSAGES phase finished — not a single
+  checkpoint across every thread. A crash, a force-quit or a lost connection partway through
+  therefore discarded the record of everything already delivered into the parent channel, and the
+  recovery run delivered it all again.
+
+  Merging now checkpoints inside each thread (on the same interval-and-time cadence the default
+  `flatten` strategy has always used) and again when a thread completes. `--resume` reads the
+  resulting marker, which it previously ignored for merged threads, so a resumed run continues from
+  where the crash landed instead of restarting the thread. The thread separator is no longer
+  re-posted either.
+
+  The larger the server, the worse this was: the window between "first message delivered" and "phase
+  finished" is the entire merge.
+
+  A message that *failed* to send also advances the checkpoint, so a resumed merge can skip past a
+  failure — exactly as the default `flatten` strategy already did. That message is not lost: it stays
+  in `failed_messages`, is reported as a failure, and an `--incremental` run re-attempts it.
+  `--resume` deliberately does not, because re-sending could duplicate a message that actually landed
+  before its response was lost.
+
+### Changed
+
+- **`docs/reference/stoat-api-notes.md` no longer claims Stoat's `Idempotency-Key` protects a
+  re-run.** It said a repeated key makes the server return the existing message, "which makes the
+  MESSAGES phase safe to re-run". Both halves are false, and the claim was load-bearing — it was the
+  stated reason resume was considered safe.
+
+  Stoat's store is a 1000-entry, in-memory, process-local LRU with no TTL, emptied on restart, and a
+  repeat returns **HTTP 409**, not the original message. A thousand entries is seconds of migration
+  traffic. What actually prevents duplicates is entirely client-side, and the page now says which
+  mechanism covers which strategy — including that `merge` never writes `message_map` and so relies
+  wholly on the markers above.
+
 ### Documentation
 
 - **New guide: "Was my earlier migration affected?"** (`docs/guides/earlier-migrations.md`) — a
@@ -18,9 +57,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   complete success and still be missing content, which is why nobody reported them.
 
   The guide gives the exact `migration_report.json` searches that identify each one, and is explicit
-  about the limits of recovery: **`--resume`, `--incremental` and `ferry retry` will not backfill
-  any of it** — the affected content was recorded as warnings, never as failures, and sits below the
-  high-water mark those modes skip. Permissions can be fixed in place; missing content currently
+  about the limits of recovery: **neither `--resume`, `--incremental`, nor the retry machinery will
+  backfill any of it** — the affected content was recorded as warnings, never as failures, and sits
+  below the high-water mark those modes skip. (The guide also notes that retry has no command-line
+  surface today, so "just run `ferry retry`" was never an option either.) Permissions can be fixed in place; missing content currently
   cannot, short of migrating the export again into a fresh server. The planned repair tool is
   described honestly, including what it will not be able to do.
 

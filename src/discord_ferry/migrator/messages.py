@@ -498,9 +498,35 @@ async def _merge_threads(
                 )
                 continue
 
-            _thread_skip_below = (
-                state.channel_high_water.get(export.channel.id, "") if config.incremental else ""
-            )
+            # These two markers are the ONLY thing preventing a re-run from
+            # duplicating this thread into the parent channel. The Idempotency-Key
+            # header does not help: Stoat's store is a 1000-entry in-memory LRU with
+            # no TTL, cleared on restart, and a hit returns 409 rather than the
+            # original message. And unlike flatten, the merge path never writes
+            # `message_map`, so there is no second line of defence here.
+            #
+            # Batch 6 (#107): mirrors the flatten read at :808-826.
+            # --resume reads the TRANSIENT per-thread offset, which is where a crashed
+            # run stopped inside this thread and is cleared once the thread completes.
+            # --incremental reads the DURABLE high-water mark, taking the transient
+            # offset too in case a crash left it ahead. Plain runs skip nothing.
+            if config.resume:
+                _thread_skip_below = state.channel_message_offsets.get(export.channel.id, "")
+            elif config.incremental:
+                _thread_skip_below = max(
+                    (
+                        v
+                        for v in (
+                            state.channel_high_water.get(export.channel.id, ""),
+                            state.channel_message_offsets.get(export.channel.id, ""),
+                        )
+                        if v and v.isdigit()
+                    ),
+                    key=int,
+                    default="",
+                )
+            else:
+                _thread_skip_below = ""
             # #77 parity: a non-numeric marker (only reachable via a hand-edited
             # state.json) degrades to "no threshold" rather than crashing int().
             if _thread_skip_below and not _thread_skip_below.isdigit():
@@ -509,6 +535,14 @@ async def _merge_threads(
             # sit below the high-water mark; on incremental, exclude them from the skip so
             # the merge re-POSTs them. Empty unless incremental, so --resume is unaffected.
             # Scoped to parent_stoat_id (mirrors the parallel path's stoat_channel_id filter).
+            #
+            # Batch 6 (#107) note: `_posted` advances on a FAILED message as well as a sent
+            # one, so the checkpoint below can persist the id of a message that never
+            # landed, and --resume now skips past it. That matches flatten exactly and is
+            # the contract SC-7 pins (`test_resume_does_not_reattempt_failed_id`): resume
+            # is a pure continuation. The message is not lost -- it stays in
+            # `state.failed_messages`, is reported as a failure, and an --incremental run
+            # self-heals it. See `test_resume_keeps_a_failed_merge_message_recoverable`.
             _failed_ids_here = (
                 {
                     fm.discord_msg_id
@@ -521,10 +555,17 @@ async def _merge_threads(
             _succeeded_ids: set[str] = set()
             _thread_max_id = 0
             _posted = 0
+            _checkpoint_interval = max(config.checkpoint_interval, 1)
+            _last_save_time = time.monotonic()
 
-            # Send separator message (skip on incremental when the thread already
-            # has a durable marker \u2014 the separator was posted on the first run).
-            if not (config.incremental and export.channel.id in state.channel_high_water):
+            # Send separator message. Skipped when a prior run already posted it:
+            # on incremental that is signalled by the durable marker, and on resume
+            # by the transient offset a crashed run left behind (batch 6, #107) --
+            # otherwise every crash would add another separator to the parent.
+            _already_started = export.channel.id in state.channel_high_water or (
+                export.channel.id in state.channel_message_offsets
+            )
+            if not ((config.incremental or config.resume) and _already_started):
                 separator = (
                     f"\u2500\u2500 Thread: {export.channel.name} "
                     f"({export.message_count} messages) \u2500\u2500"
@@ -628,6 +669,25 @@ async def _merge_threads(
                 if not _msg_failed:
                     _succeeded_ids.add(msg.id)
                 _posted += 1
+
+                # Batch 6 (#107): checkpoint inside the thread. Without this a crash
+                # loses the record of everything sent since the phase began, and the
+                # re-run re-delivers it -- the merge path has no message_map to fall
+                # back on. Interval AND a 5s floor, mirroring :885-895.
+                #
+                # No save_lock: _merge_threads is awaited at :446, strictly after the
+                # parallel gather has finished and been reconciled, so nothing else
+                # touches `state` here. Do NOT add one "for symmetry".
+                if _posted % _checkpoint_interval == 0:
+                    now = time.monotonic()
+                    if now - _last_save_time >= 5.0:
+                        # #77 parity: only persist numeric ids, so a non-numeric id can
+                        # never poison the offset the resume path reads back.
+                        if msg.id.isdigit():
+                            state.channel_message_offsets[export.channel.id] = msg.id
+                        save_state(state, config.output_dir)
+                        _last_save_time = now
+
                 await _rate_limit_with_pause(config)
 
             # Durable high-water mark for this thread (written every run so a later
@@ -640,6 +700,11 @@ async def _merge_threads(
             # — the merge path never writes message_map), and collapse the carried +
             # fresh-re-fail duplicate to one entry. Scoped to parent_stoat_id + the ids
             # carried into this thread, so sibling threads' entries are untouched.
+            #
+            # Batch 6 (#107): this gate MUST match the one building _failed_ids_here
+            # above. Re-attempting under a mode that does not reconcile would leave a
+            # succeeded message still recorded as failed — an inaccurate durable
+            # record, and a duplicate send the next time it is re-attempted.
             if config.incremental and _failed_ids_here:
                 _seen: set[str] = set()
                 _reconciled: list[FailedMessage] = []
@@ -655,6 +720,12 @@ async def _merge_threads(
                         _seen.add(fm.discord_msg_id)
                     _reconciled.append(fm)
                 state.failed_messages = _reconciled
+
+            # Thread complete — the durable marker above now covers everything sent,
+            # so the transient offset has nothing left to say. Clearing it is what
+            # makes the separator gate distinguish "mid-flight" from "finished".
+            state.channel_message_offsets.pop(export.channel.id, None)
+            save_state(state, config.output_dir)
 
             on_event(
                 MigrationEvent(
@@ -832,6 +903,14 @@ async def _process_single_channel(
         # #76: ids that failed to POST on a prior run sit below the high-water mark;
         # on incremental, exclude them from the skip so the phase re-POSTs them
         # (self-heal). Empty unless incremental, so --resume is unaffected.
+        #
+        # Deliberate, and pinned by SC-7 (`test_resume_does_not_reattempt_failed_id`):
+        # --resume is a pure continuation, so it does not re-send anything it has a
+        # marker for -- including a failure sitting below that marker. The message is
+        # not lost: it stays in `state.failed_messages` and is reported as a failure,
+        # and an --incremental run self-heals it. Re-sending under resume would risk
+        # duplicating a message that actually landed before the response was lost,
+        # which is a trade-off only the opt-in delta mode makes.
         if config.incremental:
             _failed_ids_here = {
                 fm.discord_msg_id
@@ -923,6 +1002,8 @@ async def _process_single_channel(
             # succeeded this run (now in message_map), and collapse the carried +
             # fresh-re-fail duplicate to a single entry. Scoped to this channel so
             # other channels' and brand-new failures are untouched.
+            #
+            # This gate MUST match the one building _failed_ids_here above.
             if config.incremental and _failed_ids_here:
                 _seen: set[str] = set()
                 _reconciled: list[FailedMessage] = []

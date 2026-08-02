@@ -906,3 +906,222 @@ async def test_archive_strategy_writes_forwarded_content(tmp_path: Path) -> None
 
     md = (tmp_path / "threads" / "general" / "my-thread.md").read_text()
     assert "recovered thread text" in md
+
+
+# ---------------------------------------------------------------------------
+# Batch 6 (#107) — merge-path durability
+# ---------------------------------------------------------------------------
+
+
+class _Crash(BaseException):
+    """Simulates the process dying mid-merge.
+
+    Deliberately a BaseException: the merge loop catches ``Exception`` per message
+    and records a failure, which is the opposite of the scenario under test. Only
+    something outside that net models "the process went away".
+    """
+
+
+def _crash_on_nth(keys: list[str], n: int) -> object:
+    """api_send_message stand-in that records keys and dies on the nth call."""
+
+    async def _send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        if len(keys) >= n:
+            raise _Crash(f"process died before sending {key}")
+        keys.append(key)
+        return {"_id": f"stoat-{key}"}
+
+    return _send
+
+
+def _two_thread_setup(
+    tmp_path: Path,
+    *,
+    resume: bool = False,
+    incremental: bool = False,
+    checkpoint_interval: int = 50,
+) -> tuple[FerryConfig, MigrationState, list[DCEExport]]:
+    """Parent (ch 100) plus two threads (ch 200, ch 300), four messages each."""
+    config = _make_config(
+        tmp_path,
+        thread_strategy="merge",
+        message_rate_limit=0.0,
+        resume=resume,
+        incremental=incremental,
+        checkpoint_interval=checkpoint_interval,
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent = _make_export(channel_id="100", channel_name="general")
+    threads = [
+        _make_export(
+            channel_id=cid,
+            channel_name=f"thread-{cid}",
+            is_thread=True,
+            parent_channel_name="general",
+            messages=[_make_message(mid, f"msg {mid}") for mid in ids],
+            message_count=len(ids),
+        )
+        for cid, ids in (("200", ["10", "20", "30", "40"]), ("300", ["50", "60", "70", "80"]))
+    ]
+    return config, state, [parent, *threads]
+
+
+async def test_crash_mid_merge_leaves_durable_record(tmp_path: Path) -> None:
+    """SC-35: what reached the parent channel before the crash is on DISK afterwards.
+
+    Asserts against state.json rather than the in-memory state — the whole point
+    is what survives the process going away.
+    """
+    import json
+    from unittest.mock import patch
+
+    import pytest
+
+    # checkpoint_interval=2 plus a clock that always clears the 5s floor, so the
+    # transient offset is genuinely written mid-thread. With the default interval
+    # of 50 and four messages per thread it never would be, and the "offset was
+    # cleared" assertion below would pass whether or not anything cleared it.
+    config, state, exports = _two_thread_setup(tmp_path, checkpoint_interval=2)
+    keys: list[str] = []
+    ticks = iter(range(0, 10_000, 100))
+    # Thread 200: separator + 4 messages = 5 sends, so it completes. Die on the
+    # 6th — thread 300's separator — BEFORE any later checkpoint could persist
+    # thread 200's completion as a side effect. That isolates the completion save.
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _crash_on_nth(keys, 5)),
+        patch("discord_ferry.migrator.messages.time.monotonic", lambda: next(ticks)),
+        pytest.raises(_Crash),
+    ):
+        await run_messages(config, state, exports, lambda e: None)
+
+    saved = json.loads((tmp_path / "state.json").read_text())
+    # Thread 200 ran to completion: its durable marker survives...
+    assert saved["channel_high_water"].get("200") == "40"
+    # ...and the transient offset the checkpoints wrote was cleared, because there
+    # is nothing left to resume inside it. Left behind, it would suppress the
+    # separator of a thread that had in fact finished.
+    assert "200" not in saved.get("channel_message_offsets", {})
+    # Thread 300 never started and must not claim otherwise.
+    assert "300" not in saved.get("channel_high_water", {})
+
+
+async def test_merge_checkpoints_periodically_inside_a_long_thread(tmp_path: Path) -> None:
+    """SC-36: mid-thread progress is persisted, not just per-thread completion.
+
+    Drives the interval-and-time gate with a clock that always reports the floor
+    as satisfied, so the assertion is about the interval rather than wall time.
+    """
+    import json
+    from unittest.mock import patch
+
+    import pytest
+
+    config, state, exports = _two_thread_setup(tmp_path, checkpoint_interval=2)
+    keys: list[str] = []
+    ticks = iter(range(0, 10_000, 100))
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _crash_on_nth(keys, 4)),
+        patch("discord_ferry.migrator.messages.time.monotonic", lambda: next(ticks)),
+        pytest.raises(_Crash),
+    ):
+        await run_messages(config, state, exports, lambda e: None)
+
+    saved = json.loads((tmp_path / "state.json").read_text())
+    # Separator + msgs 10, 20 landed; the crash hit msg 30. A checkpoint must have
+    # recorded progress inside thread 200, which never completed.
+    assert saved.get("channel_message_offsets", {}).get("200") == "20"
+    assert "200" not in saved.get("channel_high_water", {})
+
+
+async def test_resume_does_not_remerge_already_sent_thread_messages(tmp_path: Path) -> None:
+    """A resumed merge must not re-deliver what the crashed run already sent."""
+    from unittest.mock import patch
+
+    config, state, exports = _two_thread_setup(tmp_path, resume=True)
+    # Stand-in for the state a crashed run left behind: thread 200 got as far as 20.
+    state.channel_message_offsets["200"] = "20"
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, exports, lambda e: None)
+
+    thread_200 = [k for k in keys if k in ("ferry-merge-10", "ferry-merge-20")]
+    assert thread_200 == [], "re-sent messages the crashed run had already delivered"
+    assert "ferry-merge-30" in keys
+    assert "ferry-merge-40" in keys
+
+
+async def test_resume_does_not_repost_the_thread_separator(tmp_path: Path) -> None:
+    """The separator is posted once per thread, not once per crash."""
+    from unittest.mock import patch
+
+    config, state, exports = _two_thread_setup(tmp_path, resume=True)
+    state.channel_message_offsets["200"] = "20"
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, exports, lambda e: None)
+
+    assert "ferry-thread-sep-200" not in keys
+    # A thread the crashed run never reached still gets its separator.
+    assert "ferry-thread-sep-300" in keys
+
+
+async def test_resume_keeps_a_failed_merge_message_recoverable(tmp_path: Path) -> None:
+    """`_posted` advances on a FAILED send too, so the checkpoint can name a message
+    that never landed — and --resume now skips past it.
+
+    That is deliberate and matches flatten: SC-7
+    (`test_resume_does_not_reattempt_failed_id`) pins resume as a pure continuation,
+    because re-sending could duplicate a message that actually landed before the
+    response was lost. What must hold is that the message stays RECOVERABLE: the
+    failure record survives, so the report shows it and an --incremental run
+    self-heals it.
+    """
+    from unittest.mock import patch
+
+    config, state, exports = _two_thread_setup(tmp_path, resume=True)
+    state.channel_message_offsets["200"] = "30"
+    state.failed_messages.append(
+        FailedMessage(
+            discord_msg_id="20",
+            stoat_channel_id="stoat-ch-100",
+            error="boom",
+            content_preview="msg 20",
+        )
+    )
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, exports, lambda e: None)
+
+    # Not re-attempted under resume — same contract as flatten.
+    assert "ferry-merge-20" not in keys
+    # ...but still on the books, so it is neither silent nor permanent.
+    assert [fm.discord_msg_id for fm in state.failed_messages] == ["20"]
+    # Everything above the marker is still sent.
+    assert "ferry-merge-40" in keys
+
+
+async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Path) -> None:
+    """The opt-in delta mode is where the self-heal lives — unchanged by batch 6."""
+    from unittest.mock import patch
+
+    config, state, exports = _two_thread_setup(tmp_path, incremental=True)
+    state.channel_high_water["200"] = "30"
+    state.failed_messages.append(
+        FailedMessage(
+            discord_msg_id="20",
+            stoat_channel_id="stoat-ch-100",
+            error="boom",
+            content_preview="msg 20",
+        )
+    )
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, exports, lambda e: None)
+
+    assert "ferry-merge-20" in keys, "incremental must still self-heal"
+    # Re-sent successfully, so the stale failure record is reconciled away.
+    assert [fm.discord_msg_id for fm in state.failed_messages] == []
