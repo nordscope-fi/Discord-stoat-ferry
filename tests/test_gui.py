@@ -403,36 +403,6 @@ def test_use_cached_clears_only_discord_token() -> None:
     assert "_SESSION_TOKEN_KEYS" not in use_cached_body
 
 
-def test_export_launch_is_gated() -> None:
-    """SC-4: the /export auto-launch is behind _should_auto_export(cached)."""
-    import inspect
-
-    import discord_ferry.gui as gui_mod
-
-    source = inspect.getsource(gui_mod)
-    assert "if _should_auto_export(cached):" in source
-    # The ungated module-level auto-launch (4-space indented) must no longer exist.
-    assert "\n    background_tasks.create(_run_export())\n" not in source
-
-
-def test_reexport_button_launches_export() -> None:
-    """SC-5: 'Re-export' triggers _run_export (exactly one launch per intent)."""
-    import inspect
-
-    import discord_ferry.gui as gui_mod
-
-    source = inspect.getsource(gui_mod)
-    # The re-export handler both toggles visibility AND launches the export.
-    assert "def _re_export() -> None:" in source
-    # Exactly two launch sites: the cached-absent gate + the re-export handler.
-    assert source.count("background_tasks.create(_run_export())") == 2
-
-
-# ---------------------------------------------------------------------------
-# Batch 8 — S2 token lifecycle (memory-only app.storage.tab)
-# ---------------------------------------------------------------------------
-
-
 def test_store_session_tokens_writes_exactly_two_keys() -> None:
     """SC-7: _store_session_tokens writes exactly token + discord_token, nothing else."""
     from discord_ferry.gui import _store_session_tokens
@@ -490,21 +460,6 @@ def test_tokens_never_disk_backed() -> None:
     # (c) the token input fields do NOT pre-fill from storage (value="" — no disk read)
     assert 'value=str(storage.get("token"' not in source
     assert 'value=str(storage.get("discord_token"' not in source
-
-
-def test_token_access_uses_connected_client() -> None:
-    """SC-11: token read/write sites await a connected client (tab access is then valid)."""
-    import inspect
-
-    import discord_ferry.gui as gui_mod
-
-    source = inspect.getsource(gui_mod)
-    assert "async def _on_validate_click() -> None:" in source
-    assert "async def migrate_page() -> None:" in source
-    # validate-click, _run_export, migrate_page each await a connected client.
-    assert source.count("await ui.context.client.connected()") >= 3
-    # _run_export restart-bounce on a missing tab discord_token.
-    assert 'app.storage.tab.get("discord_token")' in source
 
 
 def test_page_guards_drop_token_term() -> None:

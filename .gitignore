@@ -59,3 +59,7 @@ site/
 # PyInstaller (keep ferry.spec — our build config)
 *.spec
 !ferry.spec
+
+# NiceGUI runtime storage (see .claude/rules/security.md — user-scoped GUI settings,
+# never tokens, but it is runtime state and must not be committed).
+.nicegui/
