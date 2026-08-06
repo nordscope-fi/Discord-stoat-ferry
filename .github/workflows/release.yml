@@ -150,6 +150,36 @@ jobs:
           }
           Write-Host "--version OK ($expected)"
 
+          # --- AttachConsole path (issue #123 symptom 3, no redirection) ---
+          # This check must not use Invoke-Ferry. Invoke-Ferry redirects
+          # stdout and stderr, which gives the process a real inherited
+          # stdout handle. That handle satisfies step 1 of the console
+          # ladder (_stdout_is_usable), so AttachConsole is never called and
+          # the --help and --version checks above never exercise it.
+          #
+          # With no redirection, step 1 fails and acquire_console() must
+          # call _attach_parent_console(). If AttachConsole succeeds, Click
+          # runs and exits 0. If it fails, acquire_console() returns False,
+          # should_run_cli() returns False, and gui.main() runs instead.
+          # gui.main() does not exit. A bounded wait that returns exit code
+          # 0 shows the attach path ran and worked. A timeout shows it did
+          # not.
+          #
+          # Keep this check separate from Invoke-Ferry. Adding redirection
+          # here would remove the only coverage of the attach path.
+          $attachTimeoutMs = 30000
+          $attachProc = Start-Process -FilePath $exe -ArgumentList '--help' -PassThru
+          if (-not $attachProc.WaitForExit($attachTimeoutMs)) {
+            taskkill /T /F /PID $attachProc.Id 2>&1 | Out-Null
+            Write-Host "::error::Ferry.exe --help with no redirection did not exit within $attachTimeoutMs ms. AttachConsole may have failed and the GUI may have launched instead."
+            exit 1
+          }
+          if ($attachProc.ExitCode -ne 0) {
+            Write-Host "::error::Ferry.exe --help with no redirection exited $($attachProc.ExitCode)"
+            exit 1
+          }
+          Write-Host "AttachConsole path OK: no redirection, exited 0"
+
       - name: Sign Windows binary
         if: env.HAS_WINDOWS_CERT == 'true'
         env:
