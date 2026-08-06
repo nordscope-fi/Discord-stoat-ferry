@@ -95,17 +95,24 @@ def test_windows_attach_failure_reports_no_console(monkeypatch: pytest.MonkeyPat
 
 
 def test_run_cli_never_returns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Click exits the process itself, so there is no status to return.
+    """run_cli() exits the process. It never returns, and it never raises
+    anything other than SystemExit.
 
     Command.main() is typed -> NoReturn in standalone mode and every path ends
     in sys.exit(). Asserting `== 0` here would assert on a value that is never
     produced.
 
+    This does not prove run_cli() calls the bound cli_main.main(). Click's
+    BaseCommand.__call__ just forwards to self.main(), so both raise
+    SystemExit(0) identically at runtime. No test built on
+    pytest.raises(SystemExit) can tell a bound call apart from a bare
+    cli_main() call. That distinction is enforced by mypy's --warn-no-return,
+    not by this test.
+
     Uses --help, not --version: Task 3 adds --version and has not landed on
     this branch yet, so that option does not exist here and would raise
     SystemExit(2) with "No such option". --help is a Click built-in present
-    on every Command. It exercises the same exit-0 path through the bound
-    main().
+    on every Command and gives the same exit-0 path.
     """
     monkeypatch.setattr("sys.argv", ["Ferry.exe", "--help"])
     with pytest.raises(SystemExit) as excinfo:
