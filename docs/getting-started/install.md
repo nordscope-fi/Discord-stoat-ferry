@@ -10,7 +10,16 @@ Pick your operating system below to get started.
 
     1. Go to the [Discord Ferry releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases) on GitHub.
     2. Under the latest release, click **Ferry-windows-x86_64.exe** to download it.
-    3. Double-click the downloaded file to run it. Your browser will open automatically.
+    3. Double-click the downloaded file to run it. Ferry opens its own window.
+
+    !!! info "No browser opens"
+        The downloaded app draws its own window and does not launch your browser. If the window
+        stays blank or does not appear, open `http://localhost:8765` in any browser while Ferry
+        is running. That address is fully supported and gives you the same interface.
+
+    !!! tip "The app also takes commands"
+        `Ferry-windows-x86_64.exe --help` lists every command, and `--version` reports the build.
+        See the [CLI Reference](../guides/cli-reference.md) for what each command does.
 
     <!-- screenshot: windows-smartscreen-warning -->
 
@@ -58,6 +67,11 @@ Pick your operating system below to get started.
 
         Ferry opens. From now on you can launch it with a normal double-click.
 
+    !!! info "No browser opens"
+        Ferry.app draws its own window and does not launch your browser. If the window stays
+        blank or does not appear, open `http://localhost:8765` in any browser while Ferry is
+        running. That address is fully supported and gives you the same interface.
+
         **Not seeing the button?** It only appears *after* macOS has blocked Ferry, and it disappears again after about an hour. Double-click **Ferry.app** once more, then go straight back to **Privacy & Security**.
 
     !!! tip "Faster, if you are comfortable with Terminal"
@@ -104,7 +118,10 @@ Pick your operating system below to get started.
         ```
 
     !!! info "No desktop app on Linux"
-        On Linux, Ferry opens in your web browser instead of a separate application window. This is normal — it works the same as the Windows and macOS versions.
+        Installed this way, Ferry opens in your web browser and does not draw its own window.
+        The downloaded Windows and macOS apps bundle the window toolkit; a `pipx` install leaves
+        it out unless you ask for it with `pipx install "discord-ferry[native]"`. Everything
+        else behaves identically.
 
 ---
 

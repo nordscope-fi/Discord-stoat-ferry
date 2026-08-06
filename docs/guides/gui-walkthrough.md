@@ -3,9 +3,11 @@
 This guide walks through every screen of the Discord Ferry web interface. Ferry runs a small local web server when you launch it — no data ever leaves your machine.
 
 !!! info "Launching the GUI"
-    On **Windows**, double-click the downloaded `Ferry-windows-x86_64.exe`. On **macOS**, open **Ferry.app** — see [Installation](../getting-started/install.md) if macOS blocks it the first time. On **Linux**, run `ferry-gui` in a terminal.
+    On **Windows**, double-click the downloaded `Ferry-windows-x86_64.exe`. On **macOS**, open **Ferry.app** (see [Installation](../getting-started/install.md) if macOS blocks it the first time). On **Linux**, run `ferry-gui` in a terminal.
 
-    Your browser will open automatically to `http://localhost:8765`. If it does not, open that URL manually.
+    The downloaded Windows and macOS apps draw their own window and do not launch a browser. A `pipx` install has no window toolkit bundled, so `ferry-gui` opens your browser instead.
+
+    Either way, `http://localhost:8765` reaches the same interface while Ferry is running. Use it if the window stays blank or never appears.
 
 ---
 

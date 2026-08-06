@@ -33,13 +33,16 @@ Before you start, confirm you have these ready:
 === "GUI (Windows / macOS)"
 
     1. Double-click **Ferry.exe** (Windows) or open **Ferry.app** (macOS).
-    2. Your default browser opens automatically at `http://localhost:8765`.
+    2. Ferry opens its own window. No browser is launched.
     3. You will see the Setup screen.
 
     <!-- screenshot: ferry-setup-screen -->
 
-    !!! info "Browser did not open?"
-        Open your browser manually and go to `http://localhost:8765`.
+    !!! info "Window blank or missing?"
+        Open `http://localhost:8765` in any browser while Ferry is running. That address is
+        fully supported and shows the same interface. See
+        [Troubleshooting](../guides/troubleshooting.md#ferry-window-is-blank-or-says-your-browser-does-not-support-es-modules)
+        if the window itself will not draw.
 
 === "CLI (Linux / advanced)"
 
