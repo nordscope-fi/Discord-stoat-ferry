@@ -155,7 +155,7 @@ jobs:
         env:
           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        # shell: bash is load-bearing -- windows-latest defaults to pwsh, where
+        # shell: bash is required here -- windows-latest defaults to pwsh, where
         # `base64 -d` and `del` are not valid. This step has never run (the cert
         # secret is unset), so the breakage was latent: it would have failed the
         # first time signing was actually enabled.
