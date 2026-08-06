@@ -21,40 +21,47 @@ jobs:
           client-id: ${{ vars.AUTO_TAG_APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTO_TAG_APP_PRIVATE_KEY }}
 
+      # fetch-depth: 0 fetches tags. The previous depth-2 checkout passed
+      # --no-tags, so the duplicate-tag guard below had no tags to find and
+      # could never have fired.
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Check for version bump
+      # Decide from the tags that exist, not from a diff against HEAD~1.
+      # A rebase merge lands the version-bump commit in the middle of the
+      # pushed range, so HEAD and HEAD~1 can both already carry the new
+      # version. That is how v2.12.0 reached main with no tag, no release and
+      # no PyPI publish, from a job that reported success. Asking "is this
+      # version tagged yet?" gives the same answer under squash, rebase and
+      # merge commits alike, and self-heals a release that was missed earlier.
+      - name: Decide whether a tag is needed
         id: version
         run: |
           CURRENT=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
-          PREVIOUS=$(git show HEAD~1:pyproject.toml | grep -m1 '^version' | sed 's/.*"\(.*\)".*/\1/')
+          TAG="v${CURRENT}"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
-          if [ "$CURRENT" != "$PREVIOUS" ]; then
-            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists, nothing to do"
           else
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG does not exist yet, creating it"
           fi
 
       - name: Configure git identity
-        if: steps.version.outputs.bumped == 'true'
+        if: steps.version.outputs.needed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Create and push tag
-        if: steps.version.outputs.bumped == 'true'
+        if: steps.version.outputs.needed == 'true'
         env:
-          VERSION: ${{ steps.version.outputs.current }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          TAG="v${VERSION}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping"
-          else
-            git tag -a "$TAG" -m "$TAG"
-            git push origin "$TAG"
-            echo "Created and pushed tag $TAG"
-          fi
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+          echo "Created and pushed tag $TAG"
