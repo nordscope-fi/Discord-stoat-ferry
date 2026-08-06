@@ -16,9 +16,11 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from nicegui import app, background_tasks, ui
+from nicegui.client import ClientConnectionTimeout
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
+from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.errors import MigrationError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
 from discord_ferry.state import load_state
@@ -138,6 +140,13 @@ def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> Non
 
 
 _EXPOSED_REACTION_MODES = ("text", "native", "skip")
+
+# NiceGUI 3.x defaults `Client.connected()` to `timeout=None`, i.e. wait forever.
+# A browser on the same machine connects in well under a second, so this only
+# bites on a genuinely dead client -- but it must be bounded, or a client that
+# never handshakes hangs the page silently (a second flavour of issue #123).
+# Comfortably longer than the reconnect_timeout=10.0 passed to ui.run().
+_CLIENT_CONNECT_TIMEOUT = 30.0
 
 
 def _coerce_advanced_settings(storage: Mapping[str, Any]) -> dict[str, Any]:
@@ -282,6 +291,18 @@ def _should_auto_export(cached: dict[str, int] | None) -> bool:
     cached JSON). See Batch 8 / F8a.
     """
     return cached is None
+
+
+def _log_path_hint() -> None:
+    """Show where the log file lives, for a user who has just hit a dead end.
+
+    This is the only place the path surfaces in the GUI, and deliberately so:
+    a persistent footer would be a new feature, which a patch release should
+    not add. Here it appears exactly where someone needs it.
+    """
+    path = configure_logging()
+    if path is not None:
+        ui.label(f"Details in {path}").classes("text-xs text-gray-500")
 
 
 def _render_step_indicator(active_step: int) -> None:
@@ -653,7 +674,7 @@ def setup_page() -> None:
                     # Store values. Tokens go to the memory-only tab store (never to
                     # disk); tab access needs a connected client — the await is a no-op
                     # during a live click but guarantees access. See Batch 8 / F8b.
-                    await ui.context.client.connected()
+                    await ui.context.client.connected(timeout=_CLIENT_CONNECT_TIMEOUT)
                     _store_session_tokens(app.storage.tab, stoat=token, discord=discord_token)
                     storage["mode"] = mode
                     storage["discord_server_id"] = discord_server
@@ -712,8 +733,16 @@ def setup_page() -> None:
 
 
 @ui.page("/export")
-def export_page() -> None:
-    """Export screen — run DCE subprocess, show per-channel progress."""
+async def export_page() -> None:
+    """Export screen — run DCE subprocess, show per-channel progress.
+
+    ``async def`` deliberately, mirroring :func:`migrate_page`. The client and the
+    tab-store tokens MUST be resolved here in the page builder, never inside the
+    ``background_tasks.create`` coroutine below: NiceGUI keys its slot stack by
+    ``id(asyncio.current_task())``, so a child task starts with an empty stack and
+    every ``ui.context`` lookup raises ``RuntimeError``. That is issue #123 — it
+    made this screen hang forever, silently, from v2.6.14 to v2.11.0.
+    """
     from discord_ferry.core.events import MigrationEvent as _MigrationEvent
 
     ui.add_head_html(_HEAD_HTML)
@@ -721,6 +750,23 @@ def export_page() -> None:
     storage = app.storage.user
     if storage.get("mode") != "orchestrated":
         ui.navigate.to("/validate")
+        return
+
+    # Resolve the client once, in the builder where the slot stack is live. Every
+    # background task below re-enters it with `with client:` so its UI calls work.
+    client = ui.context.client
+    try:
+        await client.connected(timeout=_CLIENT_CONNECT_TIMEOUT)
+    except ClientConnectionTimeout:
+        ui.label("Browser did not connect — reload this page.").classes("m-8 text-red-600")
+        _log_path_hint()
+        return
+
+    # Session-expired bounce lives HERE, not in the task: it needs tab access, and
+    # bouncing from the builder is what /migrate already does (see migrate_page).
+    if not app.storage.tab.get("discord_token"):
+        ui.notify("Session expired — re-enter your token", type="warning")
+        ui.navigate.to("/")
         return
 
     # Check for cached exports
@@ -754,11 +800,23 @@ def export_page() -> None:
                     # export_view / _run_export are defined below; closures are only
                     # invoked on click.
                     def _re_export() -> None:
+                        # Re-read the token at CLICK time, not from a value captured
+                        # in the builder. A previous run's `finally` clears it, so a
+                        # captured value would be stale on a second Re-export and we
+                        # would silently export with a dead token instead of bouncing.
+                        token_now = str(app.storage.tab.get("discord_token", ""))
+                        if not token_now:
+                            ui.notify("Session expired — re-enter your token", type="warning")
+                            ui.navigate.to("/")
+                            return
+                        # S8: one export at a time. Without this, repeated clicks stack
+                        # concurrent tasks writing into the same export directory.
+                        reexport_btn.disable()
                         cached_view.set_visibility(False)
                         export_view.set_visibility(True)
-                        background_tasks.create(_run_export())
+                        background_tasks.create(_run_export(token_now))
 
-                    ui.button("Re-export", on_click=_re_export).props("color=grey")
+                    reexport_btn = ui.button("Re-export", on_click=_re_export).props("color=grey")
 
     # --- Normal export UI ---
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10") as export_view:
@@ -819,7 +877,14 @@ def export_page() -> None:
                 # and should not be perturbed by liveness pings).
                 pass  # log_display.push() already happened above
 
-    async def _run_export() -> None:
+    async def _run_export(discord_token: str) -> None:
+        """Run the export. Receives the token as a plain value.
+
+        The whole body runs inside ``with client:`` so ``ui.notify`` and
+        ``ui.navigate.to`` resolve, and inside a single ``try`` so nothing can
+        fail before the first event reaches the log panel — the failure mode that
+        made #123 invisible.
+        """
         from discord_ferry.errors import DiscordAuthError, DotNetMissingError
         from discord_ferry.exporter import (
             detect_dotnet,
@@ -829,113 +894,108 @@ def export_page() -> None:
             validate_discord_token,
         )
 
-        # Tokens live in the memory-only tab store; need a connected client to read.
-        await ui.context.client.connected()
-        if not app.storage.tab.get("discord_token"):
-            # Restart edge: stale non-secret keys on disk but a fresh tab with no
-            # token. Bounce cleanly rather than raising DiscordAuthError("").
-            ui.notify("Session expired — re-enter your token", type="warning")
-            ui.navigate.to("/")
-            return
+        with client:
+            try:
+                # Inside the try: a missing export_dir used to raise KeyError out
+                # here, above the handler, and vanish without a trace.
+                discord_server = str(storage.get("discord_server_id", ""))
+                export_dir = Path(str(storage.get("export_dir", "")))
+                if not str(export_dir):
+                    raise MigrationError("No export directory configured — restart setup.")
 
-        discord_token = str(app.storage.tab.get("discord_token", ""))
-        discord_server = str(storage.get("discord_server_id", ""))
-        export_dir = Path(str(storage["export_dir"]))
-
-        try:
-            on_export_event(
-                _MigrationEvent(
-                    phase="export",
-                    status="started",
-                    message="Validating Discord token...",
+                on_export_event(
+                    _MigrationEvent(
+                        phase="export",
+                        status="started",
+                        message="Validating Discord token...",
+                    )
                 )
-            )
-            await validate_discord_token(discord_token)
+                await validate_discord_token(discord_token)
 
-            on_export_event(
-                _MigrationEvent(
-                    phase="export",
-                    status="progress",
-                    message="Checking for DCE binary...",
-                )
-            )
-            dce_path = get_dce_path()
-            if dce_path is None:
                 on_export_event(
                     _MigrationEvent(
                         phase="export",
                         status="progress",
-                        message="Downloading DCE...",
+                        message="Checking for DCE binary...",
                     )
                 )
-                dce_path = await download_dce(on_export_event)
+                dce_path = get_dce_path()
+                if dce_path is None:
+                    on_export_event(
+                        _MigrationEvent(
+                            phase="export",
+                            status="progress",
+                            message="Downloading DCE...",
+                        )
+                    )
+                    dce_path = await download_dce(on_export_event)
 
-            on_export_event(
-                _MigrationEvent(
-                    phase="export",
-                    status="progress",
-                    message="Verifying .NET 8 runtime...",
+                on_export_event(
+                    _MigrationEvent(
+                        phase="export",
+                        status="progress",
+                        message="Verifying .NET 8 runtime...",
+                    )
                 )
-            )
-            if not detect_dotnet():
-                raise DotNetMissingError(
-                    "DCE requires .NET 8 runtime. "
-                    "Install from https://dotnet.microsoft.com/download/dotnet/8.0"
+                if not detect_dotnet():
+                    raise DotNetMissingError(
+                        "DCE requires .NET 8 runtime. "
+                        "Install from https://dotnet.microsoft.com/download/dotnet/8.0"
+                    )
+
+                config = FerryConfig(
+                    export_dir=export_dir,
+                    stoat_url=str(storage.get("stoat_url", "")),
+                    token=str(app.storage.tab.get("token", "")),
+                    discord_token=discord_token,
+                    discord_server_id=discord_server,
+                    cancel_event=cancel_event,
                 )
 
-            config = FerryConfig(
-                export_dir=export_dir,
-                stoat_url=str(storage.get("stoat_url", "")),
-                token=str(app.storage.tab.get("token", "")),
-                discord_token=discord_token,
-                discord_server_id=discord_server,
-                cancel_event=cancel_event,
-            )
-
-            on_export_event(
-                _MigrationEvent(
-                    phase="export",
-                    status="progress",
-                    message="Launching DiscordChatExporter...",
+                on_export_event(
+                    _MigrationEvent(
+                        phase="export",
+                        status="progress",
+                        message="Launching DiscordChatExporter...",
+                    )
                 )
-            )
-            await run_dce_export(config, dce_path, on_export_event)
+                await run_dce_export(config, dce_path, on_export_event)
 
-            on_export_event(
-                _MigrationEvent(
-                    phase="export",
-                    status="completed",
-                    message="Export complete!",
+                on_export_event(
+                    _MigrationEvent(
+                        phase="export",
+                        status="completed",
+                        message="Export complete!",
+                    )
                 )
-            )
 
-            # Auto-navigate to validate
-            await asyncio.sleep(1)
-            ui.navigate.to("/validate")
+                # Auto-navigate to validate
+                await asyncio.sleep(1)
+                ui.navigate.to("/validate")
 
-        except DiscordAuthError as exc:
-            on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
-            ui.notify(f"Discord auth failed: {exc}", type="negative")
-        except DotNetMissingError as exc:
-            on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
-            ui.notify(str(exc), type="negative")
-        except Exception as exc:
-            on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
-            ui.notify(f"Export failed: {exc}", type="negative")
-        finally:
-            # Clear ONLY the Discord token here — export is its sole consumer.
-            # The Stoat token MUST survive for /migrate (which reads it from the
-            # tab store). The pre-migration page guards now check export_dir/
-            # stoat_url, and migrate re-checks the tab token after connected(), so
-            # clearing the Discord token here no longer bounces the user. Tokens
-            # live in the memory-only tab store; suppress in case the task is
-            # cancelled before connected() (the tab access would otherwise raise
-            # and mask the original exception).
-            with contextlib.suppress(Exception):
-                _clear_tokens(app.storage.tab, ("discord_token",))
+            except DiscordAuthError as exc:
+                on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
+                ui.notify(f"Discord auth failed: {exc}", type="negative")
+            except DotNetMissingError as exc:
+                on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
+                ui.notify(str(exc), type="negative")
+            except Exception as exc:
+                on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
+                ui.notify(f"Export failed: {exc}", type="negative")
+            finally:
+                # Clear ONLY the Discord token here — export is its sole consumer.
+                # The Stoat token MUST survive for /migrate (which reads it from the
+                # tab store). The pre-migration page guards now check export_dir/
+                # stoat_url, and migrate re-checks the tab token after connected(), so
+                # clearing the Discord token here no longer bounces the user. Tokens
+                # live in the memory-only tab store; suppress in case the task is
+                # cancelled before connected() (the tab access would otherwise raise
+                # and mask the original exception).
+                with contextlib.suppress(Exception):
+                    _clear_tokens(app.storage.tab, ("discord_token",))
 
     if _should_auto_export(cached):
-        background_tasks.create(_run_export())
+        background_tasks.create(_run_export(str(app.storage.tab.get("discord_token", ""))))
 
 
 # ---------------------------------------------------------------------------
@@ -1066,7 +1126,10 @@ async def migrate_page() -> None:
         return
 
     # Tokens live in the memory-only tab store; need a connected client to read it.
-    await ui.context.client.connected()
+    # `client` is captured here so the background tasks below can re-enter its slot;
+    # they cannot resolve `ui.context` themselves (issue #123).
+    client = ui.context.client
+    await client.connected(timeout=_CLIENT_CONNECT_TIMEOUT)
     if not app.storage.tab.get("token"):
         # Restart edge: stale non-secret keys on disk but a fresh tab, no token.
         ui.notify("Session expired — re-enter your token", type="warning")
@@ -1534,18 +1597,21 @@ async def migrate_page() -> None:
         rollback_btn.disable()
 
         async def _run() -> None:
-            try:
-                state = load_state(config.output_dir)
-                await run_rollback(config, state, exports=[], on_event=on_event)
-                ui.notify("Rollback complete!", type="positive")
-            except MigrationError as exc:
-                log_display.push(f"[ERROR] Rollback failed: {exc}")
-                ui.notify(f"Rollback failed: {exc}", type="negative")
-            except Exception as exc:
-                log_display.push(f"[ERROR] Unexpected error: {exc}")
-                ui.notify(f"Unexpected error: {exc}", type="negative")
-            finally:
-                rollback_btn.enable()
+            with client:
+                # Re-enter the client's slot: ui.notify below needs it, and a
+                # background task starts with an empty slot stack (issue #123).
+                try:
+                    state = load_state(config.output_dir)
+                    await run_rollback(config, state, exports=[], on_event=on_event)
+                    ui.notify("Rollback complete!", type="positive")
+                except MigrationError as exc:
+                    log_display.push(f"[ERROR] Rollback failed: {exc}")
+                    ui.notify(f"Rollback failed: {exc}", type="negative")
+                except Exception as exc:
+                    log_display.push(f"[ERROR] Unexpected error: {exc}")
+                    ui.notify(f"Unexpected error: {exc}", type="negative")
+                finally:
+                    rollback_btn.enable()
 
         background_tasks.create(_run())
 
@@ -1557,33 +1623,36 @@ async def migrate_page() -> None:
         # Wait for the user to choose Resume or Start Fresh before starting.
         await resume_choice_made.wait()
 
-        # Rebuild config with the final resume choice.
-        config.resume = bool(storage.get("resume", False))
+        with client:
+            # Same slot re-entry as the rollback task above: ui.notify is
+            # unreachable from a bare background task (issue #123).
+            # Rebuild config with the final resume choice.
+            config.resume = bool(storage.get("resume", False))
 
-        try:
-            await run_migration(config, on_event=on_event)
-        except MigrationError as exc:
-            log_display.push(f"[ERROR] Migration failed: {exc}")
-            errors_label.set_text(f"Errors: {error_count} (FAILED)")
-            ui.notify(f"Migration failed: {exc}", type="negative")
-        except Exception as exc:
-            log_display.push(f"[ERROR] Unexpected error: {exc}")
-            ui.notify(f"Unexpected error: {exc}", type="negative")
-        finally:
-            # Terminal owner of session-token cleanup, for BOTH offline and
-            # orchestrated modes, on success AND error. (Offline mode never
-            # visits /export, so its finally is the only cleanup point.) Tokens
-            # live in the memory-only tab store; clearing here is good hygiene
-            # (immediate, rather than waiting for the tab to close). Safe because
-            # this runs AFTER run_migration returns: config already holds its own
-            # token copy (a plain str), the engine never reads app.storage, and
-            # the only in-_run storage read (config.resume, above) has already
-            # completed. Do NOT move token reads below this. Suppress for parity
-            # with the export finally: if the tab closed during a long migration,
-            # this background task's tab access would otherwise raise on the now-
-            # disconnected client (the token is memory-only — never on disk).
-            with contextlib.suppress(Exception):
-                _clear_tokens(app.storage.tab, _SESSION_TOKEN_KEYS)
+            try:
+                await run_migration(config, on_event=on_event)
+            except MigrationError as exc:
+                log_display.push(f"[ERROR] Migration failed: {exc}")
+                errors_label.set_text(f"Errors: {error_count} (FAILED)")
+                ui.notify(f"Migration failed: {exc}", type="negative")
+            except Exception as exc:
+                log_display.push(f"[ERROR] Unexpected error: {exc}")
+                ui.notify(f"Unexpected error: {exc}", type="negative")
+            finally:
+                # Terminal owner of session-token cleanup, for BOTH offline and
+                # orchestrated modes, on success AND error. (Offline mode never
+                # visits /export, so its finally is the only cleanup point.) Tokens
+                # live in the memory-only tab store; clearing here is good hygiene
+                # (immediate, rather than waiting for the tab to close). Safe because
+                # this runs AFTER run_migration returns: config already holds its own
+                # token copy (a plain str), the engine never reads app.storage, and
+                # the only in-_run storage read (config.resume, above) has already
+                # completed. Do NOT move token reads below this. Suppress for parity
+                # with the export finally: if the tab closed during a long migration,
+                # this background task's tab access would otherwise raise on the now-
+                # disconnected client (the token is memory-only — never on disk).
+                with contextlib.suppress(Exception):
+                    _clear_tokens(app.storage.tab, _SESSION_TOKEN_KEYS)
 
     background_tasks.create(_run())
 
@@ -1771,6 +1840,15 @@ def main() -> None:
     # called, and NiceGUI only calls it deep inside ui.run(). Without this, the frozen
     # window child re-runs everything above ui.run() before diverting.
     multiprocessing.freeze_support()
+
+    # AFTER freeze_support(), never before. In the FROZEN build the PyInstaller
+    # bootloader re-runs this entry script for the native-window child process, so
+    # main() executes from the top and freeze_support() is what exits early -- put
+    # configure_logging() above it and both processes open the same
+    # RotatingFileHandler, which on Windows is a file lock. (In a non-frozen run the
+    # spawn child never reaches main() at all, so the ordering is merely inert
+    # there, not wrong.)
+    configure_logging()
 
     try:
         _run_gui()

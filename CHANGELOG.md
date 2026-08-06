@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-08-06
+
+### Fixed
+
+- **The one-click GUI migration could never start an export.** On the Export screen it showed
+  "Preparing…" with an empty log panel and no CPU, disk or network activity, indefinitely.
+  DiscordChatExporter was never launched.
+
+  **Every release from v2.6.14 to v2.11.0 is affected, on every platform.** If you used the
+  one-click (orchestrated) path in the GUI during that window and the export never started,
+  this is why. The "I already have exports" path and the CLI were never affected.
+
+  The export ran in a background task, and its first statement asked NiceGUI for the current
+  client. NiceGUI tracks that per asyncio task rather than through a context variable, so a
+  background task starts with nothing attached and the lookup raised immediately — before a
+  single line reached the log panel. Nothing surfaced the error, because the GUI binary is
+  built without a console and no log file existed to catch it.
+
+  The page now resolves the client and the session tokens before starting the task, and the
+  task re-enters the client's context for the UI calls it makes. The same fault silently
+  suppressed the "Migration complete!" and "Rollback complete!" confirmations and aborted the
+  rollback task early; all four background tasks are fixed together.
+
+- **Waiting for the browser to connect is now bounded.** These waits had no timeout, so a
+  client that never completed its handshake would hang the page forever with no message. They
+  now time out and say so, naming the log file.
+
+- **A missing export directory now reports an error instead of vanishing.** It previously
+  raised outside the error handler, so the screen simply stopped.
+
+- **Re-export is guarded.** Repeated clicks no longer stack concurrent exports writing into the
+  same directory, and a retry after the session token is cleared now returns you to setup
+  rather than exporting with a stale token.
+
+### Added
+
+- **A log file, always on, at `~/.discord-ferry/logs/ferry.log`** (2 MB, 3 rotations). The GUI
+  is packaged without a console, so until now nothing that failed in the background left any
+  trace anywhere — which is why the bug above survived eleven releases. Attach this file to bug
+  reports.
+
+  Tokens are masked before anything is written — including values passed as deferred log
+  arguments, and anything inside a traceback (exception messages routinely quote the token
+  that caused the failure).
+
 ## [2.11.0] - 2026-08-02
 
 ### Fixed

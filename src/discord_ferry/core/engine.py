@@ -15,7 +15,7 @@ import aiohttp
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.core.security import SecureTokenStore, safe_sanitize
+from discord_ferry.core.security import SecureTokenStore, register_secret, safe_sanitize
 from discord_ferry.discord import (
     fetch_and_translate_guild_metadata,
     load_discord_metadata,
@@ -138,6 +138,11 @@ def _ensure_token_store(config: FerryConfig) -> None:
     if config.discord_token:
         tokens["discord"] = config.discord_token
     config.token_store = SecureTokenStore(tokens)
+    # Also register process-wide so the log redaction filter can mask these.
+    # The filter is installed in main(), long before any config exists, so it
+    # has no way to reach this per-config store. See core/logging_setup.py.
+    for name, value in tokens.items():
+        register_secret(name, value)
 
 
 async def run_migration(

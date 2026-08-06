@@ -23,6 +23,8 @@ from rich.table import Table
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
+from discord_ferry.core.logging_setup import configure_logging
+from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.migrator.api import (
     api_create_channel,
@@ -606,6 +608,12 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
             "--discord-token and --discord-server (orchestrated mode)"
         )
 
+    # Register before the config exists, so anything logged between here and the
+    # engine's _ensure_token_store is already redacted.
+    register_secret("stoat", kwargs.get("token") or "")
+    if discord_token:
+        register_secret("discord", discord_token)
+
     return FerryConfig(
         export_dir=export_dir,
         stoat_url=kwargs["stoat_url"],
@@ -651,6 +659,7 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
 def main(ctx: click.Context) -> None:
     """Migrate a Discord server export to Stoat."""
     load_dotenv()
+    configure_logging()
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -1284,6 +1293,12 @@ def probe_cmd(
     if not token:
         console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
         sys.exit(1)
+
+    # probe never builds a FerryConfig or a SecureTokenStore, so the engine's
+    # _ensure_token_store hook never fires here. Without this line the Stoat
+    # token has no redaction coverage at all for the whole command -- and the
+    # regex backstop deliberately cannot match Stoat tokens (opaque base64url).
+    register_secret("stoat", token)
 
     from discord_ferry.migrator.probe import run_probe
 
