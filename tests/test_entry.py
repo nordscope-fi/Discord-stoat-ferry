@@ -67,8 +67,15 @@ def test_usable_stdout_needs_no_attach(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_non_windows_is_inert(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A binary launched from a POSIX shell already has working streams."""
+    """Even without a usable stdout, a non-Windows platform returns True.
+
+    sys.stdout is forced to None so the first branch of acquire_console()
+    cannot short-circuit the result. That isolates the platform check this
+    test is meant to cover: there is nothing left to try on POSIX, so the
+    function returns True.
+    """
     monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr("sys.stdout", None)
     assert entry.acquire_console() is True
 
 
