@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`auto-tag.yml` now checks whether the current version is already tagged.**
+  It previously compared `pyproject.toml` at `HEAD` against `HEAD~1`. A rebase
+  merge lands the version-bump commit in the middle of the pushed range, so both
+  of those commits can already carry the new version, and the job then reported
+  success without creating a tag. v2.12.0 reached `main` that way: no tag, no
+  GitHub Release, no PyPI publish. A tag-existence check gives the same answer
+  under squash, rebase and merge commits, and repairs a release that was missed
+  earlier. The checkout now fetches tags as well; at `fetch-depth: 2` it passed
+  `--no-tags`, leaving the duplicate-tag guard with nothing to find.
+
 ## [2.12.0] - 2026-08-06
 
 ### Added
