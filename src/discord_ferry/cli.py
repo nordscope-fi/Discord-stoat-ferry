@@ -21,6 +21,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
+from discord_ferry import __version__
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.logging_setup import configure_logging
@@ -655,6 +656,7 @@ def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(__version__, "--version", prog_name="ferry")
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """Migrate a Discord server export to Stoat."""

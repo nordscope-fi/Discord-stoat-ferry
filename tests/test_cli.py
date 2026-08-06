@@ -1430,3 +1430,20 @@ def test_state_roundtrip_excludes_exposed_settings(tmp_path: Path) -> None:
     raw = json.loads((tmp_path / "state.json").read_text())
     for key in _EXPOSED_FIELDS:
         assert key not in raw
+
+
+def test_version_flag_matches_package_version() -> None:
+    """--version must not drift from __init__.py.
+
+    ferry.spec regex-reads that file at build time, so it is the single source
+    of truth. Package metadata is unreliable inside a PyInstaller bundle.
+    """
+    from click.testing import CliRunner
+
+    from discord_ferry import __version__
+    from discord_ferry.cli import main
+
+    result = CliRunner().invoke(main, ["--version"])
+
+    assert result.exit_code == 0
+    assert __version__ in result.output
