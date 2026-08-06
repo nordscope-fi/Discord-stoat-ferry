@@ -30,6 +30,18 @@ def _stdout_is_usable() -> bool:
     return stream is not None and hasattr(stream, "write")
 
 
+def _stdin_is_usable() -> bool:
+    """Whether sys.stdin can actually be read from.
+
+    Same reasoning and same shape as _stdout_is_usable(). Checked alongside it
+    in acquire_console() because `migrate` and `rollback` prompt through
+    click.confirm(): a usable stdout with an unusable stdin still hangs on a
+    prompt the user cannot answer.
+    """
+    stream = sys.stdin
+    return stream is not None and hasattr(stream, "read")
+
+
 def _attach_parent_console() -> bool:
     """Attach to the launching shell's console and rebind the std streams.
 
@@ -40,6 +52,11 @@ def _attach_parent_console() -> bool:
     `rollback`, and both prompt through click.confirm. Without stdin they would
     hang on a prompt the user cannot see, which is worse than the current
     behaviour of producing no output at all.
+
+    The three opens below share one try/except. If an early open succeeds and
+    a later one raises, the streams it already reassigned are put back before
+    returning False, so a caller that falls back to gui.main() on failure
+    never runs with sys.stdout pointed at a half-open console handle.
     """
     import ctypes
 
@@ -48,11 +65,13 @@ def _attach_parent_console() -> bool:
     if not kernel32.AttachConsole(attach_parent_process):
         return False
 
+    original_stdout, original_stderr, original_stdin = sys.stdout, sys.stderr, sys.stdin
     try:
         sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
         sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
         sys.stdin = open("CONIN$", encoding="utf-8")  # noqa: SIM115
     except OSError:
+        sys.stdout, sys.stderr, sys.stdin = original_stdout, original_stderr, original_stdin
         return False
     return True
 
@@ -62,14 +81,21 @@ def acquire_console() -> bool:
 
     Three steps, in this order:
 
-    1. sys.stdout already usable, so use it (redirection, pipes, CI)
+    1. sys.stdout AND sys.stdin already usable, so use them (redirection,
+       pipes, CI)
     2. Windows: AttachConsole, then reopen CONOUT$ and CONIN$
     3. otherwise, no console is available
 
     Step 1 must precede step 2. Attaching to a parent console when the caller
     redirected our output would overwrite that redirection.
+
+    Step 1 also checks stdin. `migrate` and `rollback` prompt through
+    click.confirm(), which reads stdin. If stdout works but stdin does not,
+    the prompt hangs and the user cannot see or answer it. A caller may
+    redirect stdout without redirecting stdin, so this function checks stdin
+    explicitly.
     """
-    if _stdout_is_usable():
+    if _stdout_is_usable() and _stdin_is_usable():
         return True
     if sys.platform != "win32":
         # A POSIX binary launched from a shell inherits working streams. If it

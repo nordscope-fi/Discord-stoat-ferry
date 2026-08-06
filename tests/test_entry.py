@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
+import sys
+
 import pytest
 
 from discord_ferry.core import entry
@@ -66,6 +69,21 @@ def test_usable_stdout_needs_no_attach(monkeypatch: pytest.MonkeyPatch) -> None:
     assert attach_calls == [], "must not attach when stdout already works"
 
 
+def test_usable_stdout_but_unusable_stdin_attaches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Step 1 requires stdin too, not stdout alone.
+
+    A caller could redirect stdout without redirecting stdin. click.confirm()
+    reads stdin, so a usable stdout with no usable stdin still needs the
+    CONIN$ reopen from step 2, exactly like a fully unusable console.
+    """
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("sys.stdin", None)
+    attach_calls: list[int] = []
+    monkeypatch.setattr(entry, "_attach_parent_console", lambda: attach_calls.append(1) or True)
+    assert entry.acquire_console() is True
+    assert attach_calls == [1], "must attach when stdin is unusable even if stdout works"
+
+
 def test_non_windows_is_inert(monkeypatch: pytest.MonkeyPatch) -> None:
     """Even without a usable stdout, a non-Windows platform returns True.
 
@@ -92,6 +110,56 @@ def test_windows_attach_failure_reports_no_console(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("sys.stdout", None)
     monkeypatch.setattr(entry, "_attach_parent_console", lambda: False)
     assert entry.acquire_console() is False
+
+
+def test_attach_partial_open_failure_restores_original_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure partway through the three CONOUT$/CONIN$ opens must not leave
+    sys.stdout, sys.stderr, or sys.stdin reassigned.
+
+    Regression test: the three opens used to share one try/except with no
+    rollback. If the first open (stdout) succeeded and the second (stderr)
+    raised OSError, the function returned False but sys.stdout was left
+    pointing at the console handle from the first open. A caller that falls
+    back to gui.main() on a False return would then run with sys.stdout
+    mutated. This forces AttachConsole to report success so the open() calls
+    are reached, then fails the second open to reproduce that sequence.
+    """
+
+    class _FakeKernel32:
+        @staticmethod
+        def AttachConsole(_pid: int) -> bool:  # noqa: N802 -- mirrors the real Win32 API name
+            return True
+
+    class _FakeWinDLL:
+        kernel32 = _FakeKernel32()
+
+    monkeypatch.setattr(ctypes, "windll", _FakeWinDLL(), raising=False)
+
+    original_stdout = object()
+    original_stderr = object()
+    original_stdin = object()
+    monkeypatch.setattr("sys.stdout", original_stdout)
+    monkeypatch.setattr("sys.stderr", original_stderr)
+    monkeypatch.setattr("sys.stdin", original_stdin)
+
+    open_calls = 0
+
+    def fake_open(*args: object, **kwargs: object) -> object:
+        nonlocal open_calls
+        open_calls += 1
+        if open_calls == 1:
+            return object()
+        raise OSError("simulated failure opening CONOUT$/CONIN$")
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+    assert entry._attach_parent_console() is False
+    assert open_calls == 2, "must fail on the second open to match the scenario under test"
+    assert sys.stdout is original_stdout
+    assert sys.stderr is original_stderr
+    assert sys.stdin is original_stdin
 
 
 def test_run_cli_never_returns(monkeypatch: pytest.MonkeyPatch) -> None:
