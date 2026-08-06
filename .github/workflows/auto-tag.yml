@@ -5,6 +5,15 @@ on:
     branches: [main]
     paths:
       - "pyproject.toml"
+  # Manual recovery lever. The tag-existence check makes this safe to run at any
+  # time: if the current version is already tagged the job does nothing, and if
+  # a release was missed it creates the tag and starts release.yml. v2.12.0 was
+  # missed exactly that way, and recovering it needed a hand-pushed tag because
+  # there was no way to ask this workflow to look again.
+  #
+  # The `paths` filter above applies only to the push trigger, so a dispatch
+  # runs regardless of what changed last.
+  workflow_dispatch:
 
 jobs:
   auto-tag:
