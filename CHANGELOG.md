@@ -49,6 +49,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   before anything is written to the log. The form also gains a "where did it
   stop?" field, and the version placeholder no longer reads `0.1.0`.
 
+### Security
+
+- **aiohttp 3.14.1 → 3.14.3** (`uv.lock` only, no source change), clearing three
+  Dependabot alerts. Ferry uses aiohttp as an HTTP **client** only: `src/` contains
+  no `aiohttp.web` usage and opens no aiohttp websockets, and NiceGUI's own server
+  runs on uvicorn. Applicability of each advisory:
+  - **High, out-of-bounds heap read in the C HTTP response parser** on a malformed
+    chunked response. This one **affects Ferry**, which parses responses from Stoat,
+    Autumn, the Discord API and the Discord CDN.
+  - **Medium, HTTP request smuggling via WebSocket upgrade.** Server-side
+    (`aiohttp.web`). No effect on Ferry.
+  - **Medium, WebSocket client accepts compressed frames without a negotiated
+    `permessage-deflate`.** Ferry opens no aiohttp websockets. No effect on Ferry.
+
+  3.14.3 also fixes the client dropping only the first of `Authorization`, `Cookie`
+  and `Proxy-Authorization` when a redirect crosses an origin. Ferry sets at most
+  one of those three (`Authorization`, at `discord/client.py:128`,
+  `exporter/runner.py:337` and `migrator/structure.py:242`), so the header that got
+  dropped was always the only one present.
+
 ## [2.12.0] - 2026-08-06
 
 ### Added
