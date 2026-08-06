@@ -276,6 +276,24 @@ class TestMainLifecycle:
         monkeypatch.setattr(gui, "_run_gui", lambda: None)
         gui.main()
 
+    def test_non_frozen_main_never_dispatches_to_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The sys.frozen gate, pinned so it cannot be removed by accident.
+
+        Without it, `uv run pytest --ignore=...` leaves sys.argv[1:] non-empty
+        for the whole test process, and test_keyboard_interrupt_exits_130 and
+        test_normal_return_does_not_raise would route into Click instead of
+        _run_gui(). Both are rescued by this gate, not by luck.
+        """
+        monkeypatch.delattr("sys.frozen", raising=False)
+        monkeypatch.setattr("sys.argv", ["ferry-gui", "--ignore=tests/x.py"])
+        called: list[str] = []
+        monkeypatch.setattr(gui, "_run_gui", lambda: called.append("gui"))
+        monkeypatch.setattr(gui, "configure_logging", lambda: None)
+
+        gui.main()
+
+        assert called == ["gui"], "non-frozen main() must go to the GUI"
+
     def test_ui_run_is_called_with_tuned_timings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """NiceGUI derives the socket.io heartbeat from reconnect_timeout; its 3.0
         default gives the browser only ~6s before the "Connection lost" banner."""
