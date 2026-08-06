@@ -18,6 +18,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   earlier. The checkout now fetches tags as well; at `fetch-depth: 2` it passed
   `--no-tags`, leaving the duplicate-tag guard with nothing to find.
 
+- `install.md`, `first-migration.md` and `gui-walkthrough.md` said a browser
+  opens automatically. The packaged Windows and macOS apps bundle a window
+  toolkit, so NiceGUI sets `show=False` and no browser is opened (issue #123).
+  A `pipx` install does open a browser, because `pywebview` sits in the optional
+  `native` extra. The pages now cover the two routes separately and give
+  `http://localhost:8765` as a supported way in.
+
+### Added
+
+- `troubleshooting.md`: entry for a blank window or the message *"Your browser
+  does not support ES modules"*, with the Edge WebView2 Runtime fix.
+- `troubleshooting.md`: entry for `Ferry.exe` ignoring `--help` on versions
+  before 2.12.0.
+- `cli-reference.md` and `install.md`: the downloaded app takes commands. Both
+  note the case where it opens the GUI because there is nowhere to write output.
+
+### Changed
+
+- `bug_report.yml` asks for the log file at `~/.discord-ferry/logs/ferry.log`,
+  added in 2.11.1. It previously asked for `ferry-output/report.json`, which
+  cannot exist for a failure before the reporting stage. Tokens are stripped
+  before anything is written to the log. The form also gains a "where did it
+  stop?" field, and the version placeholder no longer reads `0.1.0`.
+
 ## [2.12.0] - 2026-08-06
 
 ### Added

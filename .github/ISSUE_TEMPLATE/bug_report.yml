@@ -25,7 +25,8 @@ body:
     id: version
     attributes:
       label: Ferry version
-      placeholder: "e.g. 0.1.0"
+      description: "Shown on the Setup screen, or run `ferry --version` (2.12.0 and later)"
+      placeholder: "e.g. 2.12.0"
     validations:
       required: true
   - type: textarea
@@ -41,14 +42,39 @@ body:
       label: What did you expect to happen?
     validations:
       required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where did it stop?
+      description: Roughly the last thing you saw before it went wrong
+      options:
+        - Before the app opened (blank window, will not launch)
+        - Setup screen (tokens, server selection)
+        - Exporting from Discord
+        - Reviewing what will be created
+        - Creating the server, channels or roles
+        - Migrating messages
+        - After it finished (something is wrong with the result)
+        - Somewhere else
+    validations:
+      required: true
   - type: textarea
     id: logs
     attributes:
-      label: Error messages or logs
-      description: Paste any error messages, or attach ferry-output/report.json
+      label: Log file and error messages
+      description: |
+        From version 2.11.1 Ferry always writes a log. Tokens are stripped before anything is
+        written, so it is safe to attach.
+
+        - Windows: `%USERPROFILE%\.discord-ferry\logs\ferry.log`
+        - macOS and Linux: `~/.discord-ferry/logs/ferry.log`
+
+        Attach that file if you can, and paste any on-screen error here. `ferry-output/report.json`
+        is written only after a migration reaches the reporting stage, so it will not exist for a
+        failure before that point. Leave it out if it is not there.
       render: shell
   - type: textarea
     id: export-info
     attributes:
       label: Export details
-      description: "Approximate server size: channels, messages, attachments"
+      description: "Approximate server size: channels, messages, attachments. Skip if it never got that far."

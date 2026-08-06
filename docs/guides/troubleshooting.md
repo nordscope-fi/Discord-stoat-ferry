@@ -139,6 +139,35 @@ xattr -dr com.apple.quarantine /Applications/Ferry.app
 
 The `-r` flag matters. Without it the quarantine flag is cleared only from the bundle folder, while the executable inside it stays blocked and the app still refuses to open. If you kept Ferry somewhere other than `/Applications`, substitute that path.
 
+### Ferry window is blank or says "Your browser does not support ES modules"
+
+| | |
+|---|---|
+| **Symptom** | The Ferry window opens but stays empty, or shows the message *"Your browser does not support ES modules."* |
+| **Cause** | Ferry draws its window using a renderer supplied by the operating system. On Windows that is the **Microsoft Edge WebView2 Runtime**, which is present on Windows 11 but not guaranteed on Windows 10. When it is missing or broken, the window falls back to a legacy engine that cannot run Ferry's interface. |
+| **Solution** | Install or repair the [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). If it is already installed, run the installer again; it repairs a broken install. |
+
+!!! tip "Use `localhost:8765` meanwhile"
+    Ferry serves its interface at `http://localhost:8765` whether or not the window draws. Open
+    that address in any browser and carry on.
+
+### Ferry.exe ignores `--help` and every other command
+
+| | |
+|---|---|
+| **Symptom** | Running `Ferry-windows-x86_64.exe --help` from PowerShell prints nothing and opens the GUI. |
+| **Cause** | Versions before **2.12.0** ignored command-line arguments entirely. |
+| **Solution** | Upgrade to 2.12.0 or later from the [releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases). |
+
+!!! info "One case still opens the GUI by design"
+    The app opens the GUI instead of running the command when there is nowhere to write output.
+    That happens when it is launched from a Windows service, a scheduled task, or by dropping a
+    file onto the icon. Run it from a terminal, or redirect its output to a file, and the
+    command runs normally.
+
+    Because the app is windowed, your shell prints its next prompt before Ferry's output
+    arrives. The output prints underneath that new prompt.
+
 ---
 
 ## The Window Stops Responding

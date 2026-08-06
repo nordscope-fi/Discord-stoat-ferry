@@ -3,7 +3,12 @@
 Ferry's command-line interface provides the same migration capability as the GUI, without a browser. It is useful for running unattended overnight migrations, scripting, or running on a remote server.
 
 !!! info "Prerequisites"
-    The CLI is included in the same `ferry` binary as the GUI. Run `ferry --help` to confirm it is working.
+    A `pipx` or source install puts `ferry` on your PATH. Run `ferry --help` to confirm it is working.
+
+    From version **2.12.0** the downloaded apps take the same commands:
+    `Ferry-windows-x86_64.exe --help` on Windows, or the binary inside `Ferry.app` on macOS. Run
+    them from a terminal so the output has somewhere to go. Launched with no console, from a
+    service or a scheduled task, the app opens the GUI.
 
 ---
 
