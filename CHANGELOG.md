@@ -11,9 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - **The packaged app now accepts command-line arguments.** `Ferry.exe --help`,
-  `--version`, and every existing command (`migrate`, `rollback`, `probe`,
-  `stats`, `export-blueprint`) work from PowerShell. Previously the binary
-  ignored every argument and opened the GUI with no output (issue #123).
+  `--version`, and every existing command (`migrate`, `validate`, `build`,
+  `export-blueprint`, `stats`, `rollback`, `probe`) work from PowerShell.
+  Previously the binary ignored every argument and opened the GUI with no
+  output (issue #123).
 
   On Windows the `.exe` is the only artifact, and `pipx install discord-ferry`
   was the only alternative route to the CLI.
@@ -21,8 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Because the app is windowed, output arrives after your shell has already
   printed its next prompt. When launched with no console at all, such as from
   a service, a scheduled task, or a file dropped onto the icon, it opens the
-  GUI instead of running the command, so arguments never fail without any
-  output.
+  GUI instead of running the command; the arguments passed to it are not
+  acted on when that happens.
 
 - **Added `ferry --version`.**
 
