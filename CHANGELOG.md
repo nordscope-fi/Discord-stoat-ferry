@@ -33,6 +33,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   before 2.12.0.
 - `cli-reference.md` and `install.md`: the downloaded app takes commands. Both
   note the case where it opens the GUI because there is nowhere to write output.
+- Test covering where `--version` gets its value. The existing test asserted
+  that the output contains `discord_ferry.__version__` without pinning the
+  source. Removing the explicit argument from `click.version_option` makes
+  Click read `importlib.metadata`, which returns the same string in an
+  editable install, so that assertion kept passing while a PyInstaller bundle
+  reported the wrong version. The new test patches the module attribute to a
+  sentinel and reloads `cli.py`.
 
 ### Changed
 
