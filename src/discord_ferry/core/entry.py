@@ -30,18 +30,6 @@ def _stdout_is_usable() -> bool:
     return stream is not None and hasattr(stream, "write")
 
 
-def _stdin_is_usable() -> bool:
-    """Whether sys.stdin can actually be read from.
-
-    Same reasoning and same shape as _stdout_is_usable(). Checked alongside it
-    in acquire_console() because `migrate` and `rollback` prompt through
-    click.confirm(): a usable stdout with an unusable stdin still hangs on a
-    prompt the user cannot answer.
-    """
-    stream = sys.stdin
-    return stream is not None and hasattr(stream, "read")
-
-
 def _attach_parent_console() -> bool:
     """Attach to the launching shell's console and rebind the std streams.
 
@@ -81,21 +69,27 @@ def acquire_console() -> bool:
 
     Three steps, in this order:
 
-    1. sys.stdout AND sys.stdin already usable, so use them (redirection,
-       pipes, CI)
+    1. sys.stdout already usable, so use it (redirection, pipes, CI)
     2. Windows: AttachConsole, then reopen CONOUT$ and CONIN$
     3. otherwise, no console is available
 
     Step 1 must precede step 2. Attaching to a parent console when the caller
     redirected our output would overwrite that redirection.
 
-    Step 1 also checks stdin. `migrate` and `rollback` prompt through
-    click.confirm(), which reads stdin. If stdout works but stdin does not,
-    the prompt hangs and the user cannot see or answer it. A caller may
-    redirect stdout without redirecting stdin, so this function checks stdin
-    explicitly.
+    Step 1 deliberately checks stdout only, not stdin. A caller who redirects
+    output to a file and runs a command meant it, and a scheduled task or
+    service has no keyboard to offer. Requiring stdin here would send that
+    caller to the GUI, which never exits, so the job would hang with the
+    command ignored and nothing written to the log they set up.
+
+    Commands that ask a question handle a missing stdin on their own:
+    click.confirm() aborts with an error, and that error lands in whatever the
+    caller redirected output to. An error in the log beats a hung GUI.
+
+    Step 2 still reopens CONIN$ alongside CONOUT$. When this process attaches
+    a console for itself, it owns both streams and should set up both.
     """
-    if _stdout_is_usable() and _stdin_is_usable():
+    if _stdout_is_usable():
         return True
     if sys.platform != "win32":
         # A POSIX binary launched from a shell inherits working streams. If it

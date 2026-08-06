@@ -69,19 +69,23 @@ def test_usable_stdout_needs_no_attach(monkeypatch: pytest.MonkeyPatch) -> None:
     assert attach_calls == [], "must not attach when stdout already works"
 
 
-def test_usable_stdout_but_unusable_stdin_attaches(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Step 1 requires stdin too, not stdout alone.
+def test_redirected_output_without_stdin_still_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller with somewhere to write gets their command run, keyboard or not.
 
-    A caller could redirect stdout without redirecting stdin. click.confirm()
-    reads stdin, so a usable stdout with no usable stdin still needs the
-    CONIN$ reopen from step 2, exactly like a fully unusable console.
+    This is the scheduled-task and service case: `Ferry.exe migrate --yes >
+    log.txt` has an output file and no keyboard. Requiring stdin here would
+    send that caller to the GUI, which never exits, so the job would hang with
+    the command ignored and nothing in the log they set up.
+
+    Commands that ask a question handle the missing stdin themselves.
+    click.confirm() aborts and the error lands in the redirect.
     """
     monkeypatch.setattr("sys.platform", "win32")
     monkeypatch.setattr("sys.stdin", None)
     attach_calls: list[int] = []
     monkeypatch.setattr(entry, "_attach_parent_console", lambda: attach_calls.append(1) or True)
     assert entry.acquire_console() is True
-    assert attach_calls == [1], "must attach when stdin is unusable even if stdout works"
+    assert attach_calls == [], "a usable stdout is enough; must not attach or fall back"
 
 
 def test_non_windows_is_inert(monkeypatch: pytest.MonkeyPatch) -> None:
