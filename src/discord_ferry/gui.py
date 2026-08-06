@@ -22,6 +22,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core import entry
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.logging_setup import configure_logging
+from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError
 from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
 from discord_ferry.state import load_state
@@ -188,7 +189,18 @@ def _store_session_tokens(store: MutableMapping[str, Any], *, stoat: str, discor
     see Batch 8 / F8b). The parameter is named ``store`` (not ``storage``) so the
     security source-inspection guard, which forbids token assignment via the
     disk-backed ``storage`` alias, cannot false-match this body.
+
+    Registration happens here because this is the only place either token enters
+    the GUI. ``cli.py`` registers at ``_build_config``; without the equivalent
+    call the GUI had no redaction for the Stoat token at all. The Discord token
+    is shaped distinctively enough for ``_DISCORD_TOKEN_RE`` to catch unregistered
+    copies, but a Stoat token is an arbitrary string, so ``sanitize_secrets`` is
+    the only thing that can mask it. Anything logged before this point, including
+    a traceback carrying it, reached ``ferry.log`` in clear text -- the file the
+    bug template asks users to attach to public issues.
     """
+    register_secret("stoat", stoat)
+    register_secret("discord", discord)
     store["token"] = stoat
     store["discord_token"] = discord
 
