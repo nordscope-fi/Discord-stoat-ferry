@@ -294,6 +294,34 @@ class TestMainLifecycle:
 
         assert called == ["gui"], "non-frozen main() must go to the GUI"
 
+    def test_frozen_main_with_args_dispatches_to_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The positive path: what this task exists to build.
+
+        Every other case in this class either never sets sys.frozen, or sets it
+        without giving main() any args, so none of them ever reach the dispatch
+        block. This is the one test that sets sys.frozen AND supplies argv AND
+        checks that entry.run_cli() runs, and that configure_logging()/_run_gui()
+        do not run.
+        """
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+        monkeypatch.setattr("sys.argv", ["Ferry.exe", "--help"])
+        monkeypatch.setattr(gui.entry, "acquire_console", lambda: True)
+        calls: list[str] = []
+
+        def _run_cli() -> None:
+            calls.append("cli")
+            raise SystemExit(0)
+
+        monkeypatch.setattr(gui.entry, "run_cli", _run_cli)
+        monkeypatch.setattr(gui, "_run_gui", lambda: calls.append("gui"))
+        monkeypatch.setattr(gui, "configure_logging", lambda: calls.append("logging"))
+
+        with pytest.raises(SystemExit) as excinfo:
+            gui.main()
+
+        assert calls == ["cli"], "frozen main() with args must dispatch to the CLI, and only that"
+        assert excinfo.value.code == 0
+
     def test_ui_run_is_called_with_tuned_timings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """NiceGUI derives the socket.io heartbeat from reconnect_timeout; its 3.0
         default gives the browser only ~6s before the "Connection lost" banner."""
