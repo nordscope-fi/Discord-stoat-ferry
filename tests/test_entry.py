@@ -92,3 +92,22 @@ def test_windows_attach_failure_reports_no_console(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("sys.stdout", None)
     monkeypatch.setattr(entry, "_attach_parent_console", lambda: False)
     assert entry.acquire_console() is False
+
+
+def test_run_cli_never_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Click exits the process itself, so there is no status to return.
+
+    Command.main() is typed -> NoReturn in standalone mode and every path ends
+    in sys.exit(). Asserting `== 0` here would assert on a value that is never
+    produced.
+
+    Uses --help, not --version: Task 3 adds --version and has not landed on
+    this branch yet, so that option does not exist here and would raise
+    SystemExit(2) with "No such option". --help is a Click built-in present
+    on every Command. It exercises the same exit-0 path through the bound
+    main().
+    """
+    monkeypatch.setattr("sys.argv", ["Ferry.exe", "--help"])
+    with pytest.raises(SystemExit) as excinfo:
+        entry.run_cli()
+    assert excinfo.value.code == 0

@@ -19,6 +19,7 @@ from nicegui import app, background_tasks, ui
 from nicegui.client import ClientConnectionTimeout
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core import entry
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.errors import MigrationError
@@ -1840,6 +1841,12 @@ def main() -> None:
     # called, and NiceGUI only calls it deep inside ui.run(). Without this, the frozen
     # window child re-runs everything above ui.run() before diverting.
     multiprocessing.freeze_support()
+
+    # Immediately after freeze_support(), which has already diverted the pywebview
+    # spawn child. Arguments reach the CLI only when this process is frozen AND a
+    # console is available. See core/entry.py for why both.
+    if entry.should_run_cli(sys.argv):
+        entry.run_cli()  # never returns
 
     # AFTER freeze_support(), never before. In the FROZEN build the PyInstaller
     # bootloader re-runs this entry script for the native-window child process, so
