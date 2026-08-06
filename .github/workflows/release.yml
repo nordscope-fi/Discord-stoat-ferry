@@ -100,6 +100,56 @@ jobs:
           }
           Write-Host "smoke test passed: served on :8765, log at $log"
 
+          # --- CLI dispatch (issue #123 symptom 3) ---
+          # System.Diagnostics.Process, NOT Start-Process: this needs captured
+          # stdout AND a bounded wait. Redirected stdout is also what satisfies
+          # step 1 of the console ladder. Without it the GUI fallback fires and
+          # this check proves nothing.
+          function Invoke-Ferry([string[]]$FerryArgs, [int]$TimeoutMs = 30000) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = (Resolve-Path $exe).Path
+            $psi.Arguments = $FerryArgs -join ' '
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $p = [System.Diagnostics.Process]::Start($psi)
+            # Start BOTH reads before waiting, and read them asynchronously.
+            # Microsoft documents two separate deadlocks here. Calling
+            # WaitForExit before reading deadlocks once the child fills a pipe
+            # buffer. Calling ReadToEnd on stdout and then ReadToEnd on stderr
+            # deadlocks the same way if the child fills the stream that is not
+            # being read yet. ReadToEndAsync on both avoids both cases.
+            $outTask = $p.StandardOutput.ReadToEndAsync()
+            $errTask = $p.StandardError.ReadToEndAsync()
+            if (-not $p.WaitForExit($TimeoutMs)) {
+              $p.Kill($true)
+              throw "Ferry.exe $($FerryArgs -join ' ') did not exit within $TimeoutMs ms"
+            }
+            return @{ Out = $outTask.Result; Err = $errTask.Result; Code = $p.ExitCode }
+          }
+
+          $help = Invoke-Ferry @('--help')
+          if ($help.Code -ne 0) {
+            Write-Host "::error::--help exited $($help.Code)"
+            Write-Host $help.Out; Write-Host $help.Err
+            exit 1
+          }
+          if ($help.Out -notmatch 'Usage') {
+            Write-Host "::error::--help printed no usage text"
+            Write-Host "stdout: [$($help.Out)]"; Write-Host "stderr: [$($help.Err)]"
+            exit 1
+          }
+          Write-Host "--help OK"
+
+          $expected = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $ver = Invoke-Ferry @('--version')
+          if ($ver.Code -ne 0 -or $ver.Out -notmatch [regex]::Escape($expected)) {
+            Write-Host "::error::--version did not report $expected"
+            Write-Host "stdout: [$($ver.Out)] exit: $($ver.Code)"
+            exit 1
+          }
+          Write-Host "--version OK ($expected)"
+
       - name: Sign Windows binary
         if: env.HAS_WINDOWS_CERT == 'true'
         env:
