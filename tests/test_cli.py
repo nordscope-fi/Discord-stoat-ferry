@@ -1438,12 +1438,44 @@ def test_version_flag_matches_package_version() -> None:
     ferry.spec regex-reads that file at build time, so it is the single source
     of truth. Package metadata is unreliable inside a PyInstaller bundle.
     """
-    from click.testing import CliRunner
-
     from discord_ferry import __version__
-    from discord_ferry.cli import main
 
     result = CliRunner().invoke(main, ["--version"])
 
     assert result.exit_code == 0
     assert __version__ in result.output
+
+
+def test_version_is_read_from_module_attribute_not_package_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit version argument to click.version_option must stay.
+
+    Dropping it makes Click fall back to importlib.metadata. In an editable
+    install that metadata equals __init__.py, so the assertion above keeps
+    passing while a PyInstaller bundle reports the wrong version or fails
+    outright -- metadata is unreliable there, which is why ferry.spec
+    regex-reads __init__.py instead.
+
+    Patching the attribute and reloading proves the value reaching --version
+    travels through discord_ferry.__version__, not through package metadata.
+    """
+    import importlib
+
+    import discord_ferry
+    import discord_ferry.cli
+
+    sentinel = "9.9.9-not-a-real-version"
+    monkeypatch.setattr(discord_ferry, "__version__", sentinel)
+    try:
+        reloaded = importlib.reload(discord_ferry.cli)
+        result = CliRunner().invoke(reloaded.main, ["--version"])
+
+        assert result.exit_code == 0
+        assert sentinel in result.output
+    finally:
+        # Restore the attribute first: the reload re-runs `from discord_ferry
+        # import __version__` at cli.py:24 and would otherwise bake the
+        # sentinel into the module every later test imports.
+        monkeypatch.undo()
+        importlib.reload(discord_ferry.cli)
