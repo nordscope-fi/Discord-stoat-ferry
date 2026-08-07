@@ -226,6 +226,39 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 
 ---
 
+## Certificate Errors
+
+### unable to get local issuer certificate
+
+| | |
+|---|---|
+| **Symptom** | Ferry (or the DiscordChatExporter download it triggers) fails with `unable to get local issuer certificate`, or another TLS/SSL certificate error |
+| **Cause** | The machine cannot verify the server's certificate. Common causes are HTTPS-scanning antivirus, a corporate proxy that intercepts TLS traffic, or a certificate authority missing from the machine's trust store. |
+| **Solution** | Point Ferry at a certificate bundle that includes the missing authority using the `SSL_CERT_FILE` environment variable, described below. |
+
+```powershell
+# Windows PowerShell
+$env:SSL_CERT_FILE = "C:\path\to\your-ca-bundle.pem"
+ferry migrate --export-dir ...
+```
+
+`SSL_CERT_FILE` is a standard OpenSSL variable, not a Ferry-specific one, so it works the same way on every platform. Ferry does not replace its own trust with the bundle you point it at: it adds the bundle's roots on top of the OS certificate store and the roots Ferry ships with, so this only widens what Ferry can verify.
+
+Run `ferry tls-check` to see what Ferry can currently verify. See the [CLI reference](cli-reference.md#ferry-tls-check) for what each line means.
+
+If it is specifically the DiscordChatExporter download that fails, you can place the binary yourself instead of letting Ferry download it:
+
+1. Download `DiscordChatExporter.Cli.exe` (or the matching binary for your OS) from the [DiscordChatExporter releases page](https://github.com/Tyrrrz/DiscordChatExporter/releases).
+2. Place it at `%USERPROFILE%\.discord-ferry\bin\dce\2.47.1\DiscordChatExporter.Cli.exe`. The version folder name must be exactly `2.47.1`. Ferry looks there first, and if a binary already exists, it uses that binary without downloading anything.
+
+!!! warning "This skips a safety check"
+    Ferry normally verifies the SHA-256 hash of the DCE binary it downloads. Placing a binary in this folder yourself bypasses that check entirely, because the download step that computes the hash never runs. Only do this with a binary you got directly from the official releases page above.
+
+!!! info "DCE still makes its own certificate checks"
+    DiscordChatExporter is a separate .NET program. It makes its own HTTPS calls against the Windows certificate store, independent of Ferry's. If the root store itself is the problem, exporting from Discord can still fail with a certificate error after the DCE download succeeds, or after you place the binary manually. That is the same underlying cause reappearing, not a new bug.
+
+---
+
 ## Flag Conflicts
 
 ### --resume and --incremental are mutually exclusive
