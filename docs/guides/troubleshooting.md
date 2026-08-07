@@ -248,8 +248,8 @@ Run `ferry tls-check` to see what Ferry can currently verify. See the [CLI refer
 
 If it is specifically the DiscordChatExporter download that fails, you can place the binary yourself instead of letting Ferry download it:
 
-1. Download `DiscordChatExporter.Cli.exe` (or the matching binary for your OS) from the [DiscordChatExporter releases page](https://github.com/Tyrrrz/DiscordChatExporter/releases).
-2. Place it at `%USERPROFILE%\.discord-ferry\bin\dce\2.47.1\DiscordChatExporter.Cli.exe`. The version folder name must be exactly `2.47.1`. Ferry looks there first, and if a binary already exists, it uses that binary without downloading anything.
+1. Download the Windows archive (`DiscordChatExporter.Cli.win-x64.zip`, or the matching archive for your OS) from the [DiscordChatExporter releases page](https://github.com/Tyrrrz/DiscordChatExporter/releases), then extract it.
+2. Place the extracted `DiscordChatExporter.Cli.exe` at `%USERPROFILE%\.discord-ferry\bin\dce\2.47.1\DiscordChatExporter.Cli.exe`. The version folder name must be exactly `2.47.1`. Ferry looks there first, and if a binary already exists, it uses that binary without downloading anything.
 
 !!! warning "This skips a safety check"
     Ferry normally verifies the SHA-256 hash of the DCE binary it downloads. Placing a binary in this folder yourself bypasses that check entirely, because the download step that computes the hash never runs. Only do this with a binary you got directly from the official releases page above.

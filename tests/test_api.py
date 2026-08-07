@@ -571,10 +571,10 @@ async def test_certificate_error_does_not_prime_the_circuit_breaker(
 
     Placing the short-circuit below either increment would let five
     short-circuited channels open the breaker and add a 30s sleep. Patching
-    asyncio.sleep and asserting it is never awaited also closes a narrower
-    mutant: a guard placed below the FIRST increment but above the second
-    still leaves consecutive_failures == 0 on this single-attempt call, since
-    the `attempt == MAX_API_RETRIES - 1` increment never runs on attempt 0.
+    asyncio.sleep and asserting it is never awaited catches a guard moved
+    below `await asyncio.sleep(delay)`: on this single-attempt call, that
+    placement would still let the sleep run before the guard raises, and the
+    assertion would catch it.
     """
     _reset_circuit_state()
     key = aiohttp.client_reqrep.ConnectionKey("api.stoat.chat", 443, True, True, None, None, None)
