@@ -288,6 +288,25 @@ jobs:
             echo "::error::extracted size differs from the built bundle by more than 10%"
             exit 1
           }
+
+          # --- TLS trust (issue #134) ---
+          # Run the EXTRACTED bundle, not dist/, so this also proves the ditto
+          # round-trip kept certifi's cacert.pem. Windows has had this check since
+          # v2.13.0; without it here a macOS-only bundling regression ships unseen.
+          # Reads the app's own verdict rather than stat-ing a path: onedir keeps
+          # its resources inside the bundle, but the app is the only thing that
+          # knows whether load_verify_locations actually parsed them.
+          TLS_OUT=$("$APP/Contents/MacOS/Ferry" tls-check 2>&1) || {
+            echo "::error::tls-check failed to run from the extracted bundle"
+            echo "$TLS_OUT"
+            exit 1
+          }
+          echo "$TLS_OUT"
+          case "$TLS_OUT" in
+            *"trust-source: union"*) echo "tls-check OK: union trust store built" ;;
+            *) echo "::error::the macOS bundle did not build the union trust store"
+               exit 1 ;;
+          esac
           codesign --verify --deep --strict "$APP"
           # -print -quit rather than `| grep -q .`: under pipefail a SIGPIPE'd find
           # would surface as a bogus "missing" failure.
