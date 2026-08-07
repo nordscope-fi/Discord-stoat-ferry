@@ -106,20 +106,19 @@ def reset_http_state() -> None:
 def describe_trust() -> dict[str, str]:
     """Report the trust configuration, for `ferry tls-check` and CI.
 
-    Rebuilds through the real code path on every call rather than trusting a
-    cached context, so the report cannot drift from what sessions actually
-    use. A real invocation of `ferry tls-check` is a fresh process and would
-    always see a cold cache anyway; the reset only matters for a long-lived
-    process (CliRunner-based tests included) that calls this more than once,
-    where a stale cache would otherwise report the first call's trust state
-    forever, including after certifi's bundle stops resolving.
+    Builds through the real code path rather than re-deriving it, so the report
+    cannot drift from what sessions actually use. Reads the CACHED context, on
+    purpose: that is what sessions actually use, and rebuilding here would drop
+    a context already in service mid-migration, breaking `_get_ssl_context`'s
+    "one parse, once per process" cost model and re-logging the fallback
+    warning on every call. Tests that must observe a fresh build call
+    `reset_http_state()` themselves, same as `tests/test_http.py` already does.
     """
     try:
         bundle = certifi.where()
     except OSError:
         bundle = "<unresolved>"
     readable = bundle != "<unresolved>" and Path(bundle).is_file()
-    reset_http_state()
     context = _get_ssl_context()
     return {
         "ca-bundle": bundle,
