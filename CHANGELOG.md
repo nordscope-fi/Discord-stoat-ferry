@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-08-07
+
+### Fixed
+
+- **The packaged Windows binary could not verify the TLS certificate for
+  `api.github.com`, so DiscordChatExporter never downloaded and the export
+  never started (issue #134).** Ferry inherited whatever trust the operating
+  system offered, with no fallback and no documented override.
+
+  Every outbound session now goes through one factory in `core/http.py` that
+  builds an SSL context trusting the union of the OS certificate store and
+  certifi's bundled roots. All 8 previous session sites use it. Verification
+  stays strict throughout: `CERT_REQUIRED` and hostname checking are on in
+  both the union and fallback branches, so nothing in this change can turn
+  verification off. `certifi` is now a direct dependency, and `ferry.spec`
+  names it so `cacert.pem` reaches the frozen binary.
+
+  `SSL_CERT_FILE` already overrode the trust store before this change; it is
+  now documented rather than newly supported.
+
+  Six existing certificate-error handlers now give actionable guidance
+  instead of a raw traceback, each keeping its own exception type. Three
+  retry loops recognize a certificate failure and stop instead of paying
+  backoff a bad certificate cannot survive, and a certificate failure no
+  longer primes the circuit breaker.
+
+  `ferry tls-check` reports the resolved bundle, whether it is readable,
+  which trust branch was taken, and how many certificates are visible. The
+  Windows release job now runs it against a real runner and asserts the
+  union branch.
+
+  This does not identify what caused the original report's certificate
+  failure. If `ferry tls-check` still shows a problem after upgrading, see
+  the troubleshooting guide.
+
 ## [2.12.1] - 2026-08-06
 
 ### Security
