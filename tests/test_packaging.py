@@ -181,6 +181,29 @@ def test_release_job_only_publishes_on_a_tag() -> None:
     )
 
 
+def test_release_workflow_asserts_the_union_branch_on_macos() -> None:
+    """SC-134-18 companion: macOS must gate on the union branch too.
+
+    Windows has asserted this since v2.13.0. Without the same check on macOS, a
+    bundling regression that drops certifi from the .app ships unseen, because
+    the macOS job otherwise only inspects symlinks and archive size.
+
+    Anchored to the literal assertion text, not to the words "tls-check" or
+    "trust-source" appearing somewhere. Matching those alone would stay green if
+    the case statement were weakened to accept any output, which is exactly the
+    hole this file already had to close once for the Windows job.
+    """
+    text = (_REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    macos_block = text.split("build-macos:")[1]
+    assert "tls-check" in macos_block, "the macOS job must run tls-check"
+    assert re.search(r'\*"trust-source: union"\*', macos_block), (
+        "the macOS job must gate on the union branch, not merely run the command"
+    )
+    assert "Contents/MacOS/Ferry" in macos_block, (
+        "it must run the extracted bundle's inner binary, so the ditto round-trip is covered"
+    )
+
+
 def test_release_workflow_asserts_the_union_branch() -> None:
     """SC-134-18.
 
