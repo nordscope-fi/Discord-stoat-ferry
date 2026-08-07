@@ -14,6 +14,7 @@ on:
     paths:
       - "ferry.spec"
       - ".github/workflows/release.yml"
+      - "src/discord_ferry/core/http.py"
   workflow_dispatch:
 
 concurrency:
@@ -149,6 +150,22 @@ jobs:
             exit 1
           }
           Write-Host "--version OK ($expected)"
+
+          # --- TLS trust (issue #134) ---
+          # Parses the exe's own report. It must NOT stat the path from pwsh: onefile
+          # deletes sys._MEIPASS on exit, so any post-hoc Test-Path always fails.
+          $tls = Invoke-Ferry @('tls-check')
+          if ($tls.Code -ne 0) {
+            Write-Host "::error::tls-check exited $($tls.Code)"
+            Write-Host $tls.Out; Write-Host $tls.Err
+            exit 1
+          }
+          if ($tls.Out -notmatch 'trust-source:\s*union') {
+            Write-Host "::error::the frozen exe did not build the union trust store"
+            Write-Host $tls.Out
+            exit 1
+          }
+          Write-Host "tls-check OK: $($tls.Out -replace "`r?`n", ' | ')"
 
           # --- AttachConsole path (issue #123 symptom 3, no redirection) ---
           # This check must not use Invoke-Ferry. Invoke-Ferry redirects

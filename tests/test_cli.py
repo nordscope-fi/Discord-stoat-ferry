@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import certifi
 import pytest
 from click.testing import CliRunner
 
@@ -1479,3 +1480,30 @@ def test_version_is_read_from_module_attribute_not_package_metadata(
         # sentinel into the module every later test imports.
         monkeypatch.undo()
         importlib.reload(discord_ferry.cli)
+
+
+# ---------------------------------------------------------------------------
+# tls-check
+# ---------------------------------------------------------------------------
+
+
+def test_tls_check_prints_the_four_pinned_keys() -> None:
+    """SC-134-16. These key names are a contract with release.yml's parser."""
+    result = CliRunner().invoke(main, ["tls-check"])
+    assert result.exit_code == 0
+    for key in ("ca-bundle:", "ca-bundle-readable:", "trust-source:", "ca-visible:"):
+        assert key in result.output
+
+
+def test_tls_check_reports_the_branch_actually_taken(tmp_path: Path) -> None:
+    """SC-134-17.
+
+    Reporting only that certifi exists would prove packaging while leaving the
+    silent fallback invisible, which is the failure this check exists to catch.
+    """
+    assert "trust-source: union" in CliRunner().invoke(main, ["tls-check"]).output
+
+    missing = tmp_path / "nope.pem"
+    with patch.object(certifi, "where", return_value=str(missing)):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+    assert "trust-source: fallback" in out
