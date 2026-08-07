@@ -570,19 +570,25 @@ async def test_certificate_error_does_not_prime_the_circuit_breaker(
     """SC-134-26.
 
     Placing the short-circuit below either increment would let five
-    short-circuited channels open the breaker and add a 30s sleep.
+    short-circuited channels open the breaker and add a 30s sleep. Patching
+    asyncio.sleep and asserting it is never awaited also closes a narrower
+    mutant: a guard placed below the FIRST increment but above the second
+    still leaves consecutive_failures == 0 on this single-attempt call, since
+    the `attempt == MAX_API_RETRIES - 1` increment never runs on attempt 0.
     """
     _reset_circuit_state()
     key = aiohttp.client_reqrep.ConnectionKey("api.stoat.chat", 443, True, True, None, None, None)
     cert_error = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad"))
 
     mock_aiohttp.get(f"{BASE_URL}/servers/x", exception=cert_error)
-    async with aiohttp.ClientSession() as session:
-        with pytest.raises(MigrationError) as caught:
-            await _api_request(session, "GET", f"{BASE_URL}/servers/x", TOKEN)
+    with patch("asyncio.sleep", new_callable=AsyncMock) as slept:
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError) as caught:
+                await _api_request(session, "GET", f"{BASE_URL}/servers/x", TOKEN)
 
     assert "SSL_CERT_FILE" in str(caught.value)
     assert _circuit_state.consecutive_failures == 0
+    assert slept.await_count == 0, "a certificate error must not pay the backoff sleep"
 
 
 async def test_api_502_retry_exhaustion(mock_aiohttp: aioresponses) -> None:

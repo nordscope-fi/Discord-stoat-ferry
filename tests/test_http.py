@@ -219,11 +219,17 @@ def test_tls_hint_finds_a_wrapped_certificate_error() -> None:
 
 
 def test_hint_is_a_message_not_an_exception_type() -> None:
-    """SC-134-23, the contract that keeps six call sites' types intact.
+    """SC-134-23.
 
-    StoatConnectionError sits under FerryError, not MigrationError. A single
-    new exception class would escape cli.py's four `except MigrationError`
-    handlers, or swallow gui.py's `except DiscordAuthError`.
+    Checks only that tls_hint() returns a str for a certificate error. It does
+    not verify that any of the six call sites still raise their original
+    exception type; a new exception class raised at one of those sites (for
+    example connect.py) would not be caught here.
+
+    The reason type preservation matters: StoatConnectionError sits under
+    FerryError, not MigrationError. A single new exception class would escape
+    cli.py's four `except MigrationError` handlers, or swallow gui.py's
+    `except DiscordAuthError`.
     """
     key = aiohttp.client_reqrep.ConnectionKey("h", 443, True, True, None, None, None)
     exc = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("x"))
