@@ -96,6 +96,39 @@ def test_reset_detaches_the_handler(tmp_path: Path) -> None:
     assert not [h for h in logging.getLogger().handlers if h.get_name() == "ferry-file"]
 
 
+def test_rotation_bounds_the_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SC-123-16: emitting past maxBytes x (backupCount + 1) drops the oldest file.
+
+    This patches `_MAX_BYTES` down so the test writes kilobytes instead of the
+    8 MB the real 2 MB x 4 bound would need. The handler reads the module
+    constant when it is constructed, so the patch has to land before
+    `configure_logging`.
+
+    An unbounded handler on a long migration fills the disk instead of helping
+    diagnose it, so the bound is the thing worth pinning.
+    """
+    monkeypatch.setattr(logging_setup, "_MAX_BYTES", 2048)
+    path = logging_setup.configure_logging(path=tmp_path / "ferry.log")
+    assert path is not None
+
+    log = logging.getLogger("discord_ferry.rotation_probe")
+    for i in range(400):
+        log.info("%s %d", "x" * 200, i)
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    produced = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("ferry.log"))
+
+    # ~100 KB emitted into a 2 KB file: with no rotation this is one huge file,
+    # and with no backupCount it keeps accumulating siblings.
+    assert produced == ["ferry.log", "ferry.log.1", "ferry.log.2", "ferry.log.3"], produced
+    assert len(produced) == logging_setup._BACKUP_COUNT + 1
+
+    # The oldest content must be gone, not merely renamed: record 0 was written
+    # long before the final rotation.
+    assert "x" * 200 + " 0\n" not in path.read_text(encoding="utf-8")
+
+
 def test_debug_records_do_not_reach_the_file(log_file: Path) -> None:
     """SC-123-26: messages.py logs per message at DEBUG.
 
@@ -216,6 +249,44 @@ def test_probe_command_registers_its_token() -> None:
 
     source = inspect.getsource(cli.probe_cmd.callback)
     assert "register_secret" in source, "probe_cmd must register its token"
+
+
+def test_gui_token_entry_registers_both_tokens(log_file: Path) -> None:
+    """SC-123-21: the GUI's token entry point must register for redaction.
+
+    Behavioural on purpose. It drives the real entry point and reads the file,
+    because a source-string assertion here would pass on code that never runs.
+
+    `cli.py` registers at `_build_config`. `gui.py` had no equivalent, so a Stoat
+    token reaching `ferry.log` through any GUI path was written in clear text.
+    The Discord regex floor cannot cover for it: a Stoat token is an opaque
+    string with no matchable shape, so `sanitize_secrets` is the only thing that
+    can mask it, and that needs registration.
+
+    Windows users reach Ferry only through the GUI, and `bug_report.yml` tells
+    them `ferry.log` is safe to attach to a public issue.
+    """
+    from discord_ferry.gui import _store_session_tokens
+
+    # What the GUI does when the user submits the setup form.
+    _store_session_tokens({}, stoat=STOAT_TOKEN, discord=DISCORD_TOKEN)
+
+    log = logging.getLogger("discord_ferry.gui_token_probe")
+    log.warning("stoat=%s discord=%s", STOAT_TOKEN, DISCORD_TOKEN)
+    try:
+        raise RuntimeError(f"upload failed for {STOAT_TOKEN}")
+    except RuntimeError:
+        log.error("with traceback", exc_info=True)
+
+    written = _read(log_file)
+
+    # The records must actually be present, or the assertions below pass on an
+    # empty file. That is how the original #123 tests stayed green.
+    assert "with traceback" in written
+    assert "upload failed for" in written
+
+    assert STOAT_TOKEN not in written, "Stoat token reached ferry.log in clear text"
+    assert DISCORD_TOKEN not in written, "Discord token reached ferry.log in clear text"
 
 
 def test_cli_group_configures_logging() -> None:

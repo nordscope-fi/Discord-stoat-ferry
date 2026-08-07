@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-08-06
+
+### Security
+
+- The desktop app never called `register_secret`, so the Stoat token was not
+  masked in `~/.discord-ferry/logs/ferry.log`. Affects versions 2.11.1 and
+  2.12.0. Command-line users were not affected. `_store_session_tokens` now
+  calls `register_secret` for both tokens.
+
+  If you ran the desktop app on those versions, check
+  `~/.discord-ferry/logs/ferry.log` for your Stoat token and rotate it if found.
+
+  `bug_report.yml` said tokens were always masked. It now gives the version
+  floor.
+
+- aiohttp 3.14.1 to 3.14.3 in `uv.lock`, with no source change. This resolves
+  three Dependabot alerts. Ferry calls aiohttp as a client. `src/` contains no
+  `aiohttp.web` code and no aiohttp websockets, and NiceGUI serves over uvicorn.
+  - High, out-of-bounds heap read in the C HTTP response parser on a malformed
+    chunked response. Ferry parses responses from Stoat, Autumn, the Discord API
+    and the Discord CDN, all of which use this parser.
+  - Medium, HTTP request smuggling via WebSocket upgrade. Server-side code only.
+  - Medium, WebSocket client accepts compressed frames without a negotiated
+    `permessage-deflate`. Needs an aiohttp websocket client.
+
+### Added
+
+- `test_gui_token_entry_registers_both_tokens` (SC-123-21) calls
+  `_store_session_tokens`, logs both tokens, and reads the log file back.
+  Removing the `register_secret` calls makes it fail.
+- `test_rotation_bounds_the_file_count` (SC-123-16) writes past the rotation
+  threshold and checks the file count stays at `_BACKUP_COUNT + 1`. It fails when
+  `_BACKUP_COUNT` is 0.
+
 ### Fixed
 
 - **`auto-tag.yml` now checks whether the current version is already tagged.**

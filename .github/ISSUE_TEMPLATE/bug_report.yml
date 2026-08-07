@@ -63,11 +63,17 @@ body:
     attributes:
       label: Log file and error messages
       description: |
-        From version 2.11.1 Ferry always writes a log. Tokens are stripped before anything is
-        written, so it is safe to attach.
+        From version 2.11.1 Ferry always writes a log.
 
         - Windows: `%USERPROFILE%\.discord-ferry\logs\ferry.log`
         - macOS and Linux: `~/.discord-ferry/logs/ferry.log`
+
+        **From 2.12.1 onward, tokens are masked before anything is written, so the file is
+        safe to attach.**
+
+        **On 2.11.1 and 2.12.0 the desktop app did not mask the Stoat token.** If you ran
+        one of those versions, search the file for your Stoat token before attaching it, and
+        rotate the token if you find it. Command-line users were never affected.
 
         Attach that file if you can, and paste any on-screen error here. `ferry-output/report.json`
         is written only after a migration reaches the reporting stage, so it will not exist for a
