@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from discord_ferry.cli import main
+from discord_ferry.core.http import reset_http_state
 from discord_ferry.errors import MigrationError
 from discord_ferry.state import MigrationState
 
@@ -1500,10 +1501,30 @@ def test_tls_check_reports_the_branch_actually_taken(tmp_path: Path) -> None:
 
     Reporting only that certifi exists would prove packaging while leaving the
     silent fallback invisible, which is the failure this check exists to catch.
+
+    `describe_trust()` reads the cached SSL context, matching what sessions
+    actually use, so this test resets it itself between invocations -- the
+    same thing `tests/test_http.py` already does around every case that must
+    observe a fresh build, on top of the autouse fixture that only resets
+    between test FUNCTIONS.
     """
     assert "trust-source: union" in CliRunner().invoke(main, ["tls-check"]).output
 
     missing = tmp_path / "nope.pem"
+    reset_http_state()
     with patch.object(certifi, "where", return_value=str(missing)):
         out = CliRunner().invoke(main, ["tls-check"]).output
     assert "trust-source: fallback" in out
+
+    # A missing bundle only proves certifi.where() failed to resolve a path.
+    # The check this command exists for is a bundle that RESOLVES and READS
+    # but does not PARSE: load_verify_locations() raises ssl.SSLError (an
+    # OSError subclass) on malformed PEM content, which must still flip the
+    # flag to fallback even though the file itself is perfectly readable.
+    bad = tmp_path / "garbage.pem"
+    bad.write_text("not a certificate")
+    reset_http_state()
+    with patch.object(certifi, "where", return_value=str(bad)):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+    assert "ca-bundle-readable: true" in out  # the file is fine
+    assert "trust-source: fallback" in out  # the trust is not

@@ -162,7 +162,8 @@ jobs:
           }
           if ($tls.Out -notmatch 'trust-source:\s*union') {
             Write-Host "::error::the frozen exe did not build the union trust store"
-            Write-Host $tls.Out
+            Write-Host $tls.Out; Write-Host $tls.Err
+            if (Test-Path $log) { Write-Host "--- ferry.log ---"; Get-Content $log }
             exit 1
           }
           Write-Host "tls-check OK: $($tls.Out -replace "`r?`n", ' | ')"
