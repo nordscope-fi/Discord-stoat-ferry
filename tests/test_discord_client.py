@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ssl
+
 import aiohttp
 import pytest
 from aioresponses import aioresponses
@@ -546,6 +548,32 @@ async def test_discord_network_error_bounded(mock_discord: aioresponses) -> None
         async with aiohttp.ClientSession() as session:
             with pytest.raises(MigrationError, match="Discord API network error"):
                 await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+
+async def test_certificate_error_skips_the_network_retry(mock_discord: aioresponses) -> None:
+    """SC-134-27.
+
+    Mirrors the api.py and manager.py short-circuit tests. A certificate
+    failure cannot succeed on retry, so the 1s sleep must never be paid, and
+    the await_count assertion also proves only one request was attempted
+    instead of _MAX_RETRIES.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.errors import MigrationError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    key = aiohttp.client_reqrep.ConnectionKey("discord.com", 443, True, True, None, None, None)
+    cert_error = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad"))
+    mock_discord.get(url, exception=cert_error)
+
+    with patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError) as caught:
+                await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    assert "SSL_CERT_FILE" in str(caught.value)
+    assert sleep.await_count == 0, "a certificate error must not pay the 1s retry sleep"
 
 
 async def test_discord_403_raises_migration_error(mock_discord: aioresponses) -> None:  # SC-21
