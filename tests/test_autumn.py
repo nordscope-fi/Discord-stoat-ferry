@@ -1,5 +1,6 @@
 """Tests for the Autumn file uploader."""
 
+import ssl
 from pathlib import Path
 
 import aiohttp
@@ -768,3 +769,84 @@ async def test_429_boolean_body_retry_after_is_ignored(
         result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
     assert result == "ok"
     assert slept[0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Certificate failures (#137) — the one host v2.13.0's error work did not reach
+# ---------------------------------------------------------------------------
+
+
+def _cert_error(host: str = "cdn.stoatusercontent.com") -> aiohttp.ClientConnectorCertificateError:
+    key = aiohttp.client_reqrep.ConnectionKey(host, 443, True, True, None, None, None)
+    return aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad"))
+
+
+async def test_certificate_error_becomes_an_actionable_autumn_error(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """A certificate failure against Autumn names the host and the override.
+
+    Kills two mutants. Without the `except aiohttp.ClientError` arm the raw
+    ClientConnectorCertificateError propagates and `pytest.raises` fails on the
+    type. Converting to AutumnUploadError but dropping `tls_hint` leaves a
+    message with no host and no SSL_CERT_FILE, which the last two assertions
+    reject — that is exactly the unactionable state #137 was filed about.
+    """
+    file = tmp_path / "icon.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", exception=_cert_error())
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError) as caught:
+            await upload_to_autumn(session, AUTUMN_URL, "icons", file, TOKEN)
+
+    message = str(caught.value)
+    assert "cdn.stoatusercontent.com" in message
+    assert "SSL_CERT_FILE" in message
+    # Pins the explicit `from exc`. tls_hint also walks __context__, which Python
+    # sets implicitly, so structure.py's role-icon handler would still re-derive
+    # the hint without it — this assertion guards the idiom, not that behaviour.
+    assert isinstance(caught.value.__cause__, aiohttp.ClientConnectorCertificateError)
+
+
+async def test_certificate_error_is_not_retried(
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
+) -> None:
+    """A certificate failure raises on attempt 1 rather than sleeping twice.
+
+    Guards the plausible wrong fix rather than the current code: handling
+    ClientError inside the loop invites `continue`, which would pay two backoff
+    sleeps before failing with an error no retry can clear. Only one response is
+    mocked, so a retry would also change the exception the caller sees.
+    """
+    file = tmp_path / "icon.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", exception=_cert_error())
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError):
+            await upload_to_autumn(session, AUTUMN_URL, "icons", file, TOKEN)
+
+    assert slept == [], "a certificate error must not pay the retry backoff"
+
+
+async def test_non_certificate_client_error_is_re_raised_unchanged(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Only certificate failures are converted; every other ClientError is untouched.
+
+    Kills the over-broad fix: wrapping every ClientError in AutumnUploadError
+    would change what each of the five callers' except clauses match, so a
+    connection reset that a caller deliberately lets escape would start being
+    swallowed as a warning instead. `pytest.raises(aiohttp.ClientError)` passes
+    under both implementations — the AutumnUploadError check is what discriminates.
+    """
+    file = tmp_path / "icon.png"
+    file.write_bytes(b"x" * 50)
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", exception=aiohttp.ClientOSError("connection reset"))
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(aiohttp.ClientError) as caught:
+            await upload_to_autumn(session, AUTUMN_URL, "icons", file, TOKEN)
+
+    assert not isinstance(caught.value, AutumnUploadError)

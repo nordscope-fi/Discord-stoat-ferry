@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ssl
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
@@ -3011,3 +3013,116 @@ async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) 
         await run_roles(config, state, exports, lambda e: None)
     assert "r1" in state.role_map and "r2" not in state.role_map
     assert "r1" in state.roles_finalized and "r2" not in state.roles_finalized
+
+
+# ---------------------------------------------------------------------------
+# #137 — the role-icon path discards the message, so it re-derives the hint
+# ---------------------------------------------------------------------------
+
+
+async def test_run_roles_icon_certificate_failure_explains_itself(tmp_path: Path) -> None:
+    """A certificate failure uploading a role icon names the host and the override.
+
+    This handler throws `str(exc)` away on purpose, so the hint upload_to_autumn
+    already put in the message never reaches the user — it has to be re-derived
+    from the __cause__ chain here. Dropping the `tls_hint(exc)` call leaves the
+    bare fixed template, which the last two assertions reject: that bare template
+    is the unactionable dead end #137 was filed about.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc123")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    key = aiohttp.client_reqrep.ConnectionKey(
+        "cdn.stoatusercontent.com", 443, True, True, None, None, None
+    )
+    cert_error = aiohttp.ClientConnectorCertificateError(
+        key, ssl.SSLCertVerificationError("unable to get local issuer certificate")
+    )
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        m.post(f"{AUTUMN_URL}/icons", exception=cert_error, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        # Must NOT raise — a certificate failure on an icon degrades like any other.
+        await run_roles(config, state, exports, events.append)
+
+    icon_warnings = [w for w in state.warnings if w.get("type") == "role_icon_upload_failed"]
+    assert icon_warnings
+    message = icon_warnings[0]["message"]
+    assert "cdn.stoatusercontent.com" in message
+    assert "SSL_CERT_FILE" in message
+
+
+async def test_run_roles_icon_warning_never_carries_the_response_body(tmp_path: Path) -> None:
+    """The hint is the only thing added — the Autumn body still never appears.
+
+    Uses a non-retryable error status so the AutumnUploadError raised carries the
+    response body verbatim. The pre-existing token-safety test uses a non-JSON 200,
+    whose exception text is a fixed template, so it cannot see this: appending
+    `{exc}` beside the hint would leave that test green and this one red.
+    """
+    events: list[MigrationEvent] = []
+    # A distinctive token: the module default is "tok", three characters that a
+    # substring check would clear even if the body were interpolated verbatim.
+    config = _make_config(tmp_path, token="stoat-session-token-SENTINEL")
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc123")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+        m.post(
+            f"{AUTUMN_URL}/icons",
+            status=400,
+            body=f"x-session-token echoed: {config.token} SENTINEL_BODY",
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    icon_warnings = [w for w in state.warnings if w.get("type") == "role_icon_upload_failed"]
+    assert icon_warnings
+    for w in icon_warnings:
+        assert "SENTINEL_BODY" not in w["message"]
+        assert config.token not in w["message"]
