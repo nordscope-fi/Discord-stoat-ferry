@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ssl
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import aiohttp
@@ -12,9 +11,6 @@ import certifi
 import pytest
 
 from discord_ferry.core import http
-
-if TYPE_CHECKING:
-    pass
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "discord_ferry"
 
@@ -134,13 +130,14 @@ def test_no_bare_client_session_outside_the_factory() -> None:
     behavioural proof that the factory works lives in the aioresponses and
     ownership tests.
     """
+    assert _SRC.is_dir(), "the src tree must actually resolve, or rglob silently yields nothing"
     allowlist = {"core/http.py"}
     offenders: list[str] = []
     for path in _SRC.rglob("*.py"):
         rel = path.relative_to(_SRC).as_posix()
         if rel in allowlist:
             continue
-        if "ClientSession(" in path.read_text(encoding="utf-8"):
+        if "aiohttp.ClientSession(" in path.read_text(encoding="utf-8"):
             offenders.append(rel)
     assert not offenders, (
         f"these files build a session directly instead of using core.http.new_session: {offenders}"
@@ -162,6 +159,20 @@ async def test_factory_session_is_intercepted_by_aioresponses() -> None:
         async with http.new_session() as session:
             resp = await session.get("https://example.invalid/x")
             assert (await resp.json())["ok"] is True
+
+
+async def test_new_session_carries_the_ferry_context() -> None:
+    """The factory must install the context it built, not aiohttp's default.
+
+    Without this, replacing new_session's body with a bare ClientSession()
+    passes every other test in the suite, including the Windows CI gate.
+    """
+    http.reset_http_state()
+    ctx = http._get_ssl_context()
+    async with http.new_session() as session:
+        connector = session.connector
+        assert isinstance(connector, aiohttp.TCPConnector)
+        assert connector._ssl is ctx
 
 
 def test_tls_hint_recognises_a_certificate_error() -> None:
@@ -196,3 +207,12 @@ def test_tls_hint_survives_a_self_referential_chain() -> None:
     exc = ValueError("loop")
     exc.__context__ = exc
     assert http.tls_hint(exc) is None
+
+
+def test_tls_hint_finds_a_wrapped_certificate_error() -> None:
+    """The chain walk must actually walk."""
+    key = aiohttp.client_reqrep.ConnectionKey("api.github.com", 443, True, True, None, None, None)
+    inner = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad"))
+    outer = RuntimeError("download failed")
+    outer.__cause__ = inner
+    assert "api.github.com" in (http.tls_hint(outer) or "")

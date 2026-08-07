@@ -47,17 +47,21 @@ def _build_ssl_context() -> ssl.SSLContext:
     """
     global _trust_source  # noqa: PLW0603
     context = ssl.create_default_context()
+    bundle = "<unresolved>"
     try:
-        context.load_verify_locations(cafile=certifi.where())
+        bundle = certifi.where()
+        context.load_verify_locations(cafile=bundle)
         _trust_source = "union"
-    except (OSError, ssl.SSLError):
+    except OSError:
+        # ssl.SSLError subclasses OSError, so catching OSError alone covers
+        # both a missing/unreadable bundle path and a malformed PEM file.
         _trust_source = "fallback"
         # Degrade to exactly today's behaviour, never to unverified transport.
         # A missing bundle is a packaging slip; it must not cost all networking.
         logger.warning(
             "could not load the bundled CA roots from %s; "
             "falling back to the operating system trust store only",
-            certifi.where(),
+            bundle,
             exc_info=True,
         )
     return context
@@ -81,15 +85,21 @@ def _get_ssl_context() -> ssl.SSLContext:
 
 
 def reset_http_state() -> None:
-    """Drop the cached context.
+    """Drop the cached context and its trust-source marker.
 
     Mirrors logging_setup.reset_logging and security.reset_secret_registry.
     tests/conftest.py calls this from its autouse fixture, so a test that
     exercises the fallback cannot poison the cache for the rest of the session,
     and the spy test always sees a cold cache.
+
+    Both module globals reset together: leaving _trust_source behind would let
+    a test that forces the fallback branch leave "fallback" behind for every
+    later test, and after a bare reset the module would claim "union" while no
+    context has been built yet.
     """
-    global _ssl_context  # noqa: PLW0603
+    global _ssl_context, _trust_source  # noqa: PLW0603
     _ssl_context = None
+    _trust_source = "unbuilt"
 
 
 def new_session(**kwargs: Any) -> aiohttp.ClientSession:
