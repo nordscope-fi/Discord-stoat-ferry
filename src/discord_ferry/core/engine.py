@@ -11,10 +11,11 @@ from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
-import aiohttp
+import aiohttp  # noqa: TCH002
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
+from discord_ferry.core.http import new_session
 from discord_ferry.core.security import SecureTokenStore, register_secret, safe_sanitize
 from discord_ferry.discord import (
     fetch_and_translate_guild_metadata,
@@ -334,7 +335,7 @@ async def run_migration(
                 )
             )
             try:
-                async with aiohttp.ClientSession() as discord_session:
+                async with new_session() as discord_session:
                     meta = await fetch_and_translate_guild_metadata(
                         discord_session, config.discord_token, config.discord_server_id
                     )
@@ -492,7 +493,7 @@ async def run_migration(
 
     init_request_semaphore(config.max_concurrent_requests)
 
-    async with aiohttp.ClientSession() as session:
+    async with new_session() as session:
         config.session = session
 
         # S17: Acquire advisory migration lock on the target server (existing server only).
@@ -565,7 +566,7 @@ async def run_migration(
             )
         )
         try:
-            async with aiohttp.ClientSession() as validation_session:
+            async with new_session() as validation_session:
                 server = await api_fetch_server(
                     validation_session, config.stoat_url, config.token, state.stoat_server_id
                 )

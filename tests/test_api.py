@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
 from aioresponses import aioresponses
 
+from discord_ferry.config import FerryConfig
 from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import (
     _api_request,
@@ -1462,3 +1464,16 @@ async def test_429_reset_after_is_capped(mock_aiohttp: aioresponses) -> None:
             await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
 
     assert calls[0] == pytest.approx(60.0, abs=0.05)
+
+
+async def test_get_session_prefers_the_config_session() -> None:
+    """SC-134-5: the config branch must survive the factory swap."""
+    from discord_ferry.core.http import new_session
+    from discord_ferry.migrator.api import get_session
+
+    async with new_session() as shared:
+        config = FerryConfig(export_dir=Path("."), stoat_url="https://x.invalid", token="t")
+        config.session = shared
+        async with get_session(config) as yielded:
+            assert yielded is shared
+        assert not shared.closed

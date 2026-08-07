@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.http import new_session
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -331,7 +332,7 @@ async def validate_discord_token(token: str) -> None:
     """
     try:
         async with (
-            aiohttp.ClientSession() as session,
+            new_session() as session,
             session.get(
                 "https://discord.com/api/v10/users/@me",
                 headers={"Authorization": token},
