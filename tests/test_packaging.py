@@ -57,7 +57,12 @@ def test_ferry_spec_collects_certifi() -> None:
         "ferry.spec must call collect_data_files('certifi'), else cacert.pem may "
         "not be bundled and the TLS trust fix is inert in the shipped app"
     )
-    assert re.search(r"certifi_datas", spec_text), "certifi_datas must reach all_datas"
+    # Anchored to the all_datas line. A bare certifi_datas search matches the
+    # assignment above it, so dropping it from the concatenation would leave
+    # this test green while nothing was bundled.
+    assert re.search(r"all_datas\s*=[^\n]*certifi_datas", spec_text), (
+        "certifi_datas must appear in the all_datas concatenation, not merely be assigned"
+    )
 
 
 def test_ferry_spec_builds_onedir_on_darwin() -> None:
