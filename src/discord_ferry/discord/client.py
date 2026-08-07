@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
+from discord_ferry.core.http import tls_hint
 from discord_ferry.discord.models import DiscordChannel, DiscordRole, PermissionOverwrite
 from discord_ferry.errors import DiscordAuthError, MigrationError
 
@@ -159,6 +160,9 @@ async def _discord_request(session: aiohttp.ClientSession, token: str, path: str
         except (DiscordAuthError, MigrationError):
             raise
         except aiohttp.ClientError as exc:
+            hint = tls_hint(exc)
+            if hint is not None:
+                raise MigrationError(f"Discord API network error: {exc}{hint}") from exc
             network_attempts += 1
             if network_attempts >= _MAX_RETRIES:
                 raise MigrationError(f"Discord API network error: {exc}") from exc

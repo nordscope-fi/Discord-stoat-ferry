@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
-from discord_ferry.core.http import new_session
+from discord_ferry.core.http import new_session, tls_hint
 from discord_ferry.errors import MigrationError
 
 if TYPE_CHECKING:
@@ -297,6 +297,13 @@ async def _api_request_inner(
                 text = await resp.text()
                 raise MigrationError(f"API error {resp.status}: {text}")
         except aiohttp.ClientError as exc:
+            hint = tls_hint(exc)
+            if hint is not None:
+                # Above both consecutive_failures increments on purpose. Five
+                # short-circuited channels in the parallel message phase would
+                # otherwise open the breaker and add a 30s sleep to an error
+                # that cannot recover.
+                raise MigrationError(f"Network error: {exc}{hint}") from exc
             if attempt == MAX_API_RETRIES - 1:
                 _circuit_state.consecutive_failures += 1
                 raise MigrationError(

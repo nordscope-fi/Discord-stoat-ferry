@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import new_session
+from discord_ferry.core.http import new_session, tls_hint
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -343,7 +343,7 @@ async def validate_discord_token(token: str) -> None:
             if resp.status != 200:
                 raise DiscordAuthError(f"Discord API returned unexpected status {resp.status}")
     except aiohttp.ClientError as exc:
-        raise DiscordAuthError(f"Cannot reach Discord API: {exc}") from exc
+        raise DiscordAuthError(f"Cannot reach Discord API: {exc}{tls_hint(exc) or ''}") from exc
 
 
 async def run_dce_export(
