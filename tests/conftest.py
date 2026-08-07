@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 from discord_ferry.core import logging_setup
+from discord_ferry.core.http import reset_http_state
 from discord_ferry.core.security import reset_secret_registry
 
 # --- aioresponses / aiohttp 3.14 compatibility shim ---------------------------
@@ -73,8 +74,10 @@ def _isolate_ferry_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     monkeypatch.setattr(logging_setup, "_log_path", lambda: tmp_path / "ferry.log")
     logging_setup.reset_logging()
     reset_secret_registry()
+    reset_http_state()
     try:
         yield
     finally:
         logging_setup.reset_logging()
         reset_secret_registry()
+        reset_http_state()

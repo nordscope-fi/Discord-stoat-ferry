@@ -458,6 +458,7 @@ version = "2.12.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
+    { name = "certifi" },
     { name = "click" },
     { name = "ijson" },
     { name = "nicegui" },
@@ -485,6 +486,7 @@ native = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "aioresponses", marker = "extra == 'dev'", specifier = ">=0.7" },
+    { name = "certifi", specifier = ">=2024.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "ijson", specifier = ">=3.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0" },

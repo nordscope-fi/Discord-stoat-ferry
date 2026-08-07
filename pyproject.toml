@@ -25,6 +25,7 @@ classifiers = [
 
 dependencies = [
     "aiohttp>=3.9",
+    "certifi>=2024.0",
     "click>=8.0",
     "ijson>=3.0",
     "nicegui>=2.0",
