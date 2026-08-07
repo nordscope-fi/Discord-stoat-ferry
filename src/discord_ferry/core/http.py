@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import ssl
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -100,6 +101,35 @@ def reset_http_state() -> None:
     global _ssl_context, _trust_source  # noqa: PLW0603
     _ssl_context = None
     _trust_source = "unbuilt"
+
+
+def describe_trust() -> dict[str, str]:
+    """Report the trust configuration, for `ferry tls-check` and CI.
+
+    Rebuilds through the real code path on every call rather than trusting a
+    cached context, so the report cannot drift from what sessions actually
+    use. A real invocation of `ferry tls-check` is a fresh process and would
+    always see a cold cache anyway; the reset only matters for a long-lived
+    process (CliRunner-based tests included) that calls this more than once,
+    where a stale cache would otherwise report the first call's trust state
+    forever, including after certifi's bundle stops resolving.
+    """
+    try:
+        bundle = certifi.where()
+    except OSError:
+        bundle = "<unresolved>"
+    readable = bundle != "<unresolved>" and Path(bundle).is_file()
+    reset_http_state()
+    context = _get_ssl_context()
+    return {
+        "ca-bundle": bundle,
+        "ca-bundle-readable": "true" if readable else "false",
+        # Read from the flag the build set, NOT inferred from counts. A readable
+        # but malformed bundle still raises, and a count comparison would then
+        # report a healthy union while trust had silently degraded.
+        "trust-source": _trust_source,
+        "ca-visible": str(len(context.get_ca_certs(binary_form=True))),
+    }
 
 
 def new_session(**kwargs: Any) -> aiohttp.ClientSession:

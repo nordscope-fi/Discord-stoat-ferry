@@ -1322,5 +1322,18 @@ def probe_cmd(
     console.print(table)
 
 
+@main.command("tls-check")
+def tls_check_cmd() -> None:
+    """Report which certificate authorities Ferry trusts.
+
+    Prints four fixed keys that .github/workflows/release.yml parses. Changing
+    a key name breaks the Windows release check, so tests/test_cli.py pins them.
+    """
+    from discord_ferry.core.http import describe_trust
+
+    for key, value in describe_trust().items():
+        click.echo(f"{key}: {value}")
+
+
 if __name__ == "__main__":
     main()

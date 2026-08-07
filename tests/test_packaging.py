@@ -179,3 +179,11 @@ def test_release_job_only_publishes_on_a_tag() -> None:
     assert "startsWith(github.ref, 'refs/tags/')" in release_job, (
         "the release job must be gated on a tag ref"
     )
+
+
+def test_release_workflow_asserts_the_union_branch() -> None:
+    """SC-134-18."""
+    text = (_REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "tls-check" in text
+    assert "trust-source" in text
+    assert "core/http.py" in text, "http.py must be in the paths filter"
