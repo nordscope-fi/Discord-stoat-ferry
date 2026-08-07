@@ -42,6 +42,24 @@ def test_ferry_spec_bundles_dce_checksums() -> None:
     )
 
 
+def test_ferry_spec_collects_certifi() -> None:
+    """SC-134-12: cacert.pem must reach the frozen binary.
+
+    pyinstaller-hooks-contrib ships hook-certifi.py, which fires only if the
+    analysis sees certifi imported. core/http.py imports it at module level, so
+    that holds today. Naming it in the spec too means the bundle does not
+    depend on that import surviving a future refactor.
+    """
+    spec_text = (_REPO_ROOT / "ferry.spec").read_text(encoding="utf-8")
+    # Match the CALL, not the word. ferry.spec carries a comment mentioning
+    # certifi, so a substring check would pass even with the collection deleted.
+    assert re.search(r'collect_data_files\(\s*["\']certifi["\']\s*\)', spec_text), (
+        "ferry.spec must call collect_data_files('certifi'), else cacert.pem may "
+        "not be bundled and the TLS trust fix is inert in the shipped app"
+    )
+    assert re.search(r"certifi_datas", spec_text), "certifi_datas must reach all_datas"
+
+
 def test_ferry_spec_builds_onedir_on_darwin() -> None:
     """macOS must build onedir, not onefile.
 

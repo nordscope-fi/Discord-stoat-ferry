@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 # Read version from source to avoid hardcoding
 _version_match = re.search(
@@ -24,6 +24,11 @@ nicegui_datas, nicegui_bins, nicegui_imports = collect_all("nicegui")
 # aiohttp has its own data files
 aiohttp_datas, aiohttp_bins, aiohttp_imports = collect_all("aiohttp")
 
+# certifi's cacert.pem is the fallback trust store core/http.py loads on top of
+# the OS store (issue #134). hooks-contrib would usually collect it, but only
+# if the analysis sees certifi imported; naming it here removes that condition.
+certifi_datas = collect_data_files("certifi")
+
 # pywebview (optional — native desktop window mode)
 try:
     webview_datas, webview_bins, webview_imports = collect_all("webview")
@@ -38,7 +43,7 @@ ferry_imports = collect_submodules("discord_ferry")
 # Aggregate
 # ---------------------------------------------------------------------------
 
-all_datas = nicegui_datas + aiohttp_datas + webview_datas + [
+all_datas = nicegui_datas + aiohttp_datas + webview_datas + certifi_datas + [
     ("src/discord_ferry/templates/*.json", "discord_ferry/templates"),
     # Pinned DCE SHA-256 hashes — MUST be bundled, otherwise exporter/manager.py
     # silently skips checksum verification in the frozen binary (the supply-chain
