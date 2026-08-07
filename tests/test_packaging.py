@@ -182,8 +182,18 @@ def test_release_job_only_publishes_on_a_tag() -> None:
 
 
 def test_release_workflow_asserts_the_union_branch() -> None:
-    """SC-134-18."""
+    """SC-134-18.
+
+    A bare "trust-source" substring check would stay green even if the workflow's
+    PowerShell condition were weakened from `-notmatch 'trust-source:\\s*union'` to
+    `-notmatch 'trust-source'`, or if the `$tls.Code -ne 0` check next to it were
+    deleted -- either change would stop the Windows gate from gating while this test
+    kept passing. Assert the union branch itself is checked, not merely mentioned.
+    """
     text = (_REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert "tls-check" in text
     assert "trust-source" in text
     assert "core/http.py" in text, "http.py must be in the paths filter"
+    assert re.search(r"trust-source:\\s\*union", text), (
+        "release.yml must assert the union branch, not merely mention trust-source"
+    )
