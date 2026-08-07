@@ -14,7 +14,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has seven top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, and `probe`.
+Ferry has eight top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `probe`, and `tls-check`.
 
 ---
 
@@ -447,3 +447,52 @@ ferry probe --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN" \
 ferry probe --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
   --test-server-id 01ABCDEF234567890ABCDEFGH --json > probe-results.json
 ```
+
+---
+
+## `ferry tls-check`
+
+Report which certificate authorities Ferry currently trusts for outbound HTTPS. Read-only: it makes no network calls itself. Use it to diagnose certificate errors such as `unable to get local issuer certificate`. See [Certificate Errors](troubleshooting.md#unable-to-get-local-issuer-certificate) in the troubleshooting guide.
+
+```
+ferry tls-check
+```
+
+No options or flags.
+
+### What it prints
+
+Four fixed lines:
+
+| Key | Meaning |
+|------|-------------|
+| `ca-bundle` | Path to the certifi CA bundle Ferry carries |
+| `ca-bundle-readable` | `true` if that bundle exists on disk and could be read, `false` otherwise |
+| `trust-source` | `union` if Ferry loaded the bundle successfully on top of the operating system's trust store, `fallback` if it could not and is relying on the OS store alone |
+| `ca-visible` | Number of CA certificates the resulting SSL context reports |
+
+**Example output:**
+
+```
+ca-bundle: /path/to/certifi/cacert.pem
+ca-bundle-readable: true
+trust-source: union
+ca-visible: 179
+```
+
+!!! info "A low ca-visible count is not necessarily a problem"
+    On Linux, trust often resolves through OpenSSL's hashed capath directory rather than a single readable bundle. `ca-visible` cannot enumerate certificates trusted that way, so it can read `0` on a machine where TLS handshakes work fine. Treat `ca-visible` as a diagnostic hint, not a health check. `trust-source: union` is the line that confirms Ferry's own bundle loaded.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Always. A missing or unreadable bundle is reported as `trust-source: fallback`, not a nonzero exit. |
+
+### Examples
+
+```bash
+ferry tls-check
+```
+
+Run this first when a migration fails with a certificate error, before changing proxy or antivirus settings. `trust-source: fallback` means Ferry's own bundle did not load and you are relying on the operating system's trust store alone.
