@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from discord_ferry.core.http import new_session
 from discord_ferry.errors import DCENotFoundError, ValidationError
 
 if TYPE_CHECKING:
@@ -175,7 +176,7 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
     data: bytes | None = None
     for attempt in range(2):
         try:
-            async with aiohttp.ClientSession() as session:
+            async with new_session() as session:
                 async with session.get(
                     release_url, headers={"Accept": "application/vnd.github.v3+json"}
                 ) as resp:

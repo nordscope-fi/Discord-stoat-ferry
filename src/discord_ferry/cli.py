@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
-import aiohttp
+import aiohttp  # noqa: TCH002
 import click
 from dotenv import load_dotenv
 from rich.console import Console
@@ -24,6 +24,7 @@ from rich.table import Table
 from discord_ferry import __version__
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
+from discord_ferry.core.http import new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError, StateError
@@ -830,7 +831,7 @@ def build(
     console.print(f"[bold]Discord Ferry[/] — building server '{_safe(bp.name)}'\n")
 
     async def _build() -> None:
-        async with aiohttp.ClientSession() as session:
+        async with new_session() as session:
             # Create server
             result = await api_create_server(session, stoat_url, token, bp.name)
             server_id = result["_id"]

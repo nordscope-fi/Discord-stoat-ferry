@@ -242,3 +242,16 @@ async def test_server_bucket_we_have_no_limit_for_is_reported(mock_aiohttp: aior
     result = _check(report, "autumn_limits")
     assert result.startswith("warn:")
     assert "stickers" in result
+
+
+async def test_probe_does_not_close_an_injected_session() -> None:
+    """SC-134-4: run_probe closes only what it created."""
+    from discord_ferry.core.http import new_session
+
+    async with new_session() as injected:
+        with aioresponses() as mocked:
+            mocked.get("https://example.invalid/", status=500, repeat=True)
+            await run_probe(
+                "https://example.invalid", "tok", "srv", lambda _e: None, session=injected
+            )
+        assert not injected.closed, "an injected session must outlive run_probe"

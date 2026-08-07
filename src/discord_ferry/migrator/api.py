@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
+from discord_ferry.core.http import new_session
 from discord_ferry.errors import MigrationError
 
 if TYPE_CHECKING:
@@ -75,7 +76,7 @@ async def get_session(config: FerryConfig) -> AsyncIterator[aiohttp.ClientSessio
     if config.session is not None:
         yield config.session
     else:
-        async with aiohttp.ClientSession() as session:
+        async with new_session() as session:
             yield session
 
 

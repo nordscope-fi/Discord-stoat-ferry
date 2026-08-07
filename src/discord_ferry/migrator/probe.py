@@ -6,8 +6,9 @@ import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
+import aiohttp  # noqa: TCH002
 
+from discord_ferry.core.http import new_session
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_webhook,
@@ -70,7 +71,7 @@ async def run_probe(
     """
     report = ProbeReport()
     own_session = session is None
-    sess = session or aiohttp.ClientSession()
+    sess = session or new_session()
     try:
         await _check_autumn(sess, stoat_url, report)
         await _check_voice_bug(sess, stoat_url, token, test_server_id, report)
