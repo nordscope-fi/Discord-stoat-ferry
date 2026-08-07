@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -561,6 +562,27 @@ async def test_api_network_error_exhausted(mock_aiohttp: aioresponses) -> None:
     async with aiohttp.ClientSession() as session:
         with pytest.raises(MigrationError, match="Network error after 3 retries"):
             await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+
+async def test_certificate_error_does_not_prime_the_circuit_breaker(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-134-26.
+
+    Placing the short-circuit below either increment would let five
+    short-circuited channels open the breaker and add a 30s sleep.
+    """
+    _reset_circuit_state()
+    key = aiohttp.client_reqrep.ConnectionKey("api.stoat.chat", 443, True, True, None, None, None)
+    cert_error = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad"))
+
+    mock_aiohttp.get(f"{BASE_URL}/servers/x", exception=cert_error)
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as caught:
+            await _api_request(session, "GET", f"{BASE_URL}/servers/x", TOKEN)
+
+    assert "SSL_CERT_FILE" in str(caught.value)
+    assert _circuit_state.consecutive_failures == 0
 
 
 async def test_api_502_retry_exhaustion(mock_aiohttp: aioresponses) -> None:

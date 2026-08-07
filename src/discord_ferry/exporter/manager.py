@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from discord_ferry.core.http import new_session
+from discord_ferry.core.http import new_session, tls_hint
 from discord_ferry.errors import DCENotFoundError, ValidationError
 
 if TYPE_CHECKING:
@@ -211,6 +211,10 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
             break  # success — exit retry loop
 
         except (aiohttp.ClientError, DCENotFoundError) as e:
+            hint = tls_hint(e)
+            if hint is not None:
+                # A certificate failure cannot succeed on retry; do not pay the sleep.
+                raise DCENotFoundError(f"Network error downloading DCE: {e}{hint}") from e
             if attempt == 0:
                 on_event(
                     MigrationEvent(

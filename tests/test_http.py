@@ -216,3 +216,15 @@ def test_tls_hint_finds_a_wrapped_certificate_error() -> None:
     outer = RuntimeError("download failed")
     outer.__cause__ = inner
     assert "api.github.com" in (http.tls_hint(outer) or "")
+
+
+def test_hint_is_a_message_not_an_exception_type() -> None:
+    """SC-134-23, the contract that keeps six call sites' types intact.
+
+    StoatConnectionError sits under FerryError, not MigrationError. A single
+    new exception class would escape cli.py's four `except MigrationError`
+    handlers, or swallow gui.py's `except DiscordAuthError`.
+    """
+    key = aiohttp.client_reqrep.ConnectionKey("h", 443, True, True, None, None, None)
+    exc = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("x"))
+    assert isinstance(http.tls_hint(exc), str)

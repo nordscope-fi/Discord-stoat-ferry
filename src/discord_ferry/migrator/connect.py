@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.http import tls_hint
 from discord_ferry.errors import StoatConnectionError
 from discord_ferry.migrator.api import api_fetch_server, get_session
 
@@ -92,7 +93,9 @@ async def _discover_autumn_url(session: aiohttp.ClientSession, stoat_url: str) -
                 raise StoatConnectionError(f"Stoat API returned status {response.status} at {url}")
             data = await response.json()
     except aiohttp.ClientError as e:
-        raise StoatConnectionError(f"Cannot reach Stoat API at {url}: {e}") from e
+        raise StoatConnectionError(
+            f"Cannot reach Stoat API at {url}: {e}{tls_hint(e) or ''}"
+        ) from e
 
     try:
         autumn_url: str = data["features"]["autumn"]["url"]
@@ -147,4 +150,6 @@ async def _verify_token(session: aiohttp.ClientSession, stoat_url: str, token: s
                     f"Token verification failed with status {response.status}"
                 )
     except aiohttp.ClientError as e:
-        raise StoatConnectionError(f"Token verification request failed: {e}") from e
+        raise StoatConnectionError(
+            f"Token verification request failed: {e}{tls_hint(e) or ''}"
+        ) from e

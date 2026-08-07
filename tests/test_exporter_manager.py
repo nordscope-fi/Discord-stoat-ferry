@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import ssl
 import subprocess
 import zipfile
 from pathlib import Path
@@ -227,6 +228,41 @@ class TestDownloadDceRetry:
 
             with pytest.raises(DCENotFoundError):
                 await download_dce(events.append)
+
+    @pytest.mark.asyncio
+    async def test_certificate_error_skips_the_download_retry(self, tmp_path):
+        """SC-134-25.
+
+        The mock must raise from an awaited call that yields. A synchronously
+        raising mock inside a retry loop has produced an unbounded hang in this
+        project before.
+        """
+        from discord_ferry.errors import DCENotFoundError
+
+        events = []
+        release_url = (
+            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
+        )
+        key = aiohttp.client_reqrep.ConnectionKey(
+            "api.github.com", 443, True, True, None, None, None
+        )
+        cert_error = aiohttp.ClientConnectorCertificateError(
+            key, ssl.SSLCertVerificationError("bad")
+        )
+
+        with (
+            aioresponses() as m,
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("asyncio.sleep", new_callable=AsyncMock) as slept,
+        ):
+            m.get(release_url, exception=cert_error)
+
+            with pytest.raises(DCENotFoundError) as caught:
+                await download_dce(events.append)
+
+        assert "SSL_CERT_FILE" in str(caught.value)
+        assert slept.await_count == 0, "a certificate error must not pay the 3s retry sleep"
 
 
 # ---------------------------------------------------------------------------
