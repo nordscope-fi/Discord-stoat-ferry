@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.http import tls_hint
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import RoleMeta, load_discord_metadata
 from discord_ferry.errors import AutumnUploadError, MigrationError
@@ -399,13 +400,17 @@ async def _resolve_role_icon(
             state.native_fidelity_counts.get("role_icons", 0) + 1
         )
         return icon_id
-    except (AutumnUploadError, OSError):
+    except (AutumnUploadError, OSError) as exc:
         # Fixed template — never str(exc); the body may echo x-session-token.
+        # tls_hint is the one safe addition: it emits a host, a port and fixed
+        # text, never the exception it inspected. Without it this is the only
+        # Autumn failure that reaches the user with no cause at all.
+        hint = tls_hint(exc) or ""
         state.warnings.append(
             {
                 "phase": "roles",
                 "type": "role_icon_upload_failed",
-                "message": f"Role icon upload failed for role '{role_name}'.",
+                "message": f"Role icon upload failed for role '{role_name}'.{hint}",
             }
         )
         return None

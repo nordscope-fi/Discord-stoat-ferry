@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.13.1] - 2026-08-07
+
+### Fixed
+
+- **A certificate failure while uploading a file to Autumn gave no reason
+  (issue #137).** v2.13.0 wired actionable guidance into six error handlers,
+  but Autumn had none: `upload_to_autumn` let a `ClientConnectorCertificateError`
+  propagate unwrapped, and `structure.py`'s role-icon handler catches it as an
+  `OSError` and discards the text on purpose, so the user saw a fixed template
+  with no cause at all.
+
+  `upload_to_autumn` now converts a certificate failure into an
+  `AutumnUploadError` naming the host and `SSL_CERT_FILE`, which covers all five
+  callers at once. Every other `ClientError` is re-raised untouched, so no
+  caller's `except` clause changes what it matches. The certificate case raises
+  on the first attempt rather than paying two retry sleeps for an error no
+  retry can clear.
+
+  The role-icon handler re-derives the hint from the `__cause__` chain, since
+  it discards the message. It still never interpolates the exception: the
+  Autumn response body may echo `x-session-token`, and `tls_hint` emits only a
+  host, a port and fixed text.
+
+  Reaches anyone on a self-hosted Stoat whose Autumn file host sits behind a
+  different certificate authority than the API host.
+
 ## [2.13.0] - 2026-08-07
 
 ### Fixed

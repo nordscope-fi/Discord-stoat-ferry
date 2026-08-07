@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from discord_ferry.core.http import tls_hint
 from discord_ferry.errors import AutumnUploadError
 
 if TYPE_CHECKING:
@@ -227,6 +228,25 @@ async def upload_to_autumn(
 
                 text = await response.text()
                 raise AutumnUploadError(f"Upload failed with status {response.status}: {text}")
+        except aiohttp.ClientError as exc:
+            hint = tls_hint(exc)
+            if hint is None:
+                raise
+            # Autumn is the one host v2.13.0's error work did not reach: no caller
+            # of this function has a handler that could explain a certificate
+            # failure, and structure.py's role-icon path discards the text entirely.
+            # Converting here covers every caller at once.
+            #
+            # Interpolating `exc` is safe in THIS branch and nowhere else in this
+            # function. A connection-level aiohttp error carries a host, a port and
+            # an OpenSSL reason; the response body -- which may echo
+            # x-session-token, hence the fixed template at structure.py's catch
+            # site -- only exists once a request completed, which a certificate
+            # failure guarantees it did not.
+            #
+            # Raised rather than retried: a certificate failure cannot succeed on a
+            # second attempt, so the caller should not pay two sleeps to learn that.
+            raise AutumnUploadError(f"Upload to Autumn failed: {exc}{hint}") from exc
         finally:
             fh.close()
 
