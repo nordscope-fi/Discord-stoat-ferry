@@ -18,6 +18,7 @@ import pytest
 from yarl import URL
 
 from discord_ferry.core import http
+from discord_ferry.core.security import reset_secret_registry, sanitize_secrets
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "discord_ferry"
 
@@ -280,3 +281,77 @@ def test_strip_userinfo_leaves_a_clean_url_alone() -> None:
     stripped, header = http._strip_userinfo(URL("http://corp:8080"))
     assert stripped == URL("http://corp:8080")
     assert header is None
+
+
+def test_strip_userinfo_handles_password_only_userinfo() -> None:
+    """Killing: `or` in place of `and` in the guard.
+
+    yarl reports raw_user as None for an empty username (_parse.py:130), so an
+    `or` short-circuits on this input and returns the URL with the password
+    still in it, which is then assigned to kwargs["proxy"] and rendered by every
+    downstream exception repr. Both existing strip tests pass under that mutant:
+    the credentialed URL has neither part None, the clean URL has both.
+    """
+    stripped, header = http._strip_userinfo(URL("http://:PROXYTOKEN@corp:8080"))
+    assert "PROXYTOKEN" not in str(stripped)
+    assert stripped == URL("http://corp:8080")
+    assert header is not None
+    assert base64.b64decode(header.split()[-1]).decode() == ":PROXYTOKEN"
+
+
+def test_strip_userinfo_registers_both_credential_forms() -> None:
+    """SC-135-49. Killing: registering only the plaintext, or neither.
+
+    sanitize masks by exact substring, and the base64 form is what travels and
+    what RequestInfo.headers holds. This is the second redaction layer; without
+    it sanitize_secrets can never mask a proxy credential reaching ferry.log.
+    """
+    reset_secret_registry()
+    _, header = http._strip_userinfo(URL("http://ferryuser:SUPERSECRET@corp:8080"))
+    assert header is not None
+    masked = sanitize_secrets(f"plaintext=SUPERSECRET encoded={header}")
+    assert "SUPERSECRET" not in masked
+    assert header.split()[-1] not in masked
+
+
+def test_os_proxies_returns_what_the_platform_getter_reports() -> None:
+    """Killing: a seam that ignores the OS entirely and always returns {}.
+
+    Nothing else in the 15-task plan executes the getattr branch: every later
+    test patches the seams themselves. Without this, `_os_proxies` could be
+    `return {}` and ship, passing the whole suite while leaving "Ferry honours
+    OS proxy settings" inert on both platforms where it matters.
+
+    This is the one place patching a stdlib name is correct, because Task 1 is
+    the seam's own unit test. create=True makes it run identically on
+    ubuntu-latest, where neither getter exists.
+    """
+    with (
+        patch.object(
+            urllib.request,
+            "getproxies_macosx_sysconf",
+            lambda: {"https": "http://corp:8080"},
+            create=True,
+        ),
+        patch.object(urllib.request, "getproxies_registry", None, create=True),
+    ):
+        assert http._os_proxies() == {"https": "http://corp:8080"}
+
+
+def test_os_proxy_bypass_returns_what_the_platform_getter_reports() -> None:
+    """Killing: a seam that always returns False, which reads as 'never bypass'.
+
+    Also pins the second name in the getattr loop: the registry variant is
+    reached only when the darwin one is absent, which nothing else proves.
+    """
+    with (
+        patch.object(urllib.request, "proxy_bypass_macosx_sysconf", None, create=True),
+        patch.object(
+            urllib.request,
+            "proxy_bypass_registry",
+            lambda host: host == "internal.corp",
+            create=True,
+        ),
+    ):
+        assert http._os_proxy_bypass("internal.corp") is True
+        assert http._os_proxy_bypass("api.stoat.chat") is False

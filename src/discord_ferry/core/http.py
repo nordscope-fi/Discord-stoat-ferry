@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import ssl
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,8 @@ from aiohttp import encode_basic_auth
 # `assert type(proxy) is URL` (client_reqrep.py:888), so this module and
 # aiohttp must hold the same class object.
 from yarl import URL  # noqa: TC002
+
+from discord_ferry.core.security import register_secret
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +209,10 @@ class ProxyChoice:
     """
 
     url: URL
-    authorization: str | None
-    source: str  # "env" or "os"
+    # repr=False matches the project convention for credential-bearing fields
+    # (config.py:23, :53; core/security.py:16). base64 is not obfuscation.
+    authorization: str | None = field(repr=False)
+    source: str = ""  # "env" or "os"
 
 
 @dataclass(frozen=True)
@@ -246,13 +250,38 @@ def _os_proxy_bypass(host: str) -> bool:
 
 
 def _strip_userinfo(url: URL) -> tuple[URL, str | None]:
-    """Split credentials out of a proxy URL.
+    """Split credentials out of a proxy URL, and register both forms as secrets.
+
+    This is the ONLY place in the feature where the plaintext password and the
+    encoded header value are both in hand. resolve_proxy receives only the
+    encoded form, so if registration does not happen here it cannot happen at
+    all.
+
+    BOTH forms are registered. sanitize masks by exact substring
+    (core/security.py:52-64), and what actually travels, and what
+    RequestInfo.headers holds, is the base64 form, which
+    ClientResponseError.__repr__ renders. Registering only the plaintext is the
+    v2.12.1 shape, where the desktop app never called register_secret and tokens
+    reached ferry.log in clear text for eleven releases.
 
     Replaces aiohttp's strip_auth_from_url, which is NOT in
-    aiohttp.helpers.__all__ and is therefore a private symbol. Verified
-    equivalent across eight cases including percent-encoded `@` and `:`, a
-    non-ASCII password, password-only userinfo, and a URL carrying a path.
+    aiohttp.helpers.__all__ and is therefore a private symbol.
+
+    ONE DELIBERATE DIVERGENCE: aiohttp's path encodes with latin1
+    (helpers.py:200-201), this uses encode_basic_auth's utf-8 default
+    (helpers.py:119). For a non-ASCII password the two produce different base64.
+    utf-8 is the better default (latin1 raises UnicodeEncodeError outside
+    Latin-1) and encode_basic_auth is the API aiohttp's own deprecation notice
+    steers callers to, so the divergence is intended rather than accidental.
+
+    Raises ValueError when the login contains ':' (helpers.py:125-126), which a
+    %3A in userinfo decodes to. Task 2's caller guards for this and turns it
+    into a ProxyNotice.
     """
     if url.raw_user is None and url.raw_password is None:
         return url, None
-    return url.with_user(None), encode_basic_auth(url.user or "", url.password or "")
+    password = url.password or ""
+    header = encode_basic_auth(url.user or "", password)
+    register_secret("proxy_password", password)
+    register_secret("proxy_authorization", header)
+    return url.with_user(None), header
