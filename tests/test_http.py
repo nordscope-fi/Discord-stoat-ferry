@@ -346,6 +346,27 @@ def test_os_proxies_returns_what_the_platform_getter_reports() -> None:
         assert http._os_proxies() == {"https": "http://corp:8080"}
 
 
+def test_os_proxies_reaches_the_registry_getter() -> None:
+    """Killing: dropping the second name from the getattr loop.
+
+    Every other test in this file either nulls getproxies_registry or never
+    reaches it, so `for name in ("getproxies_macosx_sysconf",):` survives them
+    all. Windows is the primary platform for OS-supplied proxies and the
+    registry getter is the only way Ferry reads them, so this branch carries
+    decision 1 of the feature.
+    """
+    with (
+        patch.object(urllib.request, "getproxies_macosx_sysconf", None, create=True),
+        patch.object(
+            urllib.request,
+            "getproxies_registry",
+            lambda: {"https": "http://registry-proxy:8080"},
+            create=True,
+        ),
+    ):
+        assert http._os_proxies() == {"https": "http://registry-proxy:8080"}
+
+
 def test_os_proxy_bypass_returns_what_the_platform_getter_reports() -> None:
     """Killing: a seam that always returns False, which reads as 'never bypass'.
 
