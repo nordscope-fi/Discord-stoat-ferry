@@ -15,6 +15,7 @@ chain changes.
 from __future__ import annotations
 
 import logging
+import os
 import ssl
 import urllib.request
 from dataclasses import dataclass, field
@@ -97,21 +98,27 @@ def _get_ssl_context() -> ssl.SSLContext:
 
 
 def reset_http_state() -> None:
-    """Drop the cached context and its trust-source marker.
+    """Drop the cached context, its trust-source marker and the proxy state.
 
     Mirrors logging_setup.reset_logging and security.reset_secret_registry.
     tests/conftest.py calls this from its autouse fixture, so a test that
     exercises the fallback cannot poison the cache for the rest of the session,
     and the spy test always sees a cold cache.
 
-    Both module globals reset together: leaving _trust_source behind would let
+    Every module global resets together. Leaving _trust_source behind would let
     a test that forces the fallback branch leave "fallback" behind for every
     later test, and after a bare reset the module would claim "union" while no
-    context has been built yet.
+    context has been built yet. The same applies to the three proxy globals:
+    the scan, the per-host bypass memo and the notices are all derived from one
+    environment reading, so clearing a subset leaves the module answering from
+    two different worlds.
     """
-    global _ssl_context, _trust_source  # noqa: PLW0603
+    global _ssl_context, _trust_source, _proxy_scan, _proxy_notices  # noqa: PLW0603
     _ssl_context = None
     _trust_source = "unbuilt"
+    _proxy_scan = None
+    _bypass_memo.clear()
+    _proxy_notices = ()
 
 
 def describe_trust() -> dict[str, str]:
@@ -229,6 +236,15 @@ class ProxyNotice:
     outcome: str  # what Ferry did instead, e.g. "used the OS proxy", "connected direct"
 
 
+# Cached because the environment and platform scan costs about 45 us per call
+# through the macOS sysconf path. Only the SCAN is cached; the per-host bypass
+# decision is memoised separately and keyed by (host, source), because the
+# answer differs by proxy source.
+_proxy_scan: tuple[dict[str, str], dict[str, str]] | None = None
+_bypass_memo: dict[tuple[str, str], bool] = {}
+_proxy_notices: tuple[ProxyNotice, ...] = ()
+
+
 def _os_proxies() -> dict[str, str]:
     """The OS proxy map, or {} where no platform getter exists.
 
@@ -289,3 +305,100 @@ def _strip_userinfo(url: URL) -> tuple[URL, str | None]:
     register_secret("proxy_password", password)
     register_secret("proxy_authorization", header)
     return url.with_user(None), header
+
+
+def _suppressed_schemes() -> set[str]:
+    """Schemes turned off by an empty `<scheme>_proxy`.
+
+    Uses the stdlib's own condition (urllib/request.py:2536-2554). A k.islower()
+    test would be wrong twice: it misses HTTPS_proxy="", which stdlib does pop,
+    and on Windows os.environ upper-cases every key, making the rule inert on
+    the one platform where the OS half has content to suppress.
+    """
+    out: set[str] = set()
+    for key, value in os.environ.items():
+        if len(key) > 6 and key[-6:].lower() == "_proxy" and not value:
+            out.add(key[:-6].lower())
+    if "REQUEST_METHOD" in os.environ:
+        # CVE-2016-1000110: stdlib pops 'http' in a CGI context. Under the merge
+        # a popped scheme becomes indistinguishable from an unmentioned one and
+        # the OS half would restore it, reversing the behaviour Ferry inherits.
+        out.add("http")
+    return out
+
+
+def _scheme_map() -> tuple[dict[str, str], dict[str, str]]:
+    """Return (env_proxies, os_proxies), merged per scheme, cached.
+
+    NEVER urllib.request.getproxies(): it is
+    `getproxies_environment() or getproxies_<os>()`, so any single *_proxy
+    variable short-circuits the OS half. Measured: NO_PROXY=localhost alone
+    yields {'no': 'localhost'} and a registry proxy is never seen.
+    """
+    global _proxy_scan  # noqa: PLW0603
+    if _proxy_scan is None:
+        suppressed = _suppressed_schemes()
+        env = {
+            k: v for k, v in urllib.request.getproxies_environment().items() if k not in suppressed
+        }
+        os_side = {k: v for k, v in _os_proxies().items() if k not in suppressed and k not in env}
+        _proxy_scan = (env, os_side)
+    return _proxy_scan
+
+
+def _is_bypassed(host: str, source: str, env: dict[str, str]) -> bool:
+    """The two bypass lists UNION, they do not alternate.
+
+    Alternation discards an explicitly-set NO_PROXY whenever the proxy came
+    from the OS, so a user exempting their self-hosted Stoat has that traffic
+    proxied anyway. proxy_bypass_environment is safe to call unconditionally:
+    it returns False when the 'no' key is absent (urllib/request.py:2567-2570).
+
+    Memoised by (host, source), and MISSES are memoised too, or every request to
+    a bypassed host pays the syscall.
+    """
+    key = (host, source)
+    if key not in _bypass_memo:
+        # Silenced for typing only: typeshed does not stub
+        # proxy_bypass_environment. Neither it nor getproxies_environment is in
+        # urllib.request.__all__ and the stubs happen to cover only the second.
+        # CPython defines both at module level on every platform (verified at
+        # urllib/request.py:2557 on 3.12.12), unlike the platform getters
+        # _os_proxies reaches by getattr, so no fallback is needed here.
+        _bypass_memo[key] = bool(
+            urllib.request.proxy_bypass_environment(host, env)  # type: ignore[attr-defined]
+        ) or (source == "os" and _os_proxy_bypass(host))
+    return _bypass_memo[key]
+
+
+def resolve_proxy(url: str | URL) -> ProxyChoice | None:
+    """The proxy for `url`, or None. NEVER raises: this runs inside
+    ClientRequest.__init__, so a raise kills the first request of a migration.
+    """
+    if os.environ.get("FERRY_DISABLE_PROXY"):
+        return None
+    try:
+        target = URL(url) if isinstance(url, str) else url
+    except (ValueError, TypeError):
+        return None
+
+    env, os_side = _scheme_map()
+    scheme = target.scheme
+    if scheme in env:
+        raw, source = env[scheme], "env"
+    elif scheme in os_side:
+        raw, source = os_side[scheme], "os"
+    else:
+        return None
+
+    try:
+        parsed = URL(raw)
+        if parsed.scheme.startswith("socks"):
+            return None
+        stripped, authorization = _strip_userinfo(parsed)
+    except (ValueError, TypeError):
+        return None
+
+    if _is_bypassed(target.host or "", source, env):
+        return None
+    return ProxyChoice(url=stripped, authorization=authorization, source=source)

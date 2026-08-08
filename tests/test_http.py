@@ -420,3 +420,244 @@ def test_os_proxy_bypass_reaches_the_darwin_getter() -> None:
     ):
         assert http._os_proxy_bypass("internal.corp") is True
         assert http._os_proxy_bypass("api.stoat.chat") is False
+
+
+# --- Resolution, the merge and the bypass union (Task 2) ---------------------
+
+CORP = {"https": "http://corp:8080", "http": "http://corp:8080"}
+TARGET = "https://api.stoat.chat/x"
+
+
+def test_unrelated_proxy_variable_does_not_mask_os_discovery(proxy_env, os_proxy) -> None:
+    """SC-135-03. Killing: calling urllib.request.getproxies(), which is
+    `getproxies_environment() or getproxies_<os>()`. {'no': 'localhost'} is
+    truthy, so the OS half is skipped and the user gets no proxy AND no message."""
+    with os_proxy(CORP), proxy_env(NO_PROXY="localhost"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert str(choice.url) == "http://corp:8080"
+    assert choice.source == "os"
+
+
+def test_environment_wins_for_a_scheme_it_defines(proxy_env, os_proxy) -> None:
+    """SC-135-04. Killing: 'ignore getproxies_environment entirely'. The test
+    above stays green against that mutant, which is why both exist."""
+    with os_proxy(CORP), proxy_env(HTTPS_PROXY="http://env:3128"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert str(choice.url) == "http://env:3128"
+    assert choice.source == "env"
+
+
+def test_no_proxy_is_honoured_when_the_proxy_came_from_the_os(proxy_env, os_proxy) -> None:
+    """SC-135-05, the round-5 Critical. Killing: routing the two bypass lists as
+    if/else instead of a union, which discards an explicitly-set NO_PROXY
+    whenever the proxy came from the OS. Linux never takes the OS branch and CI
+    runs Linux only, so nothing else can see this."""
+    with os_proxy(CORP, bypass=set()), proxy_env(NO_PROXY="api.stoat.chat"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_os_bypass_list_is_still_consulted(proxy_env, os_proxy) -> None:
+    """SC-135-07. Killing: `bypassed = proxy_bypass_environment(...)` alone.
+    The two tests above call _os_proxy_bypass against an empty set, where False
+    is indistinguishable from never calling it, so this is what proves the call."""
+    with os_proxy(CORP, bypass={"api.stoat.chat"}), proxy_env():
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_a_host_on_neither_list_is_still_proxied(proxy_env, os_proxy) -> None:
+    """SC-135-08. Killing: an over-eager bypass that disables the feature."""
+    with os_proxy(CORP, bypass=set()), proxy_env():
+        assert http.resolve_proxy(TARGET) is not None
+
+
+def test_no_proxy_still_exempts_an_env_supplied_proxy(proxy_env, os_proxy) -> None:
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="api.stoat.chat"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_emptied_scheme_stays_off(proxy_env, os_proxy) -> None:
+    """SC-135-16. Killing: a merge that treats 'emptied' as 'unmentioned' and
+    lets the OS half restore it, making the documented off switch do nothing."""
+    with os_proxy(CORP), proxy_env(https_proxy=""):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_mixed_case_emptied_scheme_also_suppresses(proxy_env, os_proxy) -> None:
+    """SC-135-17. Killing: a k.islower() scan condition, which misses this and is
+    inert on Windows, where os.environ upper-cases every key."""
+    with os_proxy(CORP), proxy_env(HTTPS_proxy=""):
+        assert http.resolve_proxy(TARGET) is None
+
+
+@pytest.mark.parametrize("bad", ["http://host:notaport", "http://[::1"])
+def test_a_malformed_proxy_never_raises(proxy_env, os_proxy, bad: str) -> None:
+    """SC-135-22. Killing: an unguarded parse. Resolution runs inside
+    ClientRequest.__init__, so a raise kills the first request of a migration
+    from inside the constructor. Both of these raise ValueError in yarl."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY=bad):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_reset_clears_the_scan_the_memo_and_the_notices(proxy_env, os_proxy) -> None:
+    """SC-135-13. Killing: a reset that clears half its state. That exact defect
+    shipped into the v2.13.0 plan when a str.replace anchor silently no-opped."""
+    with os_proxy(CORP), proxy_env():
+        http.resolve_proxy(TARGET)
+    assert http._proxy_scan is not None or http._bypass_memo
+    http.reset_http_state()
+    assert http._proxy_scan is None
+    assert http._bypass_memo == {}
+    assert http._proxy_notices == ()
+
+
+# The nine tests below are not in the task brief. Each closes a branch of
+# resolve_proxy, _scheme_map, _is_bypassed or _suppressed_schemes that the ten
+# above leave unexecuted or unpinned, found by enumerating the decisions in the
+# source rather than by reading the brief back. Every one was confirmed red
+# against a mutant of the exact line it claims to cover.
+
+
+@pytest.mark.parametrize(
+    ("env_value", "os_map"),
+    [("socks5://sock:1080", {}), (None, {"https": "socks4://sock:1080"})],
+)
+def test_a_socks_proxy_resolves_to_none(proxy_env, os_proxy, env_value, os_map) -> None:
+    """Killing: deleting the socks guard from resolve_proxy.
+
+    Nothing else in the plan pins it. Task 5's socks tests assert on
+    proxy_notices() only, and a notice does not stop the URL being handed to
+    aiohttp, whose update_proxy raises ValueError for any scheme but http
+    (client_reqrep.py). resolve_proxy runs inside ClientRequest.__init__, so
+    that raise kills the first request of the migration.
+
+    Both halves matter: the OS case also kills a guard keyed off the dict name
+    rather than the parsed scheme, which is the shape getproxies_registry
+    produces on Windows.
+    """
+    pairs = {"HTTPS_PROXY": env_value} if env_value else {}
+    with os_proxy(os_map), proxy_env(**pairs):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_the_scan_is_cached_and_reset_makes_it_cold(proxy_env) -> None:
+    """Killing: a _scheme_map that rebuilds per call and never sets _proxy_scan.
+
+    test_reset_clears_the_scan_the_memo_and_the_notices cannot fail against that
+    mutant: its first assertion is a disjunction the memo half satisfies alone,
+    and its second is trivially true when nothing was ever cached. So this is the
+    only test that proves the scan half of the cache exists at all.
+
+    Patches the seams directly rather than through os_proxy, because it needs the
+    call count.
+    """
+    http.reset_http_state()
+    with (
+        proxy_env(),
+        patch("discord_ferry.core.http._os_proxies", return_value=dict(CORP)) as scan_spy,
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False),
+    ):
+        assert http.resolve_proxy(TARGET) is not None
+        assert http._proxy_scan is not None
+        assert http.resolve_proxy("https://other.invalid/y") is not None
+        assert scan_spy.call_count == 1
+
+
+def test_the_bypass_decision_is_memoised_including_misses(proxy_env) -> None:
+    """Killing: dropping the memo, or memoising only the True answers.
+
+    A miss that is not stored pays the OS syscall on every request to a host
+    Ferry does proxy, which is the common case rather than the rare one. Also
+    pins the key shape: (host, source), not host alone, because the answer
+    differs by source.
+    """
+    http.reset_http_state()
+    with (
+        proxy_env(),
+        patch("discord_ferry.core.http._os_proxies", return_value=dict(CORP)),
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False) as bypass_spy,
+    ):
+        assert http.resolve_proxy(TARGET) is not None
+        assert http.resolve_proxy(TARGET) is not None
+        assert bypass_spy.call_count == 1
+    assert http._bypass_memo == {("api.stoat.chat", "os"): False}
+
+
+def test_the_os_bypass_list_does_not_veto_an_env_supplied_proxy(proxy_env, os_proxy) -> None:
+    """Killing: dropping the `source == "os"` guard from the union.
+
+    A plain `a or b` reads like a simplification and passes every other test
+    here, because they never combine an env-supplied proxy with a non-empty OS
+    bypass list. It would let a machine-wide exception list veto a proxy the user
+    set explicitly for this process, which is the opposite of the precedence the
+    merge applies everywhere else.
+    """
+    with os_proxy(CORP, bypass={"api.stoat.chat"}), proxy_env(HTTPS_PROXY="http://env:3128"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert choice.source == "env"
+
+
+def test_a_url_object_target_resolves_like_its_string(proxy_env, os_proxy) -> None:
+    """The URL half of `url: str | URL`, unexecuted by every test above.
+
+    Task 3's _FerryRequest passes the URL object form (args[1] is a yarl.URL),
+    so this is the branch production takes, not the string one.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128"):
+        choice = http.resolve_proxy(URL(TARGET))
+    assert choice is not None
+    assert str(choice.url) == "http://env:3128"
+
+
+def test_a_colon_in_the_proxy_login_never_raises(proxy_env, os_proxy) -> None:
+    """The second half of the never-raise contract, and the one the brief names.
+
+    _strip_userinfo raises ValueError when the login contains ':' (aiohttp
+    helpers.py:125-126, RFC 7617), and a %3A in userinfo decodes to exactly that:
+    yarl reports raw_user='user%3Aname' and user='user:name'. The malformed-proxy
+    test cannot reach it, because its inputs die in URL(raw) one line earlier. A
+    try narrowed to the parse alone therefore passes the whole suite and raises
+    out of ClientRequest.__init__ on the first request of the migration.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://user%3Aname:pw@corp:8080"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_a_malformed_target_never_raises(proxy_env, os_proxy) -> None:
+    """The target parse, the other guarded parse in resolve_proxy.
+
+    Distinct from test_a_malformed_proxy_never_raises, which feeds a bad PROXY
+    url and never executes this guard. Same yarl ValueError, different line.
+    """
+    with os_proxy(CORP), proxy_env():
+        assert http.resolve_proxy("http://[::1") is None
+
+
+def test_the_scheme_map_merges_per_scheme(proxy_env, os_proxy) -> None:
+    """`k not in env` on the OS half, which nothing else can observe.
+
+    resolve_proxy consults env first, so a duplicated https entry in the OS half
+    changes no resolution and every test above stays green. It is visible only
+    here, and it matters to Task 5, whose notice loop walks both dicts and would
+    report the same scheme twice.
+    """
+    with os_proxy(CORP), proxy_env(HTTPS_PROXY="http://env:3128"):
+        env, os_side = http._scheme_map()
+    assert env == {"https": "http://env:3128"}
+    assert os_side == {"http": "http://corp:8080"}
+
+
+def test_a_cgi_environment_keeps_the_http_scheme_suppressed(proxy_env, os_proxy) -> None:
+    """CVE-2016-1000110, the branch of _suppressed_schemes nothing else enters.
+
+    getproxies_environment pops 'http' when REQUEST_METHOD is set, because a
+    remote client controls the Proxy header. Under the merge that pop is
+    indistinguishable from the scheme never being mentioned, so without the
+    REQUEST_METHOD clause the OS half puts the proxy straight back and Ferry
+    reverses a stdlib mitigation it silently inherits everywhere else.
+    """
+    with os_proxy(CORP), proxy_env(REQUEST_METHOD="GET"):
+        assert http.resolve_proxy("http://plain.invalid/x") is None
+        assert http.resolve_proxy(TARGET) is not None

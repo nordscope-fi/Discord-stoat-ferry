@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import inspect
+import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from aiohttp.client_reqrep import ClientResponse
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+    from contextlib import AbstractContextManager
 
 from discord_ferry.core import logging_setup
 from discord_ferry.core.http import reset_http_state
@@ -56,6 +59,47 @@ pytest_plugins = ["nicegui.testing.user_plugin"]
 def fixtures_dir() -> Path:
     """Return the path to the test fixtures directory."""
     return FIXTURES_DIR
+
+
+@pytest.fixture
+def proxy_env() -> Callable[..., AbstractContextManager[None]]:
+    """Clear every *_proxy variable, then apply the given ones.
+
+    The autouse fixture does not neutralise these, so without this a developer
+    behind a proxy gets different results from CI.
+    """
+
+    @contextmanager
+    def _apply(**pairs: str) -> Iterator[None]:
+        saved = dict(os.environ)
+        for k in list(os.environ):
+            if k.lower().endswith("_proxy"):
+                os.environ.pop(k)
+        os.environ.update(pairs)
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    return _apply
+
+
+@pytest.fixture
+def os_proxy() -> Callable[..., AbstractContextManager[None]]:
+    """Patch BOTH seams. Never patches a stdlib name: getproxies_registry does
+    not exist on ubuntu-latest, where CI runs."""
+
+    @contextmanager
+    def _apply(proxies: dict[str, str], bypass: set[str] | None = None) -> Iterator[None]:
+        hosts = bypass or set()
+        with (
+            patch("discord_ferry.core.http._os_proxies", return_value=dict(proxies)),
+            patch("discord_ferry.core.http._os_proxy_bypass", side_effect=lambda h: h in hosts),
+        ):
+            yield
+
+    return _apply
 
 
 @pytest.fixture(autouse=True)
