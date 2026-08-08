@@ -16,11 +16,20 @@ from __future__ import annotations
 
 import logging
 import ssl
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 import certifi
+from aiohttp import encode_basic_auth
+
+# A runtime import, not a TYPE_CHECKING one. ProxyChoice.url has to stay
+# resolvable by typing.get_type_hints, and aiohttp checks a proxy with
+# `assert type(proxy) is URL` (client_reqrep.py:888), so this module and
+# aiohttp must hold the same class object.
+from yarl import URL  # noqa: TC002
 
 logger = logging.getLogger(__name__)
 
@@ -177,3 +186,73 @@ def tls_hint(exc: BaseException) -> str | None:
             )
         current = current.__cause__ or current.__context__
     return None
+
+
+# ---------------------------------------------------------------------------
+# Proxy support (issue #135)
+#
+# A proxy is part of how an outbound session reaches the network, so it lives
+# beside the trust policy rather than in a module of its own.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProxyChoice:
+    """A resolved proxy. The password is NEVER stored as its own attribute.
+
+    Only the pre-encoded Proxy-Authorization value is kept, so no field exists
+    that could be interpolated into a message in plaintext. `url` is a yarl.URL
+    because ClientRequest.__init__ asserts `type(proxy) is URL`
+    (client_reqrep.py:887-888).
+    """
+
+    url: URL
+    authorization: str | None
+    source: str  # "env" or "os"
+
+
+@dataclass(frozen=True)
+class ProxyNotice:
+    """A proxy configuration Ferry found but cannot use."""
+
+    kind: str  # stable identifier, e.g. "all_proxy_only", "socks", "malformed"
+    scheme: str
+    display: str  # redacted, never carries userinfo
+    outcome: str  # what Ferry did instead, e.g. "used the OS proxy", "connected direct"
+
+
+def _os_proxies() -> dict[str, str]:
+    """The OS proxy map, or {} where no platform getter exists.
+
+    getproxies_macosx_sysconf is defined only under `if sys.platform == 'darwin'`
+    and getproxies_registry only under `elif os.name == 'nt'`; the else branch at
+    urllib/request.py:2808-2811 defines neither. Resolving with getattr is what
+    lets this module import on Linux, and it is the seam every test patches.
+    """
+    for name in ("getproxies_macosx_sysconf", "getproxies_registry"):
+        fn = getattr(urllib.request, name, None)
+        if fn is not None:
+            return dict(fn())
+    return {}
+
+
+def _os_proxy_bypass(host: str) -> bool:
+    """The OS bypass list (Windows ProxyOverride, macOS ExceptionsList), or False."""
+    for name in ("proxy_bypass_macosx_sysconf", "proxy_bypass_registry"):
+        fn = getattr(urllib.request, name, None)
+        if fn is not None:
+            return bool(fn(host))
+    return False
+
+
+def _strip_userinfo(url: URL) -> tuple[URL, str | None]:
+    """Split credentials out of a proxy URL.
+
+    Replaces aiohttp's strip_auth_from_url, which is NOT in
+    aiohttp.helpers.__all__ and is therefore a private symbol. Verified
+    equivalent across eight cases including percent-encoded `@` and `:`, a
+    non-ASCII password, password-only userinfo, and a URL carrying a path.
+    """
+    if url.raw_user is None and url.raw_password is None:
+        return url, None
+    return url.with_user(None), encode_basic_auth(url.user or "", url.password or "")

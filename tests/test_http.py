@@ -1,14 +1,21 @@
-"""Trust policy for every outbound HTTPS call (issue #134)."""
+"""Trust policy for every outbound HTTPS call (issue #134).
+
+Proxy support (issue #135) lands in the same module, because a proxy is part of
+how an outbound session reaches the network.
+"""
 
 from __future__ import annotations
 
+import base64
 import ssl
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
 import aiohttp
 import certifi
 import pytest
+from yarl import URL
 
 from discord_ferry.core import http
 
@@ -234,3 +241,42 @@ def test_hint_is_a_message_not_an_exception_type() -> None:
     key = aiohttp.client_reqrep.ConnectionKey("h", 443, True, True, None, None, None)
     exc = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("x"))
     assert isinstance(http.tls_hint(exc), str)
+
+
+# ---------------------------------------------------------------------------
+# Proxy support (issue #135)
+# ---------------------------------------------------------------------------
+
+
+def test_os_seams_never_raise_on_any_platform() -> None:
+    """SC-135-02 support. The seams must work on Linux, where neither getter exists."""
+    assert isinstance(http._os_proxies(), dict)
+    assert isinstance(http._os_proxy_bypass("example.com"), bool)
+
+
+def test_os_seams_fall_through_when_no_getter_exists() -> None:
+    """The Linux path. A direct stdlib call would raise AttributeError here."""
+    with (
+        patch.object(urllib.request, "getproxies_macosx_sysconf", None, create=True),
+        patch.object(urllib.request, "getproxies_registry", None, create=True),
+        patch.object(urllib.request, "proxy_bypass_macosx_sysconf", None, create=True),
+        patch.object(urllib.request, "proxy_bypass_registry", None, create=True),
+    ):
+        assert http._os_proxies() == {}
+        assert http._os_proxy_bypass("example.com") is False
+
+
+def test_strip_userinfo_removes_credentials_and_keeps_them() -> None:
+    """SC-135-46. Killing: passing the URL through unstripped, which authenticates
+    correctly and is therefore the tempting implementation."""
+    stripped, header = http._strip_userinfo(URL("http://ferryuser:SUPERSECRET@corp:8080"))
+    assert "SUPERSECRET" not in str(stripped)
+    assert stripped == URL("http://corp:8080")
+    assert header is not None and header.startswith("Basic ")
+    assert base64.b64decode(header.split()[-1]).decode() == "ferryuser:SUPERSECRET"
+
+
+def test_strip_userinfo_leaves_a_clean_url_alone() -> None:
+    stripped, header = http._strip_userinfo(URL("http://corp:8080"))
+    assert stripped == URL("http://corp:8080")
+    assert header is None
