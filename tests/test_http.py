@@ -299,6 +299,22 @@ def test_strip_userinfo_handles_password_only_userinfo() -> None:
     assert base64.b64decode(header.split()[-1]).decode() == ":PROXYTOKEN"
 
 
+def test_strip_userinfo_handles_user_only_userinfo() -> None:
+    """Killing: dropping the `or ""` from `password = url.password or ""`.
+
+    The mirror of the password-only case, and the only one of the two that no
+    test supplied an input for. yarl reports password as None for
+    `http://ferryuser@corp:8080`, and encode_basic_auth interpolates with an
+    f-string (helpers.py:127), so the mutant does not raise. It builds
+    `ferryuser:None` and sends that to the proxy as a real credential, which
+    fails authentication with a header Ferry believes it got right.
+    """
+    stripped, header = http._strip_userinfo(URL("http://ferryuser@corp:8080"))
+    assert stripped == URL("http://corp:8080")
+    assert header is not None
+    assert base64.b64decode(header.split()[-1]).decode() == "ferryuser:"
+
+
 def test_strip_userinfo_registers_both_credential_forms() -> None:
     """SC-135-49. Killing: registering only the plaintext, or neither.
 
@@ -381,6 +397,26 @@ def test_os_proxy_bypass_returns_what_the_platform_getter_reports() -> None:
             lambda host: host == "internal.corp",
             create=True,
         ),
+    ):
+        assert http._os_proxy_bypass("internal.corp") is True
+        assert http._os_proxy_bypass("api.stoat.chat") is False
+
+
+def test_os_proxy_bypass_reaches_the_darwin_getter() -> None:
+    """Killing: a darwin branch that ignores its argument or returns a constant.
+
+    The fourth of four loop-name combinations. Without it, that branch is
+    exercised only by the type-only smoke test, which asserts isinstance(bool)
+    and therefore cannot fail against a constant.
+    """
+    with (
+        patch.object(
+            urllib.request,
+            "proxy_bypass_macosx_sysconf",
+            lambda host: host == "internal.corp",
+            create=True,
+        ),
+        patch.object(urllib.request, "proxy_bypass_registry", None, create=True),
     ):
         assert http._os_proxy_bypass("internal.corp") is True
         assert http._os_proxy_bypass("api.stoat.chat") is False
