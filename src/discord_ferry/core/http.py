@@ -212,7 +212,11 @@ class ProxyChoice:
     # repr=False matches the project convention for credential-bearing fields
     # (config.py:23, :53; core/security.py:16). base64 is not obfuscation.
     authorization: str | None = field(repr=False)
-    source: str = ""  # "env" or "os"
+    # No default. field(repr=False) supplies none, so `authorization` stays
+    # required and `source` needs none either. A default would let
+    # ProxyChoice(url, header) build with an empty source, and Task 2's bypass
+    # union branches on source == "os".
+    source: str  # "env" or "os"
 
 
 @dataclass(frozen=True)

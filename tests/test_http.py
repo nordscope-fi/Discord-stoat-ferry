@@ -314,6 +314,14 @@ def test_strip_userinfo_registers_both_credential_forms() -> None:
     assert header.split()[-1] not in masked
 
 
+def test_proxy_choice_requires_a_source() -> None:
+    """Killing: a default on `source`. Task 2's bypass union branches on
+    source == "os", so a ProxyChoice built without one silently takes the
+    env-only path and drops the OS bypass list."""
+    with pytest.raises(TypeError):
+        http.ProxyChoice(URL("http://corp:8080"), None)  # type: ignore[call-arg]
+
+
 def test_os_proxies_returns_what_the_platform_getter_reports() -> None:
     """Killing: a seam that ignores the OS entirely and always returns {}.
 
