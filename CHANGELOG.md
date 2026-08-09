@@ -15,8 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   them. On Windows and macOS, when those variables are unset, Ferry falls back to the operating
   system's own proxy configuration (the registry on Windows, the system configuration on macOS),
   so a proxy set only in system settings still applies. The two sources merge per scheme rather
-  than one short-circuiting the other, and their bypass lists union: a host exempted by either
-  `NO_PROXY` or the system's own exception list is exempted.
+  than one short-circuiting the other. `NO_PROXY` always exempts a host. The system's own
+  exception list is honoured as well, for a proxy the system supplied, which is how `curl`
+  behaves: a proxy you set yourself in the environment is not filtered by the machine's list.
 
   Resolution installs through a `ClientRequest` subclass in `core/http.py`, the same session
   factory every outbound call already goes through for the v2.13.0 TLS trust policy. A proxy that

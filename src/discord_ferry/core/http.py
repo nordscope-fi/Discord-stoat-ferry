@@ -523,7 +523,14 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
                 # Name the schemes, never a single source. The source is
                 # per-scheme: HTTP_PROXY in the environment with https from the
                 # OS would make any one-word answer wrong for one of them.
-                # `ferry tls-check` reports the source per scheme (Task 11).
+                #
+                # This comment used to hand off to `ferry tls-check` as
+                # reporting the source PER SCHEME. It does not. describe_proxy
+                # writes one `proxy-source` key inside its scheme loop, so on a
+                # mixed configuration the last scheme to resolve wins. Corrected
+                # at the final review; the handoff promise is dropped rather
+                # than the diagnostic widened, because release.yml asserts on
+                # the single key name.
                 outcome=(
                     f"Used the proxy configured for {', '.join(covered)} instead."
                     if covered
@@ -783,17 +790,31 @@ class _FerryRequest(aiohttp.ClientRequest):
         request of a migration from inside ClientRequest.__init__.
 
         `resolve_proxy`'s own guards catch ValueError and TypeError, which is
-        not enough. `_is_bypassed` reaches `proxy_bypass_registry`, which hands
-        registry-controlled data to `_proxy_bypass_winreg_override`, where
-        `re.match(test, host)` raises `re.error` on a ProxyOverride entry
-        containing a regex metacharacter. Measured: `re.error` subclasses
-        Exception directly, not ValueError or TypeError, so it escapes both
-        guards. The affected population is Windows corporate machines, which is
-        this feature's entire audience and where issue #134 came from.
+        not enough, because `_is_bypassed` and `_scheme_map` reach platform code
+        Ferry does not control.
+
+        An earlier version of this docstring justified the boundary with a
+        specific mechanism: that `_proxy_bypass_winreg_override` calls
+        `re.match(test, host)` and so raises `re.error` on a ProxyOverride entry
+        holding a regex metacharacter. That is wrong on every Python Ferry
+        supports. CPython 3.11 and 3.12 both use `fnmatch(host, test)` there, and
+        `fnmatch.translate` escapes an unterminated `[` rather than raising. The
+        `re.match` form lives in `requests`, not the standard library. Corrected
+        at the final review of this branch.
+
+        The boundary stays, as defense in depth over that platform code. One
+        unguarded path is still real on 3.12: `_proxy_bypass_macosx_sysconf`
+        indexes `proxy_settings['exclude_simple']` without a guard, which raises
+        `KeyError`, and `KeyError` subclasses Exception directly rather than
+        ValueError or TypeError.
         """
         if url is None:
             return None
         try:
+            # `url` is typed `object` because it arrives through **kwargs, and the
+            # `is None` check above is the only narrowing available without
+            # re-parsing. resolve_proxy accepts `str | URL` and guards its own
+            # parse, so a wrong type becomes None rather than a raise.
             return resolve_proxy(url)  # type: ignore[arg-type]
         except Exception:  # noqa: BLE001
             logger.warning(

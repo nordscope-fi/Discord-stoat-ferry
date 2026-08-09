@@ -24,7 +24,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiohttp>=3.9",
+    "aiohttp>=3.14",  # encode_basic_auth landed in 3.14.0; core/http.py imports it
     "certifi>=2024.0",
     "click>=8.0",
     "ijson>=3.0",
