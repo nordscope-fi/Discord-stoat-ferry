@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
+import re
 import ssl
 import urllib.request
 from pathlib import Path
@@ -754,7 +756,7 @@ async def test_a_callers_explicit_proxy_wins(proxy_env, os_proxy) -> None:
 
 
 async def test_the_url_can_arrive_as_a_keyword(proxy_env, os_proxy) -> None:
-    """The `kwargs.get("url")` half of the url lookup.
+    """The `"url" in kwargs` half of the url lookup.
 
     aiohttp passes method and url positionally (client.py:780-782), so the
     positional half is the one production takes and this is the only test that
@@ -767,16 +769,63 @@ async def test_the_url_can_arrive_as_a_keyword(proxy_env, os_proxy) -> None:
 
 
 async def test_a_missing_url_raises_type_error_not_index_error(proxy_env, os_proxy) -> None:
-    """The two guards that keep a malformed call aiohttp's problem, not Ferry's.
+    """The `len(args) > 1` guard: a malformed call stays aiohttp's problem.
 
-    Killing two mutants at once. A bare `args[1]` raises IndexError from Ferry's
-    own frame before super() ever runs, and dropping `if url is not None` calls
-    resolve_proxy(None), which reaches `target.scheme` and raises AttributeError
-    despite that function's "never raises" contract. Neither is a TypeError, so
-    either one turns this red.
+    Killing: a bare `args[1]`, which raises IndexError from Ferry's own frame
+    before super() ever runs, so the caller is told the wrong thing about their
+    own mistake. IndexError is not a TypeError, so that turns this red.
+
+    It does NOT cover `_resolve_or_direct`'s `if url is None` guard. That guard
+    stopped being observable here the moment the resolver call was wrapped in
+    `except Exception`: without it, resolve_proxy(None) raises AttributeError,
+    the wrapper swallows it, and this test still sees its TypeError. The test
+    below is what pins that guard.
     """
     with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"), pytest.raises(TypeError):
         http._FerryRequest("GET", loop=asyncio.get_running_loop())
+
+
+async def test_a_missing_url_never_reaches_the_resolver(proxy_env, os_proxy) -> None:
+    """`_resolve_or_direct`'s `if url is None: return None`.
+
+    Killing: dropping that guard. The visible cost is no longer an exception,
+    because `except Exception` catches the AttributeError resolve_proxy(None)
+    raises; it is a warning logged with a full traceback on a request that never
+    had a url to resolve. Asserting the resolver is not called pins the guard
+    itself rather than one of its downstream symptoms.
+    """
+    with (
+        os_proxy({}),
+        proxy_env(HTTPS_PROXY="http://corp:8080"),
+        patch("discord_ferry.core.http.resolve_proxy") as resolver,
+        pytest.raises(TypeError),
+    ):
+        http._FerryRequest("GET", loop=asyncio.get_running_loop())
+    resolver.assert_not_called()
+
+
+async def test_a_raising_resolver_connects_direct(proxy_env, os_proxy, caplog) -> None:
+    """SC-135 constraint 12, meant totally. Killing: narrowing the wrapper to
+    `except (ValueError, TypeError)`.
+
+    re.error is the concrete case. `_is_bypassed` reaches proxy_bypass_registry,
+    which hands a registry-controlled ProxyOverride entry to
+    `_proxy_bypass_winreg_override`, and `re.match(test, host)` raises re.error
+    on an entry like `internal[`. re.error subclasses Exception directly, so it
+    escapes resolve_proxy's own ValueError/TypeError guards and would kill the
+    first request of a migration from inside ClientRequest.__init__ on exactly
+    the Windows corporate machines this feature exists for.
+    """
+    boom = re.error("unterminated character set at position 8")
+    with (
+        os_proxy({}),
+        proxy_env(HTTPS_PROXY="http://corp:8080"),
+        patch("discord_ferry.core.http.resolve_proxy", side_effect=boom),
+        caplog.at_level(logging.WARNING, logger="discord_ferry.core.http"),
+    ):
+        req = http._FerryRequest("GET", URL(TARGET), loop=asyncio.get_running_loop())
+    assert req.proxy is None
+    assert "connecting direct" in caplog.text
 
 
 async def test_no_configured_proxy_leaves_the_request_direct(proxy_env, os_proxy) -> None:
@@ -829,32 +878,58 @@ async def test_a_callers_proxy_headers_are_merged_not_clobbered(proxy_env, os_pr
     assert "Proxy-Authorization" in req.proxy_headers
 
 
-async def test_a_callers_own_proxy_authorization_is_not_overwritten(proxy_env, os_proxy) -> None:
-    """setdefault, not assignment. Killing: `merged["Proxy-Authorization"] = ...`,
-    which overrides a credential the caller chose deliberately.
+async def test_a_proxy_without_a_credential_sets_no_proxy_headers(proxy_env, os_proxy) -> None:
+    """Killing: deleting the `if choice.authorization is not None:` guard.
 
-    The getall() count matters as much as the value: proxy_headers becomes a
-    CIMultiDict (client_reqrep.py:1342-1345), which happily holds two values for
-    one case-insensitive key, and both would then travel to the proxy.
+    Dedenting the body runs `merged.setdefault("Proxy-Authorization", None)`,
+    which inserts a None VALUE rather than leaving the mapping empty.
+    connection_key then hashes (("Proxy-Authorization", None),) instead of None,
+    and a `Proxy-Authorization: None` header reaches the CONNECT request. The
+    empty-CIMultiDict mutant is invisible; this one is not.
     """
-    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"):
+        req = http._FerryRequest("GET", URL(TARGET), loop=asyncio.get_running_loop())
+    assert req.proxy == URL("http://corp:8080")
+    assert req.proxy_headers is None
+
+
+@pytest.mark.parametrize(
+    "spelling", ["Proxy-Authorization", "proxy-authorization", "PROXY-AUTHORIZATION"]
+)
+async def test_a_callers_credential_survives_in_any_case(
+    proxy_env, os_proxy, spelling: str
+) -> None:
+    """Killing: a plain `dict` for `merged`.
+
+    HTTP header names are case-insensitive. A dict's setdefault does not see a
+    differently-cased key, so it inserts a SECOND Proxy-Authorization and both
+    travel to the proxy (connector.py:606-610). The previous version of this
+    test asserted len(getall(...)) == 1 while feeding only the canonical
+    spelling, which is structurally guaranteed under a plain dict and therefore
+    could not fail.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SECRET@corp:8080"):
         req = http._FerryRequest(
             "GET",
             URL(TARGET),
-            proxy_headers={"Proxy-Authorization": "Basic Y2FsbGVyOnBhc3M="},
+            proxy_headers={spelling: "Basic Y2FsbGVy"},
             loop=asyncio.get_running_loop(),
         )
     assert req.proxy_headers is not None
-    assert req.proxy_headers["Proxy-Authorization"] == "Basic Y2FsbGVyOnBhc3M="
     assert len(req.proxy_headers.getall("Proxy-Authorization")) == 1
+    assert req.proxy_headers["Proxy-Authorization"] == "Basic Y2FsbGVy"
 
 
 async def test_one_requests_proxy_headers_do_not_leak_into_the_next(proxy_env, os_proxy) -> None:
-    """A FRESH dict per request. Killing: hoisting `merged` to a module-level
+    """A FRESH mapping per request. Killing: hoisting `merged` to a module-level
     mapping reused by every request, where the first caller's headers travel to
-    the proxy on every later request and connection_key
-    (client_reqrep.py:970-972) changes between two requests to the same host,
-    defeating connection reuse for the whole migration.
+    the proxy on every later request.
+
+    Now that `merged` is a CIMultiDict, update_proxy stores it by reference
+    (client_reqrep.py:1342-1346 only re-wraps NON-MultiDict mappings), so a
+    shared one would also collect the Host that connector.py:606-610 writes into
+    it in place, and connection_key (client_reqrep.py:970-972) would shift under
+    the pool between two requests to the same host.
     """
     with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
         loop = asyncio.get_running_loop()

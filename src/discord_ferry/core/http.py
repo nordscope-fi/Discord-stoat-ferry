@@ -26,6 +26,11 @@ import aiohttp
 import certifi
 from aiohttp import encode_basic_auth
 
+# A runtime import for the same reason as yarl below: _FerryRequest builds a
+# CIMultiDict per request, and aiohttp stores a MultiDict subclass by reference
+# rather than re-wrapping it (client_reqrep.py:1342-1346).
+from multidict import CIMultiDict  # noqa: TC002
+
 # A runtime import, not a TYPE_CHECKING one. ProxyChoice.url has to stay
 # resolvable by typing.get_type_hints, and aiohttp checks a proxy with
 # `assert type(proxy) is URL` (client_reqrep.py:888), so this module and
@@ -440,16 +445,49 @@ class _FerryRequest(aiohttp.ClientRequest):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if kwargs.get("proxy") is None:
-            url = kwargs.get("url") or (args[1] if len(args) > 1 else None)
-            choice = resolve_proxy(url) if url is not None else None
+            # `"url" in kwargs`, not `kwargs.get("url") or ...`: yarl.URL defines
+            # __bool__ (yarl/_url.py:566-567), so a falsy url= keyword would be
+            # discarded and args[1] read instead.
+            url = kwargs["url"] if "url" in kwargs else (args[1] if len(args) > 1 else None)
+            choice = self._resolve_or_direct(url)
             if choice is not None:
                 kwargs["proxy"] = choice.url
                 if choice.authorization is not None:
-                    # A FRESH dict per request. connector.py:604-606 mutates
-                    # req.proxy_headers in place, and connection_key hashes it
-                    # (client_reqrep.py:970-972), so a shared mapping would
-                    # change the pool key between requests to the same host.
-                    merged = dict(kwargs.get("proxy_headers") or {})
+                    # A FRESH mapping per request, so one caller's headers can
+                    # never leak into the next. CIMultiDict, not dict: HTTP
+                    # header names are case-insensitive, and a plain dict's
+                    # setdefault would not see a caller's `proxy-authorization`,
+                    # insert a second entry, and send TWO credentials to the
+                    # proxy (connector.py:606-610 writes both).
+                    merged: CIMultiDict[str] = CIMultiDict(kwargs.get("proxy_headers") or {})
                     merged.setdefault("Proxy-Authorization", choice.authorization)
                     kwargs["proxy_headers"] = merged
         super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _resolve_or_direct(url: object) -> ProxyChoice | None:
+        """Resolve, or fall through to a direct connection. NEVER raises.
+
+        This is the boundary where the design's "resolution never raises"
+        invariant actually has to hold, because a raise here kills the first
+        request of a migration from inside ClientRequest.__init__.
+
+        `resolve_proxy`'s own guards catch ValueError and TypeError, which is
+        not enough. `_is_bypassed` reaches `proxy_bypass_registry`, which hands
+        registry-controlled data to `_proxy_bypass_winreg_override`, where
+        `re.match(test, host)` raises `re.error` on a ProxyOverride entry
+        containing a regex metacharacter. Measured: `re.error` subclasses
+        Exception directly, not ValueError or TypeError, so it escapes both
+        guards. The affected population is Windows corporate machines, which is
+        this feature's entire audience and where issue #134 came from.
+        """
+        if url is None:
+            return None
+        try:
+            return resolve_proxy(url)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Could not resolve a proxy for this request; connecting direct.",
+                exc_info=True,
+            )
+            return None
