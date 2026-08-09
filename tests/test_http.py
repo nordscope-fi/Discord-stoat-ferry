@@ -6,6 +6,7 @@ how an outbound session reaches the network.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ssl
 import urllib.request
@@ -696,3 +697,170 @@ def test_a_cgi_environment_keeps_the_http_scheme_suppressed(proxy_env, os_proxy)
     with os_proxy(CORP), proxy_env(REQUEST_METHOD="GET"):
         assert http.resolve_proxy("http://plain.invalid/x") is None
         assert http.resolve_proxy(TARGET) is not None
+
+
+# --- The request subclass and the factory wiring (Task 3) --------------------
+#
+# Every test below that builds a _FerryRequest builds it DIRECTLY. That is not a
+# shortcut: ClientSession only reaches self._request_class at client.py:780, and
+# aioresponses replaces ClientSession._request wholesale, so under a mock the
+# class is never constructed at all. The factory-installs test is what connects
+# the two halves, and Task 4 drives the whole path over a real socket.
+
+
+async def test_the_subclass_fills_the_proxy(proxy_env, os_proxy) -> None:
+    """SC-135-09, half one. Killing: a subclass that ignores its resolver."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"):
+        req = http._FerryRequest("GET", URL(TARGET), loop=asyncio.get_running_loop())
+    assert req.proxy == URL("http://corp:8080")
+
+
+async def test_the_factory_installs_the_request_class() -> None:
+    """SC-135-10, half two. Killing: 'wrote the subclass correctly, forgot
+    request_class='. Measured: the subclass is constructed 0 times under
+    aioresponses and 1 time on a real attempt, so no mocked test can see this,
+    and the test above stays green against the mutant. Mirrors
+    test_http.py's `connector._ssl is ctx`."""
+    async with http.new_session() as session:
+        assert session._request_class is http._FerryRequest
+        assert type(session) is aiohttp.ClientSession
+
+
+async def test_a_callers_own_request_class_survives() -> None:
+    """SC-135-12. Killing: a hardcoded request_class= raising
+    'TypeError: got multiple values for keyword argument'."""
+
+    class Other(aiohttp.ClientRequest):
+        pass
+
+    async with http.new_session(request_class=Other) as session:
+        assert session._request_class is Other
+
+
+async def test_a_callers_explicit_proxy_wins(proxy_env, os_proxy) -> None:
+    """The FALSE branch of `kwargs.get("proxy") is None`.
+
+    Killing: filling the proxy in unconditionally, which would redirect a caller
+    that named a specific proxy to the ambient one and attach a credential meant
+    for a different host. proxy_headers stays None because update_proxy nulls it
+    when nothing supplied any (client_reqrep.py:1335), so this also proves no
+    header was injected.
+    """
+    caller = URL("http://caller-chose-this:9999")
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+        req = http._FerryRequest("GET", URL(TARGET), proxy=caller, loop=asyncio.get_running_loop())
+    assert req.proxy == caller
+    assert req.proxy_headers is None
+
+
+async def test_the_url_can_arrive_as_a_keyword(proxy_env, os_proxy) -> None:
+    """The `kwargs.get("url")` half of the url lookup.
+
+    aiohttp passes method and url positionally (client.py:780-782), so the
+    positional half is the one production takes and this is the only test that
+    enters the keyword half. Killing: `url = args[1]` with no kwargs lookup,
+    which silently stops proxying for any caller using keywords.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"):
+        req = http._FerryRequest(method="GET", url=URL(TARGET), loop=asyncio.get_running_loop())
+    assert req.proxy == URL("http://corp:8080")
+
+
+async def test_a_missing_url_raises_type_error_not_index_error(proxy_env, os_proxy) -> None:
+    """The two guards that keep a malformed call aiohttp's problem, not Ferry's.
+
+    Killing two mutants at once. A bare `args[1]` raises IndexError from Ferry's
+    own frame before super() ever runs, and dropping `if url is not None` calls
+    resolve_proxy(None), which reaches `target.scheme` and raises AttributeError
+    despite that function's "never raises" contract. Neither is a TypeError, so
+    either one turns this red.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"), pytest.raises(TypeError):
+        http._FerryRequest("GET", loop=asyncio.get_running_loop())
+
+
+async def test_no_configured_proxy_leaves_the_request_direct(proxy_env, os_proxy) -> None:
+    """The FALSE branch of `choice is not None`.
+
+    Killing: `kwargs["proxy"] = choice.url` outside the guard, which raises
+    AttributeError on None and would kill the first request of every migration
+    on every machine that has no proxy at all.
+    """
+    with os_proxy({}), proxy_env():
+        req = http._FerryRequest("GET", URL(TARGET), loop=asyncio.get_running_loop())
+    assert req.proxy is None
+    assert req.proxy_headers is None
+
+
+async def test_the_credential_becomes_a_proxy_authorization_header(proxy_env, os_proxy) -> None:
+    """The `choice.authorization is not None` branch.
+
+    Killing: setting the proxy and dropping the header, which reaches the user
+    as a 407 they cannot explain because the credential they configured was
+    parsed, stripped, and then thrown away.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+        req = http._FerryRequest("GET", URL(TARGET), loop=asyncio.get_running_loop())
+    assert req.proxy == URL("http://corp:8080")
+    assert "SUPERSECRET" not in str(req.proxy)
+    assert req.proxy_headers is not None
+    encoded = req.proxy_headers["Proxy-Authorization"]
+    assert base64.b64decode(encoded.split()[-1]).decode() == "ferryuser:SUPERSECRET"
+
+
+async def test_a_callers_proxy_headers_are_merged_not_clobbered(proxy_env, os_proxy) -> None:
+    """The merge. Killing: `kwargs["proxy_headers"] = {"Proxy-Authorization": ...}`,
+    which drops every header the caller set.
+
+    Direct construction is the only route into this branch today:
+    ClientSession nulls proxy_headers whenever proxy is None (client.py:648-649),
+    so through a session a caller's headers only ever arrive alongside a caller's
+    proxy, which the guard above already declines to touch.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+        req = http._FerryRequest(
+            "GET",
+            URL(TARGET),
+            proxy_headers={"X-Caller": "1"},
+            loop=asyncio.get_running_loop(),
+        )
+    assert req.proxy_headers is not None
+    assert req.proxy_headers["X-Caller"] == "1"
+    assert "Proxy-Authorization" in req.proxy_headers
+
+
+async def test_a_callers_own_proxy_authorization_is_not_overwritten(proxy_env, os_proxy) -> None:
+    """setdefault, not assignment. Killing: `merged["Proxy-Authorization"] = ...`,
+    which overrides a credential the caller chose deliberately.
+
+    The getall() count matters as much as the value: proxy_headers becomes a
+    CIMultiDict (client_reqrep.py:1342-1345), which happily holds two values for
+    one case-insensitive key, and both would then travel to the proxy.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+        req = http._FerryRequest(
+            "GET",
+            URL(TARGET),
+            proxy_headers={"Proxy-Authorization": "Basic Y2FsbGVyOnBhc3M="},
+            loop=asyncio.get_running_loop(),
+        )
+    assert req.proxy_headers is not None
+    assert req.proxy_headers["Proxy-Authorization"] == "Basic Y2FsbGVyOnBhc3M="
+    assert len(req.proxy_headers.getall("Proxy-Authorization")) == 1
+
+
+async def test_one_requests_proxy_headers_do_not_leak_into_the_next(proxy_env, os_proxy) -> None:
+    """A FRESH dict per request. Killing: hoisting `merged` to a module-level
+    mapping reused by every request, where the first caller's headers travel to
+    the proxy on every later request and connection_key
+    (client_reqrep.py:970-972) changes between two requests to the same host,
+    defeating connection reuse for the whole migration.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+        loop = asyncio.get_running_loop()
+        first = http._FerryRequest("GET", URL(TARGET), proxy_headers={"X-Caller": "1"}, loop=loop)
+        second = http._FerryRequest("GET", URL(TARGET), loop=loop)
+    assert first.proxy_headers is not None
+    assert second.proxy_headers is not None
+    assert "X-Caller" in first.proxy_headers
+    assert "X-Caller" not in second.proxy_headers

@@ -162,7 +162,13 @@ def new_session(**kwargs: Any) -> aiohttp.ClientSession:
     NEVER subclass ClientSession. aioresponses patches
     ClientSession._request on the class; a subclass defining _request would
     shadow the patch and silently disable HTTP mocking across the test suite.
+    The proxy is installed through the REQUEST class instead, which is defined
+    at the bottom of this module beside the resolution it calls.
+
+    setdefault, never `request_class=_FerryRequest` as an argument: a caller
+    passing their own would then raise TypeError for a repeated keyword.
     """
+    kwargs.setdefault("request_class", _FerryRequest)
     connector = aiohttp.TCPConnector(ssl=_get_ssl_context())
     return aiohttp.ClientSession(connector=connector, **kwargs)
 
@@ -417,3 +423,33 @@ def resolve_proxy(url: str | URL) -> ProxyChoice | None:
     if _is_bypassed(target.host or "", source, env):
         return None
     return ProxyChoice(url=stripped, authorization=authorization, source=source)
+
+
+class _FerryRequest(aiohttp.ClientRequest):
+    """Fills in the proxy when the caller gave none.
+
+    Subclassing ClientRequest is safe. Subclassing ClientSession is NOT:
+    aioresponses patches ClientSession._request on the class, and a subclass
+    defining _request would shadow the patch and disable HTTP mocking across 21
+    test modules.
+
+    Note that self._request_class(...) is reached only at aiohttp
+    client.py:780, so under aioresponses this class is never constructed. That
+    is why the factory-installs test exists separately.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if kwargs.get("proxy") is None:
+            url = kwargs.get("url") or (args[1] if len(args) > 1 else None)
+            choice = resolve_proxy(url) if url is not None else None
+            if choice is not None:
+                kwargs["proxy"] = choice.url
+                if choice.authorization is not None:
+                    # A FRESH dict per request. connector.py:604-606 mutates
+                    # req.proxy_headers in place, and connection_key hashes it
+                    # (client_reqrep.py:970-972), so a shared mapping would
+                    # change the pool key between requests to the same host.
+                    merged = dict(kwargs.get("proxy_headers") or {})
+                    merged.setdefault("Proxy-Authorization", choice.authorization)
+                    kwargs["proxy_headers"] = merged
+        super().__init__(*args, **kwargs)
