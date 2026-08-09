@@ -234,12 +234,15 @@ async def upload_to_autumn(
             # preserve.
             #
             # Every proxy failure is therefore CONVERTED, a 502 as much as a
-            # 407 -- proxy_hint has no status filter. That is deliberate, and
-            # structure.py:403 depends on it: its handler catches
-            # (AutumnUploadError, OSError): ClientHttpProxyError is a
-            # ClientResponseError, NOT an OSError, so leaving it raw would make
-            # a proxy failure ABORT the roles phase instead of degrading to a
-            # warning. Do not "restore" a raw ClientHttpProxyError here.
+            # 407 -- proxy_hint has no status filter. Do not "restore" a raw
+            # ClientHttpProxyError here.
+            #
+            # This paragraph used to say structure.py:403 DEPENDED on this
+            # conversion, since its (AutumnUploadError, OSError) handler would
+            # let a raw ClientHttpProxyError abort the roles phase. Task 8
+            # (2026-08-09) widened that handler to also catch
+            # aiohttp.ClientError, so that dependency no longer holds; the
+            # conversion stays anyway, for the hint text it attaches.
             #
             # Proxy first and never both, for the reason in api.py.
             hint = proxy_hint(exc, target=url) or tls_hint(exc)
