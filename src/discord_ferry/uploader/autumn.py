@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from discord_ferry.core.http import tls_hint
+from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.errors import AutumnUploadError
 
 if TYPE_CHECKING:
@@ -229,7 +229,13 @@ async def upload_to_autumn(
                 text = await response.text()
                 raise AutumnUploadError(f"Upload failed with status {response.status}: {text}")
         except aiohttp.ClientError as exc:
-            hint = tls_hint(exc)
+            # No permanence gate here, and that is not an oversight: BOTH arms
+            # of this handler raise, so there is no retry for a gate to
+            # preserve. A proxy 502 leaves this function as the raw
+            # ClientHttpProxyError it does today, exactly as before.
+            #
+            # Proxy first and never both, for the reason in api.py.
+            hint = proxy_hint(exc, target=url) or tls_hint(exc)
             if hint is None:
                 raise
             # Autumn is the one host v2.13.0's error work did not reach: no caller
@@ -244,8 +250,14 @@ async def upload_to_autumn(
             # site -- only exists once a request completed, which a certificate
             # failure guarantees it did not.
             #
-            # Raised rather than retried: a certificate failure cannot succeed on a
-            # second attempt, so the caller should not pay two sleeps to learn that.
+            # The same holds for the proxy arm: ClientHttpProxyError's text is
+            # the status line of the CONNECT response, written by the PROXY, and
+            # the tunnel to Autumn was never established, so no Autumn body
+            # exists to echo the token back.
+            #
+            # Raised rather than retried: neither a certificate failure nor a
+            # proxy that refuses outright can succeed on a second attempt, so the
+            # caller should not pay two sleeps to learn that.
             raise AutumnUploadError(f"Upload to Autumn failed: {exc}{hint}") from exc
         finally:
             fh.close()

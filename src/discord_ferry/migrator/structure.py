@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import tls_hint
+from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import RoleMeta, load_discord_metadata
 from discord_ferry.errors import AutumnUploadError, MigrationError
@@ -402,10 +402,14 @@ async def _resolve_role_icon(
         return icon_id
     except (AutumnUploadError, OSError) as exc:
         # Fixed template — never str(exc); the body may echo x-session-token.
-        # tls_hint is the one safe addition: it emits a host, a port and fixed
-        # text, never the exception it inspected. Without it this is the only
-        # Autumn failure that reaches the user with no cause at all.
-        hint = tls_hint(exc) or ""
+        # tls_hint and proxy_hint are the two safe additions: each emits a host,
+        # a port and fixed text, never the exception it inspected. Without them
+        # this is the only Autumn failure that reaches the user with no cause.
+        #
+        # Proxy first and never both, for the reason in api.py. No permanence
+        # gate: this handler already degrades to a warning either way, so there
+        # is no retry for a gate to preserve.
+        hint = proxy_hint(exc, target=state.autumn_url) or tls_hint(exc) or ""
         state.warnings.append(
             {
                 "phase": "roles",

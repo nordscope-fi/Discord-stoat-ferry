@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
-from discord_ferry.core.http import new_session, tls_hint
+from discord_ferry.core.http import new_session, proxy_error_is_permanent, proxy_hint, tls_hint
 from discord_ferry.errors import MigrationError
 
 if TYPE_CHECKING:
@@ -297,17 +297,28 @@ async def _api_request_inner(
                 text = await resp.text()
                 raise MigrationError(f"API error {resp.status}: {text}")
         except aiohttp.ClientError as exc:
-            hint = tls_hint(exc)
-            if hint is not None:
+            # Compute each hint ONCE. Message and control flow are separate
+            # decisions over the same two values, which is why this is two
+            # lines rather than one. Proxy wins over the certificate hint and
+            # they are NEVER concatenated: with an https:// proxy a certificate
+            # error is built from the PROXY's connection key
+            # (connector.py:1630-1632), so tls_hint would name a host the user
+            # never configured.
+            cert = tls_hint(exc)
+            hint = proxy_hint(exc, target=url) or cert
+            if hint is not None and (cert is not None or proxy_error_is_permanent(exc)):
                 # Above both consecutive_failures increments on purpose. Five
                 # short-circuited channels in the parallel message phase would
                 # otherwise open the breaker and add a 30s sleep to an error
                 # that cannot recover.
+                #
+                # Gated on permanence: a proxy 502, 503, 504 or connect timeout
+                # CAN recover and must keep the retries it already had.
                 raise MigrationError(f"Network error: {exc}{hint}") from exc
             if attempt == MAX_API_RETRIES - 1:
                 _circuit_state.consecutive_failures += 1
                 raise MigrationError(
-                    f"Network error after {MAX_API_RETRIES} retries: {exc}"
+                    f"Network error after {MAX_API_RETRIES} retries: {exc}{hint or ''}"
                 ) from exc
             delay = min(2**attempt, 60) + random.uniform(0.1, 0.5)
             await asyncio.sleep(delay)

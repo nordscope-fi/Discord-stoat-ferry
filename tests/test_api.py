@@ -12,6 +12,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core.http import new_session
 from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import (
     _api_request,
@@ -1505,3 +1506,36 @@ async def test_get_session_prefers_the_config_session() -> None:
         async with get_session(config) as yielded:
             assert yielded is shared
         assert not shared.closed
+
+
+# ---------------------------------------------------------------------------
+# #135 — a refusing proxy must name itself at api.py:300
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-28. Killing: proxy_hint defined and never called at api.py:300.
+
+    A real socket, because aioresponses patches ClientSession._request and the
+    request object -- the only thing that carries a proxy -- is never built.
+
+    The circuit-breaker assertion is last on purpose: the proxy assertions above
+    it are what grade the wiring, and they must be the ones that fail first.
+    """
+    _reset_circuit_state()
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"):
+            async with new_session() as session:
+                with pytest.raises(MigrationError) as caught:
+                    await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    message = str(caught.value)
+    assert "Network error" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert "FERRY_DISABLE_PROXY" in message
+    # A 403 from the proxy is permanent, so the short-circuit sits above both
+    # consecutive_failures increments, exactly as the certificate case does.
+    assert _circuit_state.consecutive_failures == 0

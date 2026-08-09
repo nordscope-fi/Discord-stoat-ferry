@@ -858,3 +858,34 @@ class TestOverlongStdoutActivity:
             await run_dce_export(cfg, tmp_path / "dce", events.append)
 
         assert any("truncated" in (e.message or "") for e in events)
+
+
+# ---------------------------------------------------------------------------
+# #135 — a refusing proxy must name itself at exporter/runner.py:346
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-28. Killing: proxy_hint defined and never called at runner.py:346.
+
+    This site also carried a target-binding hazard: the URL was an inline
+    literal inside the `try`, so there was no name to pass as `target`. It is
+    hoisted to a variable above the try.
+    """
+    from discord_ferry.errors import DiscordAuthError
+
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"):
+            with pytest.raises(DiscordAuthError) as caught:
+                await validate_discord_token("dt")
+
+    message = str(caught.value)
+    assert "Cannot reach Discord API" in message
+    # discord.com, not the proxy host: proves `target` came from the call site
+    # and named the host the user was trying to reach.
+    assert "discord.com" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert "FERRY_DISABLE_PROXY" in message

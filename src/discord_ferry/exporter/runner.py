@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import new_session, tls_hint
+from discord_ferry.core.http import new_session, proxy_hint, tls_hint
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -330,20 +330,22 @@ async def validate_discord_token(token: str) -> None:
         DiscordAuthError: If the token is invalid (401), API returns unexpected
             status, or the network is unreachable.
     """
+    # Hoisted out of the try on purpose. As an inline literal there was no name
+    # the handler could pass as `target`, and proxy_hint takes no default for it.
+    url = "https://discord.com/api/v10/users/@me"
     try:
         async with (
             new_session() as session,
-            session.get(
-                "https://discord.com/api/v10/users/@me",
-                headers={"Authorization": token},
-            ) as resp,
+            session.get(url, headers={"Authorization": token}) as resp,
         ):
             if resp.status == 401:
                 raise DiscordAuthError("Invalid Discord token. Check that you copied it correctly.")
             if resp.status != 200:
                 raise DiscordAuthError(f"Discord API returned unexpected status {resp.status}")
     except aiohttp.ClientError as exc:
-        raise DiscordAuthError(f"Cannot reach Discord API: {exc}{tls_hint(exc) or ''}") from exc
+        # Proxy first, never both, no gate: this handler has no retry.
+        hint = proxy_hint(exc, target=url) or tls_hint(exc) or ""
+        raise DiscordAuthError(f"Cannot reach Discord API: {exc}{hint}") from exc
 
 
 async def run_dce_export(

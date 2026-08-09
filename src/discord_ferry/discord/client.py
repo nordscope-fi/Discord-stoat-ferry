@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
-from discord_ferry.core.http import tls_hint
+from discord_ferry.core.http import proxy_error_is_permanent, proxy_hint, tls_hint
 from discord_ferry.discord.models import DiscordChannel, DiscordRole, PermissionOverwrite
 from discord_ferry.errors import DiscordAuthError, MigrationError
 
@@ -160,12 +160,20 @@ async def _discord_request(session: aiohttp.ClientSession, token: str, path: str
         except (DiscordAuthError, MigrationError):
             raise
         except aiohttp.ClientError as exc:
-            hint = tls_hint(exc)
-            if hint is not None:
+            # Two lines: message and control flow are separate decisions over
+            # the same two values. Proxy wins over the certificate hint and they
+            # are never concatenated, for the reason in api.py.
+            cert = tls_hint(exc)
+            hint = proxy_hint(exc, target=url) or cert
+            if hint is not None and (cert is not None or proxy_error_is_permanent(exc)):
+                # Gated on permanence because this jumps over the whole
+                # _MAX_RETRIES loop. A proxy 502, 503, 504 or connect timeout can
+                # recover, and turning one into a hard failure would abort the
+                # metadata phase on a blip it used to survive.
                 raise MigrationError(f"Discord API network error: {exc}{hint}") from exc
             network_attempts += 1
             if network_attempts >= _MAX_RETRIES:
-                raise MigrationError(f"Discord API network error: {exc}") from exc
+                raise MigrationError(f"Discord API network error: {exc}{hint or ''}") from exc
             await asyncio.sleep(1)
 
 
