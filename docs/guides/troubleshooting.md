@@ -259,6 +259,60 @@ If it is specifically the DiscordChatExporter download that fails, you can place
 
 ---
 
+## Proxy Configuration
+
+Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line tools do, and that is where most proxy questions start. It goes wider than that, though: on Windows and macOS, when those variables are not set, Ferry falls back to the system proxy settings a browser on the same machine would use. Someone who only set `HTTPS_PROXY` can still find Ferry routing traffic through a second proxy they never configured.
+
+### Ferry uses a proxy you did not set
+
+| | |
+|---|---|
+| **Symptom** | Traffic goes through a proxy you never configured, or `ferry tls-check` reports a `proxy-source` of `os` |
+| **Cause** | No environment variable is set for that scheme, so Ferry fell back to the operating system's own proxy configuration. |
+| **Solution** | Run `ferry tls-check` and read `proxy-source`: `env` means a variable you set, `os` means the system fallback. To stop the fallback for one scheme, set the matching environment variable yourself. To stop all proxy use, see `FERRY_DISABLE_PROXY` below. |
+
+`FERRY_DISABLE_PROXY=1` turns off every proxy Ferry would otherwise use, environment variable or system fallback, for every scheme. `NO_PROXY` is narrower: it exempts individual hosts (a comma-separated list, for example `NO_PROXY=stoat.internal,localhost`) while leaving the rest of the configuration in place. A third switch comes from Python's standard library rather than Ferry itself: setting the matching lowercase variable to an empty string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy without touching `https_proxy`.
+
+!!! tip "A TLS-inspecting proxy needs two settings, not one"
+    A corporate proxy that inspects HTTPS traffic presents its own certificate in place of the real one. Routing through the proxy only solves half of that: Ferry also needs `SSL_CERT_FILE` pointed at a bundle that includes the proxy's certificate authority, the same mechanism described in [Certificate Errors](#certificate-errors) above. Without it, Ferry reaches the proxy and then fails to verify what the proxy hands back.
+
+### FERRY_DISABLE_PROXY=1 does not fix the export
+
+| | |
+|---|---|
+| **Symptom** | The kill switch is set, later migration phases run fine, but exporting from Discord (phase 0) still fails or still goes through a proxy |
+| **Cause** | DiscordChatExporter is a separate program and reads the operating system's proxy settings on its own. `FERRY_DISABLE_PROXY=1` only turns off proxy use inside Ferry; it has no way to reach into DCE's resolution. |
+| **Solution** | Clear the proxy at its source instead: on Windows, **Settings → Network & internet → Proxy**; on macOS, **System Settings → Network → (your connection) → Details → Proxies**. Once the system entry is gone, both Ferry and DCE stop using it. |
+
+!!! info "The proxy scan runs once per process"
+    Ferry reads the proxy configuration when it starts and keeps that answer for the rest of the run. Connecting to a VPN, or changing networks partway through a migration, does not change what Ferry uses. Restart Ferry after a network change if a stale proxy setting seems to be involved.
+
+### `ferry tls-check` reports a proxy the GUI does not use
+
+| | |
+|---|---|
+| **Symptom** | `ferry tls-check` reports a proxy, but the desktop GUI seems to run without one, or an export from the GUI goes through unproxied |
+| **Cause** | Ferry loads a `.env` file only on the command line. `ferry tls-check` and `ferry migrate` both call that loader, so a `.env` file's `HTTPS_PROXY` reaches them. The desktop GUI never calls it, so the same variable sitting only in `.env` never reaches the GUI. |
+| **Solution** | Set `HTTPS_PROXY` (and any other proxy variables) as real environment variables before launching the GUI, not only in `.env`. Or run the migration from the CLI, where `.env` already works. |
+
+### An authenticating proxy breaks the export phase
+
+| | |
+|---|---|
+| **Symptom** | Ferry connects through a proxy without trouble, but exporting from Discord (phase 0) fails with a `407` from the proxy |
+| **Cause** | When Ferry resolves a proxy from the system settings and that proxy needs a username and password, Ferry authenticates itself but cannot hand the credential to DiscordChatExporter. A password sitting in a child process's environment is readable by other processes on some systems, so Ferry withholds it and DCE receives only the proxy address. |
+| **Solution** | Set `HTTPS_PROXY` yourself with the credential in the URL (`https://user:pass@host:port`) if that trade-off is acceptable. DCE inherits a variable you set directly; it only misses the one Ferry resolved on your behalf. |
+
+### SOCKS and ALL_PROXY are not supported
+
+| | |
+|---|---|
+| **Symptom** | A proxy notice at startup or in `ferry tls-check` names a SOCKS proxy or `ALL_PROXY`, and Ferry connects direct anyway |
+| **Cause** | Ferry supports HTTP and HTTPS proxies only. A SOCKS proxy, or a proxy set exclusively through `ALL_PROXY`, falls outside what Ferry can use ([issue #141](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/141)). |
+| **Solution** | Set `HTTP_PROXY` and `HTTPS_PROXY` directly if an HTTP or HTTPS proxy is available for the same server. Ferry writes a notice naming what it found, so the direct connection has a stated cause. There is no workaround for a SOCKS-only setup today; issue #141 tracks it. |
+
+---
+
 ## Flag Conflicts
 
 ### --resume and --incremental are mutually exclusive
