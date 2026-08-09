@@ -24,7 +24,7 @@ from rich.table import Table
 from discord_ferry import __version__
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
-from discord_ferry.core.http import new_session
+from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError, StateError
@@ -59,6 +59,20 @@ _STATUS_ICONS: dict[str, str] = {
     "warning": ">>",
     "confirm": "??",
 }
+
+
+def _print_proxy_notices(*, to_stderr: bool = False) -> None:
+    """Render format_proxy_notices() for the three entry points that do real
+    network work outside run_migration (build, rollback, probe). run_migration's
+    own preflight already emits these through the event stream (core/engine.py);
+    this covers the paths that never construct a MigrationEvent at all.
+
+    `probe --json` prints machine-readable JSON to stdout, so its call passes
+    to_stderr=True to keep a notice off the channel a script parses.
+    """
+    sink = Console(stderr=True) if to_stderr else console
+    for line in format_proxy_notices():
+        sink.print(f"[cyan][i][/] {line}")
 
 
 def _format_eta(total_messages: int, rate_limit: float) -> str:
@@ -834,6 +848,7 @@ def build(
     if name:
         bp.name = name
 
+    _print_proxy_notices()
     console.print(f"[bold]Discord Ferry[/] — building server '{_safe(bp.name)}'\n")
 
     async def _build() -> None:
@@ -1271,6 +1286,7 @@ def rollback_cmd(
         if state.rollback_progress is not None and state.rollback_progress.failures:
             sys.exit(1)
 
+    _print_proxy_notices()
     console.print("[bold]Discord Ferry[/] — starting rollback\n")
     try:
         asyncio.run(_runner())
@@ -1308,6 +1324,10 @@ def probe_cmd(
     if not token:
         console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
         sys.exit(1)
+
+    # to_stderr=True: --json prints machine-readable JSON to stdout below, and a
+    # notice landing on that channel would corrupt it for a script parsing it.
+    _print_proxy_notices(to_stderr=True)
 
     # probe never builds a FerryConfig or a SecureTokenStore, so the engine's
     # _ensure_token_store hook never fires here. Without this line the Stoat

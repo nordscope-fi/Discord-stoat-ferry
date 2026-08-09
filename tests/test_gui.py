@@ -593,3 +593,34 @@ def test_exposed_settings_wiring_pins() -> None:
     # (d) tokens still never touch app.storage.user (existing invariant re-pinned)
     assert 'storage["token"] =' not in source
     assert 'storage["discord_token"] =' not in source
+
+
+# ---------------------------------------------------------------------------
+# Task 13: proxy notices on the export screen
+# ---------------------------------------------------------------------------
+
+
+def test_proxy_notice_lines_formats_for_the_log_panel(proxy_env, os_proxy) -> None:
+    """Task 13. _run_export is a nested closure inside export_page, unreachable
+    from a unit test (see gui.py:893's docstring), the same blind spot that let
+    the one-click export ship dead for eleven releases. _proxy_notice_lines is
+    module level so its formatting is testable even though the call site is not.
+    Killing: a formatter that drops the "[notice] " prefix _run_export's push
+    relies on, or that fails to surface a real notice at all."""
+    from discord_ferry.gui import _proxy_notice_lines
+
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        lines = _proxy_notice_lines()
+    assert lines == [
+        "[notice] Proxy configuration Ferry cannot use: socks5://sock:1080 (all). "
+        "Connected direct. ALL_PROXY is not supported (see issue #141)."
+    ]
+
+
+def test_proxy_notice_lines_is_empty_on_a_clean_configuration(proxy_env, os_proxy) -> None:
+    """A clean machine must produce no line, not a stray '[notice] ' row in the
+    log panel."""
+    from discord_ferry.gui import _proxy_notice_lines
+
+    with os_proxy({}), proxy_env():
+        assert _proxy_notice_lines() == []

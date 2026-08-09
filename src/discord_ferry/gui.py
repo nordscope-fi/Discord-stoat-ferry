@@ -21,6 +21,7 @@ from nicegui.client import ClientConnectionTimeout
 from discord_ferry.config import FerryConfig
 from discord_ferry.core import entry
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
+from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError
@@ -93,6 +94,17 @@ _STEP_LABELS: list[str] = ["Configure", "Export", "Validate", "Migrate", "Done"]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _proxy_notice_lines() -> list[str]:
+    """Proxy notices formatted for the GUI log panel.
+
+    Module level so it is testable. `_run_export` is a nested closure inside a
+    page function, so nothing inside it can be reached from a unit test, which
+    is the same blind spot that let the one-click export ship dead for eleven
+    releases.
+    """
+    return [f"[notice] {line}" for line in format_proxy_notices()]
 
 
 def _open_path(path: Path) -> None:
@@ -909,6 +921,12 @@ async def export_page() -> None:
 
         with client:
             try:
+                # Before any network call: the first three (validate_discord_token,
+                # get_dce_path's download fallback, run_dce_export) all run outside
+                # run_migration, so its preflight notice never reaches this screen.
+                for line in _proxy_notice_lines():
+                    log_display.push(line)
+
                 # Inside the try: a missing export_dir used to raise KeyError out
                 # here, above the handler, and vanish without a trace.
                 discord_server = str(storage.get("discord_server_id", ""))
