@@ -15,7 +15,7 @@ import aiohttp  # noqa: TCH002
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.core.http import new_session
+from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.security import SecureTokenStore, register_secret, safe_sanitize
 from discord_ferry.discord import (
     fetch_and_translate_guild_metadata,
@@ -280,6 +280,14 @@ async def run_migration(
         state = MigrationState()
         state.started_at = datetime.now(UTC).isoformat()
         state.is_dry_run = config.dry_run
+
+    # Preflight: surface any proxy configuration Ferry found but cannot use.
+    # core/http.py returns data and never emits; the engine decides. Emitted at
+    # "notice" rather than "warning" because cli.py gates warnings behind
+    # --verbose, which defaults off.
+    for line in format_proxy_notices():
+        on_event(MigrationEvent(phase="preflight", status="notice", message=line))
+        state.warnings.append({"phase": "preflight", "type": "proxy_notice", "message": line})
 
     # Phase 0: EXPORT — run DCE subprocess inline (orchestrated mode)
     if not config.skip_export:
