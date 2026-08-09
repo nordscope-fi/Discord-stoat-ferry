@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import ssl
 
 import aiohttp
@@ -9,7 +10,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.discord import fetch_and_translate_guild_metadata
-from discord_ferry.discord.client import fetch_guild_channels, fetch_guild_roles
+from discord_ferry.discord.client import download_role_icon, fetch_guild_channels, fetch_guild_roles
 from discord_ferry.errors import DiscordAuthError
 
 DISCORD_API = "https://discord.com/api/v10"
@@ -397,6 +398,23 @@ async def test_download_role_icon_none_on_client_error():
             from discord_ferry.discord.client import download_role_icon
 
             assert await download_role_icon(s, "r1", "hash") is None
+
+
+async def test_a_role_icon_download_failure_logs_its_reason(caplog) -> None:
+    """Killing: swallowing the reason. Today any ClientError returns None and
+    structure.py reports 'Role icon download failed' with no cause."""
+    with aioresponses() as m:
+        m.get(
+            "https://cdn.discordapp.com/role-icons/r1/abc.png",
+            exception=aiohttp.ClientProxyConnectionError(
+                aiohttp.client_reqrep.ConnectionKey("corp", 8080, False, True, None, None, None),
+                OSError("refused"),
+            ),
+        )
+        async with aiohttp.ClientSession() as s:
+            with caplog.at_level(logging.WARNING):
+                assert await download_role_icon(s, "r1", "abc") is None
+    assert "corp" in caplog.text
 
 
 @pytest.mark.asyncio
