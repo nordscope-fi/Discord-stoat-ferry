@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -926,10 +927,18 @@ class TestDceChildProxyEnvironment:
             ),
             pytest.raises(RuntimeError),
         ):
+            # Snapshot INSIDE the fixtures: proxy_env has already rewritten
+            # os.environ by here, so this is the environment the child should
+            # actually inherit.
+            before = set(os.environ)
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert captured_env.get("HTTPS_PROXY") == "http://corp:8080"
-        assert "PATH" in captured_env, "the child must inherit the rest of the environment"
+        # Superset, not `"PATH" in captured_env`. That weaker form passes against a
+        # curated env={"PATH": ..., "HTTPS_PROXY": ...} that dropped SYSTEMROOT, which
+        # is the regression the implementation's own comment warns about and the one
+        # release.yml cannot catch, because the smoke jobs never run a real export.
+        assert set(captured_env) >= before - {"HTTPS_PROXY"}
 
     @pytest.mark.asyncio
     async def test_the_kill_switch_suppresses_injection(
