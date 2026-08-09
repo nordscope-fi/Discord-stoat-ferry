@@ -486,7 +486,7 @@ native = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.9" },
+    { name = "aiohttp", specifier = ">=3.14" },
     { name = "aioresponses", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "certifi", specifier = ">=2024.0" },
     { name = "click", specifier = ">=8.0" },

@@ -271,6 +271,8 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 | **Cause** | No environment variable is set for that scheme, so Ferry fell back to the operating system's own proxy configuration. |
 | **Solution** | Run `ferry tls-check` and read `proxy-source`: `env` means a variable you set, `os` means the system fallback. To stop the fallback for one scheme, set the matching environment variable yourself. To stop all proxy use, see `FERRY_DISABLE_PROXY` below. |
 
+`proxy-source` is a single value, not one per scheme. If you have `HTTP_PROXY` set in the environment and HTTPS falling back to the system, `tls-check` reports one source for both, and it is the one HTTPS resolved from. Read `proxy-http` and `proxy-https` to see the two addresses; when they differ, at least one of them came from the other source.
+
 `FERRY_DISABLE_PROXY=1` turns off every proxy Ferry would otherwise use, environment variable or system fallback, for every scheme. `NO_PROXY` is narrower: it exempts individual hosts (a comma-separated list, for example `NO_PROXY=stoat.internal,localhost`) while leaving the rest of the configuration in place. A third switch comes from Python's standard library rather than Ferry itself: setting the matching lowercase variable to an empty string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy without touching `https_proxy`.
 
 !!! tip "A TLS-inspecting proxy needs two settings, not one"
