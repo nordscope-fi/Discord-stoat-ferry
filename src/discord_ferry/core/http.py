@@ -667,6 +667,12 @@ def _proxy_identity(exc: BaseException) -> str | None:
         # `host is not None` guards the degenerate match. The getattr defaults
         # are None and a scheme-less value parses to host=None, so without it
         # None == None matches and the hint renders "None:None".
+        #
+        # It and the `candidate.host is None` check below are ALTERNATIVES, not
+        # complements: either alone closes that match, so with this one present
+        # the other cannot change any outcome and no test can tell them apart.
+        # Both are kept because each states its own half of the invariant at the
+        # point it applies. Do not read the pair as two necessary conditions.
         if scan is not None and host is not None:
             for key, raw in (*scan[0].items(), *scan[1].items()):
                 # http and https ONLY, and not because the others are unlikely.
