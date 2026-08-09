@@ -703,7 +703,7 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
 
     message = str(caught.value)
     assert "Discord API network error" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to discord.com went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
     assert sleep.await_count == 0, "a refused proxy must not pay the 1s retry sleep"
 
@@ -739,4 +739,4 @@ async def test_a_proxy_502_still_retries(fake_proxy, proxy_env, os_proxy) -> Non
     assert len(captured) == _MAX_RETRIES, "the 502 was treated as permanent and never retried"
     message = str(caught.value)
     assert "Discord API network error" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to discord.com went through the proxy at 127.0.0.1:{port}" in message

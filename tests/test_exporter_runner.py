@@ -884,8 +884,8 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
 
     message = str(caught.value)
     assert "Cannot reach Discord API" in message
-    # discord.com, not the proxy host: proves `target` came from the call site
-    # and named the host the user was trying to reach.
-    assert "discord.com" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    # ONE assertion, not two. A separate `assert "discord.com" in message` above
+    # the phrase took the failure under this site's mutant, so the phrase line
+    # never ran. Merged, it grades wiring and pins `target=` together.
+    assert f"The request to discord.com went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message

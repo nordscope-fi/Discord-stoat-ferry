@@ -1534,7 +1534,7 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
 
     message = str(caught.value)
     assert "Network error" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to api.test went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
     # A 403 from the proxy is permanent, so the short-circuit sits above both
     # consecutive_failures increments, exactly as the certificate case does.
@@ -1571,4 +1571,41 @@ async def test_a_proxy_502_still_retries(fake_proxy, proxy_env, os_proxy) -> Non
     # The exhaustion message still names the proxy: the hint is computed either
     # way, only the short-circuit is gated.
     assert f"Network error after {MAX_API_RETRIES} retries" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to api.test went through the proxy at 127.0.0.1:{port}" in message
+
+
+async def test_a_certificate_error_against_an_https_proxy_names_the_proxy_not_the_bundle(
+    mock_aiohttp: aioresponses, proxy_env, os_proxy
+) -> None:
+    """SC-135-52, integration half. Killing: concatenating the two hints.
+
+    The eight site tests all use an http:// proxy, where tls_hint is None, so a
+    site written as `proxy_hint(...) + (tls_hint(...) or "")` passes every one
+    of them. Only an https:// proxy makes both fire, and only then does the
+    precedence rule have an observable consequence: SSL_CERT_FILE advice for a
+    host the user never configured as a certificate authority.
+
+    aioresponses injects the exception rather than a socket serving it, which is
+    the same technique test_certificate_error_does_not_prime_the_circuit_breaker
+    uses. The scan is warmed through resolve_proxy, not by assigning the global.
+    """
+    from discord_ferry.core import http
+
+    _reset_circuit_state()
+    key = aiohttp.client_reqrep.ConnectionKey("secure-proxy", 8443, True, True, None, None, None)
+    cert_error = aiohttp.ClientConnectorCertificateError(key, ssl.SSLCertVerificationError("bad"))
+    mock_aiohttp.get(f"{BASE_URL}/servers/x", exception=cert_error)
+
+    with os_proxy({}), proxy_env(HTTPS_PROXY="https://secure-proxy:8443"):
+        assert http.resolve_proxy(f"{BASE_URL}/servers/x") is not None
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(MigrationError) as caught:
+                    await _api_request(session, "GET", f"{BASE_URL}/servers/x", TOKEN)
+
+    message = str(caught.value)
+    assert "went through the proxy at secure-proxy:8443" in message
+    assert "SSL_CERT_FILE" not in message, (
+        "proxy wins and REPLACES the certificate hint; appending both sends the "
+        "user to a CA bundle for a host they never configured"
+    )
