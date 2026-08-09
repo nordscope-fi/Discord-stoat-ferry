@@ -1566,6 +1566,19 @@ def test_tls_check_never_prints_userinfo(proxy_env, os_proxy) -> None:
     assert "user" not in out
 
 
+def test_tls_check_reports_proxy_disabled_true_when_the_switch_is_set(proxy_env, os_proxy) -> None:
+    """Task 11 review fix. Killing: dropping describe_proxy's own
+    FERRY_DISABLE_PROXY early return. resolve_proxy's own kill-switch check
+    still makes proxy-http/proxy-https read 'none' either way, so those two
+    keys cannot catch a diagnostic that reports proxy-disabled: false while
+    everything is in fact suppressed, which is a diagnostic lying about its
+    own state.
+    """
+    with os_proxy({}), proxy_env(FERRY_DISABLE_PROXY="1"):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+    assert "proxy-disabled: true" in out
+
+
 # ---------------------------------------------------------------------------
 # notice status
 # ---------------------------------------------------------------------------

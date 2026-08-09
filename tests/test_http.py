@@ -1566,3 +1566,36 @@ def test_the_kill_switch_disables_both_sources(proxy_env, os_proxy) -> None:
     """SC-135-14. Killing: a switch that suppresses only one half."""
     with os_proxy(CORP), proxy_env(HTTPS_PROXY="http://env:3128", FERRY_DISABLE_PROXY="1"):
         assert http.resolve_proxy(TARGET) is None
+
+
+# --- describe_proxy's userinfo layer, isolated (Task 11 review fix) ----------
+#
+# resolve_proxy always strips userinfo via _strip_userinfo before building a
+# ProxyChoice, so choice.url never carries it in production, and str(),
+# repr(), .human_repr() and describe_proxy's own f"{host}:{port}" all render
+# the same safe string against a REAL resolve_proxy. That makes the choice of
+# formatting untestable through the real path. This test patches resolve_proxy
+# to hand back a ProxyChoice built directly with unstripped userinfo, standing
+# in for a future resolve_proxy that stops stripping, so describe_proxy's own
+# formatting choice is what is actually graded.
+
+
+def test_describe_proxy_never_prints_userinfo_even_if_resolve_stops_stripping(
+    proxy_env,
+) -> None:
+    """Killing: formatting choice.url with str(), repr() or .human_repr()
+    instead of reading .host/.port. Against a real resolve_proxy all four
+    render identically, because the userinfo is already gone by the time
+    describe_proxy sees it; this isolates the formatting from that upstream
+    stripping so a regression in the formatting itself is still caught.
+    """
+    choice = http.ProxyChoice(
+        url=URL("http://user:secret@corp:8080"), authorization=None, source="env"
+    )
+    with (
+        proxy_env(),
+        patch("discord_ferry.core.http.resolve_proxy", return_value=choice),
+    ):
+        out = http.describe_proxy()
+    assert all("secret" not in v for v in out.values())
+    assert all("user" not in v for v in out.values())
