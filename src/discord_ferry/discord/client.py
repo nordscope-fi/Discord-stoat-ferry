@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
@@ -14,6 +15,8 @@ from discord_ferry.errors import DiscordAuthError, MigrationError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+logger = logging.getLogger(__name__)
 
 DISCORD_API = "https://discord.com/api/v10"
 _MAX_RETRIES = 3
@@ -212,7 +215,8 @@ async def download_role_icon(
             if len(data) > _ROLE_ICON_MAX_BYTES:
                 return None
             return data
-    except aiohttp.ClientError:
+    except aiohttp.ClientError as exc:
+        logger.warning("Role icon download failed for role %s: %s", role_id, exc)
         return None
 
 
