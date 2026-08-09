@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
+
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.discord.client import download_role_icon
@@ -38,8 +40,6 @@ from discord_ferry.state import save_state
 from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
-    import aiohttp
-
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEChannel, DCEExport
@@ -400,7 +400,7 @@ async def _resolve_role_icon(
             state.native_fidelity_counts.get("role_icons", 0) + 1
         )
         return icon_id
-    except (AutumnUploadError, OSError) as exc:
+    except (AutumnUploadError, OSError, aiohttp.ClientError) as exc:
         # Fixed template — never str(exc); the body may echo x-session-token.
         # tls_hint and proxy_hint are the two safe additions: each emits a host,
         # a port and fixed text, never the exception it inspected. Without them
