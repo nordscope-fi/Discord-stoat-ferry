@@ -1361,3 +1361,54 @@ def test_an_unreadable_configuration_is_not_cached(proxy_env, os_proxy) -> None:
             assert [n.kind for n in http.proxy_notices()] == ["unreadable"]
         assert http._proxy_notices == ()
         assert [n.kind for n in http.proxy_notices()] == ["all_proxy_only"]
+
+
+# --- Proxy hints and the permanence gate (Task 6) ----------------------------
+
+
+def _proxy_conn_error(host: str = "corp", port: int = 8080):
+    key = aiohttp.client_reqrep.ConnectionKey(host, port, False, True, None, None, None)
+    return aiohttp.ClientProxyConnectionError(key, OSError("refused"))
+
+
+def test_hint_names_the_proxy_and_the_target() -> None:
+    """SC-135-24. Killing: reading the target from the exception. Measured:
+    ClientProxyConnectionError has no request_info and no status, and the target
+    is in neither the exception nor its __cause__, which holds only
+    ConnectionRefusedError. The target must come from the call site."""
+    hint = http.proxy_hint(_proxy_conn_error(), target="https://api.stoat.chat/x")
+    assert hint is not None
+    assert "proxy" in hint.lower()
+    assert "corp" in hint
+    assert "api.stoat.chat" in hint
+
+
+def test_hint_is_none_for_a_non_proxy_error() -> None:
+    assert http.proxy_hint(OSError("boom"), target="https://x/") is None
+
+
+@pytest.mark.parametrize(
+    ("status", "permanent"), [(407, True), (403, True), (502, False), (503, False)]
+)
+def test_permanence_gate(status: int, permanent: bool) -> None:
+    """SC-135-36. Killing: branching retries on the hint string, under which
+    every proxy failure aborts. A 502 at manager.py would turn a retryable blip
+    into a hard failure on the DCE download."""
+    exc = aiohttp.ClientHttpProxyError(
+        request_info=aiohttp.RequestInfo(
+            URL("https://api.stoat.chat/x"), "CONNECT", (), URL("http://corp:8080")
+        ),
+        history=(),
+        status=status,
+    )
+    assert http.proxy_error_is_permanent(exc) is permanent
+
+
+def test_an_unreachable_proxy_is_permanent() -> None:
+    assert http.proxy_error_is_permanent(_proxy_conn_error()) is True
+
+
+def test_a_non_proxy_error_is_not_a_permanent_proxy_error() -> None:
+    """Killing: a gate that returns True for anything it does not recognise,
+    which would abort ordinary network retries."""
+    assert http.proxy_error_is_permanent(OSError("boom")) is False
