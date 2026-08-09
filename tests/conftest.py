@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 from contextlib import contextmanager
@@ -106,6 +107,28 @@ def os_proxy() -> Callable[..., AbstractContextManager[None]]:
             yield
 
     return _apply
+
+
+@pytest.fixture
+async def fake_proxy():
+    """A loopback server that records the first request and answers a status.
+
+    Needed because aioresponses patches ClientSession._request, so the request
+    object is never constructed and proxy behaviour is invisible to all 21
+    aioresponses modules. Real-socket precedent: tests/test_gui_native_lifecycle.py.
+    """
+    captured: list[str] = []
+
+    def _make(status: bytes = b"403 Forbidden"):
+        async def handle(reader, writer):
+            captured.append((await reader.read(4096)).decode("latin1"))
+            writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+
+        return asyncio.start_server(handle, "127.0.0.1", 0)
+
+    return _make, captured
 
 
 @pytest.fixture(autouse=True)
