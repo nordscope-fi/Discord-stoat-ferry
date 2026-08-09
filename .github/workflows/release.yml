@@ -166,6 +166,14 @@ jobs:
             if (Test-Path $log) { Write-Host "--- ferry.log ---"; Get-Content $log }
             exit 1
           }
+          # --- Proxy state (issue #135, Task 11) ---
+          # Pins only the KEY, not a value: CI runners have no controlled OS
+          # proxy state, so the resolved value varies and only the key's
+          # presence is assertable, unlike trust-source's fixed 'union'.
+          if ($tls.Out -notmatch 'proxy-source:\s*') {
+            Write-Host "::error::tls-check did not report proxy state"
+            exit 1
+          }
           Write-Host "tls-check OK: $($tls.Out -replace "`r?`n", ' | ')"
 
           # --- AttachConsole path (issue #123 symptom 3, no redirection) ---
@@ -306,6 +314,15 @@ jobs:
             *"trust-source: union"*) echo "tls-check OK: union trust store built" ;;
             *) echo "::error::the macOS bundle did not build the union trust store"
                exit 1 ;;
+          esac
+
+          # --- Proxy state (issue #135, Task 11) ---
+          # Pins only the KEY, not a value: CI runners have no controlled OS
+          # proxy state, so the resolved value varies and only the key's
+          # presence is assertable, unlike trust-source's fixed 'union'.
+          case "$TLS_OUT" in
+            *"proxy-source: "*) echo "tls-check OK: proxy state reported" ;;
+            *) echo "::error::tls-check did not report proxy state"; exit 1 ;;
           esac
           codesign --verify --deep --strict "$APP"
           # -print -quit rather than `| grep -q .`: under pipefail a SIGPIPE'd find

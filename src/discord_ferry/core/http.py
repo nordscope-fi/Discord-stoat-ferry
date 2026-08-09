@@ -702,6 +702,31 @@ def _proxy_identity(exc: BaseException) -> str | None:
     return None
 
 
+def describe_proxy() -> dict[str, str]:
+    """Proxy state, for `ferry tls-check` and CI. Never prints userinfo.
+
+    Reports what resolution ACTUALLY produced, not what is configured. A
+    diagnostic that reports something other than what happens is the failure
+    v2.13.0 avoided by reading trust-source from a flag.
+    """
+    if os.environ.get("FERRY_DISABLE_PROXY"):
+        return {
+            "proxy-http": "none",
+            "proxy-https": "none",
+            "proxy-source": "none",
+            "proxy-disabled": "true",
+        }
+    out = {"proxy-disabled": "false", "proxy-source": "none"}
+    for scheme in ("http", "https"):
+        choice = resolve_proxy(f"{scheme}://example.invalid/")
+        if choice is None:
+            out[f"proxy-{scheme}"] = "none"
+        else:
+            out[f"proxy-{scheme}"] = f"{choice.url.host}:{choice.url.port}"
+            out["proxy-source"] = choice.source
+    return out
+
+
 def proxy_error_is_permanent(exc: BaseException) -> bool:
     """True when no retry can help.
 

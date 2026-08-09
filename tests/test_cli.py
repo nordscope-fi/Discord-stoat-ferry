@@ -1531,6 +1531,42 @@ def test_tls_check_reports_the_branch_actually_taken(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# tls-check — proxy state (Task 11)
+# ---------------------------------------------------------------------------
+
+
+def test_tls_check_reports_the_proxy_keys(proxy_env, os_proxy) -> None:
+    """SC-135-42. Killing: a diagnostic that reports configuration rather than
+    resolution, which is what makes a diagnostic lie."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+    for key in ("proxy-https:", "proxy-source:", "proxy-disabled:"):
+        assert key in out
+
+
+def test_tls_check_keeps_the_original_four_keys() -> None:
+    """SC-135-43. Killing: breaking release.yml's Windows regex or macOS glob,
+    and with them the #134 gate.
+
+    A regression guard: describe_trust already prints all four today. It goes
+    red only if a later change drops or renames one of them.
+    """
+    out = CliRunner().invoke(main, ["tls-check"]).output
+    for key in ("ca-bundle:", "ca-bundle-readable:", "trust-source:", "ca-visible:"):
+        assert key in out
+
+
+def test_tls_check_never_prints_userinfo(proxy_env, os_proxy) -> None:
+    """SC-135-44. Killing: rendering the raw URL. Measured: str(URL), repr(URL)
+    and URL.human_repr() all leak userinfo."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://user:secret@corp:8080"):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+    assert "corp" in out
+    assert "secret" not in out
+    assert "user" not in out
+
+
+# ---------------------------------------------------------------------------
 # notice status
 # ---------------------------------------------------------------------------
 
