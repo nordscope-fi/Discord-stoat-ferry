@@ -706,3 +706,37 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
     assert f"went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
     assert sleep.await_count == 0, "a refused proxy must not pay the 1s retry sleep"
+
+
+async def test_a_proxy_502_still_retries(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-37 at discord/client.py. Killing: wiring proxy_hint here without
+    the permanence gate, i.e. `if hint is not None:` alone.
+
+    This handler jumps over the whole _MAX_RETRIES loop, so an ungated hint
+    would abort the metadata phase on a proxy blip it used to survive. The
+    captured-request count is the FIRST assertion, so it is the one that fails
+    under the mutant.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.core.http import new_session
+    from discord_ferry.discord.client import _MAX_RETRIES
+    from discord_ferry.errors import MigrationError
+
+    make, captured = fake_proxy
+    server = await make(b"502 Bad Gateway")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            async with new_session() as session:
+                with pytest.raises(MigrationError) as caught:
+                    await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    assert len(captured) == _MAX_RETRIES, "the 502 was treated as permanent and never retried"
+    message = str(caught.value)
+    assert "Discord API network error" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
