@@ -1336,14 +1336,18 @@ def probe_cmd(
 
 @main.command("tls-check")
 def tls_check_cmd() -> None:
-    """Report which certificate authorities Ferry trusts.
+    """Report which certificate authorities Ferry trusts, and the proxy state.
 
-    Prints four fixed keys that .github/workflows/release.yml parses. Changing
-    a key name breaks the Windows release check, so tests/test_cli.py pins them.
+    An earlier version of this docstring said "four fixed keys". describe_proxy
+    (Task 11) added proxy-http, proxy-https, proxy-source and proxy-disabled;
+    release.yml pins key names from both groups, so changing any breaks CI.
     """
-    from discord_ferry.core.http import describe_trust
+    from discord_ferry.core.http import describe_proxy, describe_trust
 
     for key, value in describe_trust().items():
+        click.echo(f"{key}: {value}")
+
+    for key, value in describe_proxy().items():
         click.echo(f"{key}: {value}")
 
 

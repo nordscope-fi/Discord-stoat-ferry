@@ -1550,3 +1550,19 @@ def test_permanence_is_false_for_unrelated_errors(exc: BaseException) -> None:
     test cannot see that: OSError is not a ClientConnectorError.
     """
     assert http.proxy_error_is_permanent(exc) is False
+
+
+# --- The kill switch, a regression guard (Task 11) ---------------------------
+#
+# resolve_proxy already checks FERRY_DISABLE_PROXY as its first statement
+# (core/http.py:404-405), before the env/os merge runs, so the assertion below
+# already passes today. It exists to catch a LATER change that moves the check
+# below source selection, where an env-supplied proxy could slip through while
+# the OS half stayed suppressed -- exactly the "suppresses only one half"
+# failure the switch exists to prevent.
+
+
+def test_the_kill_switch_disables_both_sources(proxy_env, os_proxy) -> None:
+    """SC-135-14. Killing: a switch that suppresses only one half."""
+    with os_proxy(CORP), proxy_env(HTTPS_PROXY="http://env:3128", FERRY_DISABLE_PROXY="1"):
+        assert http.resolve_proxy(TARGET) is None

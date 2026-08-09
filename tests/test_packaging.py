@@ -220,3 +220,14 @@ def test_release_workflow_asserts_the_union_branch() -> None:
     assert re.search(r"trust-source:\\s\*union", text), (
         "release.yml must assert the union branch, not merely mention trust-source"
     )
+
+
+def test_release_workflow_asserts_the_proxy_keys() -> None:
+    """SC-135-45. Killing: a workflow test that checks the key is MENTIONED
+    rather than ASSERTED. That exact defect shipped in v2.13.0's plan, where
+    weakening the Windows gate would have left the test green. Anchored to the
+    assertion's structure.
+    """
+    text = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert re.search(r"proxy-source:\\s\*", text), "the Windows regex must assert, not mention"
+    assert re.search(r'\*"proxy-source: "\*', text), "the macOS glob must assert"
