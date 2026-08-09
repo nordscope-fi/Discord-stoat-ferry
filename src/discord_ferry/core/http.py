@@ -430,6 +430,89 @@ def resolve_proxy(url: str | URL) -> ProxyChoice | None:
     return ProxyChoice(url=stripped, authorization=authorization, source=source)
 
 
+def proxy_notices() -> tuple[ProxyNotice, ...]:
+    """Configurations Ferry found but cannot use.
+
+    Forces the scan and evaluates the configuration ITSELF. It must not depend
+    on resolve_proxy having run: every caller (engine preflight, build,
+    rollback, probe, the GUI export screen) runs before the first request.
+
+    Pure and idempotent: builds once, then returns the same tuple on every call
+    and consumes nothing, so a second migration in the same GUI process reports
+    what the first did. The engine decides what to emit; this never does.
+    """
+    global _proxy_notices  # noqa: PLW0603
+    if _proxy_notices:
+        return _proxy_notices
+    if os.environ.get("FERRY_DISABLE_PROXY"):
+        return ()
+
+    env, os_side = _scheme_map()
+    found: list[ProxyNotice] = []
+
+    if "all" in env:
+        covered = [s for s in ("http", "https") if s in env or s in os_side]
+        found.append(
+            ProxyNotice(
+                kind="all_proxy_only",
+                scheme="all",
+                display=_safe_display(env["all"]),
+                outcome=(
+                    f"Used the {'environment' if all(s in env for s in covered) else 'OS'} "
+                    f"proxy for {', '.join(covered)} instead."
+                    if covered
+                    else "Connected direct. ALL_PROXY is not supported (see issue #141)."
+                ),
+            )
+        )
+
+    for scheme, raw in (*env.items(), *os_side.items()):
+        if scheme not in ("http", "https"):
+            continue
+        try:
+            parsed = URL(raw)
+        except (ValueError, TypeError):
+            found.append(
+                ProxyNotice(
+                    kind="malformed",
+                    scheme=scheme,
+                    display="<unparseable>",
+                    outcome="Connected direct.",
+                )
+            )
+            continue
+        if parsed.scheme.startswith("socks"):
+            found.append(
+                ProxyNotice(
+                    kind="socks",
+                    scheme=scheme,
+                    display=_safe_display(raw),
+                    outcome="Connected direct. SOCKS is not supported (see issue #141).",
+                )
+            )
+
+    _proxy_notices = tuple(found)
+    return _proxy_notices
+
+
+def _safe_display(raw: str) -> str:
+    """A proxy URL with userinfo removed, for display. Never raises."""
+    try:
+        return str(_strip_userinfo(URL(raw))[0])
+    except (ValueError, TypeError):
+        return "<unparseable>"
+
+
+def format_proxy_notices() -> list[str]:
+    """One user-facing line per notice. Lives here, not in a shell, so both
+    cli.py and gui.py render the same text without gui.py importing cli.py.
+    """
+    return [
+        f"Proxy configuration Ferry cannot use: {n.display} ({n.scheme}). {n.outcome}"
+        for n in proxy_notices()
+    ]
+
+
 class _FerryRequest(aiohttp.ClientRequest):
     """Fills in the proxy when the caller gave none.
 
