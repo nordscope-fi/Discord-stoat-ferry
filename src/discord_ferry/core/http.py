@@ -618,7 +618,15 @@ def proxy_hint(exc: BaseException, *, target: str) -> str | None:
     ClientProxyConnectionError, which has no request_info at all. NEVER from
     request_info.url, which is the TARGET.
     """
-    target_host = URL(target).host or target
+    # Guarded for the same reason resolve_proxy guards the identical
+    # construction: every call site is inside an `except` block, and
+    # structure.py passes state.autumn_url, which is SERVER-supplied. A raise
+    # here replaces the error the user was about to be told about with a
+    # ValueError from the handler that was meant to explain it.
+    try:
+        target_host = URL(target).host or target
+    except (ValueError, TypeError):
+        target_host = target
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
@@ -656,11 +664,32 @@ def _proxy_identity(exc: BaseException) -> str | None:
     if isinstance(exc, aiohttp.ClientConnectorCertificateError):
         host, port = getattr(exc, "host", None), getattr(exc, "port", None)
         scan = _proxy_scan
-        if scan is not None:
-            for raw in (*scan[0].values(), *scan[1].values()):
+        # `host is not None` guards the degenerate match. The getattr defaults
+        # are None and a scheme-less value parses to host=None, so without it
+        # None == None matches and the hint renders "None:None".
+        if scan is not None and host is not None:
+            for key, raw in (*scan[0].items(), *scan[1].items()):
+                # http and https ONLY, and not because the others are unlikely.
+                # The env half is getproxies_environment() verbatim, which keys
+                # NO_PROXY as 'no' (measured: NO_PROXY=https://stoat.internal:8443
+                # yields {'no': 'https://stoat.internal:8443'}). Scheme-prefixing
+                # NO_PROXY is a common mistake, and without this filter it makes
+                # every genuine certificate error for that host resolve as a
+                # proxy identity. Because the sites read
+                # `proxy_hint(...) or tls_hint(...)`, the correct SSL_CERT_FILE
+                # advice would then be REPLACED by proxy advice naming a host
+                # that is not a proxy -- on self-hosted Stoat behind a private
+                # CA, which is exactly where that advice matters.
+                #
+                # These two keys are also the only ones Ferry can proxy through:
+                # resolve_proxy indexes env/os_side by the TARGET's scheme.
+                if key not in ("http", "https"):
+                    continue
                 try:
                     candidate = URL(raw)
                 except (ValueError, TypeError):
+                    continue
+                if candidate.host is None:
                     continue
                 if candidate.host == host and candidate.port == port:
                     return f"{host}:{port}"

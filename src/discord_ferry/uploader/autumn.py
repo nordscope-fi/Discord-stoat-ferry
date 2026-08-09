@@ -231,8 +231,15 @@ async def upload_to_autumn(
         except aiohttp.ClientError as exc:
             # No permanence gate here, and that is not an oversight: BOTH arms
             # of this handler raise, so there is no retry for a gate to
-            # preserve. A proxy 502 leaves this function as the raw
-            # ClientHttpProxyError it does today, exactly as before.
+            # preserve.
+            #
+            # Every proxy failure is therefore CONVERTED, a 502 as much as a
+            # 407 -- proxy_hint has no status filter. That is deliberate, and
+            # structure.py:403 depends on it: its handler catches
+            # (AutumnUploadError, OSError): ClientHttpProxyError is a
+            # ClientResponseError, NOT an OSError, so leaving it raw would make
+            # a proxy failure ABORT the roles phase instead of degrading to a
+            # warning. Do not "restore" a raw ClientHttpProxyError here.
             #
             # Proxy first and never both, for the reason in api.py.
             hint = proxy_hint(exc, target=url) or tls_hint(exc)

@@ -497,8 +497,10 @@ async def test_a_refused_proxy_names_the_proxy(tmp_path, fake_proxy, proxy_env, 
 
     message = str(caught.value)
     assert "Network error downloading DCE" in message
-    assert "api.github.com" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    # ONE assertion: see the note in tests/test_exporter_runner.py. The split
+    # version put `assert "api.github.com" in message` above the phrase, so the
+    # phrase line never ran under this site's own mutant.
+    assert f"The request to api.github.com went through the proxy at 127.0.0.1:{port}" in message
     assert slept.await_count == 0, "a refused proxy is permanent and must not pay the 3s retry"
 
 
@@ -528,4 +530,6 @@ async def test_a_proxy_502_still_retries(tmp_path, fake_proxy, proxy_env, os_pro
                 await download_dce(lambda _e: None)
 
     assert len(captured) >= 2, "the 502 was treated as permanent and never retried"
-    assert f"went through the proxy at 127.0.0.1:{port}" in str(caught.value)
+    assert f"The request to api.github.com went through the proxy at 127.0.0.1:{port}" in str(
+        caught.value
+    )

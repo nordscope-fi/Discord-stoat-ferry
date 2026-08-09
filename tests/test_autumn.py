@@ -880,5 +880,5 @@ async def test_a_refused_proxy_names_the_proxy(
 
     message = str(caught.value)
     assert "Upload to Autumn failed" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to autumn.test went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message

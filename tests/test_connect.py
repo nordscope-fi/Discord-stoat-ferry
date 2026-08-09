@@ -205,11 +205,17 @@ async def test_a_refused_proxy_names_the_proxy_discovering_autumn(
     # The site marker first: it passes under the wiring mutant, so the proxy
     # assertions below are guaranteed to be reached and graded.
     assert "Cannot reach Stoat API" in message
-    # The hint's own phrase, NOT a bare `127.0.0.1:{port}`. ClientHttpProxyError
-    # renders `url='http://127.0.0.1:PORT'` (its real_url, the proxy) in
-    # __str__, so a bare host substring is already present in the unwired
-    # message and could not fail. This assertion is the one that grades wiring.
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    # ONE assertion, naming the target AND the proxy.
+    #
+    # Not a bare `127.0.0.1:{port}`: ClientHttpProxyError renders
+    # `url='http://127.0.0.1:PORT'` (its real_url, the proxy) in __str__, so a
+    # bare host substring is already in the unwired message and cannot fail.
+    #
+    # Not split in two either. A separate `assert "api.test" in message` above
+    # this line would take the failure under the wiring mutant and this line
+    # would never run. Merged, one assertion grades wiring AND pins `target=`,
+    # which a copy-paste `target=path` would otherwise pass.
+    assert f"The request to api.test went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
 
 
@@ -235,5 +241,5 @@ async def test_a_refused_proxy_names_the_proxy_verifying_the_token(
 
     message = str(caught.value)
     assert "Token verification" in message
-    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to api.test went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message

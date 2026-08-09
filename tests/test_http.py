@@ -1412,3 +1412,129 @@ def test_a_non_proxy_error_is_not_a_permanent_proxy_error() -> None:
     """Killing: a gate that returns True for anything it does not recognise,
     which would abort ordinary network retries."""
     assert http.proxy_error_is_permanent(OSError("boom")) is False
+
+
+def test_a_407_names_the_proxy_not_the_target_twice() -> None:
+    """SC-135-25. Killing: request_info.url for proxy identity. url is the
+    TARGET, real_url is the PROXY, so that mutant names the target twice."""
+    exc = aiohttp.ClientHttpProxyError(
+        request_info=aiohttp.RequestInfo(
+            URL("https://api.stoat.chat/x"), "CONNECT", (), URL("http://corp:8080")
+        ),
+        history=(),
+        status=407,
+    )
+    hint = http.proxy_hint(exc, target="https://api.stoat.chat/x")
+    assert hint is not None
+    assert "the proxy at corp:8080" in hint
+    assert "api.stoat.chat" not in hint.split("went through")[1]
+    assert "requires authentication" in hint
+
+
+def test_a_certificate_error_against_an_https_proxy_is_a_proxy_failure(proxy_env, os_proxy) -> None:
+    """SC-135-52, and the ONLY instrument for "proxy wins, never concatenated".
+
+    With an https:// proxy, connector.py builds the certificate error from the
+    PROXY's connection key, so this is the one shape where proxy_hint and
+    tls_hint BOTH fire. Every one of the eight site tests uses an http:// proxy,
+    where tls_hint is None, so a mutant that concatenated the two hints passes
+    all eight of them and only fails here.
+
+    The scan is warmed through resolve_proxy, NOT by assigning _proxy_scan.
+    _proxy_identity reads that global directly and the autouse fixture resets
+    it, so a hand-built scan would grade the test's own fixture rather than the
+    real environment read.
+    """
+    key = aiohttp.client_reqrep.ConnectionKey("secure-proxy", 8443, True, True, None, None, None)
+    cert_error = aiohttp.ClientConnectorCertificateError(
+        key, ssl.SSLCertVerificationError("unable to get local issuer certificate")
+    )
+    with os_proxy({}), proxy_env(HTTPS_PROXY="https://secure-proxy:8443"):
+        assert http.resolve_proxy("https://api.stoat.chat/x") is not None
+        hint = http.proxy_hint(cert_error, target="https://api.stoat.chat/x")
+
+    # Both fire on this shape. That is what makes it the precedence instrument
+    # rather than merely another positive case.
+    assert http.tls_hint(cert_error) is not None
+    assert hint is not None
+    assert "went through the proxy at secure-proxy:8443" in hint
+    assert "SSL_CERT_FILE" not in hint, (
+        "the certificate hint must be REPLACED, not appended: SSL_CERT_FILE "
+        "advice here names a bundle for a host the user never configured"
+    )
+
+
+def test_a_scheme_prefixed_no_proxy_is_not_a_proxy_identity(proxy_env, os_proxy) -> None:
+    """The certificate branch must read http/https entries only.
+
+    getproxies_environment() keys NO_PROXY as 'no' and returns its raw value.
+    Measured: NO_PROXY=https://stoat.internal:8443 yields
+    {'no': 'https://stoat.internal:8443'}. Scheme-prefixing NO_PROXY is a common
+    mistake, and an unfiltered scan makes every genuine certificate error for
+    that host resolve as a proxy identity. Because the sites read
+    `proxy_hint(...) or tls_hint(...)`, the correct SSL_CERT_FILE advice is then
+    REPLACED by proxy advice naming a host that is not a proxy -- on self-hosted
+    Stoat behind a private CA, which is where that advice matters most.
+    """
+    key = aiohttp.client_reqrep.ConnectionKey("stoat.internal", 8443, True, True, None, None, None)
+    cert_error = aiohttp.ClientConnectorCertificateError(
+        key, ssl.SSLCertVerificationError("unable to get local issuer certificate")
+    )
+    with os_proxy({}), proxy_env(NO_PROXY="https://stoat.internal:8443"):
+        # Warms the scan through the real path even though it resolves to None.
+        assert http.resolve_proxy("https://stoat.internal:8443/x") is None
+        assert http._proxy_scan is not None, "the scan must be warm for this test to grade anything"
+        assert "no" in http._proxy_scan[0], "the fixture must reproduce the 'no' key"
+        hint = http.proxy_hint(cert_error, target="https://stoat.internal:8443/x")
+
+    assert hint is None
+    # The advice the user actually needs must survive.
+    assert "SSL_CERT_FILE" in (http.tls_hint(cert_error) or "")
+
+
+def test_proxy_hint_survives_a_self_referential_chain() -> None:
+    """Mirrors SC-134-22 for tls_hint. Deleting the `seen` set spins forever,
+    and it does so INSIDE an exception handler at eight call sites, so the
+    symptom is a hung migration with no error at all."""
+    exc = ValueError("loop")
+    exc.__context__ = exc
+    assert http.proxy_hint(exc, target="https://x/") is None
+
+
+def test_an_unparseable_target_does_not_raise_inside_a_handler() -> None:
+    """URL(target) is guarded because every call site is inside an `except`.
+
+    structure.py passes state.autumn_url, which is SERVER-supplied. Measured:
+    URL("http://[") raises ValueError("Invalid IPv6 URL"). Unguarded, that
+    ValueError replaces the error the handler existed to explain. resolve_proxy
+    guards the identical construction for the same reason.
+    """
+    hint = http.proxy_hint(_proxy_conn_error(), target="http://[")
+    assert hint is not None
+    assert "the proxy at corp:8080" in hint
+    assert "http://[" in hint, "the unparseable target falls back to the raw string"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("nope"),
+        TimeoutError(),
+        aiohttp.ClientOSError("boom"),
+        aiohttp.ClientConnectorError(
+            aiohttp.client_reqrep.ConnectionKey("api.test", 443, True, True, None, None, None),
+            OSError("refused"),
+        ),
+    ],
+)
+def test_permanence_is_false_for_unrelated_errors(exc: BaseException) -> None:
+    """Mirrors test_tls_hint_ignores_unrelated_errors, and the last parameter is
+    the one that matters.
+
+    ClientProxyConnectionError IS a ClientConnectorError subclass, so the
+    over-broad `isinstance(exc, ClientConnectorError)` mutant marks every
+    ordinary connection failure permanent and short-circuits the retry loops at
+    api.py, discord/client.py and exporter/manager.py. An OSError-only negative
+    test cannot see that: OSError is not a ClientConnectorError.
+    """
+    assert http.proxy_error_is_permanent(exc) is False
