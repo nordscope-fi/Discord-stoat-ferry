@@ -38,6 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `ALL_PROXY` are outside what Ferry supports; Ferry reports them by name instead of connecting
   through them with no explanation, tracked as issue #141.
 
+  The `aiohttp` floor moves from `>=3.9` to `>=3.14`. `core/http.py` imports `encode_basic_auth`,
+  which aiohttp added in 3.14.0 as the replacement for `BasicAuth` and `proxy_auth`, both of which
+  are deprecated for aiohttp 4.0. Anyone with a pinned `aiohttp` below 3.14 needs to raise it.
+
   `yarl` and `multidict` are now direct dependencies. `core/http.py` imports `yarl.URL` and
   `multidict.CIMultiDict` directly, and both previously reached the environment only through
   aiohttp's own requirements, the same gap `certifi` closed in v2.13.0.
