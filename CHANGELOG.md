@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-08-10
+
+### Added
+
+- **Ferry now resolves an HTTP or HTTPS proxy for every outbound session, closing issue #135.**
+  `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` work the way most command-line tools already read
+  them. On Windows and macOS, when those variables are unset, Ferry falls back to the operating
+  system's own proxy configuration (the registry on Windows, the system configuration on macOS),
+  so a proxy set only in system settings still applies. The two sources merge per scheme rather
+  than one short-circuiting the other, and their bypass lists union: a host exempted by either
+  `NO_PROXY` or the system's own exception list is exempted.
+
+  Resolution installs through a `ClientRequest` subclass in `core/http.py`, the same session
+  factory every outbound call already goes through for the v2.13.0 TLS trust policy. A proxy that
+  requires authentication is handled on the request itself: Ferry strips the credential out of
+  the URL, sends it as a `Proxy-Authorization` header, and registers both the plaintext and
+  encoded forms for log redaction, so neither reaches `ferry.log`.
+
+  `FERRY_DISABLE_PROXY=1` turns proxy use off everywhere, and `ferry tls-check` reports what
+  Ferry actually resolved: `proxy-http`, `proxy-https`, `proxy-source` and `proxy-disabled`.
+  Eight existing network error handlers, the same call sites v2.13.0 wired for certificate
+  errors, now also recognize a proxy failure and name the proxy, the target host, and whether
+  the proxy itself rejected the request.
+
+  DiscordChatExporter runs as a separate process and cannot see any of the above, so the export
+  phase passes it an OS-resolved `HTTPS_PROXY` directly (only when the user has not already set
+  one), with the credential left out: a password sitting in a child process's environment is
+  readable by other processes on some systems. SOCKS proxies and a proxy set only through
+  `ALL_PROXY` are outside what Ferry supports; Ferry reports them by name instead of connecting
+  through them with no explanation, tracked as issue #141.
+
+  `yarl` and `multidict` are now direct dependencies. `core/http.py` imports `yarl.URL` and
+  `multidict.CIMultiDict` directly, and both previously reached the environment only through
+  aiohttp's own requirements, the same gap `certifi` closed in v2.13.0.
+
+### Documentation
+
+- Troubleshooting guide gains a Proxy Configuration section: the operating-system fallback, the
+  difference between `FERRY_DISABLE_PROXY` and `NO_PROXY`, why the kill switch cannot fix a
+  stale system proxy entry during export, why the GUI and `ferry tls-check` can disagree about a
+  `.env`-only proxy, and the SOCKS, `ALL_PROXY`, and authenticating-proxy limits.
+
 ## [2.13.1] - 2026-08-07
 
 ### Fixed
