@@ -417,6 +417,29 @@ def test_build_help(runner: CliRunner) -> None:
     assert "--blueprint" in result.output
 
 
+def test_build_prints_proxy_notice(runner: CliRunner, tmp_path: Path, proxy_env, os_proxy) -> None:
+    """Task 13. Killing: a build command that reaches api_create_server's
+    network call without ever calling _print_proxy_notices, leaving a proxied
+    user with no explanation. build is one of the four notice entry points
+    outside run_migration."""
+    from discord_ferry.blueprint import ServerBlueprint
+
+    bp = ServerBlueprint(name="Empty")
+    p = _write_bp(tmp_path, bp)
+    with (
+        os_proxy({}),
+        proxy_env(ALL_PROXY="socks5://sock:1080"),
+        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value={"_id": "srv"})),
+    ):
+        result = runner.invoke(
+            main,
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    assert "cannot use" in result.output
+
+
 # ---------------------------------------------------------------------------
 # Export-blueprint command
 # ---------------------------------------------------------------------------
@@ -633,6 +656,37 @@ def test_rollback_engine_error(runner: CliRunner, tmp_path: Path) -> None:
     assert "Lock conflict" in result.output
 
 
+def test_rollback_prints_proxy_notice(
+    runner: CliRunner, tmp_path: Path, proxy_env, os_proxy
+) -> None:
+    """Task 13. Killing: a rollback command that reaches run_rollback's network
+    work without ever calling _print_proxy_notices. rollback is one of the four
+    notice entry points outside run_migration."""
+    _write_rollback_state(tmp_path)
+    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id="srv01"))
+    with (
+        os_proxy({}),
+        proxy_env(ALL_PROXY="socks5://sock:1080"),
+        patch("discord_ferry.cli.run_rollback", mock_engine),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "rollback",
+                "--output-dir",
+                str(tmp_path),
+                "--yes",
+                "--stoat-url",
+                "http://localhost",
+                "--token",
+                "test-token",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    assert "cannot use" in result.output
+
+
 def test_rollback_tracker_renders_suspect_columns() -> None:
     """SC-33: Rich table renders created_at + stoat_id columns for untracked suspects."""
     import asyncio as _asyncio
@@ -713,6 +767,40 @@ def test_probe_requires_test_server_id(runner: CliRunner) -> None:
         main, ["probe", "--stoat-url", "https://api.test", "--token", "t"], catch_exceptions=False
     )
     assert result.exit_code != 0  # Click flags the missing required option
+
+
+def test_probe_writes_notices_to_stderr_under_json(runner: CliRunner, proxy_env, os_proxy) -> None:
+    """Task 13. probe --json prints machine-readable JSON to stdout
+    (cli.py:1322-1324), so a notice printed to stdout would corrupt it. Killing:
+    a _print_proxy_notices call site that defaults to_stderr, or omits it, and
+    lands the notice on stdout instead."""
+    from discord_ferry.migrator.probe import ProbeReport
+
+    with (
+        os_proxy({}),
+        proxy_env(ALL_PROXY="socks5://sock:1080"),
+        patch(
+            "discord_ferry.migrator.probe.run_probe",
+            AsyncMock(return_value=ProbeReport()),
+        ),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "probe",
+                "--json",
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                "t",
+                "--test-server-id",
+                "srv1",
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    assert "cannot use" not in result.stdout  # stdout stays machine-readable
+    assert "cannot use" in result.stderr  # the human gets told
 
 
 def test_no_create_invite_flag_threads_to_config(runner: CliRunner) -> None:
