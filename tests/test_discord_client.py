@@ -665,3 +665,44 @@ async def test_discord_reset_after_header_is_seconds_not_milliseconds(
     assert calls[0] == pytest.approx(5.0, abs=0.05), (
         "Discord's X-RateLimit-Reset-After is delta-seconds: 5 must mean 5s, not 0.005s"
     )
+
+
+# ---------------------------------------------------------------------------
+# #135 — a refusing proxy must name itself at discord/client.py:163
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-28. Killing: proxy_hint defined and never called at client.py:163.
+
+    A real socket: aioresponses patches ClientSession._request, so the request
+    object that carries a proxy is never built.
+
+    `asyncio.sleep` is patched so an unwired run costs no wall time, and the
+    await_count assertion pins the permanence half -- a refused proxy is
+    permanent, so it must jump over the _MAX_RETRIES loop rather than pay it.
+    That assertion is LAST, so the wiring assertions above it fail first.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.core.http import new_session
+    from discord_ferry.errors import MigrationError
+
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
+            async with new_session() as session:
+                with pytest.raises(MigrationError) as caught:
+                    await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    message = str(caught.value)
+    assert "Discord API network error" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert "FERRY_DISABLE_PROXY" in message
+    assert sleep.await_count == 0, "a refused proxy must not pay the 1s retry sleep"

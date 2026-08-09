@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import tls_hint
+from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.errors import StoatConnectionError
 from discord_ferry.migrator.api import api_fetch_server, get_session
 
@@ -93,9 +93,15 @@ async def _discover_autumn_url(session: aiohttp.ClientSession, stoat_url: str) -
                 raise StoatConnectionError(f"Stoat API returned status {response.status} at {url}")
             data = await response.json()
     except aiohttp.ClientError as e:
-        raise StoatConnectionError(
-            f"Cannot reach Stoat API at {url}: {e}{tls_hint(e) or ''}"
-        ) from e
+        # Proxy first, and NEVER both. With an https:// proxy a certificate
+        # error is built from the PROXY's connection key (connector.py:1630),
+        # so tls_hint would tell the user to point SSL_CERT_FILE at a bundle
+        # for a host they never configured.
+        #
+        # No permanence gate here: this handler has no retry to short-circuit,
+        # so the message is the only decision it makes.
+        hint = proxy_hint(e, target=url) or tls_hint(e) or ""
+        raise StoatConnectionError(f"Cannot reach Stoat API at {url}: {e}{hint}") from e
 
     try:
         autumn_url: str = data["features"]["autumn"]["url"]
@@ -150,6 +156,6 @@ async def _verify_token(session: aiohttp.ClientSession, stoat_url: str, token: s
                     f"Token verification failed with status {response.status}"
                 )
     except aiohttp.ClientError as e:
-        raise StoatConnectionError(
-            f"Token verification request failed: {e}{tls_hint(e) or ''}"
-        ) from e
+        # Proxy first, never both, and no gate: see _discover_autumn_url.
+        hint = proxy_hint(e, target=url) or tls_hint(e) or ""
+        raise StoatConnectionError(f"Token verification request failed: {e}{hint}") from e

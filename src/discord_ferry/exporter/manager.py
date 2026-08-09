@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from discord_ferry.core.http import new_session, tls_hint
+from discord_ferry.core.http import new_session, proxy_error_is_permanent, proxy_hint, tls_hint
 from discord_ferry.errors import DCENotFoundError, ValidationError
 
 if TYPE_CHECKING:
@@ -174,9 +174,15 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
     )
 
     data: bytes | None = None
+    # Bound OUTSIDE the try and reassigned before each GET. The `except` below
+    # spans both requests, and `download_url` is bound inside the try, so on a
+    # first-GET failure `target=download_url` would raise UnboundLocalError from
+    # inside an error handler. This name is always bound before it is read.
+    current_url = release_url
     for attempt in range(2):
         try:
             async with new_session() as session:
+                current_url = release_url
                 async with session.get(
                     release_url, headers={"Accept": "application/vnd.github.v3+json"}
                 ) as resp:
@@ -197,6 +203,7 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
                         f"Asset {asset_name} not found in DCE v{DCE_VERSION} release"
                     )
 
+                current_url = download_url
                 async with session.get(download_url) as resp:
                     if resp.status != 200:
                         raise DCENotFoundError(
@@ -211,9 +218,19 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
             break  # success — exit retry loop
 
         except (aiohttp.ClientError, DCENotFoundError) as e:
-            hint = tls_hint(e)
-            if hint is not None:
-                # A certificate failure cannot succeed on retry; do not pay the sleep.
+            # Two lines: message and control flow are separate decisions over the
+            # same two values. Proxy wins over the certificate hint and they are
+            # never concatenated, for the reason in api.py.
+            cert = tls_hint(e)
+            hint = proxy_hint(e, target=current_url) or cert
+            if hint is not None and (cert is not None or proxy_error_is_permanent(e)):
+                # A certificate failure, a proxy 407/403 or an unreachable proxy
+                # cannot succeed on retry; do not pay the sleep.
+                #
+                # Gated on permanence because this jumps over the `attempt == 0`
+                # retry. This is the DCE download, Ferry's highest-traffic
+                # external failure path, so a proxy 502 or a connect timeout must
+                # keep the retry it has always had.
                 raise DCENotFoundError(f"Network error downloading DCE: {e}{hint}") from e
             if attempt == 0:
                 on_event(
@@ -225,7 +242,7 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
                 )
                 await asyncio.sleep(3)
             else:
-                raise DCENotFoundError(f"Network error downloading DCE: {e}") from e
+                raise DCENotFoundError(f"Network error downloading DCE: {e}{hint or ''}") from e
 
     assert data is not None  # unreachable — both-fail case raises above
 

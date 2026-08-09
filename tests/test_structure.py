@@ -3126,3 +3126,66 @@ async def test_run_roles_icon_warning_never_carries_the_response_body(tmp_path: 
     for w in icon_warnings:
         assert "SENTINEL_BODY" not in w["message"]
         assert config.token not in w["message"]
+
+
+# ---------------------------------------------------------------------------
+# #135 — a refusing proxy must name itself at structure.py:408
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refused_proxy_names_the_proxy(
+    tmp_path: Path, fake_proxy, proxy_env, os_proxy
+) -> None:
+    """SC-135-28. Killing: proxy_hint defined and never called at structure.py:408.
+
+    This handler throws `str(exc)` away on purpose (the Autumn body may echo
+    x-session-token), so the hint upload_to_autumn already put in the message
+    never reaches the user and has to be re-derived from the __cause__ chain.
+    The same shape as the certificate test above it.
+
+    Only the Autumn host is passed through to the real connector; the Stoat
+    calls stay mocked, so exactly one request meets the proxy.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    role = DCERole(id="r1", name="Mods")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={},
+            role_metadata={"r1": RoleMeta(hoist=True, position=0, icon_hash="abc123")},
+        ),
+        tmp_path,
+    )
+
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            aioresponses(passthrough=[AUTUMN_URL]) as m,
+            patch(
+                "discord_ferry.migrator.structure.download_role_icon",
+                new=AsyncMock(return_value=b"pngbytes"),
+            ),
+        ):
+            m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
+            m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+            m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+            # Must NOT raise — a proxy failure on an icon degrades like any other.
+            await run_roles(config, state, exports, events.append)
+
+    icon_warnings = [w for w in state.warnings if w.get("type") == "role_icon_upload_failed"]
+    assert icon_warnings
+    message = icon_warnings[0]["message"]
+    assert "Role icon upload failed" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert "FERRY_DISABLE_PROXY" in message

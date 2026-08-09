@@ -462,3 +462,70 @@ class TestDceChecksumsJson:
                     f"dce_checksums.json[{version!r}][{platform_key!r}] = {value!r} "
                     "does not look like a 64-char lowercase hex SHA-256 string"
                 )
+
+
+# ---------------------------------------------------------------------------
+# #135 — a refusing proxy must name itself at exporter/manager.py:214
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refused_proxy_names_the_proxy(tmp_path, fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-28. Killing: proxy_hint defined and never called at manager.py:214.
+
+    This site also carried the worst of the two target-binding hazards: the
+    `except` spans both `session.get` calls and `download_url` is bound INSIDE
+    the try, so a failure on the first GET left it unbound and
+    `proxy_hint(e, target=download_url)` would raise UnboundLocalError from
+    inside an error handler. This test fails on the FIRST GET, so it is exactly
+    the case that would have raised.
+    """
+    from discord_ferry.errors import DCENotFoundError
+
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("discord_ferry.exporter.manager.asyncio.sleep", new_callable=AsyncMock) as slept,
+        ):
+            with pytest.raises(DCENotFoundError) as caught:
+                await download_dce(lambda _e: None)
+
+    message = str(caught.value)
+    assert "Network error downloading DCE" in message
+    assert "api.github.com" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert slept.await_count == 0, "a refused proxy is permanent and must not pay the 3s retry"
+
+
+async def test_a_proxy_502_still_retries(tmp_path, fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-37. Killing: wiring proxy_hint at manager.py without the
+    permanence gate, which would turn a retryable blip into a hard failure on
+    the DCE download, this repo's highest-traffic external failure path.
+
+    A 502 from the proxy is NOT permanent, so this must take the `attempt == 0`
+    retry and reach the socket twice. The message still names the proxy: the
+    hint is computed either way, only the short-circuit is gated.
+    """
+    from discord_ferry.errors import DCENotFoundError
+
+    make, captured = fake_proxy
+    server = await make(b"502 Bad Gateway")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("discord_ferry.exporter.manager.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            with pytest.raises(DCENotFoundError) as caught:
+                await download_dce(lambda _e: None)
+
+    assert len(captured) >= 2, "the 502 was treated as permanent and never retried"
+    assert f"went through the proxy at 127.0.0.1:{port}" in str(caught.value)

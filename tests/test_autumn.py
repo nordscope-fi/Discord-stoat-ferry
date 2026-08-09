@@ -7,6 +7,7 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
+from discord_ferry.core.http import new_session
 from discord_ferry.errors import AutumnUploadError
 from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
@@ -850,3 +851,34 @@ async def test_non_certificate_client_error_is_re_raised_unchanged(
             await upload_to_autumn(session, AUTUMN_URL, "icons", file, TOKEN)
 
     assert not isinstance(caught.value, AutumnUploadError)
+
+
+# ---------------------------------------------------------------------------
+# #135 — a refusing proxy must name itself at autumn.py:232
+# ---------------------------------------------------------------------------
+
+
+async def test_a_refused_proxy_names_the_proxy(
+    tmp_path: Path, fake_proxy, proxy_env, os_proxy
+) -> None:
+    """SC-135-28. Killing: proxy_hint defined and never called at autumn.py:232.
+
+    Without the call the hint is None, the `if hint is None: raise` arm fires,
+    and the raw ClientHttpProxyError escapes -- so pytest.raises fails on the
+    TYPE before any assertion below runs. That is the mutant's signature here.
+    """
+    file = tmp_path / "icon.png"
+    file.write_bytes(b"x" * 50)
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"):
+            async with new_session() as session:
+                with pytest.raises(AutumnUploadError) as caught:
+                    await upload_to_autumn(session, AUTUMN_URL, "icons", file, TOKEN)
+
+    message = str(caught.value)
+    assert "Upload to Autumn failed" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
+    assert "FERRY_DISABLE_PROXY" in message
