@@ -453,11 +453,16 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
     `getproxies_registry` through `_os_proxies`, and stdlib can raise there
     outside (ValueError, TypeError).
 
-    The concrete `re.error` case documented on the sibling boundary is NOT on
-    this path, and an earlier version of this paragraph claimed it was. That one
-    comes from `proxy_bypass_registry`, reached by `_os_proxy_bypass` via
-    `_is_bypassed`, which only `resolve_proxy` calls. This boundary is justified
-    by analogy with the sibling, not by that citation.
+    This paragraph has now been wrong twice, in opposite directions, so it is
+    worth stating what is actually true. It first claimed a concrete `re.error`
+    case reached this path. It then claimed that case was real but belonged to
+    the sibling boundary instead. Neither holds: `_proxy_bypass_winreg_override`
+    uses `fnmatch`, not `re.match`, on every Python Ferry supports, so no
+    `re.error` case exists on either path. Corrected at the final review of the
+    proxy branch, alongside the sibling docstring that carried the same claim.
+
+    What justifies this boundary is the platform getters above, which Ferry does
+    not control and which stdlib can raise from outside (ValueError, TypeError).
 
     Every caller runs at preflight, so a raise here would abort the first thing a
     migration does in exchange for a message it was only ever going to print.
