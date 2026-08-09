@@ -1432,13 +1432,24 @@ def test_a_407_names_the_proxy_not_the_target_twice() -> None:
 
 
 def test_a_certificate_error_against_an_https_proxy_is_a_proxy_failure(proxy_env, os_proxy) -> None:
-    """SC-135-52, and the ONLY instrument for "proxy wins, never concatenated".
+    """SC-135-52, the unit half. What this grades, and what it does NOT.
 
     With an https:// proxy, connector.py builds the certificate error from the
     PROXY's connection key, so this is the one shape where proxy_hint and
-    tls_hint BOTH fire. Every one of the eight site tests uses an http:// proxy,
-    where tls_hint is None, so a mutant that concatenated the two hints passes
-    all eight of them and only fails here.
+    tls_hint BOTH fire. This test grades two things about that shape:
+    _proxy_identity recognises the certificate error as a proxy failure at all,
+    and proxy_hint's OWN return value never carries SSL_CERT_FILE.
+
+    It does NOT grade the precedence rule at any call site. proxy_hint never
+    calls tls_hint, and this test reads proxy_hint's return value directly, so a
+    site written as `proxy_hint(...) + (tls_hint(...) or "")` cannot turn this
+    line red. Only a change to proxy_hint itself can. The site-level instrument
+    is test_a_certificate_error_against_an_https_proxy_names_the_proxy_not_the_bundle
+    in tests/test_api.py, and it covers ONE of the eight sites; see that test.
+
+    An earlier version of this docstring called this "the ONLY instrument for
+    proxy wins, never concatenated". That was prose outrunning what the
+    assertion below can detect.
 
     The scan is warmed through resolve_proxy, NOT by assigning _proxy_scan.
     _proxy_identity reads that global directly and the autouse fixture resets
@@ -1453,14 +1464,15 @@ def test_a_certificate_error_against_an_https_proxy_is_a_proxy_failure(proxy_env
         assert http.resolve_proxy("https://api.stoat.chat/x") is not None
         hint = http.proxy_hint(cert_error, target="https://api.stoat.chat/x")
 
-    # Both fire on this shape. That is what makes it the precedence instrument
-    # rather than merely another positive case.
+    # Both fire on this shape. Pinned because it is the premise the site-level
+    # precedence test rests on: without it that test would grade nothing.
     assert http.tls_hint(cert_error) is not None
     assert hint is not None
     assert "went through the proxy at secure-proxy:8443" in hint
     assert "SSL_CERT_FILE" not in hint, (
-        "the certificate hint must be REPLACED, not appended: SSL_CERT_FILE "
-        "advice here names a bundle for a host the user never configured"
+        "proxy_hint's own return value must never carry certificate advice. "
+        "Whether a CALL SITE appends it is a different question, graded in "
+        "tests/test_api.py, not here"
     )
 
 
