@@ -1528,3 +1528,56 @@ def test_tls_check_reports_the_branch_actually_taken(tmp_path: Path) -> None:
         out = CliRunner().invoke(main, ["tls-check"]).output
     assert "ca-bundle-readable: true" in out  # the file is fine
     assert "trust-source: fallback" in out  # the trust is not
+
+
+# ---------------------------------------------------------------------------
+# notice status
+# ---------------------------------------------------------------------------
+
+
+def test_a_notice_prints_without_verbose() -> None:
+    """SC-135-38. Killing: emitting at status='warning'. Measured: cli.py:361-363
+    gates that behind `if self.verbose`, default off, so the user would see only
+    'N warning(s) suppressed' AFTER the run finished. A test asserting only that
+    the event was emitted would pass while the user saw nothing."""
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, fake = _b5_console()
+    with patch("discord_ferry.cli.console", fake):
+        _ProgressTracker(verbose=False).on_event(
+            MigrationEvent(phase="preflight", status="notice", message="PROXY-NOTICE")
+        )
+    assert "PROXY-NOTICE" in buf.getvalue()
+
+
+def test_a_notice_does_not_inflate_the_warning_count() -> None:
+    """Killing: reusing 'error' or 'warning', which would make the final
+    'Warnings: N' line wrong for a configuration notice."""
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, fake = _b5_console()
+    with patch("discord_ferry.cli.console", fake):
+        tracker = _ProgressTracker(verbose=False)
+        tracker.on_event(MigrationEvent(phase="preflight", status="notice", message="x"))
+    assert tracker.warning_count == 0
+    assert tracker.error_count == 0
+
+
+def test_the_rollback_tracker_also_handles_notice() -> None:
+    """SC-135-39. Killing: adding an arm to one match and not the other. Neither
+    has a `case _`, so an unhandled status prints nothing at all, which is worse
+    than the gated 'warning' behaviour it replaced. rollback is one of the four
+    notice entry points."""
+    import asyncio
+
+    from discord_ferry.cli import _RollbackProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, fake = _b5_console()
+    with patch("discord_ferry.cli.console", fake):
+        _RollbackProgressTracker(pause_event=asyncio.Event(), skip_confirmations=True).on_event(
+            MigrationEvent(phase="preflight", status="notice", message="ROLLBACK-NOTICE")
+        )
+    assert "ROLLBACK-NOTICE" in buf.getvalue()

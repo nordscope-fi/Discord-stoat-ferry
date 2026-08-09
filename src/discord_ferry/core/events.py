@@ -12,7 +12,8 @@ class MigrationEvent:
     """Progress event emitted by the migration engine."""
 
     phase: str
-    # "started", "progress", "completed", "error", "warning", "skipped", "confirm", "heartbeat"
+    # "started", "progress", "completed", "error", "warning", "notice",
+    # "skipped", "confirm", "heartbeat"
     status: str
     message: str
     current: int = 0
