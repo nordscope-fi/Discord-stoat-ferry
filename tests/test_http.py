@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import re
 import ssl
 import urllib.request
@@ -1052,6 +1053,33 @@ def test_the_notice_outcome_is_true(proxy_env, os_proxy) -> None:
     assert any("http" in n.outcome and "https" in n.outcome for n in notices)
 
 
+def test_the_all_proxy_outcome_is_not_contradicted_by_its_own_siblings(proxy_env, os_proxy) -> None:
+    """Killing: `covered` built from key membership rather than usability.
+
+    The canonical SOCKS setup exports all three variables together, which
+    shadowsocks, v2ray, `ssh -D` and Tor all document. Under a membership test
+    the ALL_PROXY notice claims "Used the proxy configured for http, https
+    instead." while the two notices printed directly after it say "Connected
+    direct. SOCKS is not supported." The first line is false and contradicts the
+    other two.
+
+    `test_the_notice_outcome_is_true` cannot see this: it is the mirror case,
+    and its docstring names only the direction where an OS proxy WAS used.
+    """
+    with (
+        os_proxy({}),
+        proxy_env(
+            ALL_PROXY="socks5://127.0.0.1:1080",
+            HTTP_PROXY="socks5://127.0.0.1:1080",
+            HTTPS_PROXY="socks5://127.0.0.1:1080",
+        ),
+    ):
+        lines = http.format_proxy_notices()
+    joined = " ".join(lines)
+    assert "Used the proxy configured for" not in joined
+    assert any("ALL_PROXY is not supported" in line for line in lines)
+
+
 def test_the_all_proxy_outcome_does_not_name_a_single_source(proxy_env, os_proxy) -> None:
     """Killing: an outcome that picks one source word for a mixed configuration.
 
@@ -1249,3 +1277,51 @@ def test_format_proxy_notices_is_empty_on_a_clean_configuration(proxy_env, os_pr
     a shell would print as a blank row."""
     with os_proxy({}), proxy_env():
         assert http.format_proxy_notices() == []
+
+
+def test_a_malformed_scheme_proxy_does_not_count_as_covered(proxy_env, os_proxy) -> None:
+    """_usable's except arm, which nothing else enters.
+
+    test_a_malformed_proxy_url_is_reported sets no ALL_PROXY, so it never
+    evaluates `covered` at all. Without the guard here the ALL_PROXY notice
+    would claim a scheme was used that cannot even be parsed, on the same
+    configuration whose next line reports it as malformed.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080", HTTPS_PROXY="http://[::1"):
+        notices = http.proxy_notices()
+    all_notice = next(n for n in notices if n.kind == "all_proxy_only")
+    assert all_notice.outcome == "Connected direct. ALL_PROXY is not supported (see issue #141)."
+    assert any(n.kind == "malformed" for n in notices)
+
+
+def test_the_kill_switch_wins_over_a_populated_cache(proxy_env, os_proxy) -> None:
+    """The kill-switch check sits ABOVE the cache read.
+
+    test_the_kill_switch_silences_the_notices cannot see the ordering: its cache
+    is cold, so both placements return (). Below the cache read, a process that
+    read notices at preflight and then had FERRY_DISABLE_PROXY set would keep
+    serving them for a proxy layer that is now off. proxy_env restores the whole
+    environment on exit, so setting the variable in place here is contained.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        assert http.proxy_notices() != ()
+        os.environ["FERRY_DISABLE_PROXY"] = "1"
+        assert http.proxy_notices() == ()
+
+
+def test_proxy_notices_never_raises(proxy_env, os_proxy) -> None:
+    """The total boundary, mirroring _FerryRequest._resolve_or_direct.
+
+    `_scheme_map()` reaches the platform getters, and `re.error` subclasses
+    Exception directly rather than ValueError or TypeError, so it escapes both
+    narrow guards inside the loop. Mutant rows H and I showed what escaping
+    looks like from the inside: the exception surfaces at the call and no
+    assertion in the test is ever reached. Every caller runs at preflight, so
+    that aborts the first thing a migration does.
+    """
+    with (
+        os_proxy({}),
+        proxy_env(ALL_PROXY="socks5://sock:1080"),
+        patch("discord_ferry.core.http._scheme_map", side_effect=re.error("boom")),
+    ):
+        assert http.proxy_notices() == ()
