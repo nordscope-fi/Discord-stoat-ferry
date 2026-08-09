@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import os
 from contextlib import contextmanager
@@ -14,7 +15,7 @@ import pytest
 from aiohttp.client_reqrep import ClientResponse
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from contextlib import AbstractContextManager
 
 from discord_ferry.core import logging_setup
@@ -110,25 +111,45 @@ def os_proxy() -> Callable[..., AbstractContextManager[None]]:
 
 
 @pytest.fixture
-async def fake_proxy():
+async def fake_proxy() -> AsyncIterator[
+    tuple[Callable[[bytes], Awaitable[asyncio.Server]], list[str]]
+]:
     """A loopback server that records the first request and answers a status.
 
     Needed because aioresponses patches ClientSession._request, so the request
     object is never constructed and proxy behaviour is invisible to all 21
     aioresponses modules. Real-socket precedent: tests/test_gui_native_lifecycle.py.
+
+    The fixture owns teardown. Every server it hands out is closed here, so a
+    test cannot leak a listening socket by forgetting, and `wait_closed` is
+    awaited so the loop does not shut down mid-close.
     """
     captured: list[str] = []
+    servers: list[asyncio.Server] = []
 
-    def _make(status: bytes = b"403 Forbidden"):
-        async def handle(reader, writer):
-            captured.append((await reader.read(4096)).decode("latin1"))
-            writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\n\r\n")
-            await writer.drain()
-            writer.close()
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        captured.append((await reader.read(4096)).decode("latin1"))
+        writer.write(_status[0])
+        await writer.drain()
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
 
-        return asyncio.start_server(handle, "127.0.0.1", 0)
+    _status: list[bytes] = [b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"]
 
-    return _make, captured
+    async def _make(status: bytes = b"403 Forbidden") -> asyncio.Server:
+        _status[0] = b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\n\r\n"
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        servers.append(server)
+        return server
+
+    try:
+        yield _make, captured
+    finally:
+        for server in servers:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
 
 
 @pytest.fixture(autouse=True)
