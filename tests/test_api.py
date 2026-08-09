@@ -1539,3 +1539,36 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
     # A 403 from the proxy is permanent, so the short-circuit sits above both
     # consecutive_failures increments, exactly as the certificate case does.
     assert _circuit_state.consecutive_failures == 0
+
+
+async def test_a_proxy_502_still_retries(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-37 at api.py. Killing: wiring proxy_hint here without the
+    permanence gate, i.e. `if hint is not None:` alone.
+
+    A 502 from the proxy is NOT permanent, so it must keep the retries it had
+    before proxy support existed. The captured-request count is the FIRST
+    assertion, so it is the one that fails under the ungated mutant; the message
+    assertion below it is reached only when the retries actually happened.
+    """
+    from discord_ferry.migrator.api import MAX_API_RETRIES
+
+    _reset_circuit_state()
+    make, captured = fake_proxy
+    server = await make(b"502 Bad Gateway")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            async with new_session() as session:
+                with pytest.raises(MigrationError) as caught:
+                    await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+
+    assert len(captured) == MAX_API_RETRIES, "the 502 was treated as permanent and never retried"
+    message = str(caught.value)
+    # The exhaustion message still names the proxy: the hint is computed either
+    # way, only the short-circuit is gated.
+    assert f"Network error after {MAX_API_RETRIES} retries" in message
+    assert f"went through the proxy at 127.0.0.1:{port}" in message
