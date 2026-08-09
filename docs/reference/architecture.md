@@ -458,6 +458,7 @@ class MigrationEvent:
 | `completed` | Phase finished successfully | Engine, at phase exit |
 | `error` | Fatal error occurred | Phase implementations |
 | `warning` | Non-fatal issue | Phase implementations |
+| `notice` | Configuration notice the user must see before the run starts. Printed unconditionally, not counted as a warning. | Preflight checks |
 | `skipped` | Phase was skipped (config flag or resume) | Engine |
 | `confirm` | Awaiting user confirmation (review gate) | Engine, once |
 

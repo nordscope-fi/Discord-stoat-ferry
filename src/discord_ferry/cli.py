@@ -361,6 +361,12 @@ class _ProgressTracker:
                     self.warning_count += 1
                     if self.verbose:
                         self._log(f"[yellow][!!][/] {event.phase}: {_safe(event.message)}")
+                case "notice":
+                    # Printed unconditionally. A configuration problem the user
+                    # must see before the run, not a per-item warning. Does NOT
+                    # increment warning_count, so the "N warning(s) suppressed"
+                    # line stays accurate.
+                    self._log(f"[cyan][i][/] {event.phase}: {_safe(event.message)}")
                 case "confirm":
                     # Print review summary and ask for confirmation
                     if event.detail:
@@ -1054,6 +1060,12 @@ class _RollbackProgressTracker:
                     self.warning_count += 1
                     if self.verbose:
                         console.print(f"[yellow]    {_safe(event.message)}[/]")
+                case "notice":
+                    # Printed unconditionally. A configuration problem the user
+                    # must see before the run, not a per-item warning. Does NOT
+                    # increment warning_count, so the "N warning(s) suppressed"
+                    # line stays accurate.
+                    console.print(f"[cyan][i][/] {_safe(event.message)}")
                 case "error":
                     self.error_count += 1
                     console.print(f"[bold red][!!][/] {_safe(event.message)}")
