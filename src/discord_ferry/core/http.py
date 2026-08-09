@@ -448,12 +448,19 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
     The scan underneath (`_scheme_map`) is cached either way, so the repeat
     costs a dict walk rather than a syscall.
 
-    NEVER raises, for the same reason `_FerryRequest._resolve_or_direct` does
-    not: `_scheme_map()` reaches the platform getters, and stdlib can raise
-    there outside (ValueError, TypeError), `re.error` from
-    `proxy_bypass_registry` being the documented case. Every caller runs at
-    preflight, so a raise here would abort the first thing a migration does in
-    exchange for a message it was only ever going to print.
+    NEVER raises, mirroring `_FerryRequest._resolve_or_direct`. `_scheme_map()`
+    reaches the platform getters `getproxies_macosx_sysconf` and
+    `getproxies_registry` through `_os_proxies`, and stdlib can raise there
+    outside (ValueError, TypeError).
+
+    The concrete `re.error` case documented on the sibling boundary is NOT on
+    this path, and an earlier version of this paragraph claimed it was. That one
+    comes from `proxy_bypass_registry`, reached by `_os_proxy_bypass` via
+    `_is_bypassed`, which only `resolve_proxy` calls. This boundary is justified
+    by analogy with the sibling, not by that citation.
+
+    Every caller runs at preflight, so a raise here would abort the first thing a
+    migration does in exchange for a message it was only ever going to print.
     """
     global _proxy_notices  # noqa: PLW0603
     # ABOVE the cache read, not below it. resolve_proxy checks the kill switch
@@ -467,11 +474,24 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
     try:
         _proxy_notices = _scan_notices()
     except Exception:  # noqa: BLE001
-        logger.warning(
-            "Could not evaluate the proxy configuration; reporting no notices.",
-            exc_info=True,
+        logger.warning("Could not read the proxy configuration; connecting direct.", exc_info=True)
+        # Degrade VISIBLY. Returning () here would make "Ferry could not read the
+        # configuration" indistinguishable from "this machine is clean", which is
+        # the exact inversion these notices exist to prevent, and the warning
+        # above lands in a log file nobody is reading at preflight.
+        #
+        # NOT cached, deliberately. With five preflight readers the warning
+        # repeats, and that is the better trade than freezing a transient
+        # platform error for the life of the process. Do not "fix" it by
+        # assigning to _proxy_notices.
+        return (
+            ProxyNotice(
+                kind="unreadable",
+                scheme="?",
+                display="<unavailable>",
+                outcome="Ferry could not read the proxy configuration and connected direct.",
+            ),
         )
-        return ()
     return _proxy_notices
 
 
@@ -543,11 +563,15 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
 def _usable(raw: str | None) -> bool:
     """True when `raw` is a proxy Ferry can actually use. Never raises.
 
-    The `raw is None` guard is documentation rather than behaviour: URL(None)
-    raises TypeError, which the except arm below already catches and turns into
-    the same False. Measured, not assumed. It stays because the None case is a
-    normal input here (`env.get(s) or os_side.get(s)` on a scheme nobody
-    configured), and reaching it through an exception reads as an accident.
+    The `raw is None` guard is what makes the call below type-check. `raw` is
+    `str | None`, and deleting the guard removes the narrowing, so mypy reports
+    `Argument 1 to "URL" has incompatible type "str | None"` [arg-type].
+    Measured, and `mypy src/` is in the project verification command, so the gate
+    catches that mutant even though no pytest assertion can: at runtime the
+    except arm would catch the resulting TypeError from URL(None) and return the
+    same False. An earlier version of this comment called the guard
+    "documentation rather than behaviour", which was wrong for having checked
+    only one of the two tools that guard this file.
     """
     if raw is None:
         return False

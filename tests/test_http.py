@@ -1316,19 +1316,48 @@ def test_the_kill_switch_wins_over_a_populated_cache(proxy_env, os_proxy) -> Non
         assert http.proxy_notices() == ()
 
 
-def test_proxy_notices_never_raises(proxy_env, os_proxy) -> None:
-    """The total boundary, mirroring _FerryRequest._resolve_or_direct.
+def test_an_unreadable_configuration_degrades_visibly(proxy_env, os_proxy) -> None:
+    """The total boundary, and that it degrades VISIBLY rather than to ().
 
-    `_scheme_map()` reaches the platform getters, and `re.error` subclasses
-    Exception directly rather than ValueError or TypeError, so it escapes both
-    narrow guards inside the loop. Mutant rows H and I showed what escaping
-    looks like from the inside: the exception surfaces at the call and no
-    assertion in the test is ever reached. Every caller runs at preflight, so
-    that aborts the first thing a migration does.
+    Two things are asserted, and the second is the one that matters. Returning
+    () would satisfy "never raises" while making "Ferry could not read the
+    configuration" indistinguishable from "this machine is clean", which is the
+    inversion these notices exist to prevent. So this asserts on the rendered
+    line a user would see, not on the absence of output.
+
+    `_scheme_map()` reaches the platform getters `getproxies_macosx_sysconf` and
+    `getproxies_registry` through `_os_proxies`, and stdlib can raise there
+    outside (ValueError, TypeError). `re.error` is used here because it
+    subclasses Exception directly and so escapes both narrow guards; the
+    documented `re.error` path in this module belongs to the SIBLING boundary
+    (`proxy_bypass_registry`, reached only from resolve_proxy), not to this one.
+    An earlier version of this docstring inherited that attribution verbatim and
+    was wrong about it.
     """
     with (
         os_proxy({}),
         proxy_env(ALL_PROXY="socks5://sock:1080"),
         patch("discord_ferry.core.http._scheme_map", side_effect=re.error("boom")),
     ):
-        assert http.proxy_notices() == ()
+        notices = http.proxy_notices()
+        lines = http.format_proxy_notices()
+    assert [n.kind for n in notices] == ["unreadable"]
+    assert lines == [
+        "Proxy configuration Ferry cannot use: <unavailable> (?). "
+        "Ferry could not read the proxy configuration and connected direct."
+    ]
+
+
+def test_an_unreadable_configuration_is_not_cached(proxy_env, os_proxy) -> None:
+    """The degraded notice must NOT be frozen for the life of the process.
+
+    A transient platform error at preflight would otherwise make every later
+    reader in the same GUI process report an unreadable configuration, long
+    after the machine started answering again. Caching it also inverts the
+    warning: the log line would appear once and the wrong notice forever.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        with patch("discord_ferry.core.http._scheme_map", side_effect=re.error("boom")):
+            assert [n.kind for n in http.proxy_notices()] == ["unreadable"]
+        assert http._proxy_notices == ()
+        assert [n.kind for n in http.proxy_notices()] == ["all_proxy_only"]
