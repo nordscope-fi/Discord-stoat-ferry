@@ -917,13 +917,16 @@ class TestDceChildProxyEnvironment:
             captured_env.update(kwargs.get("env") or {})
             raise RuntimeError("stop here")
 
-        with os_proxy({"https": "http://corp:8080"}), proxy_env():
-            with patch(
+        with (
+            os_proxy({"https": "http://corp:8080"}),
+            proxy_env(),
+            patch(
                 "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
                 side_effect=fake_exec,
-            ):
-                with pytest.raises(RuntimeError):
-                    await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert captured_env.get("HTTPS_PROXY") == "http://corp:8080"
         assert "PATH" in captured_env, "the child must inherit the rest of the environment"
@@ -942,13 +945,16 @@ class TestDceChildProxyEnvironment:
             captured_env.update(kwargs.get("env") or {})
             raise RuntimeError("stop here")
 
-        with os_proxy({"https": "http://corp:8080"}), proxy_env(FERRY_DISABLE_PROXY="1"):
-            with patch(
+        with (
+            os_proxy({"https": "http://corp:8080"}),
+            proxy_env(FERRY_DISABLE_PROXY="1"),
+            patch(
                 "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
                 side_effect=fake_exec,
-            ):
-                with pytest.raises(RuntimeError):
-                    await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert "HTTPS_PROXY" not in captured_env
 
@@ -964,12 +970,15 @@ class TestDceChildProxyEnvironment:
             captured_env.update(kwargs.get("env") or {})
             raise RuntimeError("stop here")
 
-        with os_proxy({"https": "http://corp:8080"}), proxy_env(HTTPS_PROXY="http://mine:9999"):
-            with patch(
+        with (
+            os_proxy({"https": "http://corp:8080"}),
+            proxy_env(HTTPS_PROXY="http://mine:9999"),
+            patch(
                 "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
                 side_effect=fake_exec,
-            ):
-                with pytest.raises(RuntimeError):
-                    await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert captured_env["HTTPS_PROXY"] == "http://mine:9999"
