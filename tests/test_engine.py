@@ -55,11 +55,19 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
     return FerryConfig(**defaults)  # type: ignore[arg-type]
 
 
-async def test_run_migration_validates_exports(tmp_path: Path) -> None:
-    """Engine parses exports and emits validate events."""
+async def test_run_migration_validates_exports(tmp_path: Path, proxy_env: Any) -> None:
+    """Engine parses exports and emits validate events.
+
+    Wrapped in proxy_env() with no arguments: an ambient proxy variable on the
+    developer's machine (set by a corp VPN, Docker Desktop, etc.) makes
+    format_proxy_notices() append a preflight entry to state.warnings with no
+    matching validate-phase warning event, which would otherwise make this
+    assertion fail off CI while passing on a clean runner.
+    """
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
-    state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+    with proxy_env():
+        state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
     validate_events = [e for e in events if e.phase == "validate"]
     assert any(e.status == "started" for e in validate_events)
     assert any(e.status == "completed" for e in validate_events)
@@ -2009,3 +2017,18 @@ async def test_run_rollback_initializes_token_store(tmp_path: Path) -> None:
 
     assert config.token_store is not None
     assert "SEKRET-TOKEN-abcd" not in config.token_store.sanitize("x SEKRET-TOKEN-abcd y")
+
+
+async def test_preflight_emits_and_persists_a_proxy_notice(
+    tmp_path: Path, proxy_env: Any, os_proxy: Any
+) -> None:
+    """SC-135-40. Killing: emitting an event and never appending, so report.json,
+    the artefact users are asked to attach to bug reports, omits the cause."""
+    events: list[MigrationEvent] = []
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        state = await run_migration(
+            _make_config(tmp_path, dry_run=True), events.append, phase_overrides=_NOOP_OVERRIDES
+        )
+
+    assert any(e.status == "notice" and e.phase == "preflight" for e in events)
+    assert any(w.get("type", "").startswith("proxy_") for w in state.warnings)
