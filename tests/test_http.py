@@ -1049,7 +1049,26 @@ def test_the_notice_outcome_is_true(proxy_env, os_proxy) -> None:
     was in fact used."""
     with os_proxy(CORP), proxy_env(ALL_PROXY="socks5://sock:1080"):
         notices = http.proxy_notices()
-    assert any("OS" in n.outcome for n in notices)
+    assert any("http" in n.outcome and "https" in n.outcome for n in notices)
+
+
+def test_the_all_proxy_outcome_does_not_name_a_single_source(proxy_env, os_proxy) -> None:
+    """Killing: an outcome that picks one source word for a mixed configuration.
+
+    With HTTP_PROXY in the environment and https from the OS, the two covered
+    schemes have different sources, so any one-word answer is wrong for one of
+    them. The outcome names the schemes and leaves the source to
+    `ferry tls-check`, which reports it per scheme.
+    """
+    with (
+        os_proxy({"https": "http://corp:8080"}),
+        proxy_env(ALL_PROXY="socks5://sock:1080", HTTP_PROXY="http://env:3128"),
+    ):
+        notices = http.proxy_notices()
+    outcomes = " ".join(n.outcome for n in notices)
+    assert "http" in outcomes
+    assert "OS" not in outcomes
+    assert "environment" not in outcomes
 
 
 @pytest.mark.parametrize(
@@ -1116,7 +1135,13 @@ def test_proxy_notices_is_idempotent(proxy_env, os_proxy) -> None:
     migration in one GUI process reports nothing and describe_proxy() then
     reports a clean configuration that is not clean."""
     with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
-        assert http.proxy_notices() == http.proxy_notices()
+        first = http.proxy_notices()
+        second = http.proxy_notices()
+        # `==` alone tests non-draining, not caching: ProxyNotice is a frozen
+        # dataclass, so a rebuild-every-call implementation returns an EQUAL
+        # tuple and passes. `is` is what pins the docstring's "builds once".
+        assert first == second
+        assert first is second
 
 
 # The seven tests below are not in the task brief. Each closes a branch of
@@ -1174,14 +1199,15 @@ def test_building_a_display_never_raises(proxy_env, os_proxy, bad: str) -> None:
     assert [n.display for n in notices] == ["<unparseable>"]
 
 
-def test_the_environment_wording_is_used_when_the_environment_covers_it(
-    proxy_env, os_proxy
-) -> None:
-    """The 'environment' half of the outcome ternary, which nothing else enters.
+def test_the_all_proxy_outcome_names_a_scheme_the_environment_supplies(proxy_env, os_proxy) -> None:
+    """The `s in env` half of the `covered` comprehension, which nothing else pins.
 
-    test_the_notice_outcome_is_true pins the 'OS' half only, so hardcoding "OS"
-    passes it. Getting this backwards tells a user to look at a machine-wide
-    setting they never made.
+    Dropping that half leaves test_the_notice_outcome_is_true green, because both
+    of its schemes come from the OS. It also survives
+    test_the_all_proxy_outcome_does_not_name_a_single_source: that test's
+    `"http" in outcomes` is satisfied by the substring inside "https", so an
+    outcome naming https alone still passes it. An exact outcome on an
+    environment-only configuration is what fails.
     """
     with (
         os_proxy({}),
@@ -1192,7 +1218,7 @@ def test_the_environment_wording_is_used_when_the_environment_covers_it(
         ),
     ):
         notices = http.proxy_notices()
-    assert [n.outcome for n in notices] == ["Used the environment proxy for http, https instead."]
+    assert [n.outcome for n in notices] == ["Used the proxy configured for http, https instead."]
 
 
 def test_the_kill_switch_silences_the_notices(proxy_env, os_proxy) -> None:

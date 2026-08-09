@@ -457,9 +457,12 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
                 kind="all_proxy_only",
                 scheme="all",
                 display=_safe_display(env["all"]),
+                # Name the schemes, never a single source. The source is
+                # per-scheme: HTTP_PROXY in the environment with https from the
+                # OS would make any one-word answer wrong for one of them.
+                # `ferry tls-check` reports the source per scheme (Task 11).
                 outcome=(
-                    f"Used the {'environment' if all(s in env for s in covered) else 'OS'} "
-                    f"proxy for {', '.join(covered)} instead."
+                    f"Used the proxy configured for {', '.join(covered)} instead."
                     if covered
                     else "Connected direct. ALL_PROXY is not supported (see issue #141)."
                 ),
