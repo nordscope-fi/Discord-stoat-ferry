@@ -606,6 +606,80 @@ def format_proxy_notices() -> list[str]:
     ]
 
 
+def proxy_hint(exc: BaseException, *, target: str) -> str | None:
+    """Actionable guidance if `exc`'s chain holds a proxy failure.
+
+    Returns a MESSAGE, never an exception type, for the reason in tls_hint's
+    docstring. `target` has NO default: a str | None = None would let a
+    half-wired call site type-check clean and emit exactly the targetless
+    message this parameter exists to prevent.
+
+    Proxy identity comes from request_info.real_url, or .host/.port on
+    ClientProxyConnectionError, which has no request_info at all. NEVER from
+    request_info.url, which is the TARGET.
+    """
+    target_host = URL(target).host or target
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        proxy = _proxy_identity(current)
+        if proxy is not None:
+            detail = ""
+            status = getattr(current, "status", None)
+            if status == 407:
+                detail = " The proxy requires authentication; put credentials in the proxy URL."
+            elif status == 403:
+                detail = " The proxy refused the connection."
+            return (
+                f" The request to {target_host} went through the proxy at {proxy}, "
+                f"which did not accept it.{detail} Set FERRY_DISABLE_PROXY=1 to "
+                "bypass the proxy, or NO_PROXY to exempt this host."
+            )
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _proxy_identity(exc: BaseException) -> str | None:
+    """`host:port` of the proxy, or None if `exc` is not a proxy failure.
+
+    Also matches a certificate error whose host equals the resolved proxy: with
+    an https:// proxy, connector.py:1630-1632 builds the error from proxy_req's
+    key, so tls_hint would otherwise tell the user to point SSL_CERT_FILE at a
+    bundle for a host they never configured.
+    """
+    if isinstance(exc, aiohttp.ClientHttpProxyError):
+        real = exc.request_info.real_url
+        return f"{real.host}:{real.port}"
+    if isinstance(exc, aiohttp.ClientProxyConnectionError):
+        return f"{getattr(exc, 'host', '?')}:{getattr(exc, 'port', '?')}"
+    if isinstance(exc, aiohttp.ClientConnectorCertificateError):
+        host, port = getattr(exc, "host", None), getattr(exc, "port", None)
+        scan = _proxy_scan
+        if scan is not None:
+            for raw in (*scan[0].values(), *scan[1].values()):
+                try:
+                    candidate = URL(raw)
+                except (ValueError, TypeError):
+                    continue
+                if candidate.host == host and candidate.port == port:
+                    return f"{host}:{port}"
+    return None
+
+
+def proxy_error_is_permanent(exc: BaseException) -> bool:
+    """True when no retry can help.
+
+    A 502, 503, 504 or connect timeout CAN recover, and those are exactly the
+    shapes api.py and autumn.py already retry in the direct case. Keeping this
+    separate from the hint is what stops proxy support turning a transient
+    upstream blip into a hard abort.
+    """
+    if isinstance(exc, aiohttp.ClientHttpProxyError):
+        return exc.status in (403, 407)
+    return isinstance(exc, aiohttp.ClientProxyConnectionError)
+
+
 class _FerryRequest(aiohttp.ClientRequest):
     """Fills in the proxy when the caller gave none.
 
