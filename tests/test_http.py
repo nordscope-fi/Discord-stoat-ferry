@@ -939,3 +939,60 @@ async def test_one_requests_proxy_headers_do_not_leak_into_the_next(proxy_env, o
     assert second.proxy_headers is not None
     assert "X-Caller" in first.proxy_headers
     assert "X-Caller" not in second.proxy_headers
+
+
+# --- End to end on a real socket (Task 4) ------------------------------------
+#
+# No source of its own. These two drive the whole path that every test above
+# only reaches in pieces: environment variable -> resolve_proxy -> _FerryRequest
+# -> a CONNECT on a loopback socket. Nothing mocked below the socket, because
+# aioresponses replaces ClientSession._request and would skip the request class
+# entirely.
+
+
+async def test_a_configured_proxy_receives_a_connect(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-01 and SC-135-47. An HTTPS target on purpose: proxy_headers with
+    encode_basic_auth sends nothing on an http target and works over CONNECT, so
+    an http-target test would report a false failure."""
+    make, captured = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://ferryuser:SUPERSECRET@127.0.0.1:{port}"):
+            caught: BaseException | None = None
+            async with http.new_session() as session:
+                try:
+                    await session.get(TARGET, timeout=aiohttp.ClientTimeout(total=5))
+                except BaseException as exc:  # noqa: BLE001
+                    caught = exc
+
+    lines = [ln for ln in captured[0].split("\r\n") if ln]
+    assert lines[0].startswith("CONNECT api.stoat.chat:443")
+    auth = [ln for ln in lines if ln.lower().startswith("proxy-authorization")]
+    assert auth, "the credential never reached the proxy"
+    assert base64.b64decode(auth[0].split()[-1]).decode() == "ferryuser:SUPERSECRET"
+    assert "SUPERSECRET" not in lines[0]
+    assert isinstance(caught, aiohttp.ClientHttpProxyError)
+
+
+async def test_no_credential_reaches_the_exception(fake_proxy, proxy_env, os_proxy) -> None:
+    """SC-135-48. reset_secret_registry FIRST: with the registry populated the
+    redaction layer masks a stripping-layer leak and this passes over a real
+    leak. This repo shipped rollback redaction that was inert for that reason."""
+    reset_secret_registry()
+    make, _ = fake_proxy
+    server = await make(b"403 Forbidden")
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://ferryuser:SUPERSECRET@127.0.0.1:{port}"):
+            async with http.new_session() as session:
+                with pytest.raises(aiohttp.ClientHttpProxyError) as caught:
+                    await session.get(TARGET, timeout=aiohttp.ClientTimeout(total=5))
+
+    exc = caught.value
+    assert exc.request_info.real_url.password is None
+    assert "SUPERSECRET" not in str(exc)
+    # url is the TARGET, real_url is the PROXY. Getting these backwards names
+    # the target twice and never the proxy.
+    assert "api.stoat.chat" in str(exc.request_info.url)
+    assert "127.0.0.1" in str(exc.request_info.real_url)
