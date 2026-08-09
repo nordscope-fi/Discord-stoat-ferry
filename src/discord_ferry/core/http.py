@@ -310,10 +310,12 @@ def _strip_userinfo(url: URL) -> tuple[URL, str | None]:
 def _suppressed_schemes() -> set[str]:
     """Schemes turned off by an empty `<scheme>_proxy`.
 
-    Uses the stdlib's own condition (urllib/request.py:2536-2554). A k.islower()
-    test would be wrong twice: it misses HTTPS_proxy="", which stdlib does pop,
-    and on Windows os.environ upper-cases every key, making the rule inert on
-    the one platform where the OS half has content to suppress.
+    stdlib's screen (urllib/request.py:2536), widened to any case. The widening
+    is deliberate and is why this must not filter the environment half: see
+    _scheme_map. A k.islower() test would be wrong twice: it misses
+    HTTPS_proxy="", which stdlib does pop, and on Windows os.environ upper-cases
+    every key, making the rule inert on the one platform where the OS half has
+    content to suppress.
     """
     out: set[str] = set()
     for key, value in os.environ.items():
@@ -337,10 +339,23 @@ def _scheme_map() -> tuple[dict[str, str], dict[str, str]]:
     """
     global _proxy_scan  # noqa: PLW0603
     if _proxy_scan is None:
+        # Suppression applies to the OS half ONLY. The environment half is
+        # stdlib's job and stdlib already does it: an empty lowercase
+        # `<scheme>_proxy` is popped in getproxies_environment's second pass
+        # (urllib/request.py:2548-2554). Filtering env here as well would be
+        # worse than redundant, because that pop is CASE-SENSITIVE while
+        # _suppressed_schemes is not. With `HTTPS_PROXY=""` and
+        # `https_proxy="http://x"`, stdlib returns {"https": "http://x"} (the
+        # uppercase name fails its `name[-6:] == "_proxy"` test) while Ferry
+        # would suppress "https" and connect direct, where curl, requests and
+        # stdlib all proxy. No proxy and no notice, which is precisely the
+        # outcome the merge exists to prevent.
+        #
+        # What suppression IS for: stdlib popping a scheme from env does not
+        # stop _os_proxies() supplying one for the same scheme, so without this
+        # filter the OS half would silently restore a switch the user turned off.
         suppressed = _suppressed_schemes()
-        env = {
-            k: v for k, v in urllib.request.getproxies_environment().items() if k not in suppressed
-        }
+        env = dict(urllib.request.getproxies_environment())
         os_side = {k: v for k, v in _os_proxies().items() if k not in suppressed and k not in env}
         _proxy_scan = (env, os_side)
     return _proxy_scan

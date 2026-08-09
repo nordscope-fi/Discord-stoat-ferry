@@ -491,6 +491,21 @@ def test_mixed_case_emptied_scheme_also_suppresses(proxy_env, os_proxy) -> None:
         assert http.resolve_proxy(TARGET) is None
 
 
+def test_an_uppercase_empty_variable_does_not_suppress_a_lowercase_one(proxy_env, os_proxy) -> None:
+    """Killing: filtering the environment half by `_suppressed_schemes`.
+
+    stdlib's pop is case-SENSITIVE (urllib/request.py:2548-2554), so
+    `HTTPS_PROXY=""` does not pop and `getproxies_environment()` returns the
+    lowercase variable's value. Ferry's suppression scan is case-INsensitive.
+    Applying it to the env half would drop a proxy the user explicitly set, with
+    no proxy and no notice, where curl, requests and stdlib all proxy.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="", https_proxy="http://mine:3128"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert str(choice.url) == "http://mine:3128"
+
+
 @pytest.mark.parametrize("bad", ["http://host:notaport", "http://[::1"])
 def test_a_malformed_proxy_never_raises(proxy_env, os_proxy, bad: str) -> None:
     """SC-135-22. Killing: an unguarded parse. Resolution runs inside
@@ -498,6 +513,25 @@ def test_a_malformed_proxy_never_raises(proxy_env, os_proxy, bad: str) -> None:
     from inside the constructor. Both of these raise ValueError in yarl."""
     with os_proxy({}), proxy_env(HTTPS_PROXY=bad):
         assert http.resolve_proxy(TARGET) is None
+
+
+def test_the_choice_carries_the_stripped_url_and_the_credential(proxy_env, os_proxy) -> None:
+    """Killing: `ProxyChoice(url=raw, authorization=None, source=source)`.
+
+    That mutant discards _strip_userinfo's outputs and passes every other test
+    in this task, because `str()` of the raw string compares equal and no other
+    happy-path test feeds a credentialed proxy. aiohttp asserts
+    `type(proxy) is URL` (client_reqrep.py:887-888), so it would kill the first
+    request of every migration. Nothing before Task 3 would catch it.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://ferryuser:SUPERSECRET@corp:8080"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert type(choice.url) is URL
+    assert "SUPERSECRET" not in str(choice.url)
+    assert choice.url == URL("http://corp:8080")
+    assert choice.authorization is not None
+    assert base64.b64decode(choice.authorization.split()[-1]).decode() == "ferryuser:SUPERSECRET"
 
 
 def test_reset_clears_the_scan_the_memo_and_the_notices(proxy_env, os_proxy) -> None:
@@ -513,10 +547,10 @@ def test_reset_clears_the_scan_the_memo_and_the_notices(proxy_env, os_proxy) -> 
 
 
 # The nine tests below are not in the task brief. Each closes a branch of
-# resolve_proxy, _scheme_map, _is_bypassed or _suppressed_schemes that the ten
-# above leave unexecuted or unpinned, found by enumerating the decisions in the
-# source rather than by reading the brief back. Every one was confirmed red
-# against a mutant of the exact line it claims to cover.
+# resolve_proxy, _scheme_map, _is_bypassed or _suppressed_schemes that the
+# twelve above leave unexecuted or unpinned, found by enumerating the decisions
+# in the source rather than by reading the brief back. Every one was confirmed
+# red against a mutant of the exact line it claims to cover.
 
 
 @pytest.mark.parametrize(
@@ -536,12 +570,12 @@ def test_a_socks_proxy_resolves_to_none(proxy_env, os_proxy, env_value, os_map) 
     rather than the parsed scheme, which is the shape getproxies_registry
     produces on Windows.
     """
-    pairs = {"HTTPS_PROXY": env_value} if env_value else {}
+    pairs = {"HTTPS_PROXY": env_value} if env_value is not None else {}
     with os_proxy(os_map), proxy_env(**pairs):
         assert http.resolve_proxy(TARGET) is None
 
 
-def test_the_scan_is_cached_and_reset_makes_it_cold(proxy_env) -> None:
+def test_the_scan_is_cached(proxy_env) -> None:
     """Killing: a _scheme_map that rebuilds per call and never sets _proxy_scan.
 
     test_reset_clears_the_scan_the_memo_and_the_notices cannot fail against that
@@ -549,10 +583,11 @@ def test_the_scan_is_cached_and_reset_makes_it_cold(proxy_env) -> None:
     and its second is trivially true when nothing was ever cached. So this is the
     only test that proves the scan half of the cache exists at all.
 
-    Patches the seams directly rather than through os_proxy, because it needs the
-    call count.
+    The cache is cold at entry because the autouse fixture calls
+    reset_http_state, which is also what makes `scan_spy.call_count == 1` an
+    assertion about caching rather than about test order. Patches the seams
+    directly rather than through os_proxy, because it needs the call count.
     """
-    http.reset_http_state()
     with (
         proxy_env(),
         patch("discord_ferry.core.http._os_proxies", return_value=dict(CORP)) as scan_spy,

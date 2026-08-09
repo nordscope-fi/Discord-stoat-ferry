@@ -75,6 +75,12 @@ def proxy_env() -> Callable[..., AbstractContextManager[None]]:
         for k in list(os.environ):
             if k.lower().endswith("_proxy"):
                 os.environ.pop(k)
+        # Also neutralise the kill switch and the CGI marker. An ambient
+        # FERRY_DISABLE_PROXY=1 turns every `is not None` assertion red and
+        # every `is None` assertion vacuous, and Task 11 builds its kill-switch
+        # tests on this fixture.
+        os.environ.pop("FERRY_DISABLE_PROXY", None)
+        os.environ.pop("REQUEST_METHOD", None)
         os.environ.update(pairs)
         try:
             yield
