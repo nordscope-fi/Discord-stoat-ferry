@@ -971,14 +971,30 @@ async def test_a_configured_proxy_receives_a_connect(fake_proxy, proxy_env, os_p
     auth = [ln for ln in lines if ln.lower().startswith("proxy-authorization")]
     assert auth, "the credential never reached the proxy"
     assert base64.b64decode(auth[0].split()[-1]).decode() == "ferryuser:SUPERSECRET"
+    # A sanity check on the CONNECT line's shape, NOT a stripping detector.
+    # client_reqrep.py:1435-1438 builds the path from `self.url`, which
+    # connector.py:1648 has already reassigned to the TARGET, so this line
+    # structurally cannot carry the proxy's userinfo under any implementation.
+    # The stripping mutant is killed by test_no_credential_reaches_the_exception.
     assert "SUPERSECRET" not in lines[0]
     assert isinstance(caught, aiohttp.ClientHttpProxyError)
 
 
 async def test_no_credential_reaches_the_exception(fake_proxy, proxy_env, os_proxy) -> None:
-    """SC-135-48. reset_secret_registry FIRST: with the registry populated the
-    redaction layer masks a stripping-layer leak and this passes over a real
-    leak. This repo shipped rollback redaction that was inert for that reason."""
+    """SC-135-48. Kills the mutant that returns the unstripped proxy URL.
+
+    Either assertion below kills it independently: `ClientResponseError.__str__`
+    renders `str(request_info.real_url)` (client_exceptions.py:108-109) and
+    yarl's __str__ does not hide userinfo, so the password reaches both
+    `.password` and `str(exc)`.
+
+    `reset_secret_registry()` does NOT protect these assertions, and an earlier
+    version of this docstring wrongly said it did. Neither `.password` nor
+    `str(exc)` passes through `sanitize_secrets`, which only the logging
+    Formatter consults. The registry matters for SC-135-50, which asserts on
+    ferry.log. The call stays as cheap insurance against a future assertion here
+    that does read log output, and for no stronger reason than that.
+    """
     reset_secret_registry()
     make, _ = fake_proxy
     server = await make(b"403 Forbidden")
