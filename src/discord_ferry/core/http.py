@@ -437,21 +437,64 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
     on resolve_proxy having run: every caller (engine preflight, build,
     rollback, probe, the GUI export screen) runs before the first request.
 
-    Pure and idempotent: builds once, then returns the same tuple on every call
-    and consumes nothing, so a second migration in the same GUI process reports
-    what the first did. The engine decides what to emit; this never does.
+    Pure and idempotent: builds once when there is anything to report, then
+    returns the same tuple on every call and consumes nothing, so a second
+    migration in the same GUI process reports what the first did. The engine
+    decides what to emit; this never does.
+
+    "Builds once" is qualified on purpose. An empty result is falsy, so a clean
+    machine re-runs the evaluation on every call, and `proxy_notices() is
+    proxy_notices()` holds there only because CPython interns the empty tuple.
+    The scan underneath (`_scheme_map`) is cached either way, so the repeat
+    costs a dict walk rather than a syscall.
+
+    NEVER raises, for the same reason `_FerryRequest._resolve_or_direct` does
+    not: `_scheme_map()` reaches the platform getters, and stdlib can raise
+    there outside (ValueError, TypeError), `re.error` from
+    `proxy_bypass_registry` being the documented case. Every caller runs at
+    preflight, so a raise here would abort the first thing a migration does in
+    exchange for a message it was only ever going to print.
     """
     global _proxy_notices  # noqa: PLW0603
-    if _proxy_notices:
-        return _proxy_notices
+    # ABOVE the cache read, not below it. resolve_proxy checks the kill switch
+    # first, so today nothing can reach this with a populated cache; a later
+    # task that sets the variable after preflight would otherwise keep serving
+    # notices for a proxy layer the user has since turned off.
     if os.environ.get("FERRY_DISABLE_PROXY"):
         return ()
+    if _proxy_notices:
+        return _proxy_notices
+    try:
+        _proxy_notices = _scan_notices()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not evaluate the proxy configuration; reporting no notices.",
+            exc_info=True,
+        )
+        return ()
+    return _proxy_notices
 
+
+def _scan_notices() -> tuple[ProxyNotice, ...]:
+    """Evaluate the scanned configuration. Called only by proxy_notices().
+
+    Split out so the never-raises boundary above is a single small statement
+    rather than a try wrapped around forty lines, where a later edit could drift
+    outside it without anyone noticing.
+    """
     env, os_side = _scheme_map()
     found: list[ProxyNotice] = []
 
     if "all" in env:
-        covered = [s for s in ("http", "https") if s in env or s in os_side]
+        # "Covered" means a scheme that actually RESOLVES, not one whose key is
+        # merely present. Key membership alone produces a self-contradicting
+        # notice on the commonest SOCKS setup, where shadowsocks, v2ray, `ssh -D`
+        # and Tor all document exporting ALL_PROXY, HTTP_PROXY and HTTPS_PROXY
+        # together as socks5. Ferry connects direct for both schemes
+        # (resolve_proxy returns None at the socks guard), yet a membership test
+        # reports "Used the proxy configured for http, https instead." on the
+        # line directly above two notices saying "Connected direct."
+        covered = [s for s in ("http", "https") if _usable(env.get(s) or os_side.get(s))]
         found.append(
             ProxyNotice(
                 kind="all_proxy_only",
@@ -494,12 +537,35 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
                 )
             )
 
-    _proxy_notices = tuple(found)
-    return _proxy_notices
+    return tuple(found)
+
+
+def _usable(raw: str | None) -> bool:
+    """True when `raw` is a proxy Ferry can actually use. Never raises.
+
+    The `raw is None` guard is documentation rather than behaviour: URL(None)
+    raises TypeError, which the except arm below already catches and turns into
+    the same False. Measured, not assumed. It stays because the None case is a
+    normal input here (`env.get(s) or os_side.get(s)` on a scheme nobody
+    configured), and reaching it through an exception reads as an accident.
+    """
+    if raw is None:
+        return False
+    try:
+        return not URL(raw).scheme.startswith("socks")
+    except (ValueError, TypeError):
+        return False
 
 
 def _safe_display(raw: str) -> str:
-    """A proxy URL with userinfo removed, for display. Never raises."""
+    """A proxy URL with userinfo removed, for display. Never raises.
+
+    NOT free of side effects, despite the name. `_strip_userinfo` registers both
+    the plaintext password and the encoded header as secrets, so reading notices
+    mutates the process-wide registry. That is the intended outcome and this is
+    the ONLY path that reaches it for an ALL_PROXY or a socks credential:
+    resolve_proxy returns at the socks guard one line before it would strip.
+    """
     try:
         return str(_strip_userinfo(URL(raw))[0])
     except (ValueError, TypeError):
