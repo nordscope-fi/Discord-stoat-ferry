@@ -1289,8 +1289,15 @@ def test_a_malformed_scheme_proxy_does_not_count_as_covered(proxy_env, os_proxy)
     """
     with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080", HTTPS_PROXY="http://[::1"):
         notices = http.proxy_notices()
-    all_notice = next(n for n in notices if n.kind == "all_proxy_only")
-    assert all_notice.outcome == "Connected direct. ALL_PROXY is not supported (see issue #141)."
+    # A list and an assertion, NOT next(). Under the mutant this test kills, the
+    # raise from _usable is caught by proxy_notices' never-raises boundary and
+    # the result is (), so next() died with a bare StopIteration that named
+    # neither the test's subject nor its expectation.
+    all_notices = [n for n in notices if n.kind == "all_proxy_only"]
+    assert all_notices, "the ALL_PROXY notice must survive an unparseable sibling"
+    assert all_notices[0].outcome == (
+        "Connected direct. ALL_PROXY is not supported (see issue #141)."
+    )
     assert any(n.kind == "malformed" for n in notices)
 
 
