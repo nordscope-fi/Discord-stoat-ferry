@@ -1012,3 +1012,214 @@ async def test_no_credential_reaches_the_exception(fake_proxy, proxy_env, os_pro
     # the target twice and never the proxy.
     assert "api.stoat.chat" in str(exc.request_info.url)
     assert "127.0.0.1" in str(exc.request_info.real_url)
+
+
+# --- Notices, the configurations Ferry cannot use (Task 5) -------------------
+#
+# NOT ONE TEST BELOW CALLS resolve_proxy BEFORE READING THE NOTICES, on purpose.
+# Every reader of proxy_notices() -- the engine preflight, `build`, `rollback`,
+# `probe` and the GUI export screen -- runs before the first request is made, so
+# a resolve-time implementation returns () at all five and the configuration-time
+# half of the feature ships inert. A test that resolved first would create the
+# condition it then asserted, which is the shape that let this repo ship inert
+# rollback redaction in v2.6.16.
+
+
+def test_all_proxy_only_is_reported(proxy_env, os_proxy) -> None:
+    """SC-135-18. Killing TWO implementations.
+
+    First: delegating to get_env_proxy_for_url, which filters ALL_PROXY out
+    before Ferry can see it.
+
+    Second, and this is why the test does NOT call resolve_proxy first:
+    recording notices as a side effect of resolution. Every reader of
+    proxy_notices() -- engine preflight, build, rollback, probe, and the GUI
+    export screen -- runs BEFORE any request is made, so a resolve-time
+    implementation returns () at all five and the feature ships inert. A test
+    that called resolve_proxy first would create the condition it then asserts,
+    which is the shape that let this repo ship inert rollback redaction.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        notices = http.proxy_notices()
+    assert any(n.kind == "all_proxy_only" for n in notices)
+
+
+def test_the_notice_outcome_is_true(proxy_env, os_proxy) -> None:
+    """SC-135-18. Killing: a notice claiming 'connected direct' when an OS proxy
+    was in fact used."""
+    with os_proxy(CORP), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        notices = http.proxy_notices()
+    assert any("OS" in n.outcome for n in notices)
+
+
+@pytest.mark.parametrize(
+    ("env_value", "os_map"),
+    [("socks5://sock:1080", {}), (None, {"https": "socks4://sock:1080"})],
+)
+def test_socks_is_detected_by_url_scheme(proxy_env, os_proxy, env_value, os_map) -> None:
+    """SC-135-19. Killing: keying the check off the dict name. getproxies_registry
+    writes socks4://host:port into proxies['http'] on Windows, the exact corporate
+    population this targets."""
+    pairs = {"HTTPS_PROXY": env_value} if env_value else {}
+    with os_proxy(os_map), proxy_env(**pairs):
+        notices = http.proxy_notices()
+    assert any(n.kind == "socks" for n in notices)
+
+
+def test_no_proxy_is_never_reported_as_a_broken_proxy(proxy_env, os_proxy) -> None:
+    """SC-135-20. Killing: 'any key that is not http or https is unusable', which
+    would report the user's own NO_PROXY, since getproxies_environment maps it to
+    a {'no': ...} entry."""
+    with os_proxy({}), proxy_env(NO_PROXY="example.com"):
+        assert http.proxy_notices() == ()
+
+
+def test_an_https_proxy_is_not_reported(proxy_env, os_proxy) -> None:
+    """SC-135-21. Killing: a notice written by one task and deleted by another.
+    S7 makes https:// usable."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="https://tls-proxy:8443"):
+        assert http.proxy_notices() == ()
+        assert http.resolve_proxy(TARGET) is not None
+
+
+def test_reset_actually_clears_the_notices(proxy_env, os_proxy) -> None:
+    """The first assertion in the feature that can fail on `_proxy_notices = ()`.
+
+    Task 2's reset test asserts `_proxy_notices == ()` before and after, which
+    holds trivially because nothing in that task ever writes the global.
+    Deleting the line from reset_http_state() left all 1503 tests green.
+
+    It matters here because proxy_notices() returns early when the tuple is
+    truthy, so a reset that forgets it leaks one test's notices into every later
+    test in the session, and this task's positive assertions would pass on the
+    leak.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        assert http.proxy_notices() != ()
+    http.reset_http_state()
+    assert http._proxy_notices == ()
+
+
+def test_notices_exist_before_any_request_is_made(proxy_env, os_proxy) -> None:
+    """The defect this task exists to prevent, pinned directly.
+
+    Every reader of proxy_notices() runs before the first request. Recording
+    notices inside resolve_proxy would make all five read sites return nothing.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        # No resolve_proxy call anywhere in this test, on purpose.
+        assert http.proxy_notices() != ()
+
+
+def test_proxy_notices_is_idempotent(proxy_env, os_proxy) -> None:
+    """SC-135-23. Killing: a drain-on-read implementation, under which a second
+    migration in one GUI process reports nothing and describe_proxy() then
+    reports a clean configuration that is not clean."""
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        assert http.proxy_notices() == http.proxy_notices()
+
+
+# The seven tests below are not in the task brief. Each closes a branch of
+# proxy_notices() or _safe_display() that the eight above leave unexecuted or
+# unpinned, found by enumerating the decisions in the source rather than by
+# reading the brief back. Every one was confirmed red against a mutant of the
+# exact line it claims to cover.
+
+
+def test_a_malformed_proxy_url_is_reported(proxy_env, os_proxy) -> None:
+    """The `except (ValueError, TypeError)` arm of the notice loop, which no test
+    in the brief enters.
+
+    Deleting that arm and letting URL(raw) raise would take proxy_notices() out
+    through every one of its five callers, and the engine preflight is the first
+    thing a migration runs. resolve_proxy already returns None for this input
+    (test_a_malformed_proxy_never_raises), so without the notice the user is
+    connected direct with nothing said.
+    """
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://[::1"):
+        notices = http.proxy_notices()
+    assert [(n.kind, n.scheme, n.display) for n in notices] == [
+        ("malformed", "https", "<unparseable>")
+    ]
+
+
+@pytest.mark.parametrize("variable", ["ALL_PROXY", "HTTPS_PROXY"])
+def test_a_notice_display_never_carries_userinfo(proxy_env, os_proxy, variable) -> None:
+    """Constraint 5, at BOTH _safe_display call sites.
+
+    The ALL_PROXY case covers the display built in the all_proxy_only branch and
+    the HTTPS_PROXY case the one built in the socks branch; a `display=raw`
+    mutant at either site survives the other test. Notices reach ferry.log and
+    the GUI, and a proxy password is a credential like any other.
+    """
+    with os_proxy({}), proxy_env(**{variable: "socks5://ferryuser:SUPERSECRET@sock:1080"}):
+        notices = http.proxy_notices()
+    assert notices
+    assert all("SUPERSECRET" not in n.display for n in notices)
+    assert notices[0].display == "socks5://sock:1080"
+
+
+@pytest.mark.parametrize("bad", ["http://[::1", "http://user%3Aname:pw@corp:8080"])
+def test_building_a_display_never_raises(proxy_env, os_proxy, bad: str) -> None:
+    """_safe_display's except arm, reached by both of the two paths into it.
+
+    The first input dies in URL(raw); the second parses and then dies in
+    _strip_userinfo, which raises ValueError when the login contains ':' and a
+    %3A in userinfo decodes to exactly that (aiohttp helpers.py:125-126). A try
+    narrowed to the parse alone therefore passes the first case and raises out of
+    the preflight on the second.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY=bad):
+        notices = http.proxy_notices()
+    assert [n.display for n in notices] == ["<unparseable>"]
+
+
+def test_the_environment_wording_is_used_when_the_environment_covers_it(
+    proxy_env, os_proxy
+) -> None:
+    """The 'environment' half of the outcome ternary, which nothing else enters.
+
+    test_the_notice_outcome_is_true pins the 'OS' half only, so hardcoding "OS"
+    passes it. Getting this backwards tells a user to look at a machine-wide
+    setting they never made.
+    """
+    with (
+        os_proxy({}),
+        proxy_env(
+            ALL_PROXY="socks5://sock:1080",
+            HTTP_PROXY="http://env:3128",
+            HTTPS_PROXY="http://env:3128",
+        ),
+    ):
+        notices = http.proxy_notices()
+    assert [n.outcome for n in notices] == ["Used the environment proxy for http, https instead."]
+
+
+def test_the_kill_switch_silences_the_notices(proxy_env, os_proxy) -> None:
+    """FERRY_DISABLE_PROXY, the one early return in proxy_notices nothing else
+    takes. With the kill switch on, Ferry connects direct by instruction, so a
+    notice saying it could not use a proxy would be a report of a decision the
+    user made.
+    """
+    with os_proxy(CORP), proxy_env(ALL_PROXY="socks5://sock:1080", FERRY_DISABLE_PROXY="1"):
+        assert http.proxy_notices() == ()
+
+
+def test_format_proxy_notices_renders_one_line_per_notice(proxy_env, os_proxy) -> None:
+    """The only test of format_proxy_notices, which the brief lists as a produced
+    interface and then never exercises. Both shells render from it, so a
+    KeyError or a missing field here reaches the user, not a test.
+    """
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
+        lines = http.format_proxy_notices()
+    assert lines == [
+        "Proxy configuration Ferry cannot use: socks5://sock:1080 (all). "
+        "Connected direct. ALL_PROXY is not supported (see issue #141)."
+    ]
+
+
+def test_format_proxy_notices_is_empty_on_a_clean_configuration(proxy_env, os_proxy) -> None:
+    """A clean machine must produce no line at all, not an empty-string line that
+    a shell would print as a blank row."""
+    with os_proxy({}), proxy_env():
+        assert http.format_proxy_notices() == []
