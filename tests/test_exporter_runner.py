@@ -889,3 +889,87 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
     # never ran. Merged, it grades wiring and pins `target=` together.
     assert f"The request to discord.com went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
+
+
+# ---------------------------------------------------------------------------
+# Task 14 — the OS-resolved proxy must reach the DCE child environment
+#
+# DCE is a separate .NET process reached through create_subprocess_exec; it
+# inherits only the environment. .NET reads env vars then OS settings, so
+# Ferry silently resolving a proxy from OS settings while the environment
+# stays empty is the one gap that matters: DCE sees nothing.
+# ---------------------------------------------------------------------------
+
+
+class TestDceChildProxyEnvironment:
+    @pytest.mark.asyncio
+    async def test_an_os_resolved_proxy_reaches_the_dce_child(
+        self, tmp_path: Path, proxy_env, os_proxy
+    ) -> None:
+        """Killing: an export that succeeds while every later phase fails, teaching
+        the user their proxy works. .NET on macOS and Windows reads env then OS
+        settings, but only Ferry sees an OS proxy when the environment is silent.
+        """
+        cfg = _make_config(tmp_path)
+        captured_env: dict[str, str] = {}
+
+        async def fake_exec(*args: object, **kwargs: object) -> None:
+            captured_env.update(kwargs.get("env") or {})
+            raise RuntimeError("stop here")
+
+        with os_proxy({"https": "http://corp:8080"}), proxy_env():
+            with patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                side_effect=fake_exec,
+            ):
+                with pytest.raises(RuntimeError):
+                    await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+        assert captured_env.get("HTTPS_PROXY") == "http://corp:8080"
+        assert "PATH" in captured_env, "the child must inherit the rest of the environment"
+
+    @pytest.mark.asyncio
+    async def test_the_kill_switch_suppresses_injection(
+        self, tmp_path: Path, proxy_env, os_proxy
+    ) -> None:
+        """S2 criterion 4. Killing: a kill switch that stops Ferry proxying while
+        still pushing a proxy at the child.
+        """
+        cfg = _make_config(tmp_path)
+        captured_env: dict[str, str] = {}
+
+        async def fake_exec(*args: object, **kwargs: object) -> None:
+            captured_env.update(kwargs.get("env") or {})
+            raise RuntimeError("stop here")
+
+        with os_proxy({"https": "http://corp:8080"}), proxy_env(FERRY_DISABLE_PROXY="1"):
+            with patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                side_effect=fake_exec,
+            ):
+                with pytest.raises(RuntimeError):
+                    await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+        assert "HTTPS_PROXY" not in captured_env
+
+    @pytest.mark.asyncio
+    async def test_a_users_own_variable_is_not_overwritten(
+        self, tmp_path: Path, proxy_env, os_proxy
+    ) -> None:
+        """Killing: clobbering a deliberate user setting."""
+        cfg = _make_config(tmp_path)
+        captured_env: dict[str, str] = {}
+
+        async def fake_exec(*args: object, **kwargs: object) -> None:
+            captured_env.update(kwargs.get("env") or {})
+            raise RuntimeError("stop here")
+
+        with os_proxy({"https": "http://corp:8080"}), proxy_env(HTTPS_PROXY="http://mine:9999"):
+            with patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                side_effect=fake_exec,
+            ):
+                with pytest.raises(RuntimeError):
+                    await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+        assert captured_env["HTTPS_PROXY"] == "http://mine:9999"

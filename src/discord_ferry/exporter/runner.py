@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import new_session, proxy_hint, tls_hint
+from discord_ferry.core.http import new_session, proxy_hint, resolve_proxy, tls_hint
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -372,11 +373,20 @@ async def run_dce_export(
     cmd = _build_dce_command(config, dce_path)
     config.export_dir.mkdir(parents=True, exist_ok=True)
 
+    child_env = dict(os.environ)  # full copy: dropping SYSTEMROOT or PATH breaks .NET on Windows
+    choice = resolve_proxy("https://discord.com/")
+    if choice is not None and choice.source == "os" and "HTTPS_PROXY" not in child_env:
+        # Only when the OS supplied it. If the user set the variable themselves,
+        # DCE already inherits it, and overwriting a deliberate setting is a
+        # surprise rather than a feature.
+        child_env["HTTPS_PROXY"] = str(choice.url)
+
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP,
+        env=child_env,
     )
 
     process_start = time.monotonic()
