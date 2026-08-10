@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -76,6 +77,36 @@ async def test_run_migration_validates_exports(tmp_path: Path, proxy_env: Any) -
     assert len(state.warnings) == len(warning_events)
     # Author names should be populated from the fixture exports
     assert len(state.author_names) > 0
+
+
+async def test_rendered_markdown_warning_does_not_gate_the_migration(tmp_path: Path) -> None:
+    """The GUI blocked on this warning and the engine never did, which is the
+    real defect in #143. Pin the engine side so nobody closes the gap from the
+    wrong end.
+
+    Filters state.warnings by type rather than by length or position: the
+    proxy_env note on test_run_migration_validates_exports records that an
+    ambient proxy variable adds an unrelated preflight entry.
+
+    The observable is state.current_phase (state.py:102, set at engine.py:690
+    and again at :525 once the phase loop returns). state.completed_phases does
+    not exist. An engine that stopped at the warning would leave it "".
+
+    Killing: a gate added to the engine after engine.py:401, or one added to
+    validate_export that raises instead of returning a warning row."""
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    shutil.copy(FIXTURES_DIR / "markdown_rendered.json", export_dir / "rendered.json")
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, export_dir=export_dir)
+    state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    types = [w.get("type") for w in state.warnings]
+    assert "rendered_markdown" in types
+    # The run reached the phase loop and came out the far side.
+    assert state.current_phase != ""
+    assert any(e.phase == "connect" and e.status == "started" for e in events)
 
 
 async def test_run_migration_emits_phase_events(tmp_path: Path) -> None:
