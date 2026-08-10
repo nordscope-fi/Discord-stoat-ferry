@@ -32,8 +32,14 @@ ferry validate EXPORT_DIR
 
 - Source server name and export date
 - Counts: channels, categories, roles, messages, attachments, emoji, threads
-- Warnings (for example, missing media files or rendered markdown detected)
+- Warnings (for example, missing media files, or messages whose mentions were written as plain text instead of raw IDs)
 - An estimated migration time at the default 1.0s rate limit
+
+!!! warning "Exit code"
+    `ferry validate` prints everything above and then exits **1** when any message has mentions
+    written as plain text, so a script that gates on its exit status stops there. `ferry migrate`
+    is not affected by this warning. See
+    [Mentions written as plain text](troubleshooting.md#mentions-written-as-plain-text).
 
 **Options:**
 

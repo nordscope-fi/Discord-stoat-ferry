@@ -59,13 +59,16 @@ This page covers the most common problems encountered during migration, their ca
 | **Cause** | The export folder path is wrong, or the files are in the wrong format |
 | **Solution** | Confirm you are pointing Ferry at the folder that *contains* the `.json` files, not a parent folder. Also confirm you exported from DiscordChatExporter using `--format Json` (not HTML or CSV). |
 
-### Rendered markdown detected
+### Mentions written as plain text
 
 | | |
 |---|---|
-| **Symptom** | Ferry warns "Rendered markdown detected"; user mentions appear as `@Username` instead of raw mention IDs in Stoat messages |
-| **Cause** | The export was created without `--markdown false`. DiscordChatExporter rendered `<@123456789>` into `@Username`, destroying the data needed to reconstruct mentions. |
-| **Solution** | Re-export from DiscordChatExporter using the `--markdown false` flag. |
+| **Symptom** | Ferry warns, once per channel and with a count, that some messages "have mentions written as plain text instead of raw IDs". In Stoat those mentions arrive as `@Username` text |
+| **Cause** | Usually the export was created without `--markdown false`, so DiscordChatExporter rendered `<@123456789>` into `@Username` and the ID needed to rebuild the mention is gone. A message is also flagged when somebody typed a display name after an at-sign by hand, which is what the text looked like in Discord too. |
+| **Solution** | Check how the export was made before re-exporting. If `--markdown false` was missing, re-export with it and the mentions come back as IDs. If the export already used `--markdown false`, a re-export changes nothing, because the flagged text was typed that way in Discord. Either way, you can migrate the export as it stands: tick **I understand, migrate anyway** on the validate screen. What you give up is the link, since those mentions arrive as text with no link back to the user. |
+
+`ferry validate` exits 1 while this warning is present, so a script that gates on its exit status
+stops here. `ferry migrate` is not affected by the warning and never asks about it.
 
 ---
 
