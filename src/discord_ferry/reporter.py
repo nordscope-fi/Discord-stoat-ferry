@@ -6,12 +6,14 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from discord_ferry.core.security import scrub_document
 from discord_ferry.discord.metadata import load_discord_metadata
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from discord_ferry.config import FerryConfig
+    from discord_ferry.core.security import SecureTokenStore
     from discord_ferry.discord.metadata import DiscordMetadata
     from discord_ferry.parser.models import DCEExport
     from discord_ferry.state import MigrationState
@@ -203,7 +205,7 @@ def generate_report(
     report["invite"] = {"code": state.invite_code, "url": state.invite_url}
     report["native_fidelity"] = dict(state.native_fidelity_counts)
 
-    _write_report(config.output_dir, report)
+    _write_report(config.output_dir, report, config.token_store)
 
     return report
 
@@ -438,7 +440,14 @@ def generate_markdown_report(
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _write_report(output_dir: Path, report: dict[str, object]) -> None:
+def _write_report(
+    output_dir: Path, report: dict[str, object], token_store: SecureTokenStore | None = None
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "migration_report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    # Redact here rather than at the ~59 append sites feeding warnings and errors: a
+    # call site cannot forget a scrub it never has to make, and forgetting was the
+    # defect. This file is what the bug report template asks users to attach, so
+    # anything in it is effectively published. Issue #140, ADR-014.
+    scrubbed = scrub_document(report, token_store)
+    report_path.write_text(json.dumps(scrubbed, indent=2), encoding="utf-8")
