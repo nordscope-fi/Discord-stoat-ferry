@@ -656,6 +656,20 @@ def test_acknowledgement_required_sums_across_files() -> None:
     assert RENDERED_MENTION_CONSEQUENCE in reason
     assert acknowledgement_required([]) is None
 
+    # A rendered_markdown row among other types: the file count must report the
+    # ACKNOWLEDGEABLE rows, not every warning. The http_attachment row carries a
+    # count it has no business carrying, so a total summed over all warnings
+    # instead of over the hits is caught here too.
+    mixed = acknowledgement_required(
+        [
+            {"type": "http_attachment", "count": "9", "message": "a"},
+            {"type": "rendered_markdown", "count": "2", "message": "b"},
+            {"type": "empty_export", "message": "c"},
+        ]
+    )
+    assert mixed is not None
+    assert "2 message(s) across 1 export file(s)" in mixed
+
 
 @pytest.mark.parametrize(
     "bad", [{"type": "rendered_markdown", "count": "lots"}, {"type": "rendered_markdown"}]
