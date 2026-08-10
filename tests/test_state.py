@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from discord_ferry.core.security import register_secret
 from discord_ferry.errors import StateError
 from discord_ferry.state import (
+    FailedMessage,
     MigrationState,
     RollbackFailure,
     RollbackProgress,
@@ -664,3 +666,161 @@ def test_reaction_counters_backcompat_missing_keys(tmp_path: Path) -> None:
     loaded = load_state(tmp_path)
     assert loaded.reactions_capped == 0
     assert loaded.reactions_dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# Writer-level redaction -- issue #140, ADR-014
+# ---------------------------------------------------------------------------
+
+
+def test_state_json_masks_a_registered_secret(tmp_path: Path) -> None:
+    """state.json is written after every checkpoint and shipped in bug reports."""
+    register_secret("proxy_password", "hunter2horse")
+    state = MigrationState()
+    state.warnings.append({"type": "x", "phase": "structure", "message": "proxy: hunter2horse"})
+
+    save_state(state, tmp_path)
+
+    written = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert "hunter2horse" not in written["warnings"][0]["message"]
+    assert written["warnings"][0]["phase"] == "structure"
+
+
+def test_save_state_keeps_its_two_argument_signature() -> None:
+    """Ten call sites pass no config, so none of them can supply a token store.
+
+    Widening the signature would mean touching every phase module. The helper
+    reads the process registry instead, which needs no plumbing.
+    """
+    import inspect
+
+    assert list(inspect.signature(save_state).parameters) == ["state", "output_dir"]
+
+
+def test_state_warnings_stay_raw_in_memory_after_a_save(tmp_path: Path) -> None:
+    """Redaction happens on the way out, never in place.
+
+    22 assertions in test_structure.py read exact warning text from the in-memory
+    list. Scrubbing in place would break every one of them.
+    """
+    register_secret("proxy_password", "hunter2horse")
+    state = MigrationState()
+    state.warnings.append({"type": "x", "message": "proxy: hunter2horse"})
+
+    save_state(state, tmp_path)
+
+    assert state.warnings[0]["message"] == "proxy: hunter2horse"
+
+
+def test_identifier_maps_survive_a_secret_that_is_a_substring(tmp_path: Path) -> None:
+    """The case earlier revisions of the #140 design failed.
+
+    "12345678" is both a plausible human-chosen proxy password and a substring of a
+    real Discord snowflake. SecureTokenStore.sanitize does unbounded substring
+    replacement, so scrubbing the whole document rewrote these identifiers. A
+    rewritten channel_message_offsets value is a silently wrong resume position.
+    """
+    register_secret("proxy_password", "12345678")
+    state = MigrationState()
+    state.role_map = {"1123456789012345678": "01ABCDEF"}
+    state.channel_map = {"7712345678901234567": "01MNOPQR"}
+    state.channel_message_offsets = {"7712345678901234567": "1123456789012345678"}
+    state.channel_high_water = {"7712345678901234567": "1123456789012345678"}
+    state.current_phase = "structure"
+
+    save_state(state, tmp_path)
+
+    written = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert written["role_map"] == state.role_map
+    assert written["channel_map"] == state.channel_map
+    assert written["channel_message_offsets"] == state.channel_message_offsets
+    assert written["channel_high_water"] == state.channel_high_water
+    assert written["current_phase"] == "structure"
+
+
+def test_message_map_json_is_untouched(tmp_path: Path) -> None:
+    """message_map holds identifier pairs and no free text, so it is never walked.
+
+    Excluding it also removes the cost: scrubbing it measured ~290ms at 100k entries
+    against ~3ms for everything else, on a path that runs every 50 messages.
+    """
+    register_secret("proxy_password", "12345678")
+    state = MigrationState()
+    state.message_map = {"1123456789012345678": "01ABCDEF12345678901234567"}
+
+    save_state(state, tmp_path)
+
+    written = json.loads((tmp_path / "message_map.json").read_text(encoding="utf-8"))
+    assert written == state.message_map
+
+
+def test_save_load_save_is_byte_identical(tmp_path: Path) -> None:
+    """A resumed run loads already-scrubbed warnings and writes them again."""
+    register_secret("proxy_password", "hunter2horse")
+    state = MigrationState()
+    state.warnings.append({"type": "x", "message": "proxy: hunter2horse"})
+    state.role_map = {"111": "01A"}
+    state.current_phase = "structure"
+
+    save_state(state, tmp_path)
+    first = (tmp_path / "state.json").read_bytes()
+    save_state(load_state(tmp_path), tmp_path)
+    second = (tmp_path / "state.json").read_bytes()
+
+    assert first == second
+
+
+def test_rollback_failure_error_is_masked_in_state_json(tmp_path: Path) -> None:
+    """Closes a gap that is live in shipped code, not a hypothetical one.
+
+    The engine's five rollback-failure sites build error=_safe(config, str(exc)), and
+    _safe consults only config.token_store. The proxy password lives in the process
+    registry, which that store never reads, so it reaches state.json unmasked today.
+    """
+    register_secret("proxy_password", "hunter2horse")
+    state = MigrationState()
+    state.rollback_progress = RollbackProgress(
+        channels_deleted=3,
+        failures=[
+            RollbackFailure(
+                entity_type="channel",
+                stoat_id="01ABCDEF",
+                error="delete failed: proxy rejected hunter2horse",
+                http_status=500,
+            )
+        ],
+    )
+
+    save_state(state, tmp_path)
+
+    written = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    failure = written["rollback_progress"]["failures"][0]
+    assert "hunter2horse" not in failure["error"]
+    assert failure["entity_type"] == "channel"
+    assert failure["stoat_id"] == "01ABCDEF"
+    assert failure["http_status"] == 500
+    assert written["rollback_progress"]["channels_deleted"] == 3
+
+
+def test_failed_message_members_are_masked_in_state_json(tmp_path: Path) -> None:
+    """failed_messages carries both an exception and a slice of message content."""
+    register_secret("proxy_password", "hunter2horse")
+    state = MigrationState()
+    state.failed_messages.append(
+        FailedMessage(
+            discord_msg_id="1123456789012345678",
+            stoat_channel_id="01ABC",
+            error="send failed: hunter2horse",
+            retry_count=2,
+            content_preview="hi hunter2horse",
+        )
+    )
+
+    save_state(state, tmp_path)
+
+    written = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    failed = written["failed_messages"][0]
+    assert "hunter2horse" not in failed["error"]
+    assert "hunter2horse" not in failed["content_preview"]
+    assert failed["discord_msg_id"] == "1123456789012345678"
+    assert failed["retry_count"] == 2
