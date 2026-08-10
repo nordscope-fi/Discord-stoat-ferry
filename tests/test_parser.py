@@ -413,6 +413,22 @@ def test_validate_ignores_mentions_that_were_not_rendered() -> None:
     assert [w for w in warnings if w["type"] == "rendered_markdown"] == []
 
 
+def test_validate_counts_every_rendered_message_not_just_the_first() -> None:
+    """The old rule set markdown_warned=True on the first hit, so a user was told
+    an export was critical without being told how widespread it was. Three
+    messages out of a thousand and nine hundred out of a thousand looked
+    identical.
+
+    Killing: first-occurrence-only behaviour, and any implementation that takes
+    a message list, which reports ZERO on the engine's streaming path."""
+    exports = parse_export_directory(RENDERED_MULTI_DIR, metadata_only=True)
+    warnings = validate_export(exports, RENDERED_MULTI_DIR)
+    hits = [w for w in warnings if w["type"] == "rendered_markdown"]
+    assert len(hits) == 1
+    assert hits[0]["count"] == "2"
+    assert "2 message(s)" in hits[0]["message"]
+
+
 _ALICE = {"id": "400000000000000001", "name": "alice", "nickname": "Alice"}
 _BOB = {"id": "400000000000000002", "name": "bob", "nickname": "Bob"}
 _FLOWER = {"id": "400000000000000003", "name": "ali", "nickname": "Alice 🌸"}
@@ -542,9 +558,9 @@ _EVERYONE = {"id": "400000000000000005", "name": "everyone", "nickname": "Everyo
 def test_message_has_rendered_mention(
     content: str, mentions: list[dict[str, str]], expected: bool, kills: str
 ) -> None:
-    """Ported from the design prototype, where 41 of 43 mutants die against this
-    set. `kills` names the wrong implementation each row catches; rows saying
-    NOTHING are pinned known residuals, kept so they stay visible."""
+    """Ported from the design prototype. `kills` names the wrong implementation
+    each row catches; rows saying NOTHING are pinned known residuals, kept so
+    they stay visible."""
     assert message_has_rendered_mention(content, mentions) is expected, kills
 
 
