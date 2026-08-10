@@ -113,15 +113,21 @@ The server name and export date from the DCE export appear at the top of the scr
 
 ### Warnings List
 
-Any issues found during parsing are listed with amber indicators. Common warnings:
+Any issues found during parsing are listed. Amber entries are informational. A red entry needs your acknowledgement before the migration can start. Common warnings:
 
-- **Rendered markdown detected** — the export may have been made without `--markdown false`. Mention syntax may be lost.
+- **Mentions written as plain text** (red). One entry per channel, carrying a count: those messages have mentions written as plain text instead of raw IDs, so they will arrive as text, with no link back to the user. See [Mentions written as plain text](troubleshooting.md#mentions-written-as-plain-text) for what to do about it.
 - **Attachment files missing** — one or more attachment files were not found locally. Those files will be skipped.
 - **Channel limit may be exceeded** — the combined channel and thread count exceeds 200.
 - **Emoji limit will be reached** — the server has more than 100 custom emoji. Only the first 100 will be migrated.
 
-!!! info "Warnings vs errors"
-    Amber warnings allow migration to proceed. A red error (for example, no valid JSON files found) disables the **Start Migration** button until it is resolved.
+!!! info "Warnings and acknowledgement"
+    Amber warnings need no action, and the migration proceeds with them. When the mentions warning
+    is present, its full explanation appears above the buttons alongside a checkbox, **I understand,
+    migrate anyway**. Ticking that box is the only thing that enables **Start Migration**. The tick
+    does not persist: press **Back** and return to this screen, and the box is clear again.
+
+    A hard failure such as "No valid DCE JSON files found" stops the screen before the status is
+    drawn, so it never appears as a colour here.
 
 ### ETA Estimate
 
@@ -129,9 +135,9 @@ Based on your message count and the rate limit you chose, Ferry shows an estimat
 
 ### Overall Status
 
-- **Green** — everything looks good, migration can proceed.
-- **Amber** — warnings present, migration can proceed but review the warnings above.
-- **Red** — a blocking error was found. Migration is disabled until you resolve it.
+- **Green**, "Export looks good". No warnings were found.
+- **Amber**, "Warnings present, review before migrating". Read the warnings above, then proceed.
+- **Red**, "Acknowledgement needed before migrating". Tick **I understand, migrate anyway** to enable **Start Migration**. Red on this screen means acknowledgement is needed and nothing else.
 
 Use the **Back** button to return to the Setup screen and adjust settings, or click **Start Migration** to begin.
 
