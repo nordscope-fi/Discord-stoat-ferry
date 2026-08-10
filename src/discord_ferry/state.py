@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from discord_ferry.core.security import scrub_document
 from discord_ferry.errors import StateError
 
 
@@ -202,7 +203,14 @@ def save_state(state: MigrationState, output_dir: Path) -> None:
 
     tmp_path = output_dir / "state.json.tmp"
     final_path = output_dir / "state.json"
-    tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Redact free-text fields on the way out, never in place: state.warnings must keep
+    # its raw text in memory. save_state takes no config, so this relies on the
+    # process-wide registry, which is where the proxy secrets live.
+    #
+    # message_map was popped above and is deliberately NOT scrubbed. It holds identifier
+    # pairs and no free text, and walking it measured ~290ms at 100k entries against
+    # ~3ms for everything else, on a path that runs every 50 messages. Issue #140, ADR-014.
+    tmp_path.write_text(json.dumps(scrub_document(data), indent=2), encoding="utf-8")
     tmp_path.rename(final_path)
 
 
