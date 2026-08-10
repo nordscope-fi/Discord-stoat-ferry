@@ -401,7 +401,18 @@ async def _resolve_role_icon(
         )
         return icon_id
     except (AutumnUploadError, OSError, aiohttp.ClientError) as exc:
-        # Fixed template — never str(exc); the body may echo x-session-token.
+        # Fixed template rather than str(exc). The reason recorded here for four
+        # releases, that the Autumn body may echo x-session-token, was never verified
+        # and is false. Autumn serialises only the error variant name plus max_size on
+        # one variant (revoltchat/autumn, src/util/result.rs), and Stoat only
+        # error_type and a compile-time file:line:column (stoatchat/stoatchat,
+        # crates/core/result/src/lib.rs). Neither echoes a request header.
+        #
+        # The template is still correct, for a different reason: an aiohttp connection
+        # error can carry proxy credentials, which are registered secrets. The general
+        # backstop for that now lives at the serialisation writers rather than here.
+        # Issue #140, ADR-014.
+        #
         # tls_hint and proxy_hint are the two safe additions: each emits a host,
         # a port and fixed text, never the exception it inspected. Without them
         # this is the only Autumn failure that reaches the user with no cause.
