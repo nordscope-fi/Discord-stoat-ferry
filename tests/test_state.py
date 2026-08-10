@@ -824,3 +824,134 @@ def test_failed_message_members_are_masked_in_state_json(tmp_path: Path) -> None
     assert "hunter2horse" not in failed["content_preview"]
     assert failed["discord_msg_id"] == "1123456789012345678"
     assert failed["retry_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The field-classification guard -- issue #140, ADR-014
+# ---------------------------------------------------------------------------
+#
+# Redaction of state.json and report.json is scoped to named fields, which keeps it
+# from ever touching an identifier. The cost of that choice is that a new free-text
+# field would go unprotected. These three tests convert that from a silent runtime gap
+# into a failing build, at each level where a new field can appear.
+
+# Every top-level key state.json carries. Do not add a key here without deciding
+# whether it can hold free text: if it can, add it to _TEXT_MEMBERS in
+# core/security.py at the same time, or it is written unredacted.
+_KNOWN_STATE_FIELDS = frozenset(
+    {
+        "role_map",
+        "channel_map",
+        "category_map",
+        "category_names",
+        "channel_categories",
+        "message_map",
+        "emoji_map",
+        "avatar_cache",
+        "upload_cache",
+        "author_names",
+        "pending_pins",
+        "pending_reactions",
+        "errors",
+        "warnings",
+        "stoat_server_id",
+        "autumn_url",
+        "current_phase",
+        "completed_channel_ids",
+        "channel_message_offsets",
+        "channel_high_water",
+        "attachments_uploaded",
+        "attachments_skipped",
+        "reactions_applied",
+        "reactions_capped",
+        "reactions_dropped",
+        "pins_applied",
+        "started_at",
+        "completed_at",
+        "is_dry_run",
+        "export_completed",
+        "autumn_uploads",
+        "referenced_autumn_ids",
+        "roles_finalized",
+        "failed_messages",
+        "validation_results",
+        "prior_messages_total",
+        "source_messages_total",
+        "forum_channel_members",
+        "forum_category_names",
+        "channel_message_counts",
+        "reaction_message_counts",
+        "forum_index_message_ids",
+        "embeds_total",
+        "embeds_dropped",
+        "replies_linked",
+        "replies_total",
+        "rollback_progress",
+        "invite_code",
+        "invite_url",
+        "native_fidelity_counts",
+    }
+)
+
+
+def test_state_document_has_no_unclassified_fields() -> None:
+    """Level 1: a brand new top-level field fails here until it is classified."""
+    from discord_ferry.state import _state_to_dict
+
+    emitted = set(_state_to_dict(MigrationState()))
+
+    assert emitted - _KNOWN_STATE_FIELDS == set(), (
+        "a new state.json field appeared. Decide whether it can hold free text: if it "
+        "can, add it to _TEXT_MEMBERS in core/security.py, then list it here"
+    )
+    assert _KNOWN_STATE_FIELDS - emitted == set(), (
+        "a state.json field was removed; update this list"
+    )
+
+
+def test_failed_message_fields_are_classified() -> None:
+    """Level 3: adding a dataclass field fails here, at the point of definition.
+
+    This is the level that makes classification close to automatic, rather than
+    waiting for someone to notice a new member reached a document.
+    """
+    import dataclasses
+
+    assert {f.name for f in dataclasses.fields(FailedMessage)} == {
+        "discord_msg_id",
+        "stoat_channel_id",
+        "error",
+        "retry_count",
+        "content_preview",
+    }, "FailedMessage changed. If the new field holds free text, add it to _TEXT_MEMBERS"
+
+
+def test_rollback_failure_fields_are_classified() -> None:
+    """Level 3 again, for the sibling that went unnoticed until critique round 3.
+
+    RollbackFailure.error is populated with exception text at five engine sites and
+    was missing from the first three revisions of the field list.
+    """
+    import dataclasses
+
+    assert {f.name for f in dataclasses.fields(RollbackFailure)} == {
+        "entity_type",
+        "stoat_id",
+        "error",
+        "http_status",
+    }, "RollbackFailure changed. If the new field holds free text, add it to _TEXT_MEMBERS"
+
+
+def test_warning_and_error_member_keys_are_classified() -> None:
+    """Level 2: the member keys inside warnings and errors entries.
+
+    state.errors uses two different key names across its append sites: "message" at
+    four of them and "error" at the engine's catch-all phase handler. An earlier
+    revision of this design scrubbed only "message" and would have missed the most
+    general error capture in the codebase.
+    """
+    from discord_ferry.core.security import _TEXT_MEMBERS
+
+    assert _TEXT_MEMBERS["warnings"] == frozenset({"message"})
+    assert _TEXT_MEMBERS["errors"] == frozenset({"message", "error"})
+    assert _TEXT_MEMBERS["failed_messages"] == frozenset({"error", "content_preview"})
