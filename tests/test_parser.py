@@ -415,6 +415,8 @@ def test_validate_ignores_mentions_that_were_not_rendered() -> None:
 
 _ALICE = {"id": "400000000000000001", "name": "alice", "nickname": "Alice"}
 _BOB = {"id": "400000000000000002", "name": "bob", "nickname": "Bob"}
+_FLOWER = {"id": "400000000000000003", "name": "ali", "nickname": "Alice 🌸"}
+_PRONOUNS = {"id": "400000000000000004", "name": "cas", "nickname": "Bob (he/him)"}
 _EVERYONE = {"id": "400000000000000005", "name": "everyone", "nickname": "Everyone"}
 
 
@@ -442,6 +444,13 @@ _EVERYONE = {"id": "400000000000000005", "name": "everyone", "nickname": "Everyo
         ),
         ("Sure, that works", [_ALICE], False, "the old rule"),
         ("", [_BOB], False, "the old rule"),
+        (
+            "hi @Alice 🌸!",
+            [_FLOWER],
+            True,
+            r"a \b boundary, which cannot match after a non-word character",
+        ),
+        ("thanks @Bob (he/him).", [_PRONOUNS], True, r"a \b boundary"),
         (
             "cc @Bobby, I meant @Bob",
             [_BOB],
