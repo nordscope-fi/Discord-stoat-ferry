@@ -1074,3 +1074,103 @@ def test_report_leaves_state_warnings_raw_in_memory(tmp_path: Path) -> None:
     generate_report(config, state, [])
 
     assert state.warnings[0]["message"] == "proxy: hunter2horse"
+
+
+# ---------------------------------------------------------------------------
+# The report.json field guard -- issue #140, ADR-014
+# ---------------------------------------------------------------------------
+#
+# The state.json half of this guard lives in tests/test_state.py. This is the half the
+# first implementation missed, caught by the whole-branch review: report.json is the
+# file the bug report template actually asks users to attach, and it was the member of
+# the pair left without the safety net the whole feature exists to provide.
+
+# Every top-level key generate_report can emit. Do not add one without deciding whether
+# it can hold free text: if it can, add it to _TEXT_MEMBERS in core/security.py at the
+# same time, or it is written unredacted into a file users attach to public issues.
+_KNOWN_REPORT_FIELDS = frozenset(
+    {
+        "started_at",
+        "completed_at",
+        "duration_seconds",
+        "source_guild",
+        "target_server_id",
+        "summary",
+        "delta",
+        "fidelity",
+        "warnings",
+        "errors",
+        "maps",
+        "validation",
+        "failed_messages",
+        "failed_message_ids",
+        "orphaned_uploads",
+        "orphaned_ids",
+        "checklist",
+        "invite",
+        "native_fidelity",
+    }
+)
+
+
+def test_report_document_has_no_unclassified_fields(tmp_path: Path) -> None:
+    """A new top-level field in report.json fails here until it is classified.
+
+    Driven through the fully-populated path so the optional keys appear: validation
+    results, failed messages and orphaned uploads are all conditional in
+    generate_report, and a guard that only saw the minimal report would miss them.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.validation_results = {"passed": True}
+    state.failed_messages.append(
+        FailedMessage(
+            discord_msg_id="1",
+            stoat_channel_id="01A",
+            error="boom",
+            retry_count=0,
+            content_preview="hi",
+        )
+    )
+    state.autumn_uploads = ["orphan-1"]
+    state.invite_code = "abc"
+
+    report = generate_report(config, state, [_make_export()])
+
+    emitted = set(report)
+    assert emitted - _KNOWN_REPORT_FIELDS == set(), (
+        "a new report.json field appeared. Decide whether it can hold free text: if it "
+        "can, add it to _TEXT_MEMBERS in core/security.py, then list it here"
+    )
+    # Every optional key must actually be exercised, or the guard is weaker than it reads.
+    for optional in ("validation", "failed_message_ids", "orphaned_ids", "invite"):
+        assert optional in emitted, f"the fixture no longer exercises {optional!r}"
+
+
+def test_markdown_report_masks_a_registered_secret(tmp_path: Path) -> None:
+    """migration_report.md carries the same free text as report.json.
+
+    Found by the whole-branch review. The markdown report is written into the same
+    output directory and is what a user is most likely to read, yet it interpolated
+    warnings and failed-message errors with no redaction at all.
+    """
+    register_secret("proxy_password", "hunter2horse")
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.warnings.append({"type": "x", "message": "proxy: hunter2horse"})
+    state.failed_messages.append(
+        FailedMessage(
+            discord_msg_id="1123456789012345678",
+            stoat_channel_id="01A",
+            error="send failed: hunter2horse",
+            retry_count=1,
+            content_preview="",
+        )
+    )
+
+    generate_markdown_report(config, state, [_make_export()])
+
+    written = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "hunter2horse" not in written
+    # the identifier beside it must survive: masking is substring replacement
+    assert "1123456789012345678" in written

@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from discord_ferry.core.security import scrub_document
+from discord_ferry.core.security import safe_sanitize, sanitize_secrets, scrub_document
 from discord_ferry.discord.metadata import load_discord_metadata
 
 if TYPE_CHECKING:
@@ -407,17 +407,25 @@ def generate_markdown_report(
         lines.append("\n## Invite\n")
         lines.append(f"- {state.invite_url or state.invite_code}\n")
 
+    # The same free text that reaches report.json reaches this file, so it gets the
+    # same redaction. Applied per value rather than to the finished markdown: the
+    # document also carries Discord message identifiers, and masking works by
+    # substring replacement, so scrubbing the whole string would rewrite them.
+    # Issue #140, ADR-014.
+    def _text(value: str) -> str:
+        return sanitize_secrets(safe_sanitize(config.token_store, value))
+
     lines.append("## Errors\n")
     if state.failed_messages:
         for fm in state.failed_messages:
-            lines.append(f"- Message `{fm.discord_msg_id}`: {fm.error}")
+            lines.append(f"- Message `{fm.discord_msg_id}`: {_text(fm.error)}")
     else:
         lines.append("No errors.\n")
 
     lines.append("\n## Warnings\n")
     if state.warnings:
         for w in state.warnings:
-            lines.append(f"- [{w.get('type', 'unknown')}] {w.get('message', '')}")
+            lines.append(f"- [{w.get('type', 'unknown')}] {_text(w.get('message', ''))}")
     else:
         lines.append("No warnings.\n")
 
