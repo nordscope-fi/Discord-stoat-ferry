@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.1] - 2026-08-10
+
+### Fixed
+
+- The GUI could reach a state where migration was impossible. A `rendered_markdown`
+  warning disabled Start Migration, the only route to the migration screen, with no
+  override anywhere in the interface. The same export migrated normally through
+  `ferry migrate`, which never consulted the warning. The reason now renders with a
+  checkbox that enables the button. (#143)
+- The rendered-markdown check flagged any message with a non-empty `mentions` array
+  and no raw `<@` in its content, so a reply, a mention carried inside an embed, or an
+  attachment-only message each condemned a whole channel. It now flags a message only
+  when a mention's display form appears in the content as a whole token while its raw
+  form does not, and it reports how many messages are affected. Previously it stopped
+  at the first. (#143)
+- `ferry validate` and the GUI now give the same explanation, which names what happens
+  to the affected messages. The old wording pointed at a re-export flag that does not
+  help in every case. `ferry validate` still exits 1.
+
 ## [2.14.0] - 2026-08-10
 
 ### Added
