@@ -60,6 +60,15 @@ In that case the JSON mentions array still carries a real name, so nothing in
 `mentions` can detect it.
 """
 
+RENDERED_MENTION_CONSEQUENCE = "will arrive as text, with no link back to the user"
+"""The one consequence phrase. Shared by the per-file warning row, the GUI
+banner and `ferry validate`, so they cannot drift into three wordings.
+
+Deliberately does NOT carry "re-export with --markdown false". Unqualified,
+that is the instruction the reporter of #143 followed with no effect. It lives
+in docs/guides/troubleshooting.md, qualified.
+"""
+
 
 def _is_word_char(ch: str) -> bool:
     """Word character for boundary purposes: alphanumeric or underscore.
@@ -301,25 +310,15 @@ def validate_export(
         else:
             msg_iter = iter([])
 
-        markdown_warned = False
+        rendered_mention_count = 0
         http_warned = False
         has_messages = False
 
         for msg in msg_iter:
             has_messages = True
 
-            # Check for rendered markdown (first occurrence only; Task 2 counts)
-            if not markdown_warned and message_has_rendered_mention(msg.content, msg.mentions):
-                warnings.append(
-                    {
-                        "type": "rendered_markdown",
-                        "message": (
-                            f"Channel '{channel_name}': message {msg.id} has mentions but no raw "
-                            f"<@ syntax — export may have been created without --markdown false"
-                        ),
-                    }
-                )
-                markdown_warned = True
+            if message_has_rendered_mention(msg.content, msg.mentions):
+                rendered_mention_count += 1
 
             # Check for HTTP attachment URLs (first occurrence only) and expired CDN URLs
             for att in msg.attachments:
@@ -349,6 +348,22 @@ def validate_export(
             if msg.content:
                 for match in _CONTENT_EMOJI_RE.finditer(msg.content):
                     custom_emoji_ids.add(match.group(1))
+
+        # Below the loop, not inside it: the count needs every message, and
+        # msg_iter is a one-shot stream_messages generator whenever the caller
+        # passed metadata_only=True, which engine.py:396 always does.
+        if rendered_mention_count:
+            warnings.append(
+                {
+                    "type": "rendered_markdown",
+                    "count": str(rendered_mention_count),
+                    "message": (
+                        f"Channel '{channel_name}': {rendered_mention_count} message(s) "
+                        f"have mentions written as plain text instead of raw IDs, so "
+                        f"they {RENDERED_MENTION_CONSEQUENCE}."
+                    ),
+                }
+            )
 
         # Collect unique non-thread channel IDs
         if not export.is_thread:
