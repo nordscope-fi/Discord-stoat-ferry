@@ -284,6 +284,41 @@ def test_scrub_document_masks_nested_dataclass_members() -> None:
     assert out["rollback_progress"]["channels_deleted"] == 3
 
 
+def test_scrub_document_leaves_structural_members_of_a_scrubbed_entry_alone() -> None:
+    """The identifier members of a text-bearing entry must survive.
+
+    Found by mutation testing chunk 1: an implementation that scrubbed every string
+    member of an entry, rather than only the named ones, passed every other test
+    here. It passed because the registered secret was not a substring of the
+    identifier being asserted on, so the assertion could not fail against the
+    defect it existed to catch. The secret below IS a substring of both identifiers,
+    which is what makes this discriminate.
+    """
+    register_secret("proxy_password", "12345678")
+    doc = {
+        "failed_messages": [
+            {
+                "discord_msg_id": "1123456789012345678",
+                "stoat_channel_id": "0112345678ABCDEF",
+                "error": "send failed for 12345678",
+                "retry_count": 12345678,
+            }
+        ],
+        "errors": [{"phase": "12345678-phase", "type": "x", "message": "boom 12345678"}],
+    }
+
+    out = scrub_document(doc)
+
+    failed = out["failed_messages"][0]
+    assert failed["discord_msg_id"] == "1123456789012345678"
+    assert failed["stoat_channel_id"] == "0112345678ABCDEF"
+    assert failed["retry_count"] == 12345678
+    assert "12345678" not in failed["error"]
+    # phase is structural: consumers group on it, so mangling it would break them
+    assert out["errors"][0]["phase"] == "12345678-phase"
+    assert "12345678" not in out["errors"][0]["message"]
+
+
 def test_scrub_document_handles_absent_and_null_fields() -> None:
     """rollback_progress is None until a rollback runs, and optional fields may be absent."""
     register_secret("proxy_password", "hunter2horse")
