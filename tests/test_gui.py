@@ -624,3 +624,31 @@ def test_proxy_notice_lines_is_empty_on_a_clean_configuration(proxy_env, os_prox
 
     with os_proxy({}), proxy_env():
         assert _proxy_notice_lines() == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #143: the validate screen's status
+# ---------------------------------------------------------------------------
+
+
+def test_validate_status_three_states() -> None:
+    """The banner logic lived inline in validate_page, where nothing could reach
+    it. Module level, following _proxy_notice_lines.
+
+    Killing: a helper that colours every warning red, one with no clean state,
+    and one whose chip text and reason are the same object, which would make a
+    positional swap between them undetectable."""
+    from discord_ferry.gui import _validate_status
+
+    red = _validate_status([{"type": "rendered_markdown", "count": "2", "message": "x"}])
+    assert red.colour == "red"
+    assert red.reason is not None
+    assert red.text != red.reason
+    assert len(red.text) <= 45  # ui.chip carries 41 characters today
+    assert "fix" not in red.text.lower()  # the old wording named a fix that may not exist
+
+    amber = _validate_status([{"type": "http_attachment", "message": "x"}])
+    assert amber.colour == "amber"
+    assert amber.reason is None
+
+    assert _validate_status([]).colour == "green"

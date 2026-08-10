@@ -12,7 +12,7 @@ import secrets
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import urlparse
 
 from nicegui import app, background_tasks, ui
@@ -25,7 +25,12 @@ from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError
-from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
+from discord_ferry.parser.dce_parser import (
+    _ACKNOWLEDGEABLE_TYPES,
+    acknowledgement_required,
+    parse_export_directory,
+    validate_export,
+)
 from discord_ferry.state import load_state
 
 _HAS_WEBVIEW = False
@@ -105,6 +110,38 @@ def _proxy_notice_lines() -> list[str]:
     releases.
     """
     return [f"[notice] {line}" for line in format_proxy_notices()]
+
+
+class _ValidateStatus(NamedTuple):
+    """Colour, chip text, and the reason acknowledgement is needed (or None).
+
+    A NamedTuple because `text` and `reason` are both `str` and a positional
+    tuple invites a swap between them.
+    """
+
+    colour: str
+    text: str
+    reason: str | None
+
+
+def _validate_status(warnings: list[dict[str, str]]) -> _ValidateStatus:
+    """Classify the validate screen's warnings ONCE.
+
+    Module level so it is testable; the equivalent logic was inline in
+    validate_page, which no unit test reached. Returns the reason rather than
+    taking it, so the colour and the reason cannot be handed contradictory
+    values.
+
+    Red means exactly one thing on this screen now: acknowledgement required.
+    Both early-exit blocks in validate_page return before the chip is created,
+    so a hard parse error never reaches it.
+    """
+    reason = acknowledgement_required(warnings)
+    if reason is not None:
+        return _ValidateStatus("red", "Acknowledgement needed before migrating", reason)
+    if warnings:
+        return _ValidateStatus("amber", "Warnings present, review before migrating", None)
+    return _ValidateStatus("green", "Export looks good", None)
 
 
 def _open_path(path: Path) -> None:
@@ -1071,23 +1108,12 @@ def validate_page() -> None:
                 return
 
             warnings = validate_export(exports, export_dir)
-            has_rendered_markdown = any(w["type"] == "rendered_markdown" for w in warnings)
+            status = _validate_status(warnings)
 
             guild_name = exports[0].guild.name
             ui.label(f"Export: {guild_name}").classes("text-2xl font-bold text-center mt-2")
 
-            # Status indicator
-            if has_rendered_markdown:
-                status_colour = "red"
-                status_text = "Critical warnings — fix before migrating"
-            elif warnings:
-                status_colour = "amber"
-                status_text = "Warnings present — review before migrating"
-            else:
-                status_colour = "green"
-                status_text = "Export looks good"
-
-            ui.chip(status_text, color=status_colour).classes("mx-auto my-2")
+            ui.chip(status.text, color=status.colour).classes("mx-auto my-2")
 
             # Summary table
             summary = _compute_summary(exports)
@@ -1124,7 +1150,7 @@ def validate_page() -> None:
                     "w-full mt-2"
                 ):
                     for w in warnings:
-                        colour = "red" if w["type"] == "rendered_markdown" else "orange"
+                        colour = "red" if w["type"] in _ACKNOWLEDGEABLE_TYPES else "orange"
                         ui.label(w["message"]).classes(f"text-{colour}-600 text-sm py-1")
 
             # Navigation buttons
@@ -1137,7 +1163,7 @@ def validate_page() -> None:
                     .props("color=amber-7 text-color=white unelevated")
                     .classes("font-semibold")
                 )
-                if has_rendered_markdown:
+                if status.reason is not None:
                     start_btn.disable()
 
 
