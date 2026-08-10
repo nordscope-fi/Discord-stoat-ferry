@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/architecture/` and `scripts/check-deferral-fields.sh` are now gitignored, joining
+  `.claude/`, `CLAUDE.md` and `docs/plans/`. Both hold the local development instruction
+  layer rather than anything the tool ships, and both are backed up outside this repo.
+
 ## [2.14.1] - 2026-08-10
 
 ### Fixed
