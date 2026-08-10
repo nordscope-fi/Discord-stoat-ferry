@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.3] - 2026-08-10
+
+### Fixed
+
+- Rollback failures could write an unredacted proxy password into `state.json`. The five
+  sites recording a failed delete redact through the per-config token store, which never
+  holds the proxy password and header registered when a proxy is in use. Those values
+  live in the process-wide registry instead, so they reached the file unmasked. This is
+  the one change here that repairs shipped behaviour rather than adding depth.
+
+### Changed
+
+- `report.json` and `state.json` are now redacted where they are written, rather than at
+  each of the roughly 59 sites that append a warning or an error. Redaction had to be
+  remembered at every site, and it was not: four migrator modules applied it and two did
+  not, leaving 18 places that interpolate a raw exception into a persisted note.
+  `report.json` is the file the bug report template asks users to attach, so anything in
+  it is effectively published.
+
+  Redaction covers the fields that carry an exception or a user-supplied string:
+  warnings, errors, the failed-message error and content preview, the rollback failure
+  error, and the source guild name. It deliberately does not cover the rest of either
+  document. Identifier maps are never passed to the redactor, because masking works by
+  substring replacement and a short proxy password would rewrite Discord and Stoat
+  identifiers, including the values that drive resume. `message_map.json` is excluded
+  for the same reason, and because scrubbing it measured 290ms per checkpoint at 100,000
+  messages against 3ms for everything else.
+
+  A guard test now fails the build when a new field appears in either document, a new
+  member key appears in a warning or error entry, or a field is added to the
+  failed-message or rollback-failure records, until it is classified as text or
+  structural. See ADR-014.
+
+  Error messages are unchanged, and warnings keep their original text in memory, so
+  nothing users read while troubleshooting is affected.
+
+- A four-release-old comment in the server structure phase said the Autumn upload service
+  may echo the session token in an error body. That was never verified and is not true.
+  Autumn returns only an error variant name, and Stoat only an error type and a source
+  location. Neither echoes a request header. The comment is corrected, and the fixed
+  template it justifies is kept for the reason that does hold: a connection error can
+  carry proxy credentials.
+
 ## [2.14.2] - 2026-08-10
 
 ### Fixed
