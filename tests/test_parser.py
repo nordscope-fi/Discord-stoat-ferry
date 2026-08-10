@@ -421,14 +421,35 @@ def test_validate_counts_every_rendered_message_not_just_the_first() -> None:
     messages out of a thousand and nine hundred out of a thousand looked
     identical.
 
-    Killing: first-occurrence-only behaviour, and any implementation that takes
-    a message list, which reports ZERO on the engine's streaming path."""
+    Two exports, not one. With a single export in the directory, a counter
+    declared above `for export in exports:` instead of inside it would still
+    report "2" and pass every assertion here, while accumulating across channels
+    in the field. The second channel's count pins the counter's scope.
+
+    The consequence phrase is asserted through the constant, not as a literal.
+    A hand-written copy at the interpolation site in dce_parser.py would leave
+    every other assertion green while opening the wording drift the constant
+    exists to prevent.
+
+    Killing: first-occurrence-only behaviour; a per-directory counter; any
+    implementation that takes a message list, which reports ZERO on the engine's
+    streaming path; a consequence phrase written out by hand."""
     exports = parse_export_directory(RENDERED_MULTI_DIR, metadata_only=True)
     warnings = validate_export(exports, RENDERED_MULTI_DIR)
     hits = [w for w in warnings if w["type"] == "rendered_markdown"]
-    assert len(hits) == 1
-    assert hits[0]["count"] == "2"
-    assert "2 message(s)" in hits[0]["message"]
+    assert len(hits) == 2
+
+    # Key by channel name, not by list position: the row order follows the
+    # channel-name sort in parse_export_directory, which is not this test's
+    # subject.
+    by_channel = {w["message"].split("'")[1]: w for w in hits}
+    assert set(by_channel) == {"rendered-multi", "rendered-multi-b"}
+    assert by_channel["rendered-multi"]["count"] == "2"
+    assert by_channel["rendered-multi-b"]["count"] == "1"
+    assert "2 message(s)" in by_channel["rendered-multi"]["message"]
+    assert "1 message(s)" in by_channel["rendered-multi-b"]["message"]
+    for hit in hits:
+        assert RENDERED_MENTION_CONSEQUENCE in hit["message"]
 
 
 _ALICE = {"id": "400000000000000001", "name": "alice", "nickname": "Alice"}
