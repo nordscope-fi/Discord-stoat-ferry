@@ -1153,6 +1153,12 @@ def validate_page() -> None:
                         colour = "red" if w["type"] in _ACKNOWLEDGEABLE_TYPES else "orange"
                         ui.label(w["message"]).classes(f"text-{colour}-600 text-sm py-1")
 
+            if status.reason is not None:
+                ui.label(status.reason).classes("text-red-600 text-sm mt-4")
+                ack = ui.checkbox("I understand, migrate anyway")
+            else:
+                ack = None
+
             # Navigation buttons
             with ui.row().classes("w-full justify-between mt-6"):
                 ui.button("Back", on_click=lambda: ui.navigate.to("/")).classes(
@@ -1163,8 +1169,12 @@ def validate_page() -> None:
                     .props("color=amber-7 text-color=white unelevated")
                     .classes("font-semibold")
                 )
-                if status.reason is not None:
-                    start_btn.disable()
+                if ack is not None:
+                    # A binding, not an on_change callback: a callback body is more
+                    # logic in the one place this design cannot make testable.
+                    # bind_from propagates at bind time, so the button starts
+                    # disabled without an explicit disable() call.
+                    start_btn.bind_enabled_from(ack, "value")
 
 
 # ---------------------------------------------------------------------------
