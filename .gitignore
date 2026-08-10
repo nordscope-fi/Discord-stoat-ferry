@@ -51,6 +51,9 @@ claude_log/
 # Internal design docs (kept locally, not in public repo)
 docs/plans/
 docs/superpowers/
+# Subagent-driven-development workspace: ledgers, briefs, per-task reports.
+# Scratch for one branch's build, never part of the product.
+.superpowers/
 docs/discord-ferry-claude-code-brief.md
 
 # MkDocs build output
