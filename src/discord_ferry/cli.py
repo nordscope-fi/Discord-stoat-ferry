@@ -36,7 +36,11 @@ from discord_ferry.migrator.api import (
     api_set_role_permissions,
     api_upsert_categories,
 )
-from discord_ferry.parser.dce_parser import parse_export_directory, validate_export
+from discord_ferry.parser.dce_parser import (
+    acknowledgement_required,
+    parse_export_directory,
+    validate_export,
+)
 from discord_ferry.state import MigrationState, load_state
 from discord_ferry.stats import summarize_state
 
@@ -790,9 +794,9 @@ def validate(export_dir: str, rate_limit: float) -> None:
     eta = _format_eta(total_messages, rate_limit)
     console.print(f"[bold]{total_messages:,}[/] messages at {rate_limit:.1f}s/msg = {eta}")
 
-    has_critical = any(w["type"] == "rendered_markdown" for w in warnings)
-    if has_critical:
-        console.print("\n[bold red]Critical warnings found.[/] Fix before migrating.")
+    reason = acknowledgement_required(warnings)
+    if reason is not None:
+        console.print(f"\n[bold red]{_safe(reason)}[/]")
         sys.exit(1)
     else:
         console.print("[bold green]Export looks good.[/]")
