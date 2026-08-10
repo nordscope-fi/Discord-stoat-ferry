@@ -79,12 +79,15 @@ the button.
 
 
 def acknowledgement_required(warnings: list[dict[str, str]]) -> str | None:
-    """The one explanation the GUI banner, the GUI warnings list and `ferry
-    validate` all share.
+    """The aggregate explanation the GUI banner and `ferry validate` both show.
 
     Returns the sentence when any warning needs acknowledging before migrating,
     and None otherwise. Lives here rather than in gui.py so cli.py can import it
     without pulling NiceGUI into the CLI.
+
+    The per-file warning rows do not carry this sentence. They share only
+    RENDERED_MENTION_CONSEQUENCE with it, which is what keeps the two
+    granularities from drifting into separate wordings.
     """
     hits = [w for w in warnings if w.get("type") in _ACKNOWLEDGEABLE_TYPES]
     if not hits:
@@ -323,7 +326,10 @@ def validate_export(
             of all messages.
 
     Returns:
-        List of warning dicts, each with 'type' and 'message' keys.
+        List of warning dicts. Every dict has 'type' and 'message'; some carry
+        more. A 'rendered_markdown' dict also carries 'count', the number of
+        affected messages in that export file, as a string, which
+        acknowledgement_required reads.
     """
     warnings: list[dict[str, str]] = []
     unique_channel_ids: set[str] = set()

@@ -19,8 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   and no raw `<@` in its content, so a reply, a mention carried inside an embed, or an
   attachment-only message each condemned a whole channel. It now flags a message only
   when a mention's display form appears in the content as a whole token while its raw
-  form does not, and it reports how many messages are affected. Previously it stopped
-  at the first. (#143)
+  form does not, or when the content carries `@Unknown`, which is what the exporter
+  writes for a member it could not resolve. It also reports how many messages are
+  affected. Previously it stopped at the first. (#143)
 - `ferry validate` and the GUI now give the same explanation, which names what happens
   to the affected messages. The old wording pointed at a re-export flag that does not
   help in every case. `ferry validate` still exits 1.

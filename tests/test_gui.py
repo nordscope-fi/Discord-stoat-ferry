@@ -644,7 +644,7 @@ def test_validate_status_three_states() -> None:
     assert red.colour == "red"
     assert red.reason is not None
     assert red.text != red.reason
-    assert len(red.text) <= 45  # ui.chip carries 41 characters today
+    assert len(red.text) <= 45  # the shipped chip is 39; the longest other is 41
     assert "fix" not in red.text.lower()  # the old wording named a fix that may not exist
 
     amber = _validate_status([{"type": "http_attachment", "message": "x"}])
