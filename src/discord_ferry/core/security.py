@@ -184,6 +184,14 @@ def scrub_document(
 
     The input is not mutated, so ``state.warnings`` keeps its raw text in memory and
     every existing assertion against it still holds.
+
+    **Depth.** This descends exactly one level into a named field's entries: it masks
+    string members whose key is classified, and passes anything else through. A member
+    whose value is itself a dict or a list of strings would NOT be scrubbed. That is
+    safe today because every entry is either a ``dict[str, str]`` or a dataclass whose
+    fields are ``str`` and ``int``, and the guard tests in ``tests/test_state.py`` fail
+    the build if either shape changes. It is recorded because the safety is a property
+    of the current data model, not of this function.
     """
 
     def _mask(text: str) -> str:
