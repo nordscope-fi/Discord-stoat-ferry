@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -55,13 +56,47 @@ def test_validate_help(runner: CliRunner) -> None:
 
 
 def test_validate_basic(runner: CliRunner) -> None:
-    # Fixtures include markdown_rendered.json which triggers a critical warning,
-    # so exit code is 1.  We still verify the table and warnings render.
+    # Fixtures include markdown_rendered.json, which needs acknowledging, so the
+    # exit code is 1.  We still verify the table and warnings render.  The
+    # wording of the closing line is pinned by
+    # test_validate_reports_the_consequence_and_still_exits_1, which controls
+    # the fixture set and the console width.
     result = runner.invoke(main, ["validate", FIXTURES_DIR])
     assert result.exit_code == 1
     assert "Export Summary" in result.output
     assert "Messages" in result.output
-    assert "Critical warnings found" in result.output
+
+
+def test_validate_reports_the_consequence_and_still_exits_1(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit code is a settled decision: a command whose job is to pass or
+    fail an export keeps failing, and changing a documented exit code in a patch
+    release breaks anything scripted on it. Only the wording changes.
+
+    Rich wraps at 80 columns when not attached to a terminal, so COLUMNS is
+    pinned wide enough that the sentence under test stays on one line. Click 8.2
+    removed CliRunner(mix_stderr=...).
+
+    "across N export file(s)" is the discriminating fragment: only
+    acknowledgement_required counts files, so the per-channel warning row above
+    it cannot produce that phrasing. The consequence phrase alone would not
+    kill the old code, because the warning row already carries it.
+
+    Killing: a CLI that stops exiting 1, and one that keeps its own inline type
+    check instead of the shared classifier.
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+    shutil.copy(Path(FIXTURES_DIR) / "markdown_rendered.json", tmp_path / "rendered.json")
+
+    result = runner.invoke(main, ["validate", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "1 message(s) across 1 export file(s) have mentions written as plain text." in (
+        result.output
+    )
+    assert "arrive as text" in result.output
+    assert "Critical warnings found" not in result.output
 
 
 def test_validate_empty_dir(runner: CliRunner, tmp_path: Path) -> None:
