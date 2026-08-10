@@ -1345,7 +1345,11 @@ def probe_cmd(
 
     if as_json:
         payload = {c.name: {"status": c.status, "detail": c.detail} for c in report.checks}
-        console.print(json.dumps(payload))
+        # click.echo, not console.print: the module-level Console has soft_wrap=False
+        # and falls back to 80 columns off a terminal, so it inserts a real newline
+        # wherever the wrap lands -- including inside a string value, which makes the
+        # output unparseable (issue #145). This branch is not for a human to read.
+        click.echo(json.dumps(payload))
         return
 
     table = Table(title="Stoat Probe Results")

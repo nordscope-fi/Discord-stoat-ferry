@@ -21,6 +21,34 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DARWIN_BRANCH = '\nif sys.platform == "darwin":'
 
 
+def _fails_the_build_after(text: str, anchor: str, terminator: str) -> bool:
+    """True when `exit 1` appears between `anchor` and the `terminator` that closes its block.
+
+    Issue #146. A condition is not an assertion. The four release.yml guards below
+    used to anchor only on the condition text, so deleting the `exit 1` from the
+    branch body -- the single most likely way the gate gets weakened -- left every
+    one of them green while the workflow stopped failing the build. Measured, not
+    assumed: with one `exit 1` removed the whole group still passed.
+
+    The region is bounded by the block's own closing token, not by a character count.
+    `release.yml` carries seventeen `exit 1` lines, so a region that runs past the end
+    of its block would find the NEXT gate's exit and pass even with its own deleted --
+    the same vacuous shape this test exists to prevent. A fixed span cannot be right in
+    both directions: the Windows union branch already sat 272 characters from its exit,
+    so any budget loose enough to survive one added log line was also loose enough to
+    reach the following branch.
+
+    `terminator` is the block's closing token: the `}` at the step's indent for the
+    PowerShell `if` blocks, and `esac` for the bash `case` statements, whose `exit 1`
+    lives in the `*)` fallback rather than in the matched arm.
+    """
+    idx = text.find(anchor)
+    assert idx != -1, f"anchor not found in release.yml: {anchor!r}"
+    end = text.find(terminator, idx)
+    assert end != -1, f"terminator {terminator!r} not found after anchor {anchor!r}"
+    return "exit 1" in text[idx:end]
+
+
 def test_ferry_spec_bundles_dce_checksums() -> None:
     """ferry.spec must bundle dce_checksums.json into the frozen binary.
 
@@ -202,6 +230,9 @@ def test_release_workflow_asserts_the_union_branch_on_macos() -> None:
     assert "Contents/MacOS/Ferry" in macos_block, (
         "it must run the extracted bundle's inner binary, so the ditto round-trip is covered"
     )
+    assert _fails_the_build_after(macos_block, '*"trust-source: union"*', "esac"), (
+        "the union case must reach an exit 1, not merely echo an ::error:: and continue"
+    )
 
 
 def test_release_workflow_asserts_the_union_branch() -> None:
@@ -220,6 +251,9 @@ def test_release_workflow_asserts_the_union_branch() -> None:
     assert re.search(r"trust-source:\\s\*union", text), (
         "release.yml must assert the union branch, not merely mention trust-source"
     )
+    assert _fails_the_build_after(text, "-notmatch 'trust-source:\\s*union'", "\n          }"), (
+        "the Windows union branch must reach an exit 1, not merely write an ::error:: line"
+    )
 
 
 def test_release_workflow_asserts_the_proxy_keys() -> None:
@@ -231,3 +265,9 @@ def test_release_workflow_asserts_the_proxy_keys() -> None:
     text = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert re.search(r"proxy-source:\\s\*", text), "the Windows regex must assert, not mention"
     assert re.search(r'\*"proxy-source: "\*', text), "the macOS glob must assert"
+    assert _fails_the_build_after(text, "-notmatch 'proxy-source:\\s*'", "\n          }"), (
+        "the Windows proxy-key branch must reach an exit 1"
+    )
+    assert _fails_the_build_after(text, '*"proxy-source: "*', "esac"), (
+        "the macOS proxy-key case must reach an exit 1"
+    )

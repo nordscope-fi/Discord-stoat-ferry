@@ -838,6 +838,69 @@ def test_probe_writes_notices_to_stderr_under_json(runner: CliRunner, proxy_env,
     assert "cannot use" in result.stderr  # the human gets told
 
 
+def test_probe_json_stdout_survives_a_realistic_payload(runner: CliRunner) -> None:
+    """Issue #145. `--json` promises machine-readable output, so stdout must parse.
+
+    The sibling test above passes an empty ProbeReport, whose payload is far under
+    80 columns and so never wrapped. That is exactly why this shipped unnoticed.
+    Killing: printing the payload through the module-level Rich console, which has
+    soft_wrap=False and falls back to 80 columns off a terminal, inserting a real
+    newline wherever the wrap lands -- often inside a `", "` separator.
+    """
+    import json as json_mod
+
+    from discord_ferry.migrator.probe import ProbeCheck, ProbeReport
+
+    report = ProbeReport(
+        checks=[
+            ProbeCheck(
+                name="autumn_limits",
+                status="ok",
+                detail="attachments 20000000, avatars 4000000, banners 6000000 from limits",
+            ),
+            ProbeCheck(
+                name="rate_window",
+                status="ok",
+                detail="X-RateLimit-Reset-After reported in milliseconds, bucket /servers, limit 5",
+            ),
+            ProbeCheck(
+                name="voice_channel",
+                status="warn",
+                detail="voice channel creation returned 200 but the channel type came back as Text",
+            ),
+            ProbeCheck(
+                name="webhooks",
+                status="ok",
+                detail="webhook created, executed and deleted against the throwaway server",
+            ),
+        ]
+    )
+
+    with patch(
+        "discord_ferry.migrator.probe.run_probe",
+        AsyncMock(return_value=report),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "probe",
+                "--json",
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                "t",
+                "--test-server-id",
+                "srv1",
+            ],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    payload = json_mod.loads(result.stdout)
+    assert payload["voice_channel"]["status"] == "warn"
+    assert payload["autumn_limits"]["detail"].startswith("attachments 20000000")
+
+
 def test_no_create_invite_flag_threads_to_config(runner: CliRunner) -> None:
     mock_engine = _make_mock_engine()
     with patch("discord_ferry.cli.run_migration", mock_engine):

@@ -6,7 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.2] - 2026-08-10
+
+### Fixed
+
+- `ferry probe --json` could print output that a JSON parser rejects. The payload went
+  through the module-level Rich console, which has `soft_wrap=False` and falls back to
+  80 columns when stdout is not a terminal. Rich wraps prose at the nearest space and
+  has no idea it is holding JSON, so the inserted newline could land inside a string
+  value. It now prints through `click.echo`, which does not wrap. `probe --json` is the
+  only `--json` path in the CLI, so no other command had the same shape.
+
+  The existing test passed an empty probe report, whose payload is far under 80 columns
+  and so never wrapped. The new test uses a realistic four-check report and parses stdout.
+
 ### Changed
+
+- The four `release.yml` structural tests in `tests/test_packaging.py` now assert that
+  each guarded branch reaches its `exit 1`, rather than only that the condition text is
+  present. A condition is not an assertion: deleting the `exit 1` turns the gate into a
+  warning that never fails a build, and all four tests stayed green through exactly that
+  change. Each now slices a bounded region after its own condition, so it stays tied to
+  its own branch among the workflow's dozen-plus `exit 1` lines. Verified by removing the
+  `exit 1` from each of the four branches in turn and confirming the matching test fails.
 
 - `docs/architecture/` and `scripts/check-deferral-fields.sh` are now gitignored, joining
   `.claude/`, `CLAUDE.md` and `docs/plans/`. Both hold the local development instruction
