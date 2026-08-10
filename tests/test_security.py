@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from discord_ferry.core.security import SecureTokenStore, safe_sanitize, sanitize_for_display
+from discord_ferry.core.security import (
+    SecureTokenStore,
+    register_secret,
+    safe_sanitize,
+    sanitize_for_display,
+    scrub_document,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -197,3 +203,131 @@ def test_safe_sanitize_at_state_errors_call_site() -> None:
     last = state_errors[-1]["message"]
     assert "stoat_secret_token_value" not in last
     assert "****alue" in last
+
+
+# ---------------------------------------------------------------------------
+# scrub_document() -- issue #140, ADR-014
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_document_masks_named_text_members() -> None:
+    """warnings.message and errors.error both carry interpolated exception text."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {
+        "warnings": [{"type": "x", "phase": "structure", "message": "failed for hunter2horse"}],
+        "errors": [{"phase": "structure", "type": "phase_failed", "error": "boom hunter2horse"}],
+    }
+
+    out = scrub_document(doc)
+
+    assert "hunter2horse" not in out["warnings"][0]["message"]
+    assert "hunter2horse" not in out["errors"][0]["error"]
+    assert out["warnings"][0]["type"] == "x"
+    assert out["errors"][0]["phase"] == "structure"
+
+
+def test_scrub_document_never_touches_identifiers() -> None:
+    """SC-8.1. The case earlier revisions of the #140 design failed.
+
+    A short human-chosen proxy password is a substring of real Discord snowflakes,
+    and SecureTokenStore.sanitize does unbounded substring replacement. Scrubbing a
+    whole document therefore rewrote identifiers; a rewritten channel_message_offsets
+    value is a silently wrong resume position. This design must never touch them.
+    """
+    register_secret("proxy_password", "12345678")
+    doc = {
+        "role_map": {"1123456789012345678": "01ABCDEF"},
+        "channel_message_offsets": {"7712345678901234567": "1123456789012345678"},
+        "current_phase": "structure",
+        "attachments_uploaded": 12345678,
+    }
+
+    assert scrub_document(doc) == doc
+
+
+def test_scrub_document_masks_nested_dataclass_members() -> None:
+    """failed_messages and rollback_progress.failures both carry exception text."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {
+        "failed_messages": [
+            {
+                "discord_msg_id": "1123456789012345678",
+                "error": "send failed: hunter2horse",
+                "content_preview": "hi hunter2horse",
+                "retry_count": 2,
+            }
+        ],
+        "rollback_progress": {
+            "channels_deleted": 3,
+            "failures": [
+                {
+                    "entity_type": "channel",
+                    "stoat_id": "01ABC",
+                    "error": "delete failed: hunter2horse",
+                    "http_status": 500,
+                }
+            ],
+        },
+    }
+
+    out = scrub_document(doc)
+
+    failed = out["failed_messages"][0]
+    assert "hunter2horse" not in failed["error"]
+    assert "hunter2horse" not in failed["content_preview"]
+    assert failed["discord_msg_id"] == "1123456789012345678"
+    assert failed["retry_count"] == 2
+    failure = out["rollback_progress"]["failures"][0]
+    assert "hunter2horse" not in failure["error"]
+    assert failure["stoat_id"] == "01ABC"
+    assert failure["http_status"] == 500
+    assert out["rollback_progress"]["channels_deleted"] == 3
+
+
+def test_scrub_document_handles_absent_and_null_fields() -> None:
+    """rollback_progress is None until a rollback runs, and optional fields may be absent."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {"rollback_progress": None, "current_phase": "structure"}
+
+    assert scrub_document(doc) == doc
+
+
+def test_scrub_document_applies_the_config_store_too() -> None:
+    """The registry holds the proxy secrets; the config store holds the API tokens.
+
+    Neither is a superset of the other, so a document scrubbed with only one of them
+    leaks whatever the other holds.
+    """
+    store = make_store(stoat="tok_aaaaaaaaaaaaaaaaaaaa")
+    doc = {"warnings": [{"message": "rejected tok_aaaaaaaaaaaaaaaaaaaa"}]}
+
+    out = scrub_document(doc, store)
+
+    assert "tok_aaaaaaaaaaaaaaaaaaaa" not in out["warnings"][0]["message"]
+
+
+def test_scrub_document_is_idempotent() -> None:
+    """A resumed run loads already-scrubbed warnings and writes them again."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {"warnings": [{"message": "failed for hunter2horse"}]}
+
+    once = scrub_document(doc)
+
+    assert scrub_document(once) == once
+
+
+def test_scrub_document_masks_nothing_when_no_secret_registered() -> None:
+    """Masking keys off registered values, never a pattern, so ordinary text survives."""
+    doc = {"warnings": [{"message": "an ordinary failure with no secret"}]}
+
+    assert scrub_document(doc) == doc
+
+
+def test_scrub_document_leaves_the_input_unmutated() -> None:
+    """The caller's document must survive: state.warnings stays raw in memory."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {"warnings": [{"message": "failed for hunter2horse"}]}
+
+    scrub_document(doc)
+
+    assert doc["warnings"][0]["message"] == "failed for hunter2horse"
