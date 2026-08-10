@@ -12,12 +12,16 @@ from discord_ferry.parser.dce_parser import (
     _parse_guild,
     _parse_message,
     _parse_reaction,
+    _raw_form_present,
     check_cdn_url_expiry,
+    message_has_rendered_mention,
     parse_export_directory,
     parse_single_export,
     validate_export,
 )
 from discord_ferry.parser.models import DCEExport, DCEMessage, DCEReaction
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 # ---------------------------------------------------------------------------
 # Parsing — parse_single_export
@@ -390,6 +394,155 @@ def test_validate_detects_rendered_markdown(fixtures_dir: Path) -> None:
     warnings = validate_export(exports, fixtures_dir)
     types = [w["type"] for w in warnings]
     assert "rendered_markdown" in types
+
+
+NOT_RENDERED_DIR = FIXTURES_DIR / "mentions_not_rendered"
+RENDERED_MULTI_DIR = FIXTURES_DIR / "markdown_rendered_multi"
+
+
+def test_validate_ignores_mentions_that_were_not_rendered() -> None:
+    """A reply, an embed-carried mention and an attachment-only message all have
+    a non-empty `mentions` array and no raw `<@` in content, so the OLD rule
+    flagged every one of them. None is evidence of an export made without
+    --markdown false. This is issue #143: one such message condemned a whole
+    channel and left the GUI with no way forward.
+
+    Killing: the old rule (mentions non-empty and no <@ in content)."""
+    exports = parse_export_directory(NOT_RENDERED_DIR)
+    warnings = validate_export(exports, NOT_RENDERED_DIR)
+    assert [w for w in warnings if w["type"] == "rendered_markdown"] == []
+
+
+_ALICE = {"id": "400000000000000001", "name": "alice", "nickname": "Alice"}
+_BOB = {"id": "400000000000000002", "name": "bob", "nickname": "Bob"}
+_EVERYONE = {"id": "400000000000000005", "name": "everyone", "nickname": "Everyone"}
+
+
+@pytest.mark.parametrize(
+    ("content", "mentions", "expected", "kills"),
+    [
+        ("Hey @Alice, check out #general!", [_ALICE], True, "a rule that never fires"),
+        (
+            "Hey <@400000000000000001>! cc @Alice",
+            [_ALICE],
+            False,
+            "_raw_form_present returning a constant False, or step 2 deleted",
+        ),
+        (
+            "Hey <@!400000000000000001>! cc @Alice",
+            [_ALICE],
+            False,
+            "a raw-form check that only knows <@id>",
+        ),
+        (
+            "<@400000000000000001> and @Bob",
+            [_ALICE, _BOB],
+            True,
+            "a per-MESSAGE raw check, which would clear the whole message",
+        ),
+        ("Sure, that works", [_ALICE], False, "the old rule"),
+        ("", [_BOB], False, "the old rule"),
+        (
+            "cc @Bobby, I meant @Bob",
+            [_BOB],
+            True,
+            "a single str.find, which stops at the first rejected occurrence",
+        ),
+        ("cc @Bobby about it", [_BOB], False, "no trailing check"),
+        (
+            "cc @Bob_smith about it",
+            [_BOB],
+            False,
+            "_is_word_char dropping the underscore arm",
+        ),
+        (
+            "mail me at someone@Bob.io",
+            [_BOB],
+            False,
+            "checking only the character AFTER the candidate",
+        ),
+        (
+            "@Bob look at this",
+            [_BOB],
+            True,
+            "a leading check that requires a preceding character to exist",
+        ),
+        (
+            "thanks @Bob",
+            [_BOB],
+            True,
+            "a trailing check that requires a following character to exist",
+        ),
+        (
+            "@everyone please read",
+            [_EVERYONE],
+            False,
+            "a case-insensitive match, or using name as a SECOND candidate",
+        ),
+        (
+            "hi @alice",
+            [{"id": "1", "name": "alice"}],
+            True,
+            "direct subscripting of the mention dict",
+        ),
+        (
+            "hi @Alice there",
+            [{"id": "1", "nickname": "  Alice  "}],
+            True,
+            "using the raw value, which would look for '@  Alice  '",
+        ),
+        (
+            "hi @ there",
+            [{"id": "1", "name": "", "nickname": "   "}],
+            False,
+            "no empty-candidate guard, which makes '@' alone a match",
+        ),
+        ("ping @Unknown please", [], True, "a rule that only ever consults the mentions array"),
+        ("the @Unknowns are a band", [], False, "a bare substring test for @Unknown"),
+        (
+            "what does @Unknown mean? <@400000000000000001>",
+            [_ALICE],
+            False,
+            "running the @Unknown test BEFORE the mention loop",
+        ),
+        (
+            "@here see <@400000000000000001>",
+            [_ALICE],
+            False,
+            "treating any at-sign token as a rendered mention",
+        ),
+        (
+            "the file /home/@Bob/x is here",
+            [_BOB],
+            True,
+            "NOTHING. Known residual: '/' is not a word character, so no boundary "
+            "check can tell a path from a mention after a bracket. Requiring "
+            "whitespace before '@' would fix it and break '(@Alice)', which is what "
+            "DCE renders for '(<@1>)'.",
+        ),
+        (
+            "Sure @Alice, that works",
+            [_ALICE],
+            True,
+            "NOTHING. Known residual: in a RAW export, a body that types a name as "
+            "plain text while that person is also the reply target is "
+            "indistinguishable from the true positive.",
+        ),
+    ],
+)
+def test_message_has_rendered_mention(
+    content: str, mentions: list[dict[str, str]], expected: bool, kills: str
+) -> None:
+    """Ported from the design prototype, where 41 of 43 mutants die against this
+    set. `kills` names the wrong implementation each row catches; rows saying
+    NOTHING are pinned known residuals, kept so they stay visible."""
+    assert message_has_rendered_mention(content, mentions) is expected, kills
+
+
+def test_raw_form_present_ignores_an_empty_id() -> None:
+    """Killing: dropping _raw_form_present's empty-id guard, which makes the
+    literal '<@>' read as raw evidence and suppress a genuine warning."""
+    assert _raw_form_present("see <@> and @Bob", "") is False
 
 
 def test_validate_detects_http_urls(fixtures_dir: Path) -> None:

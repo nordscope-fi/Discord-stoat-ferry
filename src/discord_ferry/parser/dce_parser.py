@@ -51,6 +51,103 @@ _DCE_CHANNEL_TYPE_TO_INT: dict[str, int] = {
     "GuildMedia": 16,
 }
 
+UNRESOLVED_RENDER = "Unknown"
+"""What DCE writes for a member it cannot resolve.
+
+DCE 2.47.1, Exporting/PlainTextMarkdownVisitor.cs:
+    @{member?.DisplayName ?? member?.User.DisplayName ?? "Unknown"}
+In that case the JSON mentions array still carries a real name, so nothing in
+`mentions` can detect it.
+"""
+
+
+def _is_word_char(ch: str) -> bool:
+    """Word character for boundary purposes: alphanumeric or underscore.
+
+    Reproduces the intent of regex \\w without a pattern per display name.
+    Display names are user data, so a regex needs re.escape and a distinct
+    compiled pattern per name, churning the cache on a large export.
+    """
+    return ch.isalnum() or ch == "_"
+
+
+def _plain_form_present(content: str, candidate: str) -> bool:
+    """Is "@candidate" present in content as a standalone token?
+
+    Scans EVERY occurrence. A single str.find returns the first hit only, so
+    with candidate "Bob" and content "cc @Bobby, I meant @Bob" it would stop at
+    the rejected hit inside "@Bobby" and never see the genuine one.
+
+    Boundaries on BOTH sides. Without a leading check, "someone@bob.io" and
+    "http://x/@Alice" flag a correct raw export. The trade: a rendered mention
+    written with no space before it ("Hi<@1>" becomes "Hi@Alice") is missed.
+    Taken deliberately: #143 is a false positive that left a user with no way
+    forward, and the count is per file, so one missed message still leaves the
+    file flagged whenever another message in it renders.
+
+    Case-sensitive on purpose: DCE writes the nickname verbatim.
+    """
+    needle = "@" + candidate
+    idx = content.find(needle)
+    while idx != -1:
+        before_ok = idx == 0 or not _is_word_char(content[idx - 1])
+        after = idx + len(needle)
+        after_ok = after >= len(content) or not _is_word_char(content[after])
+        if before_ok and after_ok:
+            return True
+        idx = content.find(needle, idx + 1)
+    return False
+
+
+def _raw_form_present(content: str, mention_id: str) -> bool:
+    """Both spellings. DCE's MarkdownParser.cs matches <@!?(\\d+)>."""
+    if not mention_id:
+        return False
+    return f"<@{mention_id}>" in content or f"<@!{mention_id}>" in content
+
+
+def _candidate(mention: dict[str, str]) -> str:
+    """The single display form DCE would have rendered for this mention.
+
+    `nickname` only, with `name` as a fallback for a DCE version that stops
+    writing it. DCE's JSON `nickname` is `TryGetMember(id)?.DisplayName ??
+    user.DisplayName` while its renderer writes `member?.DisplayName ??
+    member?.User.DisplayName`, the same chain, so `nickname` already equals the
+    rendered string in every resolvable case. Adding `name` as a SECOND
+    candidate could never produce a true positive and did produce false ones,
+    because usernames are lowercase common words ("@everyone").
+    """
+    for key in ("nickname", "name"):
+        value = mention.get(key, "")
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def message_has_rendered_mention(content: str, mentions: list[dict[str, str]]) -> bool:
+    """Was a mention in this message written as plain text instead of raw IDs?"""
+    if "@" not in content:
+        return False
+
+    saw_raw_form = False
+    for mention in mentions:
+        if _raw_form_present(content, mention.get("id", "")):
+            saw_raw_form = True
+            continue
+        candidate = _candidate(mention)
+        if not candidate:
+            # An empty candidate would reduce the test to "content holds an
+            # at-sign", which flags most of Discord.
+            continue
+        if _plain_form_present(content, candidate):
+            return True
+
+    # Mention-independent: an unresolved member renders as "@Unknown" while the
+    # JSON still carries a real name. Runs LAST, and only when nothing in this
+    # message proved itself raw, so a message carrying <@id> is not condemned
+    # for discussing an unknown error.
+    return not saw_raw_form and _plain_form_present(content, UNRESOLVED_RENDER)
+
 
 def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> list[DCEExport]:
     """Parse all DCE JSON files in a directory (top-level only).
@@ -211,13 +308,8 @@ def validate_export(
         for msg in msg_iter:
             has_messages = True
 
-            # Check for rendered markdown (first occurrence only)
-            if (
-                not markdown_warned
-                and msg.mentions
-                and "<@" not in msg.content
-                and "<#" not in msg.content
-            ):
+            # Check for rendered markdown (first occurrence only; Task 2 counts)
+            if not markdown_warned and message_has_rendered_mention(msg.content, msg.mentions):
                 warnings.append(
                     {
                         "type": "rendered_markdown",
