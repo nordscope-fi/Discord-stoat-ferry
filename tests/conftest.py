@@ -64,6 +64,33 @@ def fixtures_dir() -> Path:
 
 
 @pytest.fixture
+def user_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """A writable stand-in for `app.storage.user`.
+
+    The real property is request-scoped (it reads a contextvar and a session
+    cookie), so a test body cannot seed it from outside a request. The page code
+    under test only ever treats it as a mapping.
+    """
+    store: dict[str, object] = {}
+    monkeypatch.setattr("nicegui.storage.Storage.user", property(lambda self: store), raising=False)
+    return store
+
+
+@pytest.fixture
+def tab_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """A writable stand-in for `app.storage.tab`.
+
+    The real property raises unless a connected client is resolvable from the
+    current task's slot stack -- which a test body does not have. That is the
+    very constraint this fix exists to respect, so the page code must still see
+    a plain mapping.
+    """
+    store: dict[str, object] = {}
+    monkeypatch.setattr("nicegui.storage.Storage.tab", property(lambda self: store), raising=False)
+    return store
+
+
+@pytest.fixture
 def proxy_env() -> Callable[..., AbstractContextManager[None]]:
     """Clear every *_proxy variable, then apply the given ones.
 
