@@ -34,13 +34,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   for the same reason, and because scrubbing it measured 290ms per checkpoint at 100,000
   messages against 3ms for everything else.
 
-  A guard test now fails the build when a new field appears in either document, a new
-  member key appears in a warning or error entry, or a field is added to the
-  failed-message or rollback-failure records, until it is classified as text or
-  structural. See ADR-014.
+  `migration_report.md` gets the same treatment. It is written beside the other two,
+  carries the same warning and failed-message text, and had no redaction at all.
 
-  Error messages are unchanged, and warnings keep their original text in memory, so
-  nothing users read while troubleshooting is affected.
+  A guard test now fails the build when a new field appears in either JSON document, a
+  new member key appears at any site that appends a warning or an error, or a field is
+  added to the failed-message or rollback-failure records, until it is classified as
+  text or structural. The member-key check reads the actual append sites rather than a
+  list, so a new one cannot slip past it. See ADR-014.
+
+  The wording of error messages is unchanged, and warnings keep their original text in
+  memory, so what a message says while troubleshooting is unaffected. A secret inside
+  one is now masked in all three files.
 
 - A four-release-old comment in the server structure phase said the Autumn upload service
   may echo the session token in an error body. That was never verified and is not true.

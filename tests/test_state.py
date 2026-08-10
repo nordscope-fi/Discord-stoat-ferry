@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from discord_ferry.core.security import register_secret
+from discord_ferry.core.security import _TEXT_MEMBERS, register_secret
 from discord_ferry.errors import StateError
 from discord_ferry.state import (
     FailedMessage,
@@ -942,16 +942,98 @@ def test_rollback_failure_fields_are_classified() -> None:
     }, "RollbackFailure changed. If the new field holds free text, add it to _TEXT_MEMBERS"
 
 
-def test_warning_and_error_member_keys_are_classified() -> None:
-    """Level 2: the member keys inside warnings and errors entries.
+def test_text_member_map_matches_its_documented_shape() -> None:
+    """A documentation pin, NOT a guard. The guard is the AST sweep below.
 
-    state.errors uses two different key names across its append sites: "message" at
-    four of them and "error" at the engine's catch-all phase handler. An earlier
-    revision of this design scrubbed only "message" and would have missed the most
-    general error capture in the codebase.
+    This asserts the module constant against a literal, so it catches an accidental
+    edit to _TEXT_MEMBERS and nothing else. It cannot catch a new append site using a
+    new member key, because it never looks at an append site. That distinction was
+    missed when this test was written and caught by the whole-branch review.
     """
-    from discord_ferry.core.security import _TEXT_MEMBERS
-
     assert _TEXT_MEMBERS["warnings"] == frozenset({"message"})
     assert _TEXT_MEMBERS["errors"] == frozenset({"message", "error"})
     assert _TEXT_MEMBERS["failed_messages"] == frozenset({"error", "content_preview"})
+
+
+def test_warning_and_error_append_sites_use_only_classified_member_keys() -> None:
+    """Level 2, done by observation rather than by pinning a constant.
+
+    The first version of this test asserted _TEXT_MEMBERS against a hardcoded literal,
+    which is the module's own constant compared to itself. It could not fail against
+    the defect it named: a new append site introducing a new member key would pass it
+    cleanly. Caught by the whole-branch review.
+
+    This walks the real source instead. Every dict literal appended to state.warnings
+    or state.errors anywhere in src/ contributes its keys, and any key that is neither
+    a known structural key nor a classified text member fails the build.
+    """
+    import ast
+
+    src_root = Path(__file__).resolve().parents[1] / "src" / "discord_ferry"
+
+    # Keys that carry no free text. A new one here is a deliberate decision.
+    structural = {"phase", "type", "nsfw", "count", "channel"}
+    classified = _TEXT_MEMBERS["warnings"] | _TEXT_MEMBERS["errors"]
+
+    observed: dict[str, set[str]] = {}
+    for path in sorted(src_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "append" or not isinstance(node.func.value, ast.Attribute):
+                continue
+            target = node.func.value.attr
+            if target not in {"warnings", "errors"} or not node.args:
+                continue
+            arg = node.args[0]
+            if not isinstance(arg, ast.Dict):
+                continue
+            for key in arg.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    observed.setdefault(key.value, set()).add(f"{path.name}:{node.lineno}")
+
+    assert observed, "the sweep found no append sites, so it cannot be guarding anything"
+
+    unclassified = {k: sorted(v) for k, v in observed.items() if k not in structural | classified}
+    assert unclassified == {}, (
+        "an append site uses a member key that is neither structural nor classified as "
+        f"free text: {unclassified}. If it can hold an exception or user text, add it to "
+        "_TEXT_MEMBERS in core/security.py; if not, add it to `structural` here"
+    )
+
+
+def test_every_classified_text_member_is_actually_used() -> None:
+    """The mirror of the sweep: a classified key nobody appends is dead configuration.
+
+    Without this, _TEXT_MEMBERS could accumulate stale entries that read as coverage.
+    failed_messages members are excluded: they come from a dataclass, not a dict
+    literal, and are guarded by test_failed_message_fields_are_classified.
+    """
+    import ast
+
+    src_root = Path(__file__).resolve().parents[1] / "src" / "discord_ferry"
+    observed: set[str] = set()
+    for path in sorted(src_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr in {"warnings", "errors"}
+                and node.args
+                and isinstance(node.args[0], ast.Dict)
+            ):
+                observed |= {
+                    k.value
+                    for k in node.args[0].keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+
+    classified = _TEXT_MEMBERS["warnings"] | _TEXT_MEMBERS["errors"]
+    assert classified <= observed, (
+        "_TEXT_MEMBERS classifies a member key no append site uses: "
+        f"{sorted(classified - observed)}"
+    )
