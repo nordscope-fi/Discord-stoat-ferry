@@ -441,8 +441,14 @@ def generate_markdown_report(
 
 
 def _write_report(
-    output_dir: Path, report: dict[str, object], token_store: SecureTokenStore | None = None
+    output_dir: Path, report: dict[str, object], token_store: SecureTokenStore | None
 ) -> None:
+    """Serialise *report* to migration_report.json, redacting free text on the way out.
+
+    ``token_store`` is required rather than defaulting to None. Passing None is valid
+    and means registry-only redaction, but it has to be chosen: a second caller that
+    simply forgot the argument would otherwise get weaker redaction and no error.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "migration_report.json"
     # Redact here rather than at the ~59 append sites feeding warnings and errors: a
