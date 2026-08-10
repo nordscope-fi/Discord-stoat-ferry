@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core.security import SecureTokenStore, register_secret
 from discord_ferry.discord.metadata import (
     DiscordMetadata,
     PermissionPair,
@@ -985,3 +986,91 @@ def test_fidelity_overall_not_depressed_by_clamped_messages() -> None:
     )
     # messages=0 (*0.40); att/embed/reply/reaction = 1.0 -> 0.25+0.15+0.10+0.10 = 0.60
     assert score["overall"] == 60.0
+
+
+# ---------------------------------------------------------------------------
+# Writer-level redaction -- issue #140, ADR-014
+# ---------------------------------------------------------------------------
+
+
+def test_report_masks_a_registered_secret_in_a_warning(tmp_path: Path) -> None:
+    """report.json is the file the bug template asks users to attach."""
+    register_secret("proxy_password", "hunter2horse")
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.warnings.append(
+        {"type": "role_colour_failed", "phase": "structure", "message": "proxy: hunter2horse"}
+    )
+
+    generate_report(config, state, [])
+
+    written = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert "hunter2horse" not in written["warnings"][0]["message"]
+    assert written["warnings"][0]["type"] == "role_colour_failed"
+
+
+def test_report_masks_the_error_key_not_just_message(tmp_path: Path) -> None:
+    """The engine's catch-all phase handler stores exception text under "error".
+
+    Scrubbing only "message" would miss the single most general error capture in
+    the codebase.
+    """
+    register_secret("proxy_password", "hunter2horse")
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.errors.append(
+        {"phase": "structure", "type": "phase_failed", "error": "boom hunter2horse"}
+    )
+
+    generate_report(config, state, [])
+
+    written = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert "hunter2horse" not in written["errors"][0]["error"]
+
+
+def test_report_masks_the_source_guild_name(tmp_path: Path) -> None:
+    """The guild name is user-supplied text carried straight from the export."""
+    register_secret("proxy_password", "hunter2horse")
+    config = _make_config(tmp_path)
+    export = _make_export(guild_name="Guild hunter2horse")
+
+    generate_report(config, MigrationState(), [export])
+
+    written = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert "hunter2horse" not in written["source_guild"]["name"]
+    assert written["source_guild"]["id"] == "111"
+
+
+def test_report_masks_a_value_held_only_by_the_config_store(tmp_path: Path) -> None:
+    """The config store holds the API tokens; the registry holds the proxy secrets.
+
+    Neither is a superset of the other, so a writer consulting only one of them
+    leaks whatever the other holds. Nothing is registered here on purpose.
+    """
+    sentinel = "aaaa_bbbb_cccc_dddd"
+    config = FerryConfig(
+        export_dir=tmp_path,
+        stoat_url="https://api.test",
+        token=sentinel,
+        output_dir=tmp_path,
+        token_store=SecureTokenStore({"stoat": sentinel}),
+    )
+    state = MigrationState()
+    state.warnings.append({"type": "x", "message": "rejected " + sentinel})
+
+    generate_report(config, state, [])
+
+    written = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert sentinel not in written["warnings"][0]["message"]
+
+
+def test_report_leaves_state_warnings_raw_in_memory(tmp_path: Path) -> None:
+    """Redaction happens on the way out, so in-memory assertions elsewhere still hold."""
+    register_secret("proxy_password", "hunter2horse")
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.warnings.append({"type": "x", "message": "proxy: hunter2horse"})
+
+    generate_report(config, state, [])
+
+    assert state.warnings[0]["message"] == "proxy: hunter2horse"
