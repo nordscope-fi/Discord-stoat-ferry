@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -135,3 +136,87 @@ def reset_secret_registry() -> None:
     Mirrors ``migrator.api._reset_circuit_state``.
     """
     _secret_registry.clear()
+
+
+# ---------------------------------------------------------------------------
+# Document redaction (issue #140, ADR-014)
+# ---------------------------------------------------------------------------
+#
+# ``report.json`` and ``state.json`` are redacted where they are serialised, not at
+# the ~59 ``state.warnings`` / ``state.errors`` append sites that feed them. A call
+# site cannot forget a scrub it never has to make, and forgetting was the defect:
+# four migrator modules called ``safe_sanitize`` and two did not.
+#
+# The map below is enumerated from every append site in ``src/``, not sampled from a
+# representative one. ``errors`` uses BOTH member keys: ``message`` at four sites and
+# ``error`` at ``core/engine.py``'s catch-all phase handler, which is the single most
+# general error capture in the codebase.
+
+# Fields whose entries are dicts carrying free text, and which members hold it.
+_TEXT_MEMBERS: dict[str, frozenset[str]] = {
+    "warnings": frozenset({"message"}),
+    "errors": frozenset({"message", "error"}),
+    "failed_messages": frozenset({"error", "content_preview"}),
+}
+
+# ``rollback_progress`` serialises as a dict rather than a list, so it is walked
+# separately. Its ``failures`` entries come from the RollbackFailure dataclass.
+_ROLLBACK_TEXT_MEMBERS: frozenset[str] = frozenset({"error"})
+
+
+def scrub_document(
+    doc: dict[str, Any], token_store: SecureTokenStore | None = None
+) -> dict[str, Any]:
+    """Return a copy of *doc* with free-text fields masked and structure untouched.
+
+    Applies the process-wide registry and, when supplied, the per-config store. The
+    two hold different secrets and neither is a superset of the other: the registry
+    carries the proxy password and proxy authorization header registered by
+    ``core/http.py``, while the config store carries the Stoat and Discord tokens the
+    engine built it from.
+
+    **Never widen this to walk the whole document.** ``SecureTokenStore.sanitize``
+    does unbounded substring replacement, so a short human-chosen proxy password
+    rewrites any identifier containing it: ``"12345678"`` turns the snowflake
+    ``"1123456789012345678"`` into ``"1****34567890****345678"``. A rewritten
+    ``channel_message_offsets`` value is a silently wrong resume position, which is a
+    worse outcome than the leak this guards against. ADR-014 carries the measurement.
+
+    The input is not mutated, so ``state.warnings`` keeps its raw text in memory and
+    every existing assertion against it still holds.
+    """
+
+    def _mask(text: str) -> str:
+        return sanitize_secrets(safe_sanitize(token_store, text))
+
+    def _mask_entries(entries: object, members: frozenset[str]) -> object:
+        if not isinstance(entries, list):
+            return entries
+        return [
+            {
+                key: _mask(value) if key in members and isinstance(value, str) else value
+                for key, value in entry.items()
+            }
+            if isinstance(entry, dict)
+            else entry
+            for entry in entries
+        ]
+
+    out: dict[str, Any] = dict(doc)
+
+    for field_name, members in _TEXT_MEMBERS.items():
+        if field_name in out:
+            out[field_name] = _mask_entries(out[field_name], members)
+
+    rollback = out.get("rollback_progress")
+    if isinstance(rollback, dict):
+        out["rollback_progress"] = {
+            **rollback,
+            "failures": _mask_entries(rollback.get("failures"), _ROLLBACK_TEXT_MEMBERS),
+        }
+
+    guild = out.get("source_guild")
+    if isinstance(guild, dict) and isinstance(guild.get("name"), str):
+        out["source_guild"] = {**guild, "name": _mask(guild["name"])}
+
+    return out
