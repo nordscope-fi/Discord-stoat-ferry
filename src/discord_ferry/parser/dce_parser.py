@@ -69,6 +69,37 @@ that is the instruction the reporter of #143 followed with no effect. It lives
 in docs/guides/troubleshooting.md, qualified.
 """
 
+_ACKNOWLEDGEABLE_TYPES: frozenset[str] = frozenset({"rendered_markdown"})
+"""Warning types the user must acknowledge before migrating.
+
+The other five types validate_export can emit (http_attachment, empty_export,
+expired_cdn_url, channel_limit, emoji_limit) are informational and never gate
+the button.
+"""
+
+
+def acknowledgement_required(warnings: list[dict[str, str]]) -> str | None:
+    """The one explanation the GUI banner, the GUI warnings list and `ferry
+    validate` all share.
+
+    Returns the sentence when any warning needs acknowledging before migrating,
+    and None otherwise. Lives here rather than in gui.py so cli.py can import it
+    without pulling NiceGUI into the CLI.
+    """
+    hits = [w for w in warnings if w.get("type") in _ACKNOWLEDGEABLE_TYPES]
+    if not hits:
+        return None
+    total = 0
+    for w in hits:
+        try:
+            total += int(w.get("count", "0"))
+        except (TypeError, ValueError):
+            continue  # a malformed count must not raise on the validate screen
+    return (
+        f"{total} message(s) across {len(hits)} export file(s) have mentions "
+        f"written as plain text. They {RENDERED_MENTION_CONSEQUENCE}."
+    )
+
 
 def _is_word_char(ch: str) -> bool:
     """Word character for boundary purposes: alphanumeric or underscore.

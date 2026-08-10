@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from discord_ferry.parser.dce_parser import (
+    RENDERED_MENTION_CONSEQUENCE,
     _coerce_channel_type,
     _infer_thread_info,
     _parse_author,
@@ -13,6 +14,7 @@ from discord_ferry.parser.dce_parser import (
     _parse_message,
     _parse_reaction,
     _raw_form_present,
+    acknowledgement_required,
     check_cdn_url_expiry,
     message_has_rendered_mention,
     parse_export_directory,
@@ -617,6 +619,53 @@ def test_validate_no_warnings_clean(fixtures_dir: Path, tmp_path: Path) -> None:
     exports = parse_export_directory(temp_dir)
     warnings = validate_export(exports, temp_dir)
     assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Acknowledgement classifier: acknowledgement_required
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "warning_type",
+    ["http_attachment", "empty_export", "expired_cdn_url", "channel_limit", "emoji_limit"],
+)
+def test_acknowledgement_not_required_for_other_warning_types(warning_type: str) -> None:
+    """Spec S1.4: no warning type other than rendered_markdown may gate the
+    button, before or after.
+
+    Killing: a classifier that gates on any warning, and a widened
+    _ACKNOWLEDGEABLE_TYPES. Parametrizing over the real other five pins the
+    BEHAVIOUR; asserting the frozenset's contents by equality would only detect
+    change."""
+    assert acknowledgement_required([{"type": warning_type, "message": "x"}]) is None
+
+
+def test_acknowledgement_required_sums_across_files() -> None:
+    """Killing: a classifier that never fires, one that reports only the first
+    warning's count, and one that raises on a missing or non-numeric count."""
+    reason = acknowledgement_required(
+        [
+            {"type": "rendered_markdown", "count": "2", "message": "x"},
+            {"type": "rendered_markdown", "count": "1", "message": "y"},
+        ]
+    )
+    assert reason is not None
+    assert "3 message(s)" in reason
+    assert "2 export file(s)" in reason
+    assert RENDERED_MENTION_CONSEQUENCE in reason
+    assert acknowledgement_required([]) is None
+
+
+@pytest.mark.parametrize(
+    "bad", [{"type": "rendered_markdown", "count": "lots"}, {"type": "rendered_markdown"}]
+)
+def test_acknowledgement_required_tolerates_a_broken_count(bad: dict[str, str]) -> None:
+    """This runs while a GUI page is rendering. A bare int() or a bare subscript
+    would raise there.
+
+    Killing: int(w["count"]) without a guard."""
+    assert acknowledgement_required([bad]) is not None
 
 
 # ---------------------------------------------------------------------------
