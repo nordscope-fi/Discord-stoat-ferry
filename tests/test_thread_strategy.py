@@ -9,7 +9,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.security import SecureTokenStore
-from discord_ferry.errors import DuplicateSendError
+from discord_ferry.errors import DuplicateSendError, MigrationError
 from discord_ferry.migrator.messages import run_messages
 from discord_ferry.migrator.structure import run_channels
 from discord_ferry.parser.models import (
@@ -1291,4 +1291,44 @@ async def test_merge_sends_a_colliding_origin_message_once(tmp_path: Path) -> No
     assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, (
         "a thread message that does not collide must still be merged; the suppression "
         "is scoped to the collision, not to the thread"
+    )
+
+
+async def test_merge_still_delivers_when_the_parents_send_failed(tmp_path: Path) -> None:
+    """SC-3.3: the suppression must not fire on a message the parent never delivered.
+
+    Batch 7's failure direction was a duplicate. This one's is a LOST message, which
+    is worse, and this is the only test that catches an over-firing suppression.
+
+    state.message_map is written only on a send that returned a non-empty Stoat id, so
+    a parent failure leaves no entry and the merge path is the message's remaining
+    route to the server.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent, thread = _post_bump_pair()
+
+    keys: list[str] = []
+
+    async def _fail_the_parents_send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        keys.append(key)
+        if key == f"ferry-{_ORIGIN_ID}":
+            raise MigrationError("parent send failed")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_the_parents_send):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert _ORIGIN_ID not in state.message_map, (
+        "premise of this test: a failed send writes no map entry, so the suppression "
+        "has nothing to act on"
+    )
+    assert f"ferry-merge-{_ORIGIN_ID}" in keys, (
+        "the suppression fired on a message the parent never delivered, so the message "
+        "reached neither channel and is lost; that is strictly worse than the duplicate "
+        "this batch removes"
     )
