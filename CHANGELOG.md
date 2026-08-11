@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-08-11
+
+### Added
+
+- **DiscordChatExporter updated from 2.47.1 to 2.47.3.** The export step now streams
+  large attachments to disk instead of holding them in memory, which fixes exports of
+  big servers running out of memory partway through. Ferry downloads the new version
+  automatically and verifies it, so there is nothing to do. If you keep a DCE binary in
+  place manually, the folder it looks in is now named `2.47.3`.
+
+### Changed
+
+- **Threads now begin with their real first message.** Discord stores a thread's opening
+  message in the parent channel and leaves only a placeholder at the top of the thread.
+  Until now Ferry migrated that placeholder as a literal `[empty message]`. DCE 2.47.3
+  resolves it, so a migrated thread opens with the message that actually started it, in
+  its right place in the conversation. Thread transcripts saved with
+  `--thread-strategy archive` gain the same line.
+- `--incremental` now refuses to continue from a dry-run migration. A dry run records
+  placeholder message ids rather than real ones, so continuing from it produced replies
+  pointing at messages that were never sent. Start a fresh migration instead; the error
+  says which file to remove.
+
+### Fixed
+
+- **`--thread-strategy merge` no longer posts a thread's opening message twice.** With
+  that strategy a thread's messages are appended into its parent channel, and after the
+  DiscordChatExporter update the thread's first message is one the parent channel had
+  already sent. Ferry now recognises it and does not send it again. One rare case is
+  still missed: if the parent's send of that message succeeded but its reply was lost,
+  Ferry has no record of it and the copy is sent anyway (tracked in #240). Anyone using
+  `flatten`, the default, was never affected.
+
 ## [2.14.7] - 2026-08-11
 
 ### Fixed
