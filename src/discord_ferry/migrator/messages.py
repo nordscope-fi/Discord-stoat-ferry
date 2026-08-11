@@ -137,6 +137,13 @@ class ChannelResult:
     warnings: list[dict[str, str]] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
     failed_messages: list[FailedMessage] = field(default_factory=list)
+    #: Source message id to Stoat message id, for this channel only.
+    #:
+    #: INVARIANT: never write an empty value here. The reply and pin lookups in
+    #: ``_process_message`` decide whether to fall back to the shared ``state.message_map``
+    #: with ``is None``, not with falsiness, so an empty string would read as "found" and
+    #: suppress the fallback, resolving the reference to nothing. The write site is
+    #: guarded on ``if stoat_msg_id:`` for exactly this reason.
     message_map_updates: dict[str, str] = field(default_factory=dict)
     pending_pins: list[tuple[str, str]] = field(default_factory=list)
     pending_reactions: list[dict[str, object]] = field(default_factory=list)
@@ -1441,6 +1448,9 @@ async def _process_message(
         # same channel_message_counts, so no state-level test can see that mistake.
         # Pinned by test_duplicate_runs_the_parallel_branch_not_the_retry_branch.
         if channel_result is not None:
+            # This guard is load-bearing twice over: it keeps an empty id out of the map,
+            # and it upholds the ChannelResult.message_map_updates invariant that the
+            # reply and pin lookups rely on. See the field's own comment.
             if stoat_msg_id:
                 channel_result.message_map_updates[msg.id] = stoat_msg_id
             channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
