@@ -1403,12 +1403,23 @@ async def _process_message(
             if is_first:
                 stoat_msg_id = part_stoat_id
 
+        # Only the statements that CONSUME the id are guarded. The counters and the
+        # reference-set updates run either way, because the message IS on the server.
+        #
+        # Do NOT fold `stoat_msg_id` into the branch condition above. `else` means "not
+        # the condition above", not "the retry path", so a parallel-path message with an
+        # empty id would fall into the retry branch and write state.message_map directly,
+        # bypassing ChannelResult and the save_lock discipline. Both branches leave the
+        # same channel_message_counts, so no state-level test can see that mistake.
+        # Pinned by test_duplicate_runs_the_parallel_branch_not_the_retry_branch.
         if channel_result is not None:
-            channel_result.message_map_updates[msg.id] = stoat_msg_id
+            if stoat_msg_id:
+                channel_result.message_map_updates[msg.id] = stoat_msg_id
             channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
             channel_result.messages_migrated += 1  # S15: track for forum index rebuild
         else:
-            state.message_map[msg.id] = stoat_msg_id
+            if stoat_msg_id:
+                state.message_map[msg.id] = stoat_msg_id
             state.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
             # S15: Track per-channel message count (direct-state path, e.g. retry).
             if export_channel_id:
@@ -1416,11 +1427,12 @@ async def _process_message(
                     state.channel_message_counts.get(export_channel_id, 0) + 1
                 )
 
-        if msg.is_pinned:
+        if msg.is_pinned and stoat_msg_id:
             acc_pins.append((stoat_channel_id, stoat_msg_id))
 
-        # Step 8b: Queue reactions (only in native mode).
-        if _effective_mode == "native":
+        # Step 8b: Queue reactions (only in native mode). Guarded at the block, which
+        # covers BOTH append sites, the custom-emoji one and the Unicode one.
+        if _effective_mode == "native" and stoat_msg_id:
             for reaction in msg.reactions:
                 if reaction.emoji.id:  # Custom emoji.
                     stoat_emoji = state.emoji_map.get(reaction.emoji.id)

@@ -3690,3 +3690,76 @@ async def test_duplicate_on_first_part_still_sends_the_rest(tmp_path: Path) -> N
     assert state.message_map.get("msg1") != "stoat-ferry-msg1_p2", (
         "a later part's id must never stand in for the first part's"
     )
+
+
+async def test_single_part_duplicate_leaves_clean_state(tmp_path: Path) -> None:
+    """SC-2.1: no empty map entry, no failure, no pin, no reaction, counters intact."""
+    state = _make_state()
+    config = _make_config(tmp_path, reaction_mode="native")
+    msg = _make_message(id="msg1", content="hello", is_pinned=True)
+    msg.reactions = [DCEReaction(emoji=DCEEmoji(id=None, name="thumbsup"), count=2)]
+    exp = _make_export(messages=[msg])
+
+    async def always_duplicate(*a: Any, **k: Any) -> dict[str, Any]:
+        raise DuplicateSendError("already on the server")
+
+    with patch("discord_ferry.migrator.messages.api_send_message", always_duplicate):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert "msg1" not in state.message_map, (
+        "an empty-valued map entry was written; a reply resolving to '' is worse than "
+        "one that does not resolve at all"
+    )
+    assert not state.failed_messages
+    assert not state.pending_pins, "a pin was queued against an empty message id"
+    assert not state.pending_reactions, "a reaction was queued against an empty message id"
+    assert "duplicate_send_unmapped" in [w.get("type") for w in state.warnings]
+
+
+async def test_duplicate_runs_the_parallel_branch_not_the_retry_branch(tmp_path: Path) -> None:
+    """SC-2.2: MANDATORY. The only check that catches the folded-condition mistake.
+
+    Guarding `if channel_result is not None and stoat_msg_id:` looks equivalent to
+    guarding the map write inside the branch. It is not. `else` means "not the
+    condition above", so an empty id sends a parallel-path message down the RETRY
+    path, which writes state.message_map directly and bypasses ChannelResult and the
+    save_lock discipline.
+
+    State-level assertions cannot see this: both branches leave
+    channel_message_counts == 1, by different routes. Only the real ChannelResult,
+    captured at the merge, distinguishes them. This mutant survived five other probes.
+    """
+    import discord_ferry.migrator.messages as mm
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="hello")])
+
+    seen: list[tuple[int, dict[str, str]]] = []
+    real_merge = mm._merge_channel_result
+
+    def spy_merge(st: Any, result: Any) -> None:
+        seen.append((result.messages_migrated, dict(result.message_map_updates)))
+        real_merge(st, result)
+
+    async def always_duplicate(*a: Any, **k: Any) -> dict[str, Any]:
+        raise DuplicateSendError("already on the server")
+
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", always_duplicate),
+        patch("discord_ferry.migrator.messages._merge_channel_result", spy_merge),
+    ):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert max((m for m, _ in seen), default=0) == 1, (
+        "the parallel branch did not run. The id check was folded into the "
+        "`channel_result is not None` condition, so control fell into the retry else "
+        f"and ChannelResult never saw the message. merges observed: {seen}"
+    )
+    assert not {k: v for _, d in seen for k, v in d.items()}, (
+        "an empty-valued map entry was accumulated on the ChannelResult"
+    )
+    assert not state.message_map, (
+        "the retry branch wrote directly to state.message_map, bypassing ChannelResult "
+        "and the save_lock discipline the parallel merge design depends on"
+    )
