@@ -970,3 +970,50 @@ async def api_delete_emoji(
     """
     url = f"{stoat_url.rstrip('/')}/custom/emoji/{emoji_id}"
     await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+
+
+async def api_fetch_messages(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+    *,
+    limit: int,
+    sort: str,
+) -> list[dict[str, Any]]:
+    """Read a channel's messages (GET /channels/{id}/messages).
+
+    ``limit`` and ``sort`` are keyword-only and required rather than defaulted,
+    which is deliberate on both counts. Upstream validates ``limit`` as
+    ``range(min = 1, max = 100)``, and its ``MessageSort`` default is
+    ``Relevance``, which this route explicitly rejects. A caller that could omit
+    ``sort`` would inherit a value the server refuses.
+
+    ``include_users`` is never sent. The response is an untagged enum: without
+    that parameter it is a bare array of messages, with it an object carrying
+    ``messages``, ``users`` and ``members``. Omitting it pins the shape.
+
+    A message id arrives as ``_id``, not ``id``. Ferry's webhook id field IS
+    ``id``, so the two are inconsistent upstream and neither can be inferred
+    from the other.
+
+    Requires ``ReadMessageHistory``. Lands in the ``channels`` rate bucket, 15
+    per 10 seconds keyed per channel id, because upstream routes to
+    ``messaging`` only on POST.
+    """
+    if not 1 <= limit <= 100:
+        raise ValueError(f"limit must be between 1 and 100, got {limit}")
+    if sort not in ("Latest", "Oldest"):
+        raise ValueError(f"sort must be 'Latest' or 'Oldest', got {sort!r}")
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/messages?limit={limit}&sort={sort}"
+    # Annotated `object` on purpose. _api_request is declared -> dict[str, Any]
+    # but its success path returns whatever JSON arrived, and this route returns
+    # an array. Widening that shared helper would cost 28 callers their typing,
+    # and a type: ignore here would hide a real shape mismatch, so the narrowing
+    # happens where the shape is actually known.
+    raw: object = await _api_request(session, "GET", url, token)
+    if not isinstance(raw, list):
+        raise MigrationError(
+            f"Expected a JSON array of messages from {url}, got {type(raw).__name__}"
+        )
+    return raw

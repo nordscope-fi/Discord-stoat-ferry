@@ -35,6 +35,7 @@ from discord_ferry.migrator.api import (
     api_edit_server,
     api_execute_webhook,
     api_fetch_channel,
+    api_fetch_messages,
     api_fetch_server,
     api_pin_message,
     api_send_message,
@@ -1737,3 +1738,119 @@ async def test_uncatching_call_site_still_sees_a_migration_error(
         except MigrationError as exc:  # the pre-existing handler shape
             caught = type(exc).__name__
     assert caught == "DuplicateSendError"
+
+
+# ---------------------------------------------------------------------------
+# api_fetch_messages (#107 batch 9, task #247)
+# ---------------------------------------------------------------------------
+
+
+async def test_message_fetch_rejects_a_limit_below_the_range() -> None:
+    """Kills an implementation that forwards the limit and lets Stoat reject it.
+
+    Upstream validates the query as range(min = 1, max = 100). Ferry rejects it
+    locally so a caller never spends a request on an opaque 400. No route is
+    registered here, so an attempted request would raise a different error and
+    the test could not pass by accident.
+    """
+    with aioresponses():
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(ValueError, match="limit"):
+                await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=0, sort="Latest")
+
+
+async def test_message_fetch_rejects_a_limit_above_the_range() -> None:
+    """The upper half of the same guard. Upstream caps limit at 100."""
+    with aioresponses():
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(ValueError, match="limit"):
+                await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=101, sort="Latest")
+
+
+async def test_message_fetch_rejects_an_unknown_sort() -> None:
+    """Stoat's MessageSort is Relevance, Latest, Oldest, and this route REJECTS
+    Relevance. Ferry only ever sends the two the route accepts."""
+    with aioresponses():
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(ValueError, match="sort"):
+                await api_fetch_messages(
+                    session, BASE_URL, TOKEN, "ch1", limit=10, sort="Relevance"
+                )
+
+
+async def test_message_fetch_sends_limit_and_sort_and_no_include_users(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Pins the exact query string.
+
+    aioresponses matches on the full URL, so registering it with exactly
+    ``?limit=100&sort=Latest`` means an implementation that omits sort, or that
+    adds include_users, fails to match and errors rather than passing.
+
+    include_users matters because BulkMessageResponse is an UNTAGGED enum:
+    omitting it yields a bare array, sending it yields {messages, users}. An
+    implementation that sends it and then indexes ["messages"] works against a
+    mock built the same wrong way and fails against the real server.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/ch1/messages?limit=100&sort=Latest",
+        payload=[{"_id": "01JSTOATMSG000000000000AA"}],
+    )
+    async with aiohttp.ClientSession() as session:
+        out = await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=100, sort="Latest")
+    assert isinstance(out, list)
+    assert out[0]["_id"] == "01JSTOATMSG000000000000AA"
+
+
+async def test_message_fetch_reads_the_underscore_id_key(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Stoat serialises a message id as ``_id`` (serde rename on Message).
+
+    Ferry's WEBHOOK id field is ``id``, so the two are inconsistent upstream and
+    copying the working webhook code is the likeliest way this gets written
+    wrong. The fixture carries NO ``id`` key at all, so a wrong read cannot pass
+    by accident.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/ch1/messages?limit=1&sort=Latest",
+        payload=[{"_id": "01JSTOATMSG000000000000AA", "content": "hi"}],
+    )
+    async with aiohttp.ClientSession() as session:
+        out = await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=1, sort="Latest")
+    assert "id" not in out[0]
+    assert out[0]["_id"] == "01JSTOATMSG000000000000AA"
+
+
+async def test_message_fetch_raises_on_403_rather_than_returning_empty(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The route requires ReadMessageHistory, so 403 is the realistic failure.
+
+    It must RAISE. Returning an empty list would turn a permission problem into
+    a false "this channel is empty" verdict in the check tool downstream, which
+    is the worst possible way for this to fail.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/ch1/messages?limit=100&sort=Latest",
+        status=403,
+        payload={"type": "MissingPermission"},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError):
+            await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=100, sort="Latest")
+
+
+async def test_message_fetch_rejects_a_non_list_body(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """_api_request is declared -> dict[str, Any] but returns whatever JSON
+    arrived. This route returns an array, so the narrowing is what keeps the
+    declared return type honest rather than a cast that lies."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/ch1/messages?limit=5&sort=Oldest",
+        payload={"messages": [], "users": []},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="JSON array"):
+            await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=5, sort="Oldest")
