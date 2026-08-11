@@ -1724,3 +1724,106 @@ def test_a_transient_platform_failure_self_heals(proxy_env) -> None:
     assert recovered is not None
     assert recovered.url.host == "corp"
     assert calls["n"] == 2, "the second call must reach the platform again"
+
+
+def test_describe_proxy_reports_unreadable_when_the_platform_fails(proxy_env) -> None:
+    """Killing: calling the SAFE wrapper here instead of the raising sibling.
+
+    resolve_proxy returns None for a read failure and for a clean machine alike,
+    so a describe_proxy built on it reports "none" for both. CI cannot catch
+    that: release.yml asserts only that the proxy-source key exists, whatever its
+    value. A unit test is the only guard.
+    """
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=KeyError("exclude_simple")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        out = http.describe_proxy()
+
+    assert out["proxy-source"] == "unreadable"
+    assert out["proxy-http"] == "unreadable"
+    assert out["proxy-https"] == "unreadable"
+
+
+def test_describe_proxy_distinguishes_all_three_states(proxy_env) -> None:
+    """Asserted pairwise. Three individually plausible values are not the same
+    as three distinguishable ones, and distinguishable is the requirement."""
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=KeyError("boom")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        failed = http.describe_proxy()["proxy-source"]
+    http.reset_http_state()
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", return_value={}),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        clean = http.describe_proxy()["proxy-source"]
+    http.reset_http_state()
+    with (
+        proxy_env(HTTPS_PROXY="http://corp:8080"),
+        patch.object(http, "_os_proxies", return_value={}),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        configured = http.describe_proxy()["proxy-source"]
+
+    assert failed == "unreadable"
+    assert clean == "none"
+    assert configured == "env"
+    assert len({failed, clean, configured}) == 3
+
+
+def test_a_resolved_source_wins_over_a_failing_sibling_scheme(proxy_env) -> None:
+    """http resolves from the environment while the https OS bypass read fails.
+
+    Killing: an unconditional `out["proxy-source"] = "unreadable"` in the except
+    branch, which prints a live proxy beside a summary denying it. Verified
+    reachable during design: this exact configuration produced
+    proxy-http: envcorp:8080 next to proxy-source: unreadable.
+    """
+    with (
+        proxy_env(HTTP_PROXY="http://envcorp:8080"),
+        patch.object(http, "_os_proxies", return_value={"https": "http://oscorp:3128"}),
+        patch.object(http, "_os_proxy_bypass", side_effect=OSError("registry")),
+    ):
+        out = http.describe_proxy()
+
+    assert out["proxy-http"] == "envcorp:8080"
+    assert out["proxy-https"] == "unreadable"
+    assert out["proxy-source"] == "env"
+
+
+def test_describe_proxy_happy_path_is_unchanged(proxy_env) -> None:
+    """release.yml pins these key names on Windows and macOS (cli.py:1367), so a
+    changed or dropped key breaks the #134 gate. Asserted as a whole dict rather
+    than key by key, so an ADDED key fails too."""
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", return_value={}),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        assert http.describe_proxy() == {
+            "proxy-disabled": "false",
+            "proxy-source": "none",
+            "proxy-http": "none",
+            "proxy-https": "none",
+        }
+
+
+def test_the_kill_switch_short_circuits_before_the_platform(proxy_env) -> None:
+    """Killing: a boundary placed above describe_proxy's own FERRY_DISABLE_PROXY
+    return, which would report unreadable on a machine where the user explicitly
+    turned proxying off. The seam is patched to raise, so reaching it at all
+    would be visible."""
+    with (
+        proxy_env(FERRY_DISABLE_PROXY="1"),
+        patch.object(http, "_os_proxies", side_effect=KeyError("never reached")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        out = http.describe_proxy()
+
+    assert out["proxy-disabled"] == "true"
+    assert out["proxy-source"] == "none"
