@@ -397,9 +397,24 @@ def _is_bypassed(host: str, source: str, env: dict[str, str]) -> bool:
     return _bypass_memo[key]
 
 
-def resolve_proxy(url: str | URL) -> ProxyChoice | None:
-    """The proxy for `url`, or None. NEVER raises: this runs inside
-    ClientRequest.__init__, so a raise kills the first request of a migration.
+def resolve_proxy_or_raise(url: str | URL) -> ProxyChoice | None:
+    """The proxy for `url`, or None. RAISES whatever the platform raises.
+
+    The guards below cover this function's own URL parses only. `_scheme_map`
+    and `_is_bypassed` reach platform code Ferry does not control, and stdlib can
+    raise there outside (ValueError, TypeError).
+
+    Call this only when you need to tell "could not read the configuration" apart
+    from "no proxy is configured", and catch it yourself. `describe_proxy` and
+    `run_dce_export` do, because reporting the first as the second is a
+    diagnostic that lies. Everything else calls `resolve_proxy`.
+
+    The raise is deliberate and load-bearing. `_scheme_map` assigns its cache
+    AFTER the call that can fail, so letting the exception through leaves the
+    cache cold and the next call retries the platform. Swallowing it lower down,
+    inside `_os_proxies`, was tried and rejected: the assignment then runs with an
+    empty result and freezes "no OS proxy" for the life of the process, so one
+    transient fault stops every later request using the proxy. Issue #148.
     """
     if os.environ.get("FERRY_DISABLE_PROXY"):
         return None
@@ -428,6 +443,26 @@ def resolve_proxy(url: str | URL) -> ProxyChoice | None:
     if _is_bypassed(target.host or "", source, env):
         return None
     return ProxyChoice(url=stripped, authorization=authorization, source=source)
+
+
+def resolve_proxy(url: str | URL) -> ProxyChoice | None:
+    """The proxy for `url`, or None. NEVER raises: this runs inside
+    ClientRequest.__init__, so a raise kills the first request of a migration.
+
+    A thin wrapper over `resolve_proxy_or_raise`, so the promise is a property of
+    this function rather than of whichever caller happens to sit behind a
+    boundary. Before #148 it was delivered by one of three callers, and the other
+    two inherited only the narrow guards, which is how `ferry tls-check` could
+    traceback on a machine where the platform misbehaved.
+    """
+    try:
+        return resolve_proxy_or_raise(url)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not read the proxy configuration; connecting direct.",
+            exc_info=True,
+        )
+        return None
 
 
 def proxy_notices() -> tuple[ProxyNotice, ...]:
