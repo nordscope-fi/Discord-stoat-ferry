@@ -21,6 +21,15 @@ class MigrationError(FerryError):
     """Error during migration phase."""
 
 
+class DuplicateSendError(MigrationError):
+    """Stoat rejected a send because its Idempotency-Key was still cached.
+
+    The message IS on the server. Stoat does not return it, so the caller has no
+    Stoat message id. Subclasses MigrationError so a call site that does not catch
+    this behaves exactly as it did before the class existed.
+    """
+
+
 class StateError(FerryError):
     """State file read/write error."""
 
