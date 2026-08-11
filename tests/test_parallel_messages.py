@@ -899,3 +899,74 @@ def test_a_thread_key_is_written_when_the_parent_has_not_merged_yet() -> None:
         ChannelResult(channel_id=origin_id, message_map_updates={origin_id: "stoat_thread_copy"}),
     )
     assert state.message_map[origin_id] == "stoat_thread_copy"
+
+
+# ---------------------------------------------------------------------------
+# The batch 8 precondition (#107 batch 7, chunk #198, task #212)
+# ---------------------------------------------------------------------------
+#
+# Batch 7 gates batch 8 (#110, the DCE 2.47.1 -> 2.47.3 bump) on exactly two properties:
+# the guard changes nothing at the current pin, and it resolves the collision the bump
+# introduces. Both are asserted here so batch 8 has evidence rather than an assurance.
+
+
+def test_the_guard_is_inert_at_the_2_47_1_pin() -> None:
+    """SC-5.1: at the current pin nothing collides, so nothing is skipped.
+
+    Ground truth from the shipped fixture
+    'Discord Ferry Test - general - Cool Thread [1506019505778987190].json':
+    the thread's channel id is 1506019505778987190 and its starter placeholder carries
+    the DIFFERENT synthetic id 1506019526855360593, under type 21.
+    """
+    thread_channel_id = "1506019505778987190"
+    synthetic_starter_id = "1506019526855360593"
+    assert thread_channel_id != synthetic_starter_id, (
+        "the premise of this test: at 2.47.1 the starter id is synthetic, not the origin id"
+    )
+
+    state = MigrationState()
+    parent = ChannelResult(
+        channel_id="parent_ch",
+        message_map_updates={synthetic_starter_id: "stoat_placeholder"},
+    )
+    thread = ChannelResult(
+        channel_id=thread_channel_id,
+        message_map_updates={thread_channel_id: "stoat_thread_first"},
+    )
+    _merge_channel_result(state, parent)
+    _merge_channel_result(state, thread)
+
+    # Every key written, nothing suppressed. This is what "batch 7 changes nothing
+    # before the bump" means concretely.
+    assert state.message_map == {
+        synthetic_starter_id: "stoat_placeholder",
+        thread_channel_id: "stoat_thread_first",
+    }
+
+
+def test_the_guard_is_active_in_the_post_bump_shape() -> None:
+    """SC-5.2: after 2.47.3 the starter carries the origin id, and the parent must win.
+
+    Built now rather than waiting for the bump. The whole point of batch 7 gating
+    batch 8 is that this is proven before the pin moves.
+    """
+    origin_id = "1506019505778987190"  # a thread's channel id IS its origin message id
+
+    for order in ("parent_first", "thread_first"):
+        state = MigrationState()
+        parent = ChannelResult(
+            channel_id="parent_ch",
+            message_map_updates={origin_id: "stoat_parent_copy"},
+        )
+        thread = ChannelResult(
+            channel_id=origin_id,
+            message_map_updates={origin_id: "stoat_thread_copy"},
+        )
+        pair = (parent, thread) if order == "parent_first" else (thread, parent)
+        for result in pair:
+            _merge_channel_result(state, result)
+
+        assert state.message_map[origin_id] == "stoat_parent_copy", (
+            f"the thread's copy won in the {order} order; a reply in the parent would "
+            "then be sent against the wrong message, and a sent reply cannot be unsent"
+        )
