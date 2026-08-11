@@ -1220,3 +1220,75 @@ async def test_thread_header_duplicate_records_no_warning(tmp_path: Path) -> Non
         await run_messages(config, state, [thread], lambda e: None)
 
     assert not [w for w in state.warnings if w.get("type") == "thread_header_failed"]
+
+
+# ---------------------------------------------------------------------------
+# Batch 8 (#110), chunk #218: the merge duplicate suppression
+# ---------------------------------------------------------------------------
+#
+# DCE 2.47.3 resolves a thread's empty ThreadStarterMessage placeholder into the real
+# parent-channel message, KEEPING that message's Discord id (upstream PR #1557). A
+# thread's Discord channel id EQUALS its origin message id, so post-bump the thread's
+# first message is a message the parent export already sent.
+#
+# Under `merge` that lands in the parent's own Stoat channel a second time, under a
+# different idempotency key (ferry-merge-* against ferry-*), so Stoat sees two distinct
+# nonces and nothing deduplicates it.
+#
+# Every test below asserts on captured idempotency keys, never on state. The merge path
+# writes no message_map either way, so a state-level assertion cannot distinguish a
+# suppressed send from a delivered one.
+
+# The real fixture's ids, so the shape under test is the shape that ships.
+_ORIGIN_ID = "1506019505778987190"  # 'Cool Thread' channel id AND its origin message id
+_THREAD_REPLY_ID = "1506019529476800745"
+
+
+def _post_bump_pair(
+    origin_content: str = "the thread's origin message",
+) -> tuple[DCEExport, DCEExport]:
+    """A parent export and the post-2.47.3 thread export that collides with it."""
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[_make_message(_ORIGIN_ID, origin_content)],
+        message_count=1,
+    )
+    thread = _make_export(
+        channel_id=_ORIGIN_ID,  # a thread's channel id IS its origin message id
+        channel_name="cool-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[
+            _make_message(_ORIGIN_ID, origin_content),
+            _make_message(_THREAD_REPLY_ID, "first reply in the thread"),
+        ],
+        message_count=2,
+    )
+    return parent, thread
+
+
+async def test_merge_sends_a_colliding_origin_message_once(tmp_path: Path) -> None:
+    """SC-3.1: the thread's resolved starter is the parent's own message, so send it once.
+
+    Fails against the pre-batch-8 code, where the thread's copy is merged into the
+    parent channel a second time.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert f"ferry-{_ORIGIN_ID}" in keys, "the parent's own send must be unaffected"
+    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, (
+        "the thread's copy of the parent's own message was sent again into the same "
+        "Stoat channel; that is the duplicate this batch exists to prevent"
+    )
+    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, (
+        "a thread message that does not collide must still be merged; the suppression "
+        "is scoped to the collision, not to the thread"
+    )

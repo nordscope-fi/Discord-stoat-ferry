@@ -646,6 +646,48 @@ async def _merge_threads(
                 if _would_skip and msg.id not in _failed_ids_here:
                     continue
 
+                # Batch 8 (#110): post-DCE-2.47.3 a thread's FIRST message is the parent's
+                # own origin message. DCE resolves the empty ThreadStarterMessage
+                # placeholder into the real parent-channel message and keeps its id
+                # (upstream PR #1557), and a thread's channel id equals that id. Merging
+                # it here sends it into the parent's Stoat channel a second time, under
+                # `ferry-merge-{id}` where the parent used `ferry-{id}`, so Stoat sees two
+                # distinct nonces and nothing deduplicates it.
+                #
+                # `msg.id in state.message_map` means BOTH "the parent already has this"
+                # and "the parent's send landed". The map is written only on a send that
+                # returned a non-empty Stoat id (:1454-1455 into ChannelResult, folded in
+                # by _merge_channel_result at :184; :1460 on the retry branch), and
+                # _merge_threads is awaited at :462, after the parallel gather and its
+                # reconciliation. A parent send that FAILED leaves no entry, so its
+                # message still goes out here rather than being lost.
+                #
+                # NOT `msg.id == export.channel.id`. That is batch 7's discriminator and
+                # it is wrong here: a forum post satisfies that shape today and
+                # legitimately, so it would drop the post's own body. Pinned by
+                # test_merge_never_suppresses_a_forum_posts_starter.
+                #
+                # Placement is chosen. Below _thread_max_id (:634-636) so the durable
+                # high-water still advances over a suppressed message. Below _would_skip
+                # so incremental gating is untouched. Above _build_masquerade so a
+                # suppressed message costs no Autumn avatar upload.
+                #
+                # Known miss, deferred as #240: a parent send that landed under a 409
+                # DuplicateNonce writes no map entry (:1434-1435), so it is invisible
+                # here and that one case still duplicates. Pinned by
+                # test_merge_still_duplicates_after_a_parent_duplicate_nonce.
+                if msg.id in state.message_map:
+                    # Counted as delivered, so a FailedMessage carried from a prior run
+                    # reconciles below at :745-759. NOT counted in _posted: nothing was
+                    # sent, and _posted feeds the user-facing "Merged thread X (N
+                    # messages)" event.
+                    _succeeded_ids.add(msg.id)
+                    logger.debug(
+                        "Merge: %s already delivered to the parent channel, not re-sending",
+                        msg.id,
+                    )
+                    continue
+
                 # This path never enters _process_message, so the forwarded payload has
                 # to be promoted here too -- otherwise a forward inside a merged thread
                 # is sent as an empty message with no warning.
