@@ -1045,3 +1045,28 @@ async def api_fetch_server_with_channels(
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}?include_channels=true"
     return await _api_request(session, "GET", url, token)
+
+
+async def api_fetch_emoji_list(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+) -> list[dict[str, Any]]:
+    """List a server's custom emoji (GET /servers/{id}/emojis).
+
+    A separate request because the ``Server`` model carries no emoji field at
+    all. Upstream returns ``Vec<Emoji>`` and requires only server membership,
+    unlike the message route which requires ``ReadMessageHistory``.
+
+    Narrowed the same way as :func:`api_fetch_messages`, and for the same
+    reason: this route returns an array while the shared request helper is
+    declared to return a mapping.
+
+    Lands in the ``servers`` rate bucket, 5 per 10 seconds keyed per server id.
+    """
+    url = f"{stoat_url.rstrip('/')}/servers/{server_id}/emojis"
+    raw: object = await _api_request(session, "GET", url, token)
+    if not isinstance(raw, list):
+        raise MigrationError(f"Expected a JSON array of emoji from {url}, got {type(raw).__name__}")
+    return raw

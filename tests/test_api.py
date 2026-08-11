@@ -35,6 +35,7 @@ from discord_ferry.migrator.api import (
     api_edit_server,
     api_execute_webhook,
     api_fetch_channel,
+    api_fetch_emoji_list,
     api_fetch_messages,
     api_fetch_server,
     api_fetch_server_with_channels,
@@ -1907,3 +1908,44 @@ async def test_api_fetch_server_still_sends_no_include_channels(
         out = await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
     assert out["_id"] == "srv1"
     assert "channels" not in out
+
+
+# ---------------------------------------------------------------------------
+# api_fetch_emoji_list (#107 batch 9, task #249)
+# ---------------------------------------------------------------------------
+
+
+async def test_emoji_list_reads_the_server_emoji_route(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Emoji are their own route because the Server model carries no emoji field.
+
+    GET /servers/{id}/emojis returns Vec<Emoji> and needs only server
+    membership, unlike the message route which needs ReadMessageHistory.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1/emojis",
+        payload=[{"_id": "01JAUTUMNEMOJI000000000A", "name": "party"}],
+    )
+    async with aiohttp.ClientSession() as session:
+        out = await api_fetch_emoji_list(session, BASE_URL, TOKEN, "srv1")
+    assert isinstance(out, list)
+    assert out[0]["name"] == "party"
+
+
+async def test_emoji_list_raises_on_403(mock_aiohttp: aioresponses) -> None:
+    """A non-member gets 404 or 403. Either must raise rather than reporting an
+    empty emoji set, which the check tool would read as "every emoji is gone"."""
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1/emojis", status=403, payload={})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError):
+            await api_fetch_emoji_list(session, BASE_URL, TOKEN, "srv1")
+
+
+async def test_emoji_list_rejects_a_non_list_body(mock_aiohttp: aioresponses) -> None:
+    """Same narrowing as the message fetch, for the same reason: _api_request is
+    declared -> dict[str, Any] and this route returns an array."""
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1/emojis", payload={"emoji": []})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="JSON array"):
+            await api_fetch_emoji_list(session, BASE_URL, TOKEN, "srv1")
