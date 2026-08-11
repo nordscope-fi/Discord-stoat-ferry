@@ -1425,9 +1425,10 @@ async def test_a_suppressed_message_is_not_counted_as_posted(tmp_path: Path) -> 
 
     A NOTE ON WHAT THIS TEST DOES NOT COVER, because the omission is deliberate.
     The suppression also adds the id to `_succeeded_ids`, so the merge loop's
-    reconciliation at messages.py:745-759 would drop a stale FailedMessage for a
+    reconciliation at the end of the per-thread block in _merge_threads would drop a
+    stale FailedMessage for a
     message that is on the server. No test asserts that, because it is not reachable:
-    the parallel path's own reconciliation (messages.py:1089-1103) drops on
+    the parallel path's own reconciliation in _process_single_channel drops on
     `in state.message_map`, which is this suppression's own precondition, so the parent
     channel's worker always clears such an entry first. A mutation removing the
     `_succeeded_ids.add` survives the whole suite. That was measured, not assumed, and
@@ -1488,7 +1489,8 @@ async def test_merge_still_duplicates_after_a_parent_duplicate_nonce(tmp_path: P
     Batch 7 chose, correctly, to write NO message_map entry when a send lands but
     Stoat answers 409 DuplicateNonce. Stoat returns no id with that response, and an
     entry with an empty value is worse than no entry: a reply resolving to '' is worse
-    than one that does not resolve at all. See messages.py:1434-1435 and
+    than one that does not resolve at all. See the duplicate_unmapped branch of
+    _process_message and
     tests/test_messages.py::test_single_part_duplicate_leaves_clean_state.
 
     A consequence nobody noticed until batch 8's first critique round: the map is
