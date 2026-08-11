@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from discord_ferry.core.atomicio import atomic_write_text
+
 
 @dataclass
 class BlueprintRole:
@@ -53,7 +55,10 @@ def export_blueprint(blueprint: ServerBlueprint, output_path: Path) -> None:
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     data = _blueprint_to_dict(blueprint)
-    output_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Atomic: import_blueprint reads this file back, so a truncated export outlives
+    # the run that produced it and there is no way to tell it apart from a good one
+    # until the import fails or builds a partial server (#175).
+    atomic_write_text(output_path, json.dumps(data, indent=2))
 
 
 def import_blueprint(input_path: Path) -> ServerBlueprint:

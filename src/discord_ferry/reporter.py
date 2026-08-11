@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.security import safe_sanitize, sanitize_secrets, scrub_document
 from discord_ferry.discord.metadata import load_discord_metadata
 
@@ -444,8 +445,7 @@ def generate_markdown_report(
             )
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = config.output_dir / "migration_report.md"
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(config.output_dir / "migration_report.md", "\n".join(lines))
 
 
 def _write_report(
@@ -458,10 +458,9 @@ def _write_report(
     simply forgot the argument would otherwise get weaker redaction and no error.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "migration_report.json"
     # Redact here rather than at the ~59 append sites feeding warnings and errors: a
     # call site cannot forget a scrub it never has to make, and forgetting was the
     # defect. This file is what the bug report template asks users to attach, so
     # anything in it is effectively published. Issue #140, ADR-014.
     scrubbed = scrub_document(report, token_store)
-    report_path.write_text(json.dumps(scrubbed, indent=2), encoding="utf-8")
+    atomic_write_text(output_dir / "migration_report.json", json.dumps(scrubbed, indent=2))

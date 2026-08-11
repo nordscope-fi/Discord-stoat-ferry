@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.security import scrub_document
 from discord_ferry.errors import StateError
 
@@ -194,19 +195,10 @@ def save_state(state: MigrationState, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     data = _state_to_dict(state)
 
-    # Extract message_map and write it to its own file atomically.
+    # Extract message_map and write it to its own file.
     message_map = data.pop("message_map", {})
-    mm_tmp = output_dir / "message_map.json.tmp"
-    mm_final = output_dir / "message_map.json"
-    mm_tmp.write_text(json.dumps(message_map, indent=2), encoding="utf-8")
-    # replace, not rename: os.rename refuses an existing destination on Windows and
-    # replaces it everywhere else. save_state runs at every phase boundary and every
-    # checkpoint_interval messages, so the SECOND save of any run died here, not only
-    # a second run into an existing directory (#172).
-    mm_tmp.replace(mm_final)
+    atomic_write_text(output_dir / "message_map.json", json.dumps(message_map, indent=2))
 
-    tmp_path = output_dir / "state.json.tmp"
-    final_path = output_dir / "state.json"
     # Redact free-text fields on the way out, never in place: state.warnings must keep
     # its raw text in memory. save_state takes no config, so this relies on the
     # process-wide registry, which is where the proxy secrets live.
@@ -214,8 +206,7 @@ def save_state(state: MigrationState, output_dir: Path) -> None:
     # message_map was popped above and is deliberately NOT scrubbed. It holds identifier
     # pairs and no free text, and walking it measured ~290ms at 100k entries against
     # ~3ms for everything else, on a path that runs every 50 messages. Issue #140, ADR-014.
-    tmp_path.write_text(json.dumps(scrub_document(data), indent=2), encoding="utf-8")
-    tmp_path.replace(final_path)
+    atomic_write_text(output_dir / "state.json", json.dumps(scrub_document(data), indent=2))
 
 
 def load_state(output_dir: Path) -> MigrationState:
@@ -418,9 +409,11 @@ def _migrate_v1_to_v2(data: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     Returns:
         Modified dict with v2 resume fields and v1 fields removed.
     """
-    # Back up the original state.json before migrating.
+    # Back up the original state.json before migrating. Atomic like the rest: this is
+    # the only copy of the pre-migration state, so a truncated backup is a safety net
+    # with a hole in it (#175). The path is named because the warning below reports it.
     backup_path = output_dir / "state.json.v1.bak"
-    backup_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_text(backup_path, json.dumps(data, indent=2))
 
     lcc: str = data.get("last_completed_channel", "")
     lcm: str = data.get("last_completed_message", "")
