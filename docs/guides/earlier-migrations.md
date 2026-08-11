@@ -45,8 +45,9 @@ directory as `migration_report.json` (and `migration_report.md`).
 
 Ferry skipped every forwarded message and recorded it as a DiscordChatExporter limitation. That was
 true when the code was written and stopped being true in **February 2026**, when DCE 2.47 began
-exporting the full forwarded payload. Ferry has pinned DCE 2.47.1 since **v2.0.2 (21 April 2026)**,
-so if Ferry produced your export, the data was there and was thrown away.
+exporting the full forwarded payload. Ferry pinned DCE 2.47.1 from **v2.0.2 (21 April 2026)** and
+moved to 2.47.3 in **v2.15.0**, so if Ferry produced your export, the data was there and was thrown
+away.
 
 **How to check.** Search your report for `forwarded_message`:
 

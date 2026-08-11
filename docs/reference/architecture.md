@@ -1038,7 +1038,7 @@ No engine changes required. The event system is the only integration point.
 
 DCE (DiscordChatExporter) is an external .NET tool. Ferry downloads and caches it automatically.
 
-- **Version**: Pinned to `DCE_VERSION = "2.47.1"`
+- **Version**: Pinned to `DCE_VERSION = "2.47.3"`
 - **Cache location**: `~/.discord-ferry/bin/dce/{version}/`
 - **Platform detection**: Maps `(platform.system(), platform.machine())` to DCE release asset
   names (win-x64, linux-x64, osx-x64, osx-arm64)
