@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp  # noqa: TCH002
 
 from discord_ferry.core.http import new_session, proxy_error_is_permanent, proxy_hint, tls_hint
-from discord_ferry.errors import MigrationError
+from discord_ferry.errors import DuplicateSendError, MigrationError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -293,6 +293,34 @@ async def _api_request_inner(
                         await asyncio.sleep(delay)
                         _circuit_state.consecutive_failures += 1
                     continue
+
+                if resp.status == 409:
+                    # A still-cached Idempotency-Key. The message IS on the server;
+                    # Stoat answers DuplicateNonce and does not return it, so the caller
+                    # gets no message id. Only a request that CARRIED a key can reach
+                    # this, so "the caller opted in" and "the caller sent a key" are the
+                    # same condition and no opt-in flag is needed.
+                    #
+                    # isinstance-guarded exactly like the 429 body parse at :203: a
+                    # syntactically valid 409 body that is a list, a number or a string
+                    # would otherwise raise AttributeError out of this branch instead of
+                    # falling through to the catch-all below.
+                    try:
+                        dup_body = await resp.json(content_type=None)
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError):
+                        dup_body = None
+                    if isinstance(dup_body, dict) and dup_body.get("type") == "DuplicateNonce":
+                        # A delivered message, so this must not prime the breaker. Same
+                        # bookkeeping as the 204 branch above.
+                        _circuit_state.consecutive_failures = 0
+                        if _rate_multiplier > 1.0 and not any(
+                            time.monotonic() - t < 30 for t in _rate_429_window
+                        ):
+                            _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
+                        raise DuplicateSendError(
+                            "Stoat rejected a duplicate Idempotency-Key; the message "
+                            "is already on the server"
+                        )
 
                 text = await resp.text()
                 raise MigrationError(f"API error {resp.status}: {text}")
