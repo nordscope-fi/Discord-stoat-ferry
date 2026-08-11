@@ -1051,7 +1051,19 @@ async def test_channel_pinned_message_unknown_ref(
 
 
 async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """ThreadStarterMessage type is NOT skipped — it falls through to normal handling."""
+    """A ThreadStarterMessage is not skipped; it falls through to normal handling.
+
+    A PRE-2.47.3 SHAPE, kept for exports users already hold. Ferry pins DCE 2.47.3 as
+    of v2.15.0, and that release resolves the empty starter placeholder into the real
+    parent-channel message before serialising it, or drops it when the original is
+    gone. Upstream PR #1557 adds MessageKind.ThreadStarterMessage = 21 in the SAME
+    commit that removes the placeholder from the output, so kind 21 stops being emitted
+    rather than changing spelling. A current export will not contain one.
+
+    This is not coverage of what a 2.47.3 export looks like. For that shape, see
+    tests/fixtures/dce_2_47_3/ and
+    test_flatten_resolves_the_post_bump_collision_to_the_parent.
+    """
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_starter"})
 
     state = _make_state()
