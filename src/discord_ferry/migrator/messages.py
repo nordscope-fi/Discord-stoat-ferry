@@ -1427,6 +1427,22 @@ async def _process_message(
                     state.channel_message_counts.get(export_channel_id, 0) + 1
                 )
 
+        if duplicate_unmapped:
+            # The message is on the server but Stoat returned no id with the 409, so
+            # nothing can reference it: replies to it will not resolve, and its pin and
+            # reactions are skipped above. Say so rather than reporting a clean run.
+            acc_warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "duplicate_send_unmapped",
+                    "message": (
+                        f"Message {msg.id} was already on the server (duplicate send); "
+                        "its Stoat id could not be recovered, so replies to it and its "
+                        "pins and reactions were skipped"
+                    ),
+                }
+            )
+
         if msg.is_pinned and stoat_msg_id:
             acc_pins.append((stoat_channel_id, stoat_msg_id))
 
