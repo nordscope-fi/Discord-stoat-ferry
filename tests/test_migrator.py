@@ -99,6 +99,62 @@ async def test_dry_run_resume_raises_migration_error(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2b — Dry-run incremental refusal (#110 batch 8, chunk #217, task #222)
+# ---------------------------------------------------------------------------
+
+
+async def test_dry_run_incremental_raises_migration_error(tmp_path: Path) -> None:
+    """SC-0.1: a dry-run state.json is not valid input for --incremental either.
+
+    A dry run fills message_map with `dry-msg-<id>` sentinels for every message,
+    threads included (messages.py:329), and persists them. The incremental branch
+    carries message_map forward verbatim (engine.py:201).
+
+    Two things then break. Reply resolution has always resolved against those fake
+    ids. And the merge duplicate suppression added in chunk #218 reads the same map,
+    so every merged thread message would be skipped as "already delivered".
+
+    --resume has refused a dry-run state since it was written. Its sibling never did.
+    """
+    prior = MigrationState(
+        is_dry_run=True,
+        current_phase="channels",
+        started_at="2024-01-01T00:00:00+00:00",
+    )
+    prior.message_map = {"m1": "dry-msg-m1"}
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True)
+    with pytest.raises(MigrationError, match="dry-run"):
+        await run_migration(config, lambda e: None, phase_overrides=_CONNECT_NOOP)
+
+
+async def test_incremental_still_accepts_a_real_prior_state(tmp_path: Path) -> None:
+    """SC-0.2: the guard is scoped to dry-run states, not to --incremental itself.
+
+    Without this, a guard that refused EVERY prior state would pass the test above
+    and break incremental migration entirely. Runs with dry_run=True so it stays
+    offline; the guard reads `prior.is_dry_run`, which is False here.
+    """
+    prior = MigrationState(
+        is_dry_run=False,
+        current_phase="channels",
+        started_at="2024-01-01T00:00:00+00:00",
+    )
+    prior.message_map = {"m1": "stoat-m1"}
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True, dry_run=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_CONNECT_NOOP)
+
+    assert state.message_map["m1"] == "stoat-m1", (
+        "an ordinary prior state must still be carried forward; --incremental that "
+        "does not carry message_map breaks reply references with no error at the "
+        "point of failure"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 3 — Permission bootstrap warning (server phase)
 # ---------------------------------------------------------------------------
 
