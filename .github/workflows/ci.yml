@@ -77,3 +77,32 @@ jobs:
       - name: Run contract + replay tests
         run: uv run pytest tests/test_dce_contract.py tests/test_dce_output_replay.py -v
 
+
+  windows-atomic-write:
+    name: Atomic writes on Windows
+    # The rest of CI is ubuntu-only, so nothing here has ever executed on Win32.
+    # Issue #172 was an os.rename that refuses an existing destination there and
+    # replaces it everywhere else, which no Linux runner can see. It reached a
+    # user instead of a test.
+    #
+    # Two named files rather than the whole suite: #174 tracks the full leg and
+    # is blocked on triaging an unknown number of unrelated first-run failures.
+    # Naming two files sidesteps that blocker and covers what this code touches.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev --extra native
+
+      - name: Run the state and metadata suites
+        # `uv run` resolves independently of `uv sync`, so the extras are named
+        # again on purpose.
+        run: uv run --extra dev --extra native pytest tests/test_state.py tests/test_metadata.py -v
