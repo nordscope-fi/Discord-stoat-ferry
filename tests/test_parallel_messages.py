@@ -1014,3 +1014,81 @@ def test_a_forum_post_already_has_key_equal_to_its_channel_id_today() -> None:
     )
     assert state.message_map["999"] == "stoat_second"
     assert state.message_map["1000"] == "stoat_third"
+
+
+# ---------------------------------------------------------------------------
+# The batch 7 guard, driven from parsed exports (#110 batch 8, chunk #219, task #229)
+# ---------------------------------------------------------------------------
+#
+# test_the_guard_is_active_in_the_post_bump_shape above pins parent-wins against
+# hand-constructed ChannelResult objects. That proves the merge function, not the path
+# that reaches it. This drives the REAL parent capture, which already contains message
+# 1506019505778987190, together with the synthetic 2.47.3 thread export, through
+# run_messages under `flatten`.
+
+_REAL_PARENT_NAME = "Discord Ferry Test - general [1506019498094891120].json"
+_POST_BUMP_THREAD_NAME = "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
+_ORIGIN = "1506019505778987190"
+
+
+@pytest.mark.parametrize("slow_channel", ["stoat-parent", "stoat-thread"])
+async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
+    tmp_path: Path, slow_channel: str
+) -> None:
+    """SC-4.3: parent-wins holds end to end, in BOTH worker completion orders.
+
+    Both channels are their own Stoat channel under `flatten`, so both legitimately
+    send the origin message: the parent's own copy and the thread's resolved starter.
+    Only one can own state.message_map[origin], and it has to be the parent's, because
+    a reply in the parent is the common case and a sent reply cannot be unsent.
+
+    THE PARAMETRISATION IS WHAT MAKES THIS TEST ABLE TO FAIL, and it was added after a
+    mutation proved the single-order version could not. Workers self-merge under
+    save_lock as they complete, so with the guard removed the winner is simply whoever
+    merges last. Left to itself the thread finishes first, having 2 messages against the
+    parent's 11, so the parent overwrites it and parent-wins holds BY ACCIDENT. Delaying
+    one channel's sends forces each order in turn, and the thread-last order is the one
+    that fails without the guard.
+
+    That accident is exactly the nondeterminism the guard exists to remove, which is why
+    a test that only samples one ordering proves nothing about it.
+    """
+    import pathlib
+
+    from discord_ferry.parser.dce_parser import parse_single_export
+
+    fixtures = pathlib.Path(__file__).parent / "fixtures"
+    parent = parse_single_export(fixtures / _REAL_PARENT_NAME)
+    thread = parse_single_export(fixtures / "dce_2_47_3" / _POST_BUMP_THREAD_NAME)
+
+    assert thread.channel.id == thread.messages[0].id == _ORIGIN, (
+        "premise: the post-bump fixture carries the collision"
+    )
+    assert any(m.id == _ORIGIN for m in parent.messages), (
+        "premise: the real parent capture contains the same message id"
+    )
+
+    config = _make_config(tmp_path, thread_strategy="flatten", message_rate_limit=0.0)
+    state = _make_state()
+    state.channel_map = {parent.channel.id: "stoat-parent", thread.channel.id: "stoat-thread"}
+
+    async def _send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        if channel_id == slow_channel:
+            # Enough event-loop turns that this channel's worker finishes last whatever
+            # its message count.
+            for _ in range(50):
+                await asyncio.sleep(0)
+        # The Stoat id records which CHANNEL accepted it, which is what the assertion
+        # below needs to distinguish.
+        return {"_id": f"{channel_id}::{kwargs.get('idempotency_key', '')}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _send):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert state.message_map[_ORIGIN].startswith("stoat-parent::"), (
+        f"with {slow_channel} completing last, the thread's copy won the collision: "
+        f"{state.message_map[_ORIGIN]!r}. A reply in the parent channel would then be "
+        f"sent against the thread's message, and a sent reply cannot be unsent"
+    )
