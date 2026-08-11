@@ -1480,3 +1480,64 @@ async def test_the_merge_suppression_records_no_warning(tmp_path: Path) -> None:
         f"the suppression recorded a warning naming the suppressed message: {state.warnings}"
     )
     assert not state.failed_messages, "a suppressed message is not a failure"
+
+
+async def test_merge_still_duplicates_after_a_parent_duplicate_nonce(tmp_path: Path) -> None:
+    """SC-3.6: a KNOWN MISS, pinned so it stays visible. Not the intended outcome.
+
+    Batch 7 chose, correctly, to write NO message_map entry when a send lands but
+    Stoat answers 409 DuplicateNonce. Stoat returns no id with that response, and an
+    entry with an empty value is worse than no entry: a reply resolving to '' is worse
+    than one that does not resolve at all. See messages.py:1434-1435 and
+    tests/test_messages.py::test_single_part_duplicate_leaves_clean_state.
+
+    A consequence nobody noticed until batch 8's first critique round: the map is
+    therefore NOT a complete record of what the parent delivered. This suppression
+    reads that map, so a parent origin message delivered under a 409 is invisible to
+    it, and the thread's copy is sent anyway. The channel holds it twice.
+
+    WHAT WOULD CLOSE IT: issue #240 (spec P2 item S8), a durable MigrationState record
+    of duplicate-unmapped sends. A run-scoped carrier is not enough: on --resume after
+    a crash that happened before the thread was processed, the parent channel is
+    skipped through completed_channel_ids, so no in-run signal exists.
+
+    WHY IT IS NOT CLOSED HERE: the case is compound-rare. The parent's send must lose
+    its response, the retry must land inside Stoat's 1000-entry idempotency LRU, that
+    message must be a thread origin, and the user must run `merge`. Its outcome is one
+    duplicated message, which is the pre-bump status quo for every merge user.
+
+    Change the final assertion only when #240 is built.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent, thread = _post_bump_pair()
+
+    keys: list[str] = []
+
+    async def _parents_send_is_a_duplicate(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        keys.append(key)
+        if key == f"ferry-{_ORIGIN_ID}":
+            raise DuplicateSendError("already on the server")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _parents_send_is_a_duplicate):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert f"ferry-{_ORIGIN_ID}" in keys, "premise: the parent attempted the send"
+    assert _ORIGIN_ID not in state.message_map, (
+        "premise: batch 7 deliberately writes no map entry for a send that landed "
+        "under a duplicate-nonce 409, so the suppression has nothing to match on"
+    )
+    assert any(w.get("type") == "duplicate_send_unmapped" for w in state.warnings), (
+        "premise: batch 7 does warn about it, so the information exists in the run; "
+        "it is just not in a form the suppression can read"
+    )
+    assert f"ferry-merge-{_ORIGIN_ID}" in keys, (
+        "KNOWN MISS (#240 / spec S8): the parent delivered this message under a 409 "
+        "but recorded nothing, so the suppression cannot see it and the thread's copy "
+        "is sent into the same channel. Do not 'fix' this assertion; build #240."
+    )
