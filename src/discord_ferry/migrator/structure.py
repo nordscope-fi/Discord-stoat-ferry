@@ -14,7 +14,7 @@ from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import RoleMeta, load_discord_metadata
-from discord_ferry.errors import AutumnUploadError, MigrationError
+from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
@@ -1256,26 +1256,36 @@ async def run_channels(
                 else:
                     content = "No posts migrated."
 
-                msg_result = await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    index_channel_id,
-                    content=content,
-                    masquerade={"name": "Discord Ferry"},
-                    idempotency_key=f"ferry-forum-index-{forum_key}",
-                )
+                index_msg_id: str = ""
+                try:
+                    msg_result = await api_send_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        content=content,
+                        masquerade={"name": "Discord Ferry"},
+                        idempotency_key=f"ferry-forum-index-{forum_key}",
+                    )
+                    index_msg_id = msg_result["_id"]
+                except DuplicateSendError:
+                    # The index message is already on the server. Stoat returns no id
+                    # with the 409, so it cannot be pinned. Everything below uses
+                    # index_channel_id rather than the message id, so the channel wiring
+                    # must still run: letting the broad handler swallow it would lose
+                    # the channel_map entry for a channel that exists.
+                    pass
                 await asyncio.sleep(config.upload_delay)
 
-                index_msg_id: str = msg_result["_id"]
-                await api_pin_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    index_channel_id,
-                    index_msg_id,
-                )
-                await asyncio.sleep(config.upload_delay)
+                if index_msg_id:
+                    await api_pin_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        index_msg_id,
+                    )
+                    await asyncio.sleep(config.upload_delay)
 
                 # Insert at position 0 so it appears at the top of the category.
                 category_channels.setdefault(forum_cat_stoat_id, []).insert(0, index_channel_id)

@@ -3232,3 +3232,59 @@ async def test_a_refused_proxy_names_the_proxy(
     assert "Role icon upload failed" in message
     assert f"The request to autumn.test went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
+
+
+async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
+    """SC-2.6: a duplicate index send leaves no id, so there is nothing to pin.
+
+    Driven through real HTTP so the whole stack runs, including api.py's
+    DuplicateNonce branch. The channel wiring below the send uses index_channel_id,
+    not the message id, so it must still happen.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    exports = [
+        _make_export(
+            channel_id="fp1",
+            channel_name="first-post",
+            channel_type=15,
+            is_thread=True,
+            parent_channel_name="my-forum",
+            category_id="cat1",
+            category="General",
+            message_count=42,
+        ),
+    ]
+
+    pins: list[str] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-fp1", "name": "my-forum-first-post"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-idx1", "name": "my-forum-index"},
+        )
+        # The index message send answers with a still-cached Idempotency-Key.
+        m.post(
+            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            status=409,
+            payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
+        )
+        # Registered so a stray pin is recorded rather than erroring out.
+        m.put(
+            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
+            payload={},
+            callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+
+        await run_channels(config, state, exports, events.append)
+
+    assert pins == [], "a pin was attempted against a message id that was never returned"
+    # The channel wiring does not depend on the message id and must still have run.
+    assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
