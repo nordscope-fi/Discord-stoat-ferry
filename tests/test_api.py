@@ -37,6 +37,7 @@ from discord_ferry.migrator.api import (
     api_fetch_channel,
     api_fetch_messages,
     api_fetch_server,
+    api_fetch_server_with_channels,
     api_pin_message,
     api_send_message,
     api_set_channel_default_permissions,
@@ -1854,3 +1855,55 @@ async def test_message_fetch_rejects_a_non_list_body(
     async with aiohttp.ClientSession() as session:
         with pytest.raises(MigrationError, match="JSON array"):
             await api_fetch_messages(session, BASE_URL, TOKEN, "ch1", limit=5, sort="Oldest")
+
+
+# ---------------------------------------------------------------------------
+# api_fetch_server_with_channels (#107 batch 9, task #248)
+# ---------------------------------------------------------------------------
+
+
+async def test_server_with_channels_requests_channel_objects(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Pins include_channels=true and both lists in the response.
+
+    Upstream returns FetchServerResponse::JustServer without the parameter and
+    ServerWithChannels with it. Two different top-level shapes from one route,
+    so the parameter is what decides which one arrives.
+
+    Both lists matter downstream: server.channels is UNFILTERED and lists every
+    channel id, while the sibling channels array holds only objects the caller
+    may ViewChannel. That pair is the only way to tell a deleted channel from an
+    invisible one.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1?include_channels=true",
+        payload={
+            "server": {"_id": "srv1", "channels": ["01JSTOATCH00000000000AAA"]},
+            "channels": [{"_id": "01JSTOATCH00000000000AAA", "name": "general"}],
+        },
+    )
+    async with aiohttp.ClientSession() as session:
+        out = await api_fetch_server_with_channels(session, BASE_URL, TOKEN, "srv1")
+    assert out["server"]["channels"] == ["01JSTOATCH00000000000AAA"]
+    assert out["channels"][0]["name"] == "general"
+
+
+async def test_api_fetch_server_still_sends_no_include_channels(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Regression. The pre-existing api_fetch_server must not gain the parameter.
+
+    Adding include_channels to it instead of adding a new function would change
+    the response shape under two callers this batch does not touch: the
+    --validate-after block in run_migration, and rollback. aioresponses matches
+    the full URL, so a query string appearing here fails to match and errors.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        payload={"_id": "srv1", "name": "My Server"},
+    )
+    async with aiohttp.ClientSession() as session:
+        out = await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert out["_id"] == "srv1"
+    assert "channels" not in out
