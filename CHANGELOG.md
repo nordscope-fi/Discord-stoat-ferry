@@ -13,8 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **DiscordChatExporter updated from 2.47.1 to 2.47.3.** The export step now streams
   large attachments to disk instead of holding them in memory, which fixes exports of
   big servers running out of memory partway through. Ferry downloads the new version
-  automatically and verifies it, so there is nothing to do. If you keep a DCE binary in
-  place manually, the folder it looks in is now named `2.47.3`.
+  automatically and verifies it, so most people have nothing to do. If you put a DCE
+  binary in place by hand, move it: the folder Ferry looks in is now named `2.47.3`.
 
 ### Changed
 
@@ -34,10 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **`--thread-strategy merge` no longer posts a thread's opening message twice.** With
   that strategy a thread's messages are appended into its parent channel, and after the
   DiscordChatExporter update the thread's first message is one the parent channel had
-  already sent. Ferry now recognises it and does not send it again. One rare case is
-  still missed: if the parent's send of that message succeeded but its reply was lost,
-  Ferry has no record of it and the copy is sent anyway (tracked in #240). Anyone using
-  `flatten`, the default, was never affected.
+  already sent. Ferry now recognises it and does not send it again. One case is still
+  missed, and it needs all of these at once: the parent's send of that message
+  succeeded, its reply was lost on the way back, and the retry reached Stoat while the
+  original was still in Stoat's short-lived duplicate cache. Ferry then has no record of
+  the message and sends the copy anyway (tracked in #240). Anyone using `flatten`, the
+  default, was never affected.
 
 ## [2.14.7] - 2026-08-11
 

@@ -848,10 +848,7 @@ def test_media_discordapp_net_is_consulted_for_expiry(tmp_path: Path) -> None:
     ) as checked:
         _result, media_path = flatten_embed({"image": {"url": url}}, export_dir=tmp_path)
 
-    assert checked.call_count == 1, (
-        "the expiry check was never consulted for a media.discordapp.net URL, so the "
-        "host was dropped from the condition in flatten_embed"
-    )
+    checked.assert_called_once_with(url)
     assert media_path is None, "an expired URL must not be offered as usable media"
 
 
