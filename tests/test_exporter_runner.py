@@ -991,3 +991,80 @@ class TestDceChildProxyEnvironment:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert captured_env["HTTPS_PROXY"] == "http://mine:9999"
+
+
+# ---------------------------------------------------------------------------
+# Proxy resolution must never abort an export (issue #148)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_export_launches_when_proxy_resolution_fails(tmp_path: Path) -> None:
+    """Today the raise aborts the export before DCE starts.
+
+    The HTTPS_PROXY variable this block injects is an optimisation: DCE works
+    without it, and a user who set the variable themselves already has it. Losing
+    the whole export over a failure to read the OS proxy configuration is a bad
+    trade, so the export must launch anyway with the variable absent rather than
+    present and wrong.
+    """
+    process = _make_process([b"Successfully exported 1 channel(s).\n"])
+    exec_mock = AsyncMock(return_value=process)
+    events: list[MigrationEvent] = []
+
+    with (
+        patch("discord_ferry.exporter.runner.asyncio.create_subprocess_exec", new=exec_mock),
+        patch("discord_ferry.core.http._os_proxies", side_effect=KeyError("boom")),
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False),
+    ):
+        await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+    assert exec_mock.await_count == 1, "the subprocess must still be created"
+    assert "HTTPS_PROXY" not in exec_mock.await_args.kwargs["env"]
+
+
+@pytest.mark.asyncio
+async def test_a_user_set_proxy_variable_survives_a_resolution_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The comment beside this block says overwriting a deliberate setting is a
+    surprise rather than a feature. A boundary that clears the variable on
+    failure would do exactly that."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://mine:8080")
+    process = _make_process([b"Successfully exported 1 channel(s).\n"])
+    exec_mock = AsyncMock(return_value=process)
+    events: list[MigrationEvent] = []
+
+    with (
+        patch("discord_ferry.exporter.runner.asyncio.create_subprocess_exec", new=exec_mock),
+        patch("discord_ferry.core.http._os_proxies", side_effect=KeyError("boom")),
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False),
+    ):
+        await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+    assert exec_mock.await_args.kwargs["env"]["HTTPS_PROXY"] == "http://mine:8080"
+
+
+@pytest.mark.asyncio
+async def test_a_resolution_failure_reaches_the_event_stream(tmp_path: Path) -> None:
+    """Without this, the two tests above both pass against an empty except block.
+
+    An export that silently runs without the proxy the user configured is the
+    shape recorded in lesson_a_command_that_does_nothing_is_worse_than_no_command:
+    a code path that looks like it delivers something and structurally cannot.
+    """
+    process = _make_process([b"Successfully exported 1 channel(s).\n"])
+    events: list[MigrationEvent] = []
+
+    with (
+        patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ),
+        patch("discord_ferry.core.http._os_proxies", side_effect=KeyError("boom")),
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False),
+    ):
+        await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+    warnings = [e for e in events if e.status == "warning" and "proxy" in e.message.lower()]
+    assert len(warnings) == 1

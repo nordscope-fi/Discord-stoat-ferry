@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import new_session, proxy_hint, resolve_proxy, tls_hint
+from discord_ferry.core.http import new_session, proxy_hint, resolve_proxy_or_raise, tls_hint
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -374,7 +374,26 @@ async def run_dce_export(
     config.export_dir.mkdir(parents=True, exist_ok=True)
 
     child_env = dict(os.environ)  # full copy: dropping SYSTEMROOT or PATH breaks .NET on Windows
-    choice = resolve_proxy("https://discord.com/")
+    # The RAISING sibling, with a boundary here. resolve_proxy would swallow and
+    # return None, which is indistinguishable from "this machine has no proxy",
+    # and there would be nothing to tell the user. The variable below is an
+    # optimisation, so a failure to resolve it must never abort an export, but it
+    # must not pass silently either: a user behind a proxy whose export runs
+    # without one deserves to know why. Issue #148.
+    try:
+        choice = resolve_proxy_or_raise("https://discord.com/")
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the proxy configuration for the export.", exc_info=True)
+        on_event(
+            MigrationEvent(
+                phase="export",
+                status="warning",
+                message=(
+                    "Could not read the system proxy configuration. The export will run without it."
+                ),
+            )
+        )
+        choice = None
     if choice is not None and choice.source == "os" and "HTTPS_PROXY" not in child_env:
         # Only when the OS supplied it. If the user set the variable themselves,
         # DCE already inherits it, and overwriting a deliberate setting is a
