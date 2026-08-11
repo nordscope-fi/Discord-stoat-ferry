@@ -813,3 +813,70 @@ def test_format_timestamp_naive_is_utc() -> None:
 def test_format_timestamp_malformed_returns_raw() -> None:
     """SC-11: a non-ISO string returns the raw input (no raise)."""
     assert format_original_timestamp("not-a-date") == "not-a-date"
+
+
+# ---------------------------------------------------------------------------
+# Batch 8 (#110, chunk #221): two assumptions #110's body lists as work
+# ---------------------------------------------------------------------------
+#
+# Both were already true before this batch started. The tests exist so the next
+# reader of #110 does not re-investigate them, and so a later edit cannot quietly
+# undo them.
+
+
+def test_media_discordapp_net_is_consulted_for_expiry(tmp_path: Path) -> None:
+    """SC-5.1: #110 says Ferry's CDN-expiry logic only knows cdn.discordapp.com.
+
+    It has known both hosts since 1793e86 (2026-03-18), which predates the issue.
+    DCE 2.47.3 extended its OWN signature stripping to media.discordapp.net (upstream
+    PR #1554); Ferry's side of that was already done.
+
+    THIS ASSERTS THE CALL, NOT THE OUTCOME, and that is the whole point. An unchecked
+    remote URL and an expired one both leave media_path None, so no outcome-based
+    assertion can tell them apart. The pre-existing test_media_discordapp_net_checked
+    asserts `media_path is None` and therefore survives dropping the host from the
+    condition entirely, which was confirmed by making that edit and watching it stay
+    green. Only call_count distinguishes the implementations.
+    """
+    from unittest.mock import patch
+
+    # ex/is/hm are the signed-URL parameters Discord appends.
+    url = "https://media.discordapp.net/attachments/1/2/x.png?ex=60000000&is=1&hm=deadbeef"
+
+    with patch(
+        "discord_ferry.parser.transforms.check_cdn_url_expiry", return_value=True
+    ) as checked:
+        _result, media_path = flatten_embed({"image": {"url": url}}, export_dir=tmp_path)
+
+    assert checked.call_count == 1, (
+        "the expiry check was never consulted for a media.discordapp.net URL, so the "
+        "host was dropped from the condition in flatten_embed"
+    )
+    assert media_path is None, "an expired URL must not be offered as usable media"
+
+
+def test_local_embed_media_resolves_whatever_the_dce_hash_spelling(tmp_path: Path) -> None:
+    """SC-5.2: DCE 2.47.3 migrates asset filenames between two hash spellings.
+
+    Upstream PR #1552 taught DCE to recognise both the old 5-character uppercase hash
+    and the newer lowercase form when migrating. #110 lists checking Ferry against that
+    as work.
+
+    It is not. Ferry never pattern-matches a DCE asset name: flatten_embed joins
+    export_dir to whatever relative path DCE wrote into the JSON. The JSON and the files
+    come from the same DCE run, so they always agree and the migration is invisible.
+    Parametrised over both spellings to say so in a form that fails if that ever stops
+    being true.
+    """
+    for hash_form in ("ABCDE", "abcde"):
+        rel = f"general_Files/0-{hash_form}.png"
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        _result, media_path = flatten_embed({"image": {"url": rel}}, export_dir=tmp_path)
+
+        assert media_path == target, (
+            f"a DCE asset named with the {hash_form!r} hash form did not resolve; "
+            "Ferry must read the path from the JSON rather than matching the name"
+        )
