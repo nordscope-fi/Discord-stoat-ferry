@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.security import SecureTokenStore
+from discord_ferry.errors import DuplicateSendError
 from discord_ferry.migrator.messages import run_messages
 from discord_ferry.migrator.structure import run_channels
 from discord_ferry.parser.models import (
@@ -1125,3 +1127,96 @@ async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Pat
     assert "ferry-merge-20" in keys, "incremental must still self-heal"
     # Re-sent successfully, so the stale failure record is reconciled away.
     assert [fm.discord_msg_id for fm in state.failed_messages] == []
+
+
+# ---------------------------------------------------------------------------
+# Duplicate sends at the result-discarding sites (#107 batch 7, task #202)
+# ---------------------------------------------------------------------------
+
+
+def _dup_on(prefix: str) -> object:
+    """Patch target: raise DuplicateSendError for keys with *prefix*, else succeed."""
+
+    async def _send(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        key = str(kwargs.get("idempotency_key", ""))
+        if key.startswith(prefix):
+            raise DuplicateSendError("already on the server")
+        return {"_id": f"stoat-{key}"}
+
+    return _send
+
+
+async def test_merge_duplicate_records_no_failed_message(tmp_path: Path) -> None:
+    """SC-2.5: the merge path must not record a landed message as failed.
+
+    This is the defect itself. A FailedMessage here is what --incremental later
+    re-sends, producing a real duplicate in the user's channel.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+
+    parent = _make_export(channel_id="100", channel_name="general", message_count=0)
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "thread msg")],
+        message_count=1,
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _dup_on("ferry-merge-")):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert not state.failed_messages, (
+        "a message already on the server was recorded as failed; --incremental will "
+        "re-send it and create a real duplicate"
+    )
+    assert not [w for w in state.warnings if w.get("type") == "merge_message_failed"]
+
+
+async def test_merge_separator_duplicate_records_no_warning(tmp_path: Path) -> None:
+    """SC-2.8, separator half: a duplicate separator is not a failure."""
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+
+    parent = _make_export(channel_id="100", channel_name="general", message_count=0)
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "thread msg")],
+        message_count=1,
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _dup_on("ferry-thread-sep-")):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert not [w for w in state.warnings if w.get("type") == "merge_separator_failed"]
+
+
+async def test_thread_header_duplicate_records_no_warning(tmp_path: Path) -> None:
+    """SC-2.8, header half: a duplicate flatten-mode header is not a failure."""
+    config = _make_config(tmp_path, thread_strategy="flatten", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    state.channel_map["200"] = "stoat-ch-200"
+
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "thread msg")],
+        message_count=1,
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _dup_on("ferry-header-")):
+        await run_messages(config, state, [thread], lambda e: None)
+
+    assert not [w for w in state.warnings if w.get("type") == "thread_header_failed"]

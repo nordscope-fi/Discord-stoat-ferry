@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
+from discord_ferry.errors import DuplicateSendError
 from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
@@ -580,6 +581,10 @@ async def _merge_threads(
                         masquerade={"name": "Discord Ferry"},
                         idempotency_key=f"ferry-thread-sep-{export.channel.id}",
                     )
+                except DuplicateSendError:
+                    # Already on the server. The return value is discarded here, so a
+                    # duplicate is indistinguishable from a success.
+                    pass
                 except Exception as exc:  # noqa: BLE001
                     safe_exc = safe_sanitize(config.token_store, str(exc))
                     state.warnings.append(
@@ -641,6 +646,14 @@ async def _merge_threads(
                             masquerade=masquerade,
                             idempotency_key=idem_key,
                         )
+                    except DuplicateSendError:
+                        # Already on the server. _msg_failed deliberately stays False so
+                        # the message still reaches _succeeded_ids and drives
+                        # reconciliation. Recording a FailedMessage here is the defect
+                        # this batch fixes: --incremental re-attempts previously-failed
+                        # ids, the idempotency LRU has evicted the key by then, and the
+                        # re-send succeeds, leaving a real duplicate in the channel.
+                        continue
                     except Exception as exc:  # noqa: BLE001
                         safe_exc = safe_sanitize(config.token_store, str(exc))
                         state.warnings.append(
@@ -848,6 +861,9 @@ async def _process_single_channel(
                     masquerade={"name": "Discord Ferry"},
                     idempotency_key=f"ferry-header-{export.channel.id}",
                 )
+            except DuplicateSendError:
+                # Already on the server. The return value is discarded here.
+                pass
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(
                     {
