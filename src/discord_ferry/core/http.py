@@ -764,13 +764,35 @@ def describe_proxy() -> dict[str, str]:
             "proxy-disabled": "true",
         }
     out = {"proxy-disabled": "false", "proxy-source": "none"}
+    any_failed = False
     for scheme in ("http", "https"):
-        choice = resolve_proxy(f"{scheme}://example.invalid/")
+        # The RAISING sibling, deliberately. resolve_proxy returns None for a read
+        # failure and for a clean machine alike, so calling it here would report
+        # "none" for both, and CI would not notice: release.yml asserts only that
+        # the proxy-source key is present, whatever its value. A diagnostic that
+        # reports "no proxy" when it means "could not look" is the failure this
+        # function's own docstring is about. Issue #148.
+        try:
+            choice = resolve_proxy_or_raise(f"{scheme}://example.invalid/")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Could not read the proxy configuration for %s.", scheme, exc_info=True
+            )
+            out[f"proxy-{scheme}"] = "unreadable"
+            any_failed = True
+            continue
         if choice is None:
             out[f"proxy-{scheme}"] = "none"
         else:
             out[f"proxy-{scheme}"] = f"{choice.url.host}:{choice.url.port}"
             out["proxy-source"] = choice.source
+    # A real resolved source wins the summary. Overwriting it with "unreadable"
+    # because the OTHER scheme failed prints a live proxy next to a line denying
+    # it, which is the contradiction this design rejected an alternative for. The
+    # failing scheme still reports its own failure in its own key, so nothing is
+    # hidden.
+    if any_failed and out["proxy-source"] == "none":
+        out["proxy-source"] = "unreadable"
     return out
 
 
