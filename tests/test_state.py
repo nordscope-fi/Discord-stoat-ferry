@@ -1037,3 +1037,42 @@ def test_every_classified_text_member_is_actually_used() -> None:
         "_TEXT_MEMBERS classifies a member key no append site uses: "
         f"{sorted(classified - observed)}"
     )
+
+
+def test_save_state_overwrites_existing_files_on_windows(
+    windows_filesystem: None, tmp_path: Path
+) -> None:
+    """Issue #172: a second run into an existing output directory must not crash.
+
+    One test covers both swap sites. save_state has no branch between them
+    (state.py:198-214), so reverting the message_map swap raises on the first and
+    reverting the state.json swap raises on the second.
+    """
+    save_state(MigrationState(stoat_server_id="first"), tmp_path)
+    save_state(MigrationState(stoat_server_id="second"), tmp_path)
+
+    assert load_state(tmp_path).stoat_server_id == "second"
+    assert (tmp_path / "message_map.json").exists()
+
+
+def test_save_state_first_write_succeeds_on_windows(
+    windows_filesystem: None, tmp_path: Path
+) -> None:
+    """The fixture must only refuse an EXISTING destination.
+
+    If it refused unconditionally, a genuine first-run break would look identical
+    to the bug under test and this suite could not tell them apart.
+    """
+    save_state(MigrationState(stoat_server_id="only"), tmp_path)
+
+    assert load_state(tmp_path).stoat_server_id == "only"
+
+
+def test_repeated_checkpoints_overwrite_on_windows(
+    windows_filesystem: None, tmp_path: Path
+) -> None:
+    """save_state runs every checkpoint_interval messages, 50 by default."""
+    for n in range(5):
+        save_state(MigrationState(stoat_server_id=f"run-{n}"), tmp_path)
+
+    assert load_state(tmp_path).stoat_server_id == "run-4"

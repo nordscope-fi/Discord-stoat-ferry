@@ -457,3 +457,30 @@ def test_rolemeta_legacy_json_defaults_name_color():
     restored = _dict_to_meta(legacy)
     assert restored.role_metadata["r1"].name == ""
     assert restored.role_metadata["r1"].color == ""
+
+
+def test_save_metadata_overwrites_existing_file_on_windows(
+    windows_filesystem: None, tmp_path: Path
+) -> None:
+    """Issue #172, the third swap site."""
+    first = DiscordMetadata(
+        guild_id="123",
+        fetched_at="2026-06-23T00:00:00+00:00",
+        server_default_permissions=7,
+        role_permissions={"role-a": PermissionPair(allow=1, deny=2)},
+        channel_metadata={"chan-a": ChannelMeta(nsfw=True)},
+    )
+    second = DiscordMetadata(
+        guild_id="456",
+        fetched_at="2026-06-24T00:00:00+00:00",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+    )
+
+    save_discord_metadata(first, tmp_path)
+    save_discord_metadata(second, tmp_path)
+
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None
+    assert loaded.guild_id == "456"

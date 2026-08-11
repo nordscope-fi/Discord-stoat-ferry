@@ -70,7 +70,8 @@ def save_discord_metadata(meta: DiscordMetadata, output_dir: Path) -> None:
     tmp_path = output_dir / "discord_metadata.json.tmp"
     final_path = output_dir / "discord_metadata.json"
     tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp_path.rename(final_path)
+    # replace, not rename: see state.py and issue #172.
+    tmp_path.replace(final_path)
 
 
 def load_discord_metadata(output_dir: Path) -> DiscordMetadata | None:
