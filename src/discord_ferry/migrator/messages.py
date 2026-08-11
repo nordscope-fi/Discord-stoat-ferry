@@ -677,10 +677,23 @@ async def _merge_threads(
                 # here and that one case still duplicates. Pinned by
                 # test_merge_still_duplicates_after_a_parent_duplicate_nonce.
                 if msg.id in state.message_map:
-                    # Counted as delivered, so a FailedMessage carried from a prior run
-                    # reconciles below at :745-759. NOT counted in _posted: nothing was
-                    # sent, and _posted feeds the user-facing "Merged thread X (N
-                    # messages)" event.
+                    # NOT counted in _posted: nothing was sent, and _posted feeds the
+                    # user-facing "Merged thread X (N messages)" event. Pinned by
+                    # test_a_suppressed_message_is_not_counted_as_posted.
+                    #
+                    # _succeeded_ids IS updated, and it is deliberately defensive rather
+                    # than observable. It exists so this loop's reconciliation at
+                    # :745-759 would drop a stale FailedMessage for a message that is on
+                    # the server. In practice it never has to: the parallel path's own
+                    # reconciliation at :1089-1103 drops on `in state.message_map`, which
+                    # is this branch's own precondition, so the parent channel's worker
+                    # always clears such an entry first. A mutation removing this line
+                    # therefore survives the suite, which was checked rather than assumed.
+                    #
+                    # It stays because the invariant "everything this loop treats as
+                    # delivered is in _succeeded_ids" is what the reconciliation reads,
+                    # and a future change to the discriminator could make the difference
+                    # reachable. Do not delete it on the strength of a surviving mutant.
                     _succeeded_ids.add(msg.id)
                     logger.debug(
                         "Merge: %s already delivered to the parent channel, not re-sending",

@@ -1412,3 +1412,71 @@ async def test_archive_is_unaffected_by_the_merge_suppression(tmp_path: Path) ->
     assert "the thread's origin message" in archived, (
         "archive must still record the starter; _archive_threads consults no message_map"
     )
+
+
+async def test_a_suppressed_message_is_not_counted_as_posted(tmp_path: Path) -> None:
+    """SC-3.5: the completion event must not claim a message nobody sent.
+
+    `_posted` feeds "Merged thread X (N messages)". A suppressed message was already
+    on the server before this run touched it, so counting it overstates the merge.
+
+    Proven able to fail: adding `_posted += 1` to the suppression branch makes this
+    test fail.
+
+    A NOTE ON WHAT THIS TEST DOES NOT COVER, because the omission is deliberate.
+    The suppression also adds the id to `_succeeded_ids`, so the merge loop's
+    reconciliation at messages.py:745-759 would drop a stale FailedMessage for a
+    message that is on the server. No test asserts that, because it is not reachable:
+    the parallel path's own reconciliation (messages.py:1089-1103) drops on
+    `in state.message_map`, which is this suppression's own precondition, so the parent
+    channel's worker always clears such an entry first. A mutation removing the
+    `_succeeded_ids.add` survives the whole suite. That was measured, not assumed, and
+    the line is kept as a documented invariant rather than as covered behaviour.
+    """
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    # The parent delivered the origin on a prior run and recorded doing so.
+    state.message_map[_ORIGIN_ID] = "stoat-parent-copy"
+
+    parent = _make_export(channel_id="100", channel_name="general", messages=[], message_count=0)
+    _, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], events.append)
+
+    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, "premise: the origin was suppressed"
+    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, "premise: the reply was merged"
+
+    merged = [e.message or "" for e in events if "Merged thread" in (e.message or "")]
+    assert any("(1 messages)" in m for m in merged), (
+        f"_posted counted the suppressed message, so the completion event overstates "
+        f"what this run merged: {merged}"
+    )
+
+
+async def test_the_merge_suppression_records_no_warning(tmp_path: Path) -> None:
+    """SC-3.5: the suppression is silent, by choice.
+
+    Post-bump it fires once per thread for every `merge` user, so a warning would be
+    noise proportional to thread count rather than a signal. A `logger.debug` line
+    keeps it reachable in ferry.log for anyone diagnosing a specific migration.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, "premise: the origin was suppressed"
+    assert not [w for w in state.warnings if _ORIGIN_ID in w.get("message", "")], (
+        f"the suppression recorded a warning naming the suppressed message: {state.warnings}"
+    )
+    assert not state.failed_messages, "a suppressed message is not a failure"
