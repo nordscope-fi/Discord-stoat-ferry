@@ -463,6 +463,42 @@ class TestDceChecksumsJson:
                     "does not look like a 64-char lowercase hex SHA-256 string"
                 )
 
+    # -----------------------------------------------------------------------
+    # Batch 8 (#110, chunk #220, task #230): the 2.47.3 block
+    # -----------------------------------------------------------------------
+
+    def test_dce_checksums_json_retains_the_previous_version_for_rollback(self):
+        """SC-2.3: pinning back to 2.47.1 must still verify.
+
+        _verify_dce_checksum hard-fails on an unpinned version since #37 phase 2, so
+        deleting the old block would turn a rollback into a DCENotFoundError for every
+        user rather than a downgrade.
+        """
+        data = self._load_checksums()
+        assert "2.47.1" in data, "the previous pin's hashes are the rollback path"
+        assert set(data["2.47.1"]) == {
+            "win-x64",
+            "linux-x64",
+            "osx-x64",
+            "osx-arm64",
+            "linux-arm64",
+        }
+
+    def test_the_new_block_is_not_a_copy_of_the_old_one(self):
+        """A copy-paste that forgot to replace the digests passes every other test here.
+
+        test_dce_checksums_json_covers_all_supported_platforms only checks the keys
+        exist. test_dce_checksums_json_values_look_like_sha256 only checks the shape.
+        Neither can tell 2.47.3's real digests from 2.47.1's, and a rollback pin that
+        verified against the wrong archive would be worse than no pin at all.
+        """
+        data = self._load_checksums()
+        for platform_key, value in data["2.47.3"].items():
+            assert value != data["2.47.1"][platform_key], (
+                f"dce_checksums.json['2.47.3'][{platform_key!r}] equals the 2.47.1 "
+                "digest, so the block was copied without re-hashing the new archives"
+            )
+
 
 # ---------------------------------------------------------------------------
 # #135 — a refusing proxy must name itself at exporter/manager.py:214
