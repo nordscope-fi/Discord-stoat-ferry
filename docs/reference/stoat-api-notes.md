@@ -302,6 +302,28 @@ mechanism:
 Treat the idempotency key as a cheap guard against an immediate double-send within one run — a
 retried request, a duplicated task — and nothing more.
 
+### Ferry acts on the 409 as of v2.14.7
+
+Before v2.14.7 the guard fired and Ferry treated the answer as a failure. A 409 reached the generic
+error handler at every send site, which recorded the message in `state.failed_messages`. An
+`--incremental` run then re-attempted it, by which point the key had left the cache, so the re-send
+succeeded and the channel held the message twice. The mechanism meant to prevent a duplicate was
+producing one.
+
+A 409 whose body is `{"type": "DuplicateNonce"}` now raises `DuplicateSendError`, and every send
+site treats it as delivered. Nothing is recorded as failed, so nothing re-sends it. Any other 409,
+and any body that is not a JSON object, still raises the generic error.
+
+What it costs, because the 409 carries no message id:
+
+- A duplicate on a message's **first part** loses its `message_map` entry. Replies to that one
+  message will not resolve, its pin is skipped and its reactions are skipped. A warning of type
+  `duplicate_send_unmapped` names the message.
+- A duplicate on a **later part** costs nothing. Only the first part feeds the map, and the
+  remaining parts still send, because each part carries its own key.
+- A duplicate on the **forum index** means the index message cannot be pinned. The channel wiring
+  does not need that id and still happens.
+
 !!! note "Deprecated: nonce body field"
     The old `nonce` body field on message sends is deprecated. Use the `Idempotency-Key` HTTP header
     instead.
