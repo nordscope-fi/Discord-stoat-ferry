@@ -483,10 +483,16 @@ def proxy_notices() -> tuple[ProxyNotice, ...]:
     The scan underneath (`_scheme_map`) is cached either way, so the repeat
     costs a dict walk rather than a syscall.
 
-    NEVER raises, mirroring `_FerryRequest._resolve_or_direct`. `_scheme_map()`
+    NEVER raises, like `resolve_proxy`, which since #148 is the function that
+    defines this contract rather than inheriting it from a caller. `_scheme_map()`
     reaches the platform getters `getproxies_macosx_sysconf` and
     `getproxies_registry` through `_os_proxies`, and stdlib can raise there
     outside (ValueError, TypeError).
+
+    This function keeps its own boundary rather than calling `resolve_proxy`,
+    because it evaluates the configuration itself and must run before the first
+    request. It also degrades differently, to a visible `unreadable` notice
+    rather than a silent direct connection.
 
     This paragraph has now been wrong twice, in opposite directions, so it is
     worth stating what is actually true. It first claimed a concrete `re.error`
@@ -845,13 +851,17 @@ class _FerryRequest(aiohttp.ClientRequest):
     def _resolve_or_direct(url: object) -> ProxyChoice | None:
         """Resolve, or fall through to a direct connection. NEVER raises.
 
-        This is the boundary where the design's "resolution never raises"
-        invariant actually has to hold, because a raise here kills the first
-        request of a migration from inside ClientRequest.__init__.
+        This WAS the boundary where the "resolution never raises" invariant
+        actually held, which was the defect #148 fixed: the invariant belonged to
+        a caller rather than to the function that promised it, so the other two
+        callers inherited only the narrow guards. `resolve_proxy` now holds it.
 
-        `resolve_proxy`'s own guards catch ValueError and TypeError, which is
-        not enough, because `_is_bypassed` and `_scheme_map` reach platform code
-        Ferry does not control.
+        The boundary stays, for two reasons rather than as habit. It is defense
+        in depth over platform code Ferry does not control. And it still covers a
+        case `resolve_proxy`'s boundary does not reach in the same way:
+        `resolve_proxy(None)` raises `AttributeError` from Ferry's own frame, and
+        the `if url is None` guard above is what stops that, with the test below
+        pinning it.
 
         An earlier version of this docstring justified the boundary with a
         specific mechanism: that `_proxy_bypass_winreg_override` calls
