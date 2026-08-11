@@ -199,7 +199,9 @@ def save_state(state: MigrationState, output_dir: Path) -> None:
     mm_tmp = output_dir / "message_map.json.tmp"
     mm_final = output_dir / "message_map.json"
     mm_tmp.write_text(json.dumps(message_map, indent=2), encoding="utf-8")
-    mm_tmp.rename(mm_final)
+    # replace, not rename: os.rename refuses an existing destination on Windows,
+    # so every second run into an existing output directory died here (#172).
+    mm_tmp.replace(mm_final)
 
     tmp_path = output_dir / "state.json.tmp"
     final_path = output_dir / "state.json"
@@ -211,7 +213,7 @@ def save_state(state: MigrationState, output_dir: Path) -> None:
     # pairs and no free text, and walking it measured ~290ms at 100k entries against
     # ~3ms for everything else, on a path that runs every 50 messages. Issue #140, ADR-014.
     tmp_path.write_text(json.dumps(scrub_document(data), indent=2), encoding="utf-8")
-    tmp_path.rename(final_path)
+    tmp_path.replace(final_path)
 
 
 def load_state(output_dir: Path) -> MigrationState:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import inspect
 import os
 from contextlib import contextmanager
@@ -202,3 +203,37 @@ def _isolate_ferry_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
         logging_setup.reset_logging()
         reset_secret_registry()
         reset_http_state()
+
+
+# --- Windows filesystem semantics ---------------------------------------------
+# POSIX rename(2) is an atomic replace, so on Linux and macOS a swap onto an
+# existing file just works and no test can tell Path.rename from Path.replace.
+# Win32 MoveFile refuses, which is issue #172: every second migration into an
+# existing output directory died at the first checkpoint save.
+#
+# ci.yml runs the suite on ubuntu-latest only, so this fixture is the only way a
+# pull request can see that difference. The windows-atomic-write job runs the
+# same files on a real Windows runner, where no simulation is needed.
+_REAL_RENAME = Path.rename
+
+
+def _win32_rename(self: Path, target: str | Path) -> Path:
+    """Path.rename with Win32 MoveFile semantics: refuse an existing destination."""
+    if Path(target).exists():
+        raise FileExistsError(
+            errno.EEXIST,
+            "Cannot create a file when that file already exists",
+            str(self),
+        )
+    return _REAL_RENAME(self, target)
+
+
+@pytest.fixture
+def windows_filesystem(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make Path.rename behave as it does on Windows, for one test.
+
+    monkeypatch rather than a bare ``Path.rename = ...`` so the attribute is
+    restored when the test ends. A leaked patch would break every test that ran
+    after it in the same process.
+    """
+    monkeypatch.setattr(Path, "rename", _win32_rename)
