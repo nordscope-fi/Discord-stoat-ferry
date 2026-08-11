@@ -1129,10 +1129,15 @@ async def _process_message(
     # ChannelPinnedMessage: mark the referenced message for re-pinning, don't send.
     if msg.type == "ChannelPinnedMessage":
         if msg.reference and msg.reference.message_id:
-            # Check both the main state map and the channel result's local map.
-            ref_stoat_id = state.message_map.get(msg.reference.message_id)
-            if ref_stoat_id is None and channel_result is not None:
+            # Channel-local FIRST, then the shared map. After the DCE bump a parent and
+            # a thread can hold the same key with different values, and a pin in this
+            # channel must resolve to this channel's copy. Same rule as the reply
+            # lookup below.
+            ref_stoat_id = None
+            if channel_result is not None:
                 ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
+            if ref_stoat_id is None:
+                ref_stoat_id = state.message_map.get(msg.reference.message_id)
             if ref_stoat_id:
                 acc_pins.append((stoat_channel_id, ref_stoat_id))
             else:
@@ -1307,9 +1312,15 @@ async def _process_message(
             channel_result.replies_total += 1
         else:
             state.replies_total += 1
-        ref_stoat_id = state.message_map.get(msg.reference.message_id)
-        if ref_stoat_id is None and channel_result is not None:
+        # Channel-local FIRST, then the shared map. Without this, a reply in the parent
+        # channel can resolve to the thread's copy of the same key once DCE 2.47.3 makes
+        # the two collide, and a sent reply cannot be unsent. Pairs with the parent-wins
+        # guard in _merge_channel_result: neither half works alone.
+        ref_stoat_id = None
+        if channel_result is not None:
             ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
+        if ref_stoat_id is None:
+            ref_stoat_id = state.message_map.get(msg.reference.message_id)
         if ref_stoat_id:
             replies.append({"id": ref_stoat_id, "mention": False})
             if channel_result is not None:

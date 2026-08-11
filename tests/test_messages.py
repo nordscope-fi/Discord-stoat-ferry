@@ -3763,3 +3763,107 @@ async def test_duplicate_runs_the_parallel_branch_not_the_retry_branch(tmp_path:
         "the retry branch wrote directly to state.message_map, bypassing ChannelResult "
         "and the save_lock discipline the parallel merge design depends on"
     )
+
+
+# ---------------------------------------------------------------------------
+# Channel-local lookup precedence (#107 batch 7, chunk #198, task #211)
+# ---------------------------------------------------------------------------
+#
+# The two maps must hold DIFFERING values for the same key. A fixture where they agree
+# cannot distinguish the two orders and does not test anything.
+
+
+async def test_a_reply_resolves_against_the_channel_local_map_first(tmp_path: Path) -> None:
+    """SC-4.1: a differing local entry wins over the shared one.
+
+    After the DCE bump a parent and a thread can hold the same key with different
+    values. A reply inside the parent must resolve to the parent's copy, not the
+    thread's, and a sent reply cannot be unsent.
+    """
+    state = _make_state()
+    state.message_map["ref_id"] = "SHARED"
+    config = _make_config(tmp_path)
+    result = ChannelResult(channel_id="ch1", message_map_updates={"ref_id": "LOCAL"})
+    sent: list[dict[str, Any]] = []
+
+    async def capture(*a: Any, **k: Any) -> dict[str, Any]:
+        sent.append(k)
+        return {"_id": "stoat_new"}
+
+    msg = _make_message(id="m2", content="a reply")
+    msg.reference = DCEReference(message_id="ref_id")
+
+    async with aiohttp.ClientSession() as session:
+        with patch("discord_ferry.migrator.messages.api_send_message", capture):
+            await _process_message(
+                msg=msg,
+                stoat_channel_id="stoat_ch1",
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda e: None,
+                channel_result=result,
+            )
+
+    assert sent[0]["replies"] == [{"id": "LOCAL", "mention": False}], (
+        f"the reply resolved against the shared map, not the channel's own. got {sent[0]['replies']}"
+    )
+
+
+async def test_a_pin_resolves_against_the_channel_local_map_first(tmp_path: Path) -> None:
+    """SC-4.2: same rule for a ChannelPinnedMessage reference."""
+    state = _make_state()
+    state.message_map["ref_id"] = "SHARED"
+    config = _make_config(tmp_path)
+    result = ChannelResult(channel_id="ch1", message_map_updates={"ref_id": "LOCAL"})
+
+    msg = _make_message(id="m3", content="", msg_type="ChannelPinnedMessage")
+    msg.reference = DCEReference(message_id="ref_id")
+
+    async def capture(*a: Any, **k: Any) -> dict[str, Any]:
+        return {"_id": "stoat_new"}
+
+    async with aiohttp.ClientSession() as session:
+        with patch("discord_ferry.migrator.messages.api_send_message", capture):
+            await _process_message(
+                msg=msg,
+                stoat_channel_id="stoat_ch1",
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda e: None,
+                channel_result=result,
+            )
+
+    assert result.pending_pins == [("stoat_ch1", "LOCAL")], (
+        f"the pin resolved against the shared map, not the channel's own. got {result.pending_pins}"
+    )
+
+
+async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> None:
+    """SC-4.3: the retry path has no local map, so the shared one still answers."""
+    state = _make_state()
+    state.message_map["ref_id"] = "SHARED"
+    config = _make_config(tmp_path)
+    sent: list[dict[str, Any]] = []
+
+    async def capture(*a: Any, **k: Any) -> dict[str, Any]:
+        sent.append(k)
+        return {"_id": "stoat_new"}
+
+    msg = _make_message(id="m4", content="a reply")
+    msg.reference = DCEReference(message_id="ref_id")
+
+    async with aiohttp.ClientSession() as session:
+        with patch("discord_ferry.migrator.messages.api_send_message", capture):
+            await _process_message(
+                msg=msg,
+                stoat_channel_id="stoat_ch1",
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda e: None,
+                channel_result=None,
+            )
+
+    assert sent[0]["replies"] == [{"id": "SHARED", "mention": False}]
