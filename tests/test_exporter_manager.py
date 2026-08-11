@@ -484,6 +484,29 @@ class TestDceChecksumsJson:
             "linux-arm64",
         }
 
+    def test_the_real_pinned_file_rejects_wrong_bytes(self):
+        """SC-2.4: every other checksum test in this file mocks the checksums JSON.
+
+        TestVerifyDceChecksum patches importlib.resources.files in all five of its
+        cases, so it proves the function's logic against a synthetic file and says
+        nothing about the one Ferry ships. This test uses the real
+        dce_checksums.json and the real pinned version, so it fails if the file stops
+        being found, stops being parsed, or stops being consulted.
+
+        It cannot prove a digest is CORRECT. Nothing in-repo can: that took downloading
+        the five archives, and the digests are recorded in the chunk 4 review. What it
+        proves is that the wiring is live, which is the part a refactor can break
+        silently.
+        """
+        from discord_ferry.errors import DCENotFoundError
+        from discord_ferry.exporter.manager import _PLATFORM_MAP, DCE_VERSION
+
+        for platform_key in sorted(set(_PLATFORM_MAP.values())):
+            with pytest.raises(DCENotFoundError, match="hash mismatch"):
+                _verify_dce_checksum(
+                    b"this is not a DiscordChatExporter archive", DCE_VERSION, platform_key
+                )
+
     def test_the_new_block_is_not_a_copy_of_the_old_one(self):
         """A copy-paste that forgot to replace the digests passes every other test here.
 
