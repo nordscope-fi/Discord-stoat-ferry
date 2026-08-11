@@ -1332,3 +1332,83 @@ async def test_merge_still_delivers_when_the_parents_send_failed(tmp_path: Path)
         "reached neither channel and is lost; that is strictly worse than the duplicate "
         "this batch removes"
     )
+
+
+# Ground truth from the shipped fixture
+# 'Discord Ferry Test - feedback-forum - Bug Report [1506019530294562938].json':
+# the forum post's channel id and its first message id are the SAME, because a forum
+# post is a thread whose starter is a real message rather than a placeholder.
+_FORUM_POST_ID = "1506019530294562938"
+
+
+async def test_merge_never_suppresses_a_forum_posts_starter(tmp_path: Path) -> None:
+    """SC-3.4: MANDATORY. The only test that kills the `key == channel_id` mutant.
+
+    That mutant is batch 7's discriminator, and it is wrong for this path. A forum
+    post already satisfies `channel_id == first_message_id` at the 2.47.1 pin, so that
+    variant suppresses the post's own body and loses it. The correct discriminator
+    leaves it alone, because a forum CHANNEL export carries no messages of its own and
+    the starter therefore never reaches state.message_map.
+
+    Companion to test_a_forum_post_already_has_key_equal_to_its_channel_id_today
+    (tests/test_parallel_messages.py), which pins the same shape for batch 7's guard.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["300"] = "stoat-ch-300"
+
+    forum_channel = _make_export(
+        channel_id="300",
+        channel_name="feedback-forum",
+        messages=[],  # a forum channel export carries no messages of its own
+        message_count=0,
+    )
+    post = _make_export(
+        channel_id=_FORUM_POST_ID,
+        channel_name="Bug Report",
+        is_thread=True,
+        parent_channel_name="feedback-forum",
+        messages=[_make_message(_FORUM_POST_ID, "the post body")],
+        message_count=1,
+    )
+
+    # The premise assertion. Without it this test passes against the mutant whenever the
+    # shape happens not to hold, which is exactly how batch 7's M2 survived five of six
+    # probes. This line is what makes the mutant's condition actually fire.
+    assert post.channel.id == post.messages[0].id, (
+        "premise: a forum post's channel id equals its starter's id, so a "
+        "`key == channel_id` discriminator would fire here and drop the post's body"
+    )
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [forum_channel, post], lambda e: None)
+
+    assert f"ferry-merge-{_FORUM_POST_ID}" in keys, (
+        "the forum post's own starter was suppressed; a `key == channel_id` "
+        "discriminator does exactly this, and the post has no other copy anywhere"
+    )
+
+
+async def test_archive_is_unaffected_by_the_merge_suppression(tmp_path: Path) -> None:
+    """SC-I6: archive writes markdown and makes no API calls, so nothing is suppressed.
+
+    The bump gives archive a free improvement, a real starter line where it had an
+    empty placeholder, and it needs no code change to get it.
+    """
+    config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    # Even with the collision already recorded, archive must not consult it.
+    state.message_map[_ORIGIN_ID] = "stoat-parent-copy"
+    parent, thread = _post_bump_pair()
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys([])):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    archived = (config.output_dir / "threads" / "general" / "cool-thread.md").read_text(
+        encoding="utf-8"
+    )
+    assert "the thread's origin message" in archived, (
+        "archive must still record the starter; _archive_threads consults no message_map"
+    )
