@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.5] - 2026-08-11
+
+### Fixed
+
+- `ferry tls-check` could fail with a traceback instead of reporting, on a machine
+  where the system proxy configuration could not be read. It now reports
+  `proxy-source: unreadable` and exits normally. Reading the configuration involves
+  the operating system, and Ferry does not control what that can return.
+
+  It also no longer reports a clean machine when it means it could not look. Those
+  two are worth telling apart: one says there is no proxy, the other says the
+  question could not be answered, and treating the second as the first is a
+  diagnostic that lies. When one protocol resolves and the other cannot be read,
+  the working one is still reported and the failing one is marked `unreadable`, so
+  neither answer hides the other.
+
+- An export could stop before DiscordChatExporter started, for the same reason.
+  Ferry passes the system proxy through to the exporter as a convenience, and a
+  failure to read it now leaves the export running without it rather than ending
+  it. If that happens the export log says so, so an export that quietly ignored a
+  proxy no longer looks like an export that never needed one.
+
+  Nothing changes on a machine where the proxy configuration reads normally, and a
+  proxy set through an environment variable is still passed through untouched.
+
 ## [2.14.4] - 2026-08-11
 
 ### Fixed
