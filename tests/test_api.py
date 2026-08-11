@@ -1652,6 +1652,13 @@ async def test_other_409_variant_raises_generic_error(mock_aiohttp: aioresponses
             )
     assert not isinstance(ei.value, DuplicateSendError)
     assert "409" in str(ei.value)
+    # The 409 branch calls resp.json() before falling through to resp.text(). aiohttp
+    # caches the body on first read, so the catch-all still reports it. Asserted rather
+    # than assumed: if the stream were consumed the message would end at "409: ".
+    assert "SomethingElse" in str(ei.value), (
+        "the response body was lost, so resp.json() consumed the stream and the "
+        "catch-all now reports an empty body"
+    )
 
 
 @pytest.mark.parametrize("payload", [["not", "an", "object"], 42, "bare string"])
