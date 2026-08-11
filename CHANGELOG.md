@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.7] - 2026-08-11
+
+### Fixed
+
+- A message that Stoat had already accepted could be reported as failed, and a later
+  `--incremental` run would then send it a second time, leaving two copies in the
+  channel. This happened when a send succeeded but its reply was lost on the way
+  back, for example on a flaky connection: Ferry retried, Stoat recognised the retry
+  and refused it as a duplicate, and Ferry read that refusal as a failure. Ferry now
+  recognises it as "already delivered", so the message is not recorded as failed and
+  nothing re-sends it. Stoat does not say which message it was, so a message affected
+  this way cannot be used as a reply target, and its pin and reactions are skipped; a
+  warning names it in the report (#107 batch 7).
+- The forum index message is no longer reported as a failure when it turns out to have
+  been posted already, and the index channel keeps its place in the migrated server
+  rather than being left unlinked.
+
+### Changed
+
+- When a thread and its parent channel both refer to the same source message, the
+  parent's copy is now the one Ferry records, consistently rather than depending on
+  which channel happened to finish first. Replies and pins inside a channel now
+  resolve against that channel's own messages first. This has no effect on the
+  current DiscordChatExporter version and is groundwork for updating it (#110).
+
 ## [2.14.6] - 2026-08-11
 
 ### Fixed
