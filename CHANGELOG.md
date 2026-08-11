@@ -10,13 +10,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- Running a migration a second time into an output directory Ferry had already
-  written to crashed on Windows with `[WinError 183]`, at the first checkpoint
-  save. This hit resume, `--incremental`, and any run that reused an existing
-  export, so a Windows user who ran Ferry twice into the same folder lost the
-  migration and could not resume. The three writers that finish an atomic write
-  now overwrite an existing destination on Windows, as they always did on macOS
-  and Linux (#172).
+- Migrations crashed on Windows with `[WinError 183]` at a checkpoint save. Ferry
+  saves its checkpoint at every phase boundary and every 50 messages, writing to
+  a temporary file and then swapping it over the previous one. That swap used a
+  call that replaces the destination on macOS and Linux but refuses it on
+  Windows, so the save died as soon as a checkpoint file already existed. A run
+  into a fresh folder got as far as its second save, inside the server and
+  channel phase; a run into a folder Ferry had already written to, which is what
+  resume, `--incremental` and reusing an existing export all do, died at the
+  first. Either way the migration ended early and could not be resumed. The
+  three affected writers now overwrite on Windows as they always did elsewhere
+  (#172).
 
 ### Changed
 
