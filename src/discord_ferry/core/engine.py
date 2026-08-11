@@ -22,7 +22,7 @@ from discord_ferry.discord import (
     load_discord_metadata,
     save_discord_metadata,
 )
-from discord_ferry.errors import DotNetMissingError, MigrationError
+from discord_ferry.errors import DotNetMissingError, DuplicateSendError, MigrationError
 from discord_ferry.exporter import (
     detect_dotnet,
     download_dce,
@@ -933,26 +933,37 @@ async def _rebuild_forum_indexes(
                     )
                     index_msg_id: str = existing_msg_id
                 else:
-                    msg_result = await api_send_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        index_channel_id,
-                        content=content,
-                        masquerade={"name": "Discord Ferry"},
-                        idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
-                    )
+                    try:
+                        msg_result = await api_send_message(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            index_channel_id,
+                            content=content,
+                            masquerade={"name": "Discord Ferry"},
+                            idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
+                        )
+                        index_msg_id = msg_result["_id"]
+                    except DuplicateSendError:
+                        # Already on the server with no recoverable id. Write NOTHING to
+                        # forum_index_message_ids: an entry there persists into
+                        # state.json and drives an api_edit_message against an id that
+                        # does not exist on the next run. Letting the broad handler take
+                        # this instead would report a rebuild failure that did not
+                        # happen, which is the same defect as the FailedMessage on the
+                        # message path.
+                        index_msg_id = ""
                     await asyncio.sleep(config.upload_delay)
-                    index_msg_id = msg_result["_id"]
-                    state.forum_index_message_ids[forum_key] = index_msg_id
-                    await api_pin_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        index_channel_id,
-                        index_msg_id,
-                    )
-                    await asyncio.sleep(config.upload_delay)
+                    if index_msg_id:
+                        state.forum_index_message_ids[forum_key] = index_msg_id
+                        await api_pin_message(
+                            session,
+                            config.stoat_url,
+                            config.token,
+                            index_channel_id,
+                            index_msg_id,
+                        )
+                        await asyncio.sleep(config.upload_delay)
                 on_event(
                     MigrationEvent(
                         phase="report",

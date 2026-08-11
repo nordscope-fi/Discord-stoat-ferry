@@ -2111,3 +2111,60 @@ async def test_retry_path_does_not_reraise_on_a_duplicate(tmp_path: Path) -> Non
     assert "msg_dup" not in state.message_map, (
         "Stoat returns no id with a 409, so nothing may be mapped for it"
     )
+
+
+async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> None:
+    """SC-2.7: three id consumers here, and the state write is the one that matters.
+
+    A bad forum_index_message_ids entry persists into state.json and is read back on
+    the next run, where it drives an api_edit_message against an id that does not
+    exist. Nothing may be written when Stoat returned no id.
+    """
+    from discord_ferry.core.engine import _rebuild_forum_indexes
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="stoat-srv",
+        forum_channel_members={"forum-news": ["disc-ch1"]},
+        forum_category_names={"forum-news": "News"},
+        channel_map={
+            "disc-ch1": "stoat-ch1",
+            "forum-index-forum-news": "stoat-idx-news",
+        },
+        channel_message_counts={"disc-ch1": 42},
+    )
+
+    pins: list[str] = []
+
+    with aioresponses() as mock:
+        mock.post(
+            "https://api.test/channels/stoat-idx-news/messages",
+            status=409,
+            payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
+        )
+        # Registered so a stray pin is recorded rather than erroring out.
+        mock.put(
+            "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
+            payload={},
+            callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
+        )
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            config.session = session
+            await _rebuild_forum_indexes(config, state, events.append)
+
+    assert pins == [], "a pin was attempted against an id that was never returned"
+    assert not state.forum_index_message_ids, (
+        "an index message id was recorded for a message whose id Stoat never returned; "
+        "this persists into state.json and drives an edit against a nonexistent id "
+        f"on the next run. got: {state.forum_index_message_ids}"
+    )
+    # The two above already hold, because the broad handler catches the duplicate before
+    # either statement runs. This one does not: it is the reason the task exists.
+    assert not [w for w in state.warnings if w.get("type") == "forum_index_rebuild_failed"], (
+        "the rebuild was reported as failed, but the index message is on the server. "
+        "Reporting a failure that did not happen is the same defect as the FailedMessage "
+        "on the message path, in a different place"
+    )
