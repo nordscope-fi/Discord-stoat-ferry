@@ -10,6 +10,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.errors import DuplicateSendError
 from discord_ferry.migrator.messages import (
     ChannelResult,
     _build_content,
@@ -3622,3 +3623,70 @@ async def test_pre_247_export_still_skips_and_warns(tmp_path: Path) -> None:
 
     assert "fwd_old" not in state.message_map
     assert any("fwd_old" in e.message for e in events if e.status == "warning")
+
+
+# ---------------------------------------------------------------------------
+# Duplicate sends on the main path (#107 batch 7, chunk #196)
+# ---------------------------------------------------------------------------
+
+
+async def test_duplicate_on_later_part_does_not_truncate(tmp_path: Path) -> None:
+    """SC-2.3: every part after a duplicate must still be sent.
+
+    The catch has to be PER PART. A catch around the loop aborts it, so the parts
+    after the duplicate are never sent and their content is lost with no warning.
+    Each part carries its own Idempotency-Key, so they are not duplicates.
+    """
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
+    seen: list[str] = []
+
+    async def dup_on_second(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        seen.append(key)
+        if key.endswith("_p2"):
+            raise DuplicateSendError("already on the server")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", dup_on_second):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    # Assert "everything after the duplicate was attempted", not a hardcoded count:
+    # the sent content is longer than the raw body once continuation markers are added.
+    assert any(k.endswith("_p3") for k in seen), (
+        f"part 3 was never attempted, so the duplicate truncated the message. keys={seen}"
+    )
+    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    assert not state.failed_messages
+    assert "duplicate_send_unmapped" not in [w.get("type") for w in state.warnings], (
+        "a later-part duplicate must not claim the message is unmapped: part 1 mapped fine"
+    )
+
+
+async def test_duplicate_on_first_part_still_sends_the_rest(tmp_path: Path) -> None:
+    """SC-2.4: a duplicate on part 1 costs the map entry, not the remaining parts."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="C" * 5000)])
+    seen: list[str] = []
+
+    async def dup_on_first(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        seen.append(key)
+        if key.endswith("_p1"):
+            raise DuplicateSendError("already on the server")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", dup_on_first):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert any(k.endswith("_p2") for k in seen), (
+        f"a duplicate on part 1 stopped the remaining parts being sent. keys={seen}"
+    )
+    assert not state.failed_messages
+    # The map entry is task #204's concern: part 1 produced no id, so nothing may be
+    # written. Asserted in test_single_part_duplicate_leaves_clean_state.
+    assert state.message_map.get("msg1") != "stoat-ferry-msg1_p2", (
+        "a later part's id must never stand in for the first part's"
+    )

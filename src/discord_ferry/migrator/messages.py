@@ -1368,23 +1368,37 @@ async def _process_message(
 
     # Step 8: Send the message (all parts).
     stoat_msg_id: str = ""
+    duplicate_unmapped = False
     try:
         for part_idx, part_content in enumerate(parts):
             is_first = part_idx == 0
             idem_key = f"ferry-{msg.id}" if len(parts) == 1 else f"ferry-{msg.id}_p{part_idx + 1}"
-            result = await api_send_message(
-                session,
-                config.stoat_url,
-                config.token,
-                stoat_channel_id,
-                content=part_content,
-                # Attachments, embeds, and replies only on the first part.
-                attachments=(autumn_ids if autumn_ids and is_first else None),
-                embeds=(stoat_embeds if stoat_embeds and is_first else None),
-                masquerade=masquerade,
-                replies=(replies if replies and is_first else None),
-                idempotency_key=idem_key,
-            )
+            try:
+                result = await api_send_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    stoat_channel_id,
+                    content=part_content,
+                    # Attachments, embeds, and replies only on the first part.
+                    attachments=(autumn_ids if autumn_ids and is_first else None),
+                    embeds=(stoat_embeds if stoat_embeds and is_first else None),
+                    masquerade=masquerade,
+                    replies=(replies if replies and is_first else None),
+                    idempotency_key=idem_key,
+                )
+            except DuplicateSendError:
+                # This part is already on the server. The catch is PER PART, not around
+                # the loop: every part carries its own Idempotency-Key, so the parts
+                # after a duplicate are NOT duplicates and must still be sent. Catching
+                # at the loop truncates the message and loses their content with no
+                # warning, which is worse than the bug this batch fixes.
+                #
+                # Only the first part's id reaches message_map, so only it is worth
+                # noting. Stoat returns no id with the 409, so that entry is lost.
+                if is_first:
+                    duplicate_unmapped = True
+                continue
             part_stoat_id: str = result["_id"]
             if is_first:
                 stoat_msg_id = part_stoat_id
