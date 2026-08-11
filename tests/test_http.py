@@ -1692,3 +1692,35 @@ def test_a_failed_scan_leaves_the_cache_cold(proxy_env) -> None:
     ):
         http.resolve_proxy("https://a.test/")
         assert http._proxy_scan is None
+
+
+def test_a_transient_platform_failure_self_heals(proxy_env) -> None:
+    """One bad reading must not cost the whole process its proxy.
+
+    Fails against the design rejected at critique round 1, which put the boundary
+    inside _os_proxies. Under that shape call 1 caches an empty scan and call 2
+    still returns None after the platform has recovered, for the life of the
+    process. Measured during design: exactly that.
+
+    Both seams are patched even though only one is exercised, so the test does not
+    reach the real _scproxy C extension on a macOS machine.
+    """
+    calls = {"n": 0}
+
+    def flaky() -> dict[str, str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyError("transient")
+        return {"https": "http://corp:8080"}
+
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=flaky),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        assert http.resolve_proxy("https://a.test/") is None
+        recovered = http.resolve_proxy("https://a.test/")
+
+    assert recovered is not None
+    assert recovered.url.host == "corp"
+    assert calls["n"] == 2, "the second call must reach the platform again"
