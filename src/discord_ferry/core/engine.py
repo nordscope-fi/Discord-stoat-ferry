@@ -186,11 +186,12 @@ async def run_migration(
             prior = load_state(config.output_dir)
             if prior.is_dry_run:
                 # A dry run fills message_map with `dry-msg-<id>` sentinels for EVERY
-                # message, threads included (messages.py:329), and persists them. The
-                # carry-over below copies that map forward verbatim, so reply targets
-                # resolve against ids that were never sent, and the merge duplicate
-                # suppression (messages.py, batch 8 / #110) reads the same map and would
-                # skip every merged thread message as "already delivered".
+                # message, threads included, in the dry-run branch of run_messages, and
+                # persists them. The carry-over below copies that map forward verbatim,
+                # so reply targets resolve against ids that were never sent, and the
+                # merge duplicate suppression in _merge_threads (batch 8, #110) reads the
+                # same map and would skip every merged thread message as "already
+                # delivered".
                 #
                 # --resume has refused a dry-run state since it was written, four lines
                 # above. This is the sibling mode, and it never did.

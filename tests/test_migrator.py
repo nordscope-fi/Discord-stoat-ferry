@@ -107,8 +107,8 @@ async def test_dry_run_incremental_raises_migration_error(tmp_path: Path) -> Non
     """SC-0.1: a dry-run state.json is not valid input for --incremental either.
 
     A dry run fills message_map with `dry-msg-<id>` sentinels for every message,
-    threads included (messages.py:329), and persists them. The incremental branch
-    carries message_map forward verbatim (engine.py:201).
+    threads included, in the dry-run branch of run_messages, and persists them. The
+    --incremental branch of run_migration then carries message_map forward verbatim.
 
     Two things then break. Reply resolution has always resolved against those fake
     ids. And the merge duplicate suppression added in chunk #218 reads the same map,

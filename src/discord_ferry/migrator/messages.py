@@ -659,26 +659,30 @@ async def _merge_threads(
                 # distinct nonces and nothing deduplicates it.
                 #
                 # `msg.id in state.message_map` means BOTH "the parent already has this"
-                # and "the parent's send landed". The map is written only on a send that
-                # returned a non-empty Stoat id (:1454-1455 into ChannelResult, folded in
-                # by _merge_channel_result at :184; :1460 on the retry branch), and
-                # _merge_threads is awaited at :462, after the parallel gather and its
-                # reconciliation. A parent send that FAILED leaves no entry, so its
-                # message still goes out here rather than being lost.
+                # and "the parent's send landed". The map has exactly three writers, and
+                # both real ones are guarded on a non-empty Stoat id: _process_message
+                # writes ChannelResult.message_map_updates, which _merge_channel_result
+                # folds in, and the retry branch writes state directly. (The third is the
+                # dry-run sentinel loop in run_messages, which --incremental now refuses
+                # to carry forward.) _merge_threads is awaited from run_messages after the
+                # parallel gather and its reconciliation, so the map is complete by here.
+                # A parent send that FAILED leaves no entry, so its message still goes out
+                # here rather than being lost.
                 #
                 # NOT `msg.id == export.channel.id`. That is batch 7's discriminator and
                 # it is wrong here: a forum post satisfies that shape today and
                 # legitimately, so it would drop the post's own body. Pinned by
                 # test_merge_never_suppresses_a_forum_posts_starter.
                 #
-                # Placement is chosen. Below _thread_max_id (:634-636) so the durable
-                # high-water still advances over a suppressed message. Below _would_skip
+                # Placement is chosen. Below the `_thread_max_id` tracking so the durable
+                # high-water still advances over a suppressed message. Below `_would_skip`
                 # so incremental gating is untouched. Above _build_masquerade so a
                 # suppressed message costs no Autumn avatar upload.
                 #
                 # Known miss, deferred as #240: a parent send that landed under a 409
-                # DuplicateNonce writes no map entry (:1434-1435), so it is invisible
-                # here and that one case still duplicates. Pinned by
+                # DuplicateNonce sets `duplicate_unmapped` in _process_message and writes
+                # no map entry, so it is invisible here and that one case still
+                # duplicates. Pinned by
                 # test_merge_still_duplicates_after_a_parent_duplicate_nonce.
                 if msg.id in state.message_map:
                     # NOT counted in _posted: nothing was sent, and _posted feeds the
@@ -686,13 +690,14 @@ async def _merge_threads(
                     # test_a_suppressed_message_is_not_counted_as_posted.
                     #
                     # _succeeded_ids IS updated, and it is deliberately defensive rather
-                    # than observable. It exists so this loop's reconciliation at
-                    # :745-759 would drop a stale FailedMessage for a message that is on
-                    # the server. In practice it never has to: the parallel path's own
-                    # reconciliation at :1089-1103 drops on `in state.message_map`, which
-                    # is this branch's own precondition, so the parent channel's worker
-                    # always clears such an entry first. A mutation removing this line
-                    # therefore survives the suite, which was checked rather than assumed.
+                    # than observable. It exists so this loop's own FailedMessage
+                    # reconciliation, at the end of this per-thread block, would drop a
+                    # stale entry for a message that is on the server. In practice it
+                    # never has to: the parallel path's reconciliation in
+                    # _process_single_channel drops on `in state.message_map`, which is
+                    # this branch's own precondition, so the parent channel's worker always
+                    # clears such an entry first. A mutation removing this line therefore
+                    # survives the suite, which was checked rather than assumed.
                     #
                     # It stays because the invariant "everything this loop treats as
                     # delivered is in _succeeded_ids" is what the reconciliation reads,
