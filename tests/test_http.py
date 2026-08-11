@@ -809,13 +809,18 @@ async def test_a_raising_resolver_connects_direct(proxy_env, os_proxy, caplog) -
     """SC-135 constraint 12, meant totally. Killing: narrowing the wrapper to
     `except (ValueError, TypeError)`.
 
-    re.error is the concrete case. `_is_bypassed` reaches proxy_bypass_registry,
-    which hands a registry-controlled ProxyOverride entry to
-    `_proxy_bypass_winreg_override`, and `re.match(test, host)` raises re.error
-    on an entry like `internal[`. re.error subclasses Exception directly, so it
-    escapes resolve_proxy's own ValueError/TypeError guards and would kill the
-    first request of a migration from inside ClientRequest.__init__ on exactly
-    the Windows corporate machines this feature exists for.
+    `re.error` is the injected class, chosen because it subclasses Exception
+    directly and so escapes the narrow guards. It is NOT a claim about a real
+    path: an earlier version of this docstring said `_proxy_bypass_winreg_override`
+    calls `re.match(test, host)` and raises `re.error` on a ProxyOverride entry
+    like `internal[`. That is wrong on every Python Ferry supports, which uses
+    `fnmatch` there, and both source docstrings have since retracted it. The
+    `re.match` form lives in `requests`, not the standard library.
+
+    What is real is the class of failure, not that one instance of it: the
+    platform getters beneath `_scheme_map` and `_is_bypassed` are code Ferry does
+    not control, and a raise from either would kill the first request of a
+    migration from inside ClientRequest.__init__.
     """
     boom = re.error("unterminated character set at position 8")
     with (
@@ -1327,12 +1332,14 @@ def test_an_unreadable_configuration_degrades_visibly(proxy_env, os_proxy) -> No
 
     `_scheme_map()` reaches the platform getters `getproxies_macosx_sysconf` and
     `getproxies_registry` through `_os_proxies`, and stdlib can raise there
-    outside (ValueError, TypeError). `re.error` is used here because it
-    subclasses Exception directly and so escapes both narrow guards; the
-    documented `re.error` path in this module belongs to the SIBLING boundary
-    (`proxy_bypass_registry`, reached only from resolve_proxy), not to this one.
-    An earlier version of this docstring inherited that attribution verbatim and
-    was wrong about it.
+    outside (ValueError, TypeError). `re.error` is used here only because it
+    subclasses Exception directly and so escapes both narrow guards.
+
+    Earlier versions of this docstring argued about which boundary owned a
+    concrete `re.error` path. No such path exists on any Python Ferry supports:
+    `_proxy_bypass_winreg_override` uses `fnmatch`, not `re.match`. The argument
+    is dropped rather than re-attributed, and it would be ambiguous now in any
+    case, since #148 gave `resolve_proxy` a boundary of its own.
     """
     with (
         os_proxy({}),
