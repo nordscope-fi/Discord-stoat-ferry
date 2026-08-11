@@ -1,0 +1,87 @@
+{
+  "guild": {
+    "id": "1505988963628879902",
+    "name": "Discord Ferry Test",
+    "iconUrl": "Discord Ferry Test - general - Cool Thread [1506019505778987190].json_Files/0-eb806f2bcf037a33.png"
+  },
+  "channel": {
+    "id": "1506019505778987190",
+    "type": "GuildPublicThread",
+    "categoryId": "1506019498094891120",
+    "category": "general",
+    "name": "Cool Thread",
+    "topic": "SYNTHETIC fixture. Hand-authored against DiscordChatExporter 2.47.3 source (DiscordChatExporter.Core/Discord/DiscordClient.cs, ResolveThreadStarterMessageAsync, and Discord/Data/MessageKind.cs), NOT produced by running DCE. Ferry pins 2.47.1 at the time of writing, and re-capturing at 2.47.3 needs interactive Discord auth and is human-run, so no genuine export of this shape exists in-repo (issue #238). 2.47.3 replaces the empty ThreadStarterMessage placeholder with the real parent-channel message, KEEPING that message's Discord id, and a thread's channel id equals its origin message id, so this file's channel id and first message id are the same by construction. The starter here is copied verbatim from the real capture 'Discord Ferry Test - general [1506019498094891120].json', with only its avatarUrl re-pointed at this export's own _Files directory, which is what DCE writes per export. If DCE's thread-starter resolution changes, re-derive this from source rather than editing it to make a test pass."
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2026-05-18T22:59:09.668994+03:00",
+  "messages": [
+    {
+      "id": "1506019505778987190",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:50.667+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Message anchoring the thread reply chain. [ferry:msg-thread-anchor]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general - Cool Thread [1506019505778987190].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    },
+    {
+      "id": "1506019529476800745",
+      "type": "Default",
+      "timestamp": "2026-05-18T22:43:56.317+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "First reply in the thread. [ferry:thread-cool]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - general - Cool Thread [1506019505778987190].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    }
+  ],
+  "messageCount": 2
+}
