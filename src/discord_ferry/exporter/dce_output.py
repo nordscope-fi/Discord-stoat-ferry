@@ -1,4 +1,4 @@
-"""Pure parser for DiscordChatExporter (DCE) 2.47.1 stdout lines.
+"""Pure parser for DiscordChatExporter (DCE) stdout lines.
 
 Public surface:
   - parse_dce_line(line: str) -> ParsedDceLine  (total, no I/O)

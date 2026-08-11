@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DCE_VERSION = "2.47.1"
+DCE_VERSION = "2.47.3"
 
 # Map (system, machine) to DCE release asset suffix.
 _PLATFORM_MAP: dict[tuple[str, str], str] = {
@@ -60,7 +60,7 @@ def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> No
 
     Args:
         zip_data: Raw bytes of the downloaded zip archive.
-        version: DCE release version string (e.g. "2.47.1").
+        version: DCE release version string (e.g. "2.47.3").
         platform_key: Platform identifier matching the checksums file key
             (e.g. "win-x64", "linux-x64", "osx-x64").
 

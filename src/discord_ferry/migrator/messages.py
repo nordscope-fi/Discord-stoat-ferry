@@ -176,8 +176,12 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
     # would lose a thread's only entry when its parent has not merged yet; dropping the
     # key comparison would suppress an ordinary re-merge.
     #
-    # Inert at the current 2.47.1 pin, where the starter carries a synthetic id that
-    # collides with nothing. Pinned in both arrival orders by test_parent_wins_*.
+    # Written during batch 7 while Ferry still pinned DCE 2.47.1, where a thread's
+    # starter carried a synthetic id that collided with nothing, so this was inert.
+    # Batch 8 moved the pin to 2.47.3, where the starter carries the origin's own id.
+    # This guard is now live. Pinned in both arrival orders by test_parent_wins_*, and
+    # end to end from parsed exports by
+    # test_flatten_resolves_the_post_bump_collision_to_the_parent.
     for _key, _stoat_id in result.message_map_updates.items():
         if _key == result.channel_id and _key in state.message_map:
             continue

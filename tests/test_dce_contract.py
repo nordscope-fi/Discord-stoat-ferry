@@ -1,7 +1,7 @@
 """Contract test: real DCE binary still exposes the flags Ferry depends on.
 
 Uses the canonical `_get_dce_dir()` location so the CI cache key
-`dce-${{ runner.os }}-2.47.1` actually populates and reuses the binary
+`dce-${{ runner.os }}-2.47.3` actually populates and reuses the binary
 across runs. Without this, every CI run would re-download ~30MB and hit
 GitHub's unauthenticated rate limit (60/hr per IP).
 """

@@ -65,8 +65,8 @@ jobs:
       - name: Cache DCE binary
         uses: actions/cache@v4
         with:
-          path: ~/.discord-ferry/bin/dce/2.47.1
-          key: dce-${{ runner.os }}-2.47.1
+          path: ~/.discord-ferry/bin/dce/2.47.3
+          key: dce-${{ runner.os }}-2.47.3
 
       - name: Install dependencies
         run: uv sync --locked --extra dev --extra native

@@ -26,7 +26,7 @@ from discord_ferry.exporter.manager import (
 
 
 def test_dce_version_is_pinned():
-    assert DCE_VERSION == "2.47.1"
+    assert DCE_VERSION == "2.47.3"
 
 
 def test_get_dce_dir():
