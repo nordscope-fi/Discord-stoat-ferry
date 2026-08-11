@@ -307,7 +307,7 @@ async def _api_request_inner(
                     # falling through to the catch-all below.
                     try:
                         dup_body = await resp.json(content_type=None)
-                    except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError):
+                    except (json.JSONDecodeError, ValueError):
                         dup_body = None
                     if isinstance(dup_body, dict) and dup_body.get("type") == "DuplicateNonce":
                         # A delivered message, so this must not prime the breaker. Same
