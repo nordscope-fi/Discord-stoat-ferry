@@ -13,7 +13,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.http import new_session
-from discord_ferry.errors import MigrationError
+from discord_ferry.errors import DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
     _api_request,
     _circuit_state,
@@ -1609,3 +1609,124 @@ async def test_a_certificate_error_against_an_https_proxy_names_the_proxy_not_th
         "proxy wins and REPLACES the certificate hint; appending both sends the "
         "user to a CA bundle for a host they never configured"
     )
+
+
+# ---------------------------------------------------------------------------
+# DuplicateNonce 409 (#107 batch 7, chunk #195, task #201)
+# ---------------------------------------------------------------------------
+
+
+async def test_duplicate_nonce_raises_duplicate_send_error(mock_aiohttp: aioresponses) -> None:
+    """SC-1.1: a DuplicateNonce body raises the distinct subclass.
+
+    Body shape read from revoltchat/backend crates/core/result/src/lib.rs: ErrorType
+    carries serde(tag = "type") and Error.error_type carries serde(flatten), so the
+    variant tag is a top-level key.
+    """
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/c1/messages",
+        status=409,
+        payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:12:3"},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(DuplicateSendError) as ei:
+            await api_send_message(
+                session, BASE_URL, TOKEN, "c1", content="x", idempotency_key="ferry-1"
+            )
+    assert isinstance(ei.value, MigrationError), (
+        "must subclass MigrationError so an uncatching call site is unaffected"
+    )
+
+
+async def test_other_409_variant_raises_generic_error(mock_aiohttp: aioresponses) -> None:
+    """SC-1.2: a different 409 variant is NOT a duplicate. Kills mutant M6."""
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/c1/messages",
+        status=409,
+        payload={"type": "SomethingElse", "location": "x.rs:1:1"},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as ei:
+            await api_send_message(
+                session, BASE_URL, TOKEN, "c1", content="x", idempotency_key="ferry-1"
+            )
+    assert not isinstance(ei.value, DuplicateSendError)
+    assert "409" in str(ei.value)
+
+
+@pytest.mark.parametrize("payload", [["not", "an", "object"], 42, "bare string"])
+async def test_non_object_409_body_does_not_crash(payload: object) -> None:
+    """SC-1.3: a JSON 409 body that is not a dict must not raise AttributeError.
+
+    Kills mutant M5, dropping the isinstance guard the 429 branch already applies.
+    """
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/channels/c1/messages", status=409, payload=payload)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError) as ei:
+                await api_send_message(
+                    session, BASE_URL, TOKEN, "c1", content="x", idempotency_key="ferry-1"
+                )
+    assert not isinstance(ei.value, DuplicateSendError)
+
+
+async def test_409_with_no_idempotency_key_is_unchanged(mock_aiohttp: aioresponses) -> None:
+    """SC-1.4: an endpoint that sends no key still sees the generic error.
+
+    A DuplicateNonce is only reachable when a key was sent, which is what makes the
+    opt-in flag redundant. This pins that an unrelated 409 elsewhere is untouched.
+    """
+    mock_aiohttp.post(
+        f"{BASE_URL}/servers/srv1/roles", status=409, payload={"type": "AlreadyInGroup"}
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as ei:
+            await api_create_role(session, BASE_URL, TOKEN, "srv1", "role")
+    assert not isinstance(ei.value, DuplicateSendError)
+
+
+async def test_duplicate_path_resets_the_circuit_breaker(mock_aiohttp: aioresponses) -> None:
+    """SC-1.5: a duplicate is a delivered message, so it must not prime the breaker.
+
+    No functional test would notice if this bookkeeping were dropped, which is why it
+    gets its own test.
+    """
+    _circuit_state.consecutive_failures = 3
+    try:
+        mock_aiohttp.post(
+            f"{BASE_URL}/channels/c1/messages",
+            status=409,
+            payload={"type": "DuplicateNonce", "location": "x.rs:1:1"},
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(DuplicateSendError):
+                await api_send_message(
+                    session, BASE_URL, TOKEN, "c1", content="x", idempotency_key="ferry-1"
+                )
+        assert _circuit_state.consecutive_failures == 0
+    finally:
+        _reset_circuit_state()
+
+
+async def test_uncatching_call_site_still_sees_a_migration_error(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-1.6: the property that removes the need for an opt-in flag.
+
+    A caller written before this class existed catches MigrationError or Exception.
+    Both must still catch a duplicate.
+    """
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/c1/messages",
+        status=409,
+        payload={"type": "DuplicateNonce", "location": "x.rs:1:1"},
+    )
+    caught: str = ""
+    async with aiohttp.ClientSession() as session:
+        try:
+            await api_send_message(
+                session, BASE_URL, TOKEN, "c1", content="x", idempotency_key="ferry-1"
+            )
+        except MigrationError as exc:  # the pre-existing handler shape
+            caught = type(exc).__name__
+    assert caught == "DuplicateSendError"
