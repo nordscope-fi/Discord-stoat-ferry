@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.6] - 2026-08-11
+
+### Fixed
+
+- A crash, a full disk, or a killed process partway through writing one of
+  Ferry's own files could leave a half-written file where a complete one was
+  expected, with the previous good copy already gone. The server blueprint is the
+  one that mattered: Ferry reads that file back when you import it, so an
+  incomplete export survived the run that produced it, and there was no way to
+  tell it apart from a good one until the import failed or built a partial
+  server. Every file Ferry writes and later reads is now written to a temporary
+  file first and swapped into place, so a failure leaves the previous version
+  readable. This also covers the backup taken before a state file is upgraded to
+  the current format, which is the only copy of the old one (#175).
+
 ## [2.14.5] - 2026-08-11
 
 ### Fixed
