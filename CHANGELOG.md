@@ -16,10 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   one that mattered: Ferry reads that file back when you import it, so an
   incomplete export survived the run that produced it, and there was no way to
   tell it apart from a good one until the import failed or built a partial
-  server. Every file Ferry writes and later reads is now written to a temporary
-  file first and swapped into place, so a failure leaves the previous version
-  readable. This also covers the backup taken before a state file is upgraded to
-  the current format, which is the only copy of the old one (#175).
+  server. The files holding your migration's progress, the Discord server details
+  it collected, its report and an exported blueprint are now written to a
+  temporary file first and swapped into place, so a failure leaves the previous
+  version readable. This also covers the backup Ferry takes before upgrading an
+  older state file, which becomes the only copy of the original (#175).
 
 ## [2.14.5] - 2026-08-11
 

@@ -18,9 +18,14 @@ because the destination only exists from the second write onward, it killed the
 second checkpoint save of every migration on Windows.
 
 Both are guarded. ``tests/test_atomicio.py`` asserts the previous file survives a
-failed write and a failed swap, exercises the swap under simulated Win32
-semantics, and walks the four document-owning modules with ``ast`` to fail the
-build if one of them writes directly again.
+partial write and a failed swap, and exercises the swap under simulated Win32
+semantics.
+
+It also walks the four document-owning modules with ``ast`` and fails the build
+on a direct ``write_text`` call in any of them. That catches the mistake someone
+is actually likely to make, and no more: it does not see ``open(path, "w")``, an
+aliased method, ``getattr``, or a fifth module that starts owning a document. It
+is a tripwire on the obvious path, not proof of coverage.
 """
 
 from pathlib import Path

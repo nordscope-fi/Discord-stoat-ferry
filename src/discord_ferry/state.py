@@ -409,9 +409,10 @@ def _migrate_v1_to_v2(data: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     Returns:
         Modified dict with v2 resume fields and v1 fields removed.
     """
-    # Back up the original state.json before migrating. Atomic like the rest: this is
-    # the only copy of the pre-migration state, so a truncated backup is a safety net
-    # with a hole in it (#175). The path is named because the warning below reports it.
+    # Back up the original state.json before migrating. Atomic like the rest: state.json
+    # still holds the v1 content at this moment, but the run's first save_state overwrites
+    # it, so this backup becomes the only copy. A truncated one is a safety net with a
+    # hole in it (#175). The path is named because the warning below reports it.
     backup_path = output_dir / "state.json.v1.bak"
     atomic_write_text(backup_path, json.dumps(data, indent=2))
 
