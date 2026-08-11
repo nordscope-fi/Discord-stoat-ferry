@@ -775,9 +775,7 @@ def describe_proxy() -> dict[str, str]:
         try:
             choice = resolve_proxy_or_raise(f"{scheme}://example.invalid/")
         except Exception:  # noqa: BLE001
-            logger.warning(
-                "Could not read the proxy configuration for %s.", scheme, exc_info=True
-            )
+            logger.warning("Could not read the proxy configuration for %s.", scheme, exc_info=True)
             out[f"proxy-{scheme}"] = "unreadable"
             any_failed = True
             continue
