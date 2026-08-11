@@ -14,6 +14,7 @@ from aioresponses import aioresponses
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PHASE_ORDER, PhaseFunction, run_migration, run_retry_failed
 from discord_ferry.core.events import EventCallback, MigrationEvent
+from discord_ferry.errors import DuplicateSendError
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
 from discord_ferry.state import FailedMessage, MigrationState
 
@@ -2063,3 +2064,50 @@ async def test_preflight_emits_and_persists_a_proxy_notice(
 
     assert any(e.status == "notice" and e.phase == "preflight" for e in events)
     assert any(w.get("type", "").startswith("proxy_") for w in state.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate on the retry path (#107 batch 7, chunk #197, task #206)
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_path_does_not_reraise_on_a_duplicate(tmp_path: Path) -> None:
+    """SC-2.9: a duplicate means the message landed, so the retry loop must terminate.
+
+    _process_message re-raises when channel_result is None, which is this path, because
+    the retry loop relies on an exception to mark a re-failure. A DuplicateSendError is
+    NOT a re-failure: the message is on the server. It never reaches that re-raise,
+    because the catch sits inside the send loop.
+
+    This test passes without a source change in this task. Its value is that it stays
+    true: moving the catch from inside the loop to around it makes it fail.
+    """
+    config = _make_retry_config(tmp_path)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    _write_dce_json(config.export_dir, "ch_dup", [_dce_msg_dict("msg_dup")])
+    exports = _make_exports_from_dir(config.export_dir)
+    state = MigrationState(
+        channel_map={"ch_dup": "stoat_ch_dup"},
+        autumn_url=AUTUMN_URL,
+        failed_messages=[
+            FailedMessage(discord_msg_id="msg_dup", stoat_channel_id="stoat_ch_dup", error="e"),
+        ],
+    )
+
+    async def always_duplicate(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        await asyncio.sleep(0.01)  # yield so wait_for can bound a regression
+        raise DuplicateSendError("already on the server")
+
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", always_duplicate):
+        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
+
+    assert not any(fm.discord_msg_id == "msg_dup" for fm in state.failed_messages), (
+        "a message already on the server was left in failed_messages, so it stays "
+        "reported as a failure and --incremental will re-send it"
+    )
+    assert "msg_dup" not in state.message_map, (
+        "Stoat returns no id with a 409, so nothing may be mapped for it"
+    )
