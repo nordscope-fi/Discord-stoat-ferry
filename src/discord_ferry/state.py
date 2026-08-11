@@ -199,8 +199,10 @@ def save_state(state: MigrationState, output_dir: Path) -> None:
     mm_tmp = output_dir / "message_map.json.tmp"
     mm_final = output_dir / "message_map.json"
     mm_tmp.write_text(json.dumps(message_map, indent=2), encoding="utf-8")
-    # replace, not rename: os.rename refuses an existing destination on Windows,
-    # so every second run into an existing output directory died here (#172).
+    # replace, not rename: os.rename refuses an existing destination on Windows and
+    # replaces it everywhere else. save_state runs at every phase boundary and every
+    # checkpoint_interval messages, so the SECOND save of any run died here, not only
+    # a second run into an existing directory (#172).
     mm_tmp.replace(mm_final)
 
     tmp_path = output_dir / "state.json.tmp"

@@ -208,12 +208,15 @@ def _isolate_ferry_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
 # --- Windows filesystem semantics ---------------------------------------------
 # POSIX rename(2) is an atomic replace, so on Linux and macOS a swap onto an
 # existing file just works and no test can tell Path.rename from Path.replace.
-# Win32 MoveFile refuses, which is issue #172: every second migration into an
-# existing output directory died at the first checkpoint save.
+# Win32 MoveFile refuses, which is issue #172. save_state runs at every phase
+# boundary and every checkpoint_interval messages, so the SECOND save of any run
+# hit an existing destination and died, not only a second run into an existing
+# directory. test_repeated_checkpoints_overwrite_on_windows is the one that shows
+# this: it starts from an empty tmp_path.
 #
-# ci.yml runs the suite on ubuntu-latest only, so this fixture is the only way a
-# pull request can see that difference. The windows-atomic-write job runs the
-# same files on a real Windows runner, where no simulation is needed.
+# Every other job in ci.yml is ubuntu-only, so this fixture is the only way a pull
+# request can see that difference. The windows-atomic-write job runs the same two
+# files on a real Windows runner, where no simulation is needed.
 _REAL_RENAME = Path.rename
 
 
