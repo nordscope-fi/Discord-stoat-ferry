@@ -1541,3 +1541,181 @@ async def test_merge_still_duplicates_after_a_parent_duplicate_nonce(tmp_path: P
         "but recorded nothing, so the suppression cannot see it and the thread's copy "
         "is sent into the same channel. Do not 'fix' this assertion; build #240."
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch 8 integration scenarios (SC-I1 to SC-I5)
+# ---------------------------------------------------------------------------
+
+
+async def test_flatten_then_merge_under_incremental_suppresses_everything(
+    tmp_path: Path,
+) -> None:
+    """SC-I1: switching strategy across an --incremental run suppresses the whole thread.
+
+    Run 1 under `flatten` puts every thread message in message_map, because each
+    thread is its own Stoat channel. Run 2 under `merge` then finds all of them
+    already delivered.
+
+    This is accepted rather than incidental: those messages are on the server in the
+    thread's own channel, and re-sending them into the parent would duplicate content
+    across the server. Pinned because, unpinned, it looks like a bug the first time
+    somebody hits it.
+    """
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    # Run 1 under flatten delivered both thread messages into the thread's own channel.
+    state.message_map[_ORIGIN_ID] = "stoat-thread-copy"
+    state.message_map[_THREAD_REPLY_ID] = "stoat-thread-reply"
+
+    parent = _make_export(channel_id="100", channel_name="general", messages=[], message_count=0)
+    _, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert not [k for k in keys if k.startswith("ferry-merge-")], (
+        f"a strategy switch under --incremental must not re-deliver messages that are "
+        f"already on the server in their own thread channel: {keys}"
+    )
+
+
+async def test_a_resume_interrupted_mid_thread_does_not_resend_the_separator(
+    tmp_path: Path,
+) -> None:
+    """SC-I2: resume continues a thread without repeating its boundary marker.
+
+    A transient offset is what a crashed run leaves behind. The separator gate reads
+    it, so a resume must not add a second '── Thread: ... ──' line to the parent, and
+    must skip the messages at or below the offset.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0, resume=True)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    # A crash left the thread partway through, at the origin.
+    state.channel_message_offsets[_ORIGIN_ID] = _ORIGIN_ID
+
+    parent = _make_export(channel_id="100", channel_name="general", messages=[], message_count=0)
+    _, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert f"ferry-thread-sep-{_ORIGIN_ID}" not in keys, (
+        "the separator was re-sent, so every crash would add another one"
+    )
+    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, (
+        "a message at or below the transient offset must not be re-sent"
+    )
+    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, (
+        "the tail above the offset is exactly what resume exists to deliver"
+    )
+
+
+async def test_a_second_incremental_pass_sends_nothing(tmp_path: Path) -> None:
+    """SC-I3: a completed merge, re-run with --incremental and no new messages.
+
+    The thread's durable high-water covers every message, so `_would_skip` fires
+    before the suppression is ever consulted. This also confirms the high-water still
+    advanced over the message the first run suppressed, which is why the suppression
+    sits below the `_thread_max_id` tracking rather than above it.
+    """
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    state.channel_high_water[_ORIGIN_ID] = _THREAD_REPLY_ID  # covers both ids
+    state.message_map[_ORIGIN_ID] = "stoat-parent-copy"
+
+    parent = _make_export(channel_id="100", channel_name="general", messages=[], message_count=0)
+    _, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert keys == [], f"an unchanged incremental re-run must make no sends at all: {keys}"
+
+
+async def test_a_thread_whose_only_message_is_suppressed_still_gets_its_separator(
+    tmp_path: Path,
+) -> None:
+    """SC-I4: a separator with nothing beneath it, and that is the accepted outcome.
+
+    Today the same thread produces a separator plus a literal '[empty message]',
+    because the 2.47.1 placeholder has no content. Post-bump it produces a separator
+    and nothing, which is less odd, and it still tells the reader a thread existed.
+
+    Pinned so a later reader does not "fix" it into a suppressed separator, which
+    would remove the only trace of the thread from the parent channel.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[_make_message(_ORIGIN_ID, "the thread's origin message")],
+        message_count=1,
+    )
+    thread = _make_export(
+        channel_id=_ORIGIN_ID,
+        channel_name="cool-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message(_ORIGIN_ID, "the thread's origin message")],
+        message_count=1,
+    )
+
+    keys: list[str] = []
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], events.append)
+
+    assert f"ferry-thread-sep-{_ORIGIN_ID}" in keys, (
+        "the separator is the only remaining trace that this thread existed"
+    )
+    assert f"ferry-merge-{_ORIGIN_ID}" not in keys
+    merged = [e.message or "" for e in events if "Merged thread" in (e.message or "")]
+    assert any("(0 messages)" in m for m in merged), (
+        f"the completion event must report zero, not one: {merged}"
+    )
+
+
+async def test_a_thread_with_no_resolvable_parent_is_skipped_before_the_suppression(
+    tmp_path: Path,
+) -> None:
+    """SC-I5: the pre-existing merge_parent_not_found path is unchanged.
+
+    Confirms the suppression sits inside the parent-resolved branch. If it had been
+    added above the parent lookup, a thread with a missing parent would take a
+    different route than it does today.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.message_map[_ORIGIN_ID] = "stoat-parent-copy"
+
+    orphan = _make_export(
+        channel_id=_ORIGIN_ID,
+        channel_name="cool-thread",
+        is_thread=True,
+        parent_channel_name="a-channel-that-is-not-in-this-export",
+        messages=[_make_message(_ORIGIN_ID, "the thread's origin message")],
+        message_count=1,
+    )
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [orphan], lambda e: None)
+
+    assert keys == [], "nothing is sent for a thread whose parent cannot be resolved"
+    assert [w for w in state.warnings if w.get("type") == "merge_parent_not_found"], (
+        f"the pre-existing warning must still fire: {state.warnings}"
+    )
