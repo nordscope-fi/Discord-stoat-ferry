@@ -1599,3 +1599,96 @@ def test_describe_proxy_never_prints_userinfo_even_if_resolve_stops_stripping(
         out = http.describe_proxy()
     assert all("secret" not in v for v in out.values())
     assert all("user" not in v for v in out.values())
+
+
+# ---------------------------------------------------------------------------
+# The never-raises contract (issue #148)
+# ---------------------------------------------------------------------------
+#
+# Four rules apply to every test below, and three of them exist because this
+# work already got them wrong once.
+#
+# 1. The os_proxy fixture cannot inject a raise: it patches both seams with
+#    return_value and side_effect=lambda, which only produce successful returns.
+#    A raise has to be patched in directly.
+# 2. Patch BOTH seams anyway. Patching only _os_proxies leaves _os_proxy_bypass
+#    real, and on a macOS machine that calls the _scproxy C extension.
+# 3. Wrap in proxy_env(), which clears ambient *_proxy variables and neutralises
+#    FERRY_DISABLE_PROXY.
+# 4. Raise something outside (ValueError, TypeError). resolve_proxy_or_raise
+#    still guards those around its own URL parses, so using one proves nothing
+#    about the boundary under test.
+
+
+def test_resolve_proxy_returns_none_when_the_scan_seam_raises(proxy_env) -> None:
+    """The docstring has promised this since v2.14.0, and the function raised.
+
+    KeyError rather than ValueError on purpose: see rule 4 above.
+    """
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=KeyError("exclude_simple")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        assert http.resolve_proxy("https://a.test/") is None
+
+
+def test_resolve_proxy_returns_none_when_the_bypass_seam_raises(proxy_env) -> None:
+    """The bypass call sits after the scan and is reached only when a proxy
+    matched from the OS half, so a fix that guards only the scan passes the test
+    above and fails this one."""
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", return_value={"https": "http://oscorp:3128"}),
+        patch.object(http, "_os_proxy_bypass", side_effect=OSError("registry")),
+    ):
+        assert http.resolve_proxy("https://a.test/") is None
+
+
+def test_resolve_proxy_or_raise_still_raises(proxy_env) -> None:
+    """The split has to be real, not cosmetic.
+
+    If the boundary went into the sibling too, describe_proxy and run_dce_export
+    would receive None for a read failure and for a clean machine alike, which is
+    the silent inversion this change exists to prevent.
+    """
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=KeyError("exclude_simple")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+        pytest.raises(KeyError),
+    ):
+        http.resolve_proxy_or_raise("https://a.test/")
+
+
+def test_resolve_proxy_logs_the_failure_once(proxy_env, caplog) -> None:
+    """A silent swallow makes a persistent platform failure invisible."""
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=KeyError("exclude_simple")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+        caplog.at_level(logging.WARNING, logger="discord_ferry.core.http"),
+    ):
+        http.resolve_proxy("https://a.test/")
+
+    records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+
+
+def test_a_failed_scan_leaves_the_cache_cold(proxy_env) -> None:
+    """The assertion that separates this design from the one that was rejected.
+
+    _scheme_map assigns _proxy_scan AFTER the comprehension that calls
+    _os_proxies, so letting the raise through leaves the cache None and the next
+    call retries the platform. A boundary inside the seam would let the
+    assignment run with an empty os_side and freeze "no OS proxy" for the life of
+    the process, which is worse than the bug it replaces.
+    """
+    with (
+        proxy_env(),
+        patch.object(http, "_os_proxies", side_effect=KeyError("exclude_simple")),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        http.resolve_proxy("https://a.test/")
+        assert http._proxy_scan is None
