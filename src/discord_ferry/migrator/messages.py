@@ -157,7 +157,24 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
     state.warnings.extend(result.warnings)
     state.errors.extend(result.errors)
     state.failed_messages.extend(result.failed_messages)
-    state.message_map.update(result.message_map_updates)
+    # Parent-wins on a thread-starter collision. Prerequisite for batch 8 (#110): after
+    # DCE 2.47.3 a thread's starter carries the ORIGIN message's id, and a thread's
+    # channel id EQUALS that origin id, so the parent channel and the thread channel
+    # write the same key. save_lock serialises these merges but does not ORDER them, and
+    # a small thread routinely finishes before its large parent, so first-wins and
+    # last-wins are both wrong.
+    #
+    # The discriminator is exact: a thread's map key equals its own channel_id, and a
+    # parent's never does. Both halves are required. Dropping `in state.message_map`
+    # would lose a thread's only entry when its parent has not merged yet; dropping the
+    # key comparison would suppress an ordinary re-merge.
+    #
+    # Inert at the current 2.47.1 pin, where the starter carries a synthetic id that
+    # collides with nothing. Pinned in both arrival orders by test_parent_wins_*.
+    for _key, _stoat_id in result.message_map_updates.items():
+        if _key == result.channel_id and _key in state.message_map:
+            continue
+        state.message_map[_key] = _stoat_id
     state.pending_pins.extend(result.pending_pins)
     state.pending_reactions.extend(result.pending_reactions)
     state.attachments_uploaded += result.attachments_uploaded

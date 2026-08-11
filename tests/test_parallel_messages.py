@@ -819,3 +819,83 @@ async def test_unmapped_emoji_reaction_warning_token_safe(tmp_path: Path) -> Non
 
     assert state.reactions_dropped == 1
     assert all(secret not in w["message"] for w in state.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Parent-wins on a thread-starter collision (#107 batch 7, chunk #198, task #210)
+# ---------------------------------------------------------------------------
+#
+# Prerequisite work for batch 8 (#110). No symptom at the current DCE 2.47.1 pin.
+#
+# After DCE 2.47.3 a thread's starter carries the ORIGIN message's id, and a thread's
+# channel id EQUALS that origin id, so the parent channel and the thread channel write
+# the same message_map key. save_lock serialises the two merges but does not order them,
+# and with max_concurrent_channels defaulting to 3 a small thread routinely finishes
+# before its large parent. First-wins and last-wins are therefore both wrong.
+#
+# The discriminator: a thread's map key equals its own channel_id; a parent's never does.
+
+
+def _collision_pair() -> tuple[ChannelResult, ChannelResult]:
+    """A parent and a thread that both write the same key, as DCE 2.47.3 produces."""
+    origin_id = "1506019505778987190"
+    parent = ChannelResult(
+        channel_id="parent_ch",
+        message_map_updates={origin_id: "stoat_parent_copy"},
+    )
+    thread = ChannelResult(
+        channel_id=origin_id,  # a thread's channel id IS its origin message id
+        message_map_updates={origin_id: "stoat_thread_copy"},
+    )
+    return parent, thread
+
+
+def test_parent_wins_when_the_parent_merges_first() -> None:
+    """SC-3.1."""
+    state = MigrationState()
+    parent, thread = _collision_pair()
+    _merge_channel_result(state, parent)
+    _merge_channel_result(state, thread)
+    assert state.message_map["1506019505778987190"] == "stoat_parent_copy"
+
+
+def test_parent_wins_when_the_thread_merges_first() -> None:
+    """SC-3.2. Both orders are required.
+
+    A test running only one order cannot distinguish parent-wins from last-wins, and
+    last-wins is one of the two wrong answers this guard exists to rule out.
+    """
+    state = MigrationState()
+    parent, thread = _collision_pair()
+    _merge_channel_result(state, thread)
+    _merge_channel_result(state, parent)
+    assert state.message_map["1506019505778987190"] == "stoat_parent_copy"
+
+
+def test_a_key_already_present_but_not_the_channel_id_is_still_written() -> None:
+    """SC-3.4: the skip needs BOTH halves of the condition.
+
+    An ordinary re-merge of an existing key must not be suppressed. Only the exact
+    thread-starter shape is skipped.
+    """
+    state = MigrationState()
+    state.message_map["msg1"] = "old"
+    _merge_channel_result(
+        state, ChannelResult(channel_id="ch1", message_map_updates={"msg1": "new"})
+    )
+    assert state.message_map["msg1"] == "new"
+
+
+def test_a_thread_key_is_written_when_the_parent_has_not_merged_yet() -> None:
+    """SC-3.4, the other half: the skip needs the key to be PRESENT already.
+
+    A thread whose parent has not merged is not a collision. Suppressing it would lose
+    the only entry the message has.
+    """
+    state = MigrationState()
+    origin_id = "1506019505778987190"
+    _merge_channel_result(
+        state,
+        ChannelResult(channel_id=origin_id, message_map_updates={origin_id: "stoat_thread_copy"}),
+    )
+    assert state.message_map[origin_id] == "stoat_thread_copy"
