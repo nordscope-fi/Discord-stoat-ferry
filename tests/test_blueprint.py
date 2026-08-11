@@ -3,6 +3,8 @@
 import importlib.resources
 from pathlib import Path
 
+import pytest
+
 from discord_ferry.blueprint import (
     BlueprintCategory,
     BlueprintChannel,
@@ -150,3 +152,35 @@ def test_education_template_parses() -> None:
     assert bp.name == "Education Server"
     assert len(bp.roles) >= 2
     assert any("course" in cat.name.lower() for cat in bp.categories)
+
+
+def test_a_failed_export_leaves_the_previous_blueprint_importable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #175, the case that made this worth fixing.
+
+    ``export_blueprint`` and ``import_blueprint`` are a matched pair, so a
+    truncated file is read back by a later run. Before the atomic write, the
+    direct ``write_text`` truncated the target as soon as it opened it, which
+    destroyed a good blueprint the moment a second write failed partway through.
+    A user who then lost the source server had no way to tell the file was
+    incomplete until the import failed or built a partial server.
+    """
+    target = tmp_path / "server.json"
+    export_blueprint(_make_blueprint(), target)
+    real_write_text = Path.write_text
+
+    def half_then_fail(self: Path, data: str, *args: object, **kwargs: object) -> None:
+        # Half the content, then fail. A failure that writes nothing leaves the
+        # target intact even without the temp file, so it would not detect the bug.
+        real_write_text(self, data[: len(data) // 2], encoding="utf-8")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", half_then_fail)
+    with pytest.raises(OSError):
+        export_blueprint(ServerBlueprint(name="Replacement"), target)
+    monkeypatch.undo()
+
+    recovered = import_blueprint(target)
+    assert recovered.name == "Test Server"
+    assert [r.name for r in recovered.roles] == ["Admin", "Member"]
