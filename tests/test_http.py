@@ -778,9 +778,12 @@ async def test_a_missing_url_raises_type_error_not_index_error(proxy_env, os_pro
 
     It does NOT cover `_resolve_or_direct`'s `if url is None` guard. That guard
     stopped being observable here the moment the resolver call was wrapped in
-    `except Exception`: without it, resolve_proxy(None) raises AttributeError,
-    the wrapper swallows it, and this test still sees its TypeError. The test
-    below is what pins that guard.
+    `except Exception`: without it, `resolve_proxy_or_raise(None)` raises
+    AttributeError, a boundary swallows it, and this test still sees its
+    TypeError. The test below is what pins that guard.
+
+    Naming the raising function matters since #148 split the resolver in two.
+    `resolve_proxy` no longer raises on None; it catches and returns None.
     """
     with os_proxy({}), proxy_env(HTTPS_PROXY="http://corp:8080"), pytest.raises(TypeError):
         http._FerryRequest("GET", loop=asyncio.get_running_loop())
@@ -790,10 +793,11 @@ async def test_a_missing_url_never_reaches_the_resolver(proxy_env, os_proxy) -> 
     """`_resolve_or_direct`'s `if url is None: return None`.
 
     Killing: dropping that guard. The visible cost is no longer an exception,
-    because `except Exception` catches the AttributeError resolve_proxy(None)
-    raises; it is a warning logged with a full traceback on a request that never
-    had a url to resolve. Asserting the resolver is not called pins the guard
-    itself rather than one of its downstream symptoms.
+    because `resolve_proxy` catches the AttributeError that
+    `resolve_proxy_or_raise(None)` raises at `target.scheme`; it is a warning
+    logged with a full traceback on a request that never had a url to resolve.
+    Asserting the resolver is not called pins the guard itself rather than one of
+    its downstream symptoms.
     """
     with (
         os_proxy({}),

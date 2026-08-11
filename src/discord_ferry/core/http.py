@@ -856,12 +856,18 @@ class _FerryRequest(aiohttp.ClientRequest):
         a caller rather than to the function that promised it, so the other two
         callers inherited only the narrow guards. `resolve_proxy` now holds it.
 
-        The boundary stays, for two reasons rather than as habit. It is defense
-        in depth over platform code Ferry does not control. And it still covers a
-        case `resolve_proxy`'s boundary does not reach in the same way:
-        `resolve_proxy(None)` raises `AttributeError` from Ferry's own frame, and
-        the `if url is None` guard above is what stops that, with the test below
-        pinning it.
+        The boundary stays as defense in depth over platform code Ferry does not
+        control, not as habit.
+
+        What the `if url is None` guard above buys is worth stating precisely,
+        because #148 changed it. `resolve_proxy_or_raise(None)` raises
+        `AttributeError` at `target.scheme`, from Ferry's own frame rather than
+        from a platform seam. `resolve_proxy` now catches that itself and returns
+        None, so dropping the guard would no longer produce an exception here.
+        It would produce a logged warning with a full traceback on every request
+        that never had a url to resolve. The guard prevents the noise, not a
+        crash, and the test below pins it by asserting the resolver is never
+        called rather than by asserting on a symptom.
 
         An earlier version of this docstring justified the boundary with a
         specific mechanism: that `_proxy_bypass_winreg_override` calls
