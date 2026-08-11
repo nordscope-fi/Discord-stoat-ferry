@@ -1017,3 +1017,31 @@ async def api_fetch_messages(
             f"Expected a JSON array of messages from {url}, got {type(raw).__name__}"
         )
     return raw
+
+
+async def api_fetch_server_with_channels(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+) -> dict[str, Any]:
+    """Fetch a server together with its channel objects.
+
+    ``GET /servers/{id}?include_channels=true``. Deliberately a separate
+    function from :func:`api_fetch_server` rather than a parameter on it.
+    Upstream answers this route with ``FetchServerResponse::JustServer`` when
+    the parameter is absent and ``ServerWithChannels`` when it is present, so
+    adding it to the existing function would change the response shape under the
+    ``validate_after`` block in ``run_migration`` and under rollback, neither of
+    which this work touches.
+
+    The response carries two lists, and the pair is the point. ``server`` is
+    returned unmodified, so its own ``channels`` field still names every channel
+    id on the server. The sibling ``channels`` array holds only the channel
+    objects the caller may ``ViewChannel``. Comparing the two is the only way to
+    tell a channel that was deleted from one this token simply cannot see.
+
+    Lands in the ``servers`` rate bucket, 5 per 10 seconds keyed per server id.
+    """
+    url = f"{stoat_url.rstrip('/')}/servers/{server_id}?include_channels=true"
+    return await _api_request(session, "GET", url, token)
