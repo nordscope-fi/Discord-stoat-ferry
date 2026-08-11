@@ -1816,3 +1816,60 @@ def test_the_rollback_tracker_also_handles_notice() -> None:
             MigrationEvent(phase="preflight", status="notice", message="ROLLBACK-NOTICE")
         )
     assert "ROLLBACK-NOTICE" in buf.getvalue()
+
+
+def test_tls_check_reports_unreadable_without_crashing(proxy_env) -> None:
+    """The library call being guarded is not the same as the command surviving.
+
+    Killing: a boundary that covers describe_proxy but lets the CLI wrapper
+    traceback. The command must exit zero and still print the four describe_trust
+    keys release.yml pins, or the #134 gate breaks.
+    """
+    with (
+        proxy_env(),
+        patch("discord_ferry.core.http._os_proxies", side_effect=KeyError("boom")),
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False),
+    ):
+        result = CliRunner().invoke(main, ["tls-check"])
+
+    assert result.exit_code == 0
+    assert "proxy-source: unreadable" in result.output
+    for key in ("ca-bundle:", "ca-bundle-readable:", "trust-source:", "ca-visible:"):
+        assert key in result.output
+
+
+def test_tls_check_says_nothing_about_unreadable_on_a_healthy_machine(proxy_env) -> None:
+    """A diagnostic that cries wolf is the same defect in the other direction.
+
+    test_tls_check_reports_the_proxy_keys calls reporting configuration rather
+    than resolution "what makes a diagnostic lie". Reporting a failure that did
+    not happen lies just as loudly.
+    """
+    with (
+        proxy_env(HTTPS_PROXY="http://corp:8080"),
+        patch("discord_ferry.core.http._os_proxies", return_value={}),
+        patch("discord_ferry.core.http._os_proxy_bypass", return_value=False),
+    ):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+
+    assert "proxy-source: env" in out
+    assert "proxy-https: corp:8080" in out
+    assert "unreadable" not in out
+
+
+def test_tls_check_never_prints_userinfo_on_the_failure_path(proxy_env) -> None:
+    """A new code path is a new chance to leak.
+
+    test_tls_check_never_prints_userinfo measured that str(URL), repr(URL) and
+    URL.human_repr() all render userinfo. This drives the same command down the
+    branch that did not exist when that test was written.
+    """
+    with (
+        proxy_env(HTTPS_PROXY="http://user:secret@corp:8080"),
+        patch("discord_ferry.core.http._os_proxies", return_value={"http": "http://os:3128"}),
+        patch("discord_ferry.core.http._os_proxy_bypass", side_effect=OSError("registry")),
+    ):
+        out = CliRunner().invoke(main, ["tls-check"]).output
+
+    assert "secret" not in out
+    assert "user" not in out
