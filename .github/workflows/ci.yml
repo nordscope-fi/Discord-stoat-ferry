@@ -102,5 +102,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev --extra native
 
-      - name: Run the state and metadata suites
-        run: uv run pytest tests/test_state.py tests/test_metadata.py -v
+      - name: Run the atomic-write suites
+        # test_atomicio and test_blueprint joined the list in v2.14.6. Every
+        # document write now goes through one helper, and the blueprint is the
+        # case that matters most, since import_blueprint reads that file back.
+        # The conftest fixture only simulates Win32 rename semantics; this is the
+        # real thing.
+        run: >-
+          uv run pytest tests/test_atomicio.py tests/test_state.py
+          tests/test_metadata.py tests/test_blueprint.py -v
