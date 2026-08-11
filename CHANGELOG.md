@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.14.4] - 2026-08-11
+
+### Fixed
+
+- Running a migration a second time into an output directory Ferry had already
+  written to crashed on Windows with `[WinError 183]`, at the first checkpoint
+  save. This hit resume, `--incremental`, and any run that reused an existing
+  export, so a Windows user who ran Ferry twice into the same folder lost the
+  migration and could not resume. The three writers that finish an atomic write
+  now overwrite an existing destination on Windows, as they always did on macOS
+  and Linux (#172).
+
+### Changed
+
+- CI now runs the state and metadata test suites on Windows. Nothing in this
+  project's tests had ever executed on Windows, which is why #172 reached a user
+  rather than a test run (#174).
+
 ## [2.14.3] - 2026-08-10
 
 ### Fixed
