@@ -970,3 +970,47 @@ def test_the_guard_is_active_in_the_post_bump_shape() -> None:
             f"the thread's copy won in the {order} order; a reply in the parent would "
             "then be sent against the wrong message, and a sent reply cannot be unsent"
         )
+
+
+def test_a_forum_post_already_has_key_equal_to_its_channel_id_today() -> None:
+    """The key == channel_id shape is NOT hypothetical: a forum post has it at 2.47.1.
+
+    Found by chunk 4's review, which claimed the discriminator was inexact. The
+    mechanism it named was wrong, but the shape is real. Ground truth from the shipped
+    fixture 'Discord Ferry Test - feedback-forum - Bug Report [1506019530294562938]':
+    the channel id and the first message id are the SAME, because a forum post is a
+    thread and its starter is a real message rather than a placeholder.
+
+    A forum post is still a thread, so the discriminator's premise holds. What must be
+    proven is that the guard never drops the post's own starter: the skip fires only
+    when the key is already present, and for a forum post the only writer of that key
+    is the post itself, so the value never changes.
+    """
+    post_id = "1506019530294562938"
+    state = MigrationState()
+
+    # Checkpoint merge: the starter, plus a later message in the same post.
+    _merge_channel_result(
+        state,
+        ChannelResult(
+            channel_id=post_id,
+            message_map_updates={post_id: "stoat_starter", "999": "stoat_second"},
+        ),
+    )
+    assert state.message_map[post_id] == "stoat_starter"
+
+    # Completion merge. Workers reset their own result, so this carries only new keys.
+    _merge_channel_result(
+        state, ChannelResult(channel_id=post_id, message_map_updates={"1000": "stoat_third"})
+    )
+
+    # Re-merging the SAME result is the harsher case: the key repeats and is now present.
+    _merge_channel_result(
+        state, ChannelResult(channel_id=post_id, message_map_updates={post_id: "stoat_starter"})
+    )
+
+    assert state.message_map[post_id] == "stoat_starter", (
+        "the forum post's own starter entry was dropped by the guard"
+    )
+    assert state.message_map["999"] == "stoat_second"
+    assert state.message_map["1000"] == "stoat_third"

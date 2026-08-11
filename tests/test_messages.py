@@ -3806,7 +3806,8 @@ async def test_a_reply_resolves_against_the_channel_local_map_first(tmp_path: Pa
             )
 
     assert sent[0]["replies"] == [{"id": "LOCAL", "mention": False}], (
-        f"the reply resolved against the shared map, not the channel's own. got {sent[0]['replies']}"
+        f"the reply resolved against the shared map, not the channel's own. "
+        f"got {sent[0]['replies']}"
     )
 
 
