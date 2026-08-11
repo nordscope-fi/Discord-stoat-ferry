@@ -1517,6 +1517,12 @@ async def _process_message(
         # the retry loop accounts correctly and terminates. The parallel per-channel path
         # (channel_result set) keeps degrade-in-loop. Guard is provably retry-path-only:
         # only engine.py's retry loop passes channel_result=None.
+        #
+        # Batch 7: a DuplicateSendError never reaches here. It is caught per part inside
+        # the send loop above, because a duplicate means the message landed and there is
+        # no re-failure to mark. Re-raising it would leave the message in
+        # failed_messages, which is exactly the defect batch 7 removes. Pinned by
+        # test_retry_path_does_not_reraise_on_a_duplicate.
         if channel_result is None:
             raise
         return
