@@ -481,6 +481,7 @@ def test_save_metadata_overwrites_existing_file_on_windows(
     save_discord_metadata(first, tmp_path)
     save_discord_metadata(second, tmp_path)
 
-    loaded = load_discord_metadata(tmp_path)
-    assert loaded is not None
-    assert loaded.guild_id == "456"
+    # Full-object equality, matching test_metadata_roundtrip_preserves_new_fields.
+    # Asserting guild_id alone would pass even if the second write landed only
+    # partially, because every other field would still read back as `first`'s.
+    assert load_discord_metadata(tmp_path) == second

@@ -103,6 +103,4 @@ jobs:
         run: uv sync --locked --extra dev --extra native
 
       - name: Run the state and metadata suites
-        # `uv run` resolves independently of `uv sync`, so the extras are named
-        # again on purpose.
-        run: uv run --extra dev --extra native pytest tests/test_state.py tests/test_metadata.py -v
+        run: uv run pytest tests/test_state.py tests/test_metadata.py -v
