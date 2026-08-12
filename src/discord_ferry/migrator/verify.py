@@ -265,9 +265,20 @@ async def _check_structure(
     # tell a deleted channel from one merely hidden, which would make
     # `channel_missing` unreachable and lose the point of the tool.
     all_channel_ids = set(server.get("channels") or [])
-    visible_ids = {
-        c["_id"] for c in (payload.get("channels") or []) if isinstance(c, dict) and "_id" in c
+    # An id-to-name dict, mirroring `found_titles` in the category branch below.
+    # The name is needed for the rename comparison and is already in this
+    # response, so keeping it costs no request and the two-request budget for the
+    # whole structure family is unchanged.
+    #
+    # The isinstance and `"_id" in c` guards are unchanged, so `visible_ids`
+    # derived from this dict has exactly the membership the previous set
+    # comprehension produced, malformed entries dropped identically.
+    visible_names = {
+        c["_id"]: c.get("name", "")
+        for c in (payload.get("channels") or [])
+        if isinstance(c, dict) and "_id" in c
     }
+    visible_ids = set(visible_names)
 
     for discord_id, stoat_id in state.channel_map.items():
         # `discord_id` is not always a Discord snowflake: the forum index writer
@@ -315,7 +326,13 @@ async def _check_structure(
     # set() over the MAP, so these are its KEYS. Roles are keyed by id upstream;
     # each Role object also carries an inner "_id", which is deliberately not
     # what is read here. See the three-conventions note above.
-    role_ids = set(server.get("roles") or {})
+    #
+    # Kept whole rather than collapsed straight to its keys, because the rename
+    # comparison needs the Role objects the values hold. `set()` over a dict
+    # takes its keys, so `role_ids` is exactly what the previous one-liner
+    # produced.
+    roles_map = server.get("roles") or {}
+    role_ids = set(roles_map)
     for discord_id, stoat_id in state.role_map.items():
         present = stoat_id in role_ids
         report.add(
