@@ -207,7 +207,7 @@ async def _check_structure(
         )
     )
     payload = await api_fetch_server_with_channels(sess, stoat_url, token, state.stoat_server_id)
-    await api_fetch_emoji_list(sess, stoat_url, token, state.stoat_server_id)
+    emoji = await api_fetch_emoji_list(sess, stoat_url, token, state.stoat_server_id)
 
     server = payload.get("server") or {}
     # Two lists, and the pair is the discriminator. `server.channels` comes back
@@ -258,3 +258,38 @@ async def _check_structure(
     # No branch for a `dry-ch-` value. It is written only under config.dry_run,
     # and the same run sets state.is_dry_run, which run_check refuses above. The
     # branch is unreachable by construction, so it is not written.
+
+    # Roles arrive as a map keyed by role id, so membership is a key lookup.
+    # There is no second list and no permission filter here, unlike channels, so
+    # an absence is unambiguous and reports fail rather than unverifiable.
+    role_ids = set(server.get("roles") or {})
+    for discord_id, stoat_id in state.role_map.items():
+        present = stoat_id in role_ids
+        report.add(
+            name=f"role:{discord_id}",
+            status="ok" if present else "fail",
+            kind="role_present" if present else "role_missing",
+            detail=(
+                "role exists under its recorded id"
+                if present
+                else "the server does not list this role"
+            ),
+            discord_id=discord_id,
+            stoat_id=stoat_id,
+        )
+
+    emoji_ids = {e["_id"] for e in emoji if isinstance(e, dict) and "_id" in e}
+    for discord_id, stoat_id in state.emoji_map.items():
+        present = stoat_id in emoji_ids
+        report.add(
+            name=f"emoji:{discord_id}",
+            status="ok" if present else "fail",
+            kind="emoji_present" if present else "emoji_missing",
+            detail=(
+                "emoji exists under its recorded id"
+                if present
+                else "the server does not list this emoji"
+            ),
+            discord_id=discord_id,
+            stoat_id=stoat_id,
+        )
