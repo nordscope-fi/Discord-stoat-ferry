@@ -1434,6 +1434,19 @@ def _render_check_report(report: CheckReport) -> None:
     on a merge migration most tail results are unverifiable, and a bare count
     beside three green ones reads like approval of something never examined.
     """
+    # `detail` can embed a server-supplied error body, which this project treats
+    # as attacker-influenced in the general case. escape() neutralises Rich
+    # markup in it, and that is ALL it does: it leaves an ESC byte untouched.
+    #
+    # A raw ANSI sequence in that text is defanged anyway, but by the rendering
+    # rather than by escape(). Rich interleaves its own style codes between the
+    # ESC and the following '[', so "\x1b[2J" never reaches the terminal as one
+    # contiguous sequence. Measured, not assumed.
+    #
+    # That protection is incidental, so it disappears the moment this text is
+    # emitted any other way. If a --json mode is added (spec P1 S6), it must go
+    # through click.echo per the recorded rule, and click.echo would print the
+    # ESC verbatim. Strip control characters there rather than relying on this.
     colours = {"ok": "green", "warn": "yellow", "fail": "red", "unverifiable": "cyan"}
     table = Table(title="Migration Check")
     table.add_column("Check")
