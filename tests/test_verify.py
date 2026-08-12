@@ -428,7 +428,7 @@ async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
 
 
 # ---------------------------------------------------------------------------
-# structure: categories, and the only warn in the tool (task #254)
+# structure: categories, warn's first producer and still its clearest (task #254)
 # ---------------------------------------------------------------------------
 
 
@@ -443,12 +443,13 @@ def _state_with_category(stoat_cat_id: str, expected_title: str) -> MigrationSta
 async def test_a_renamed_category_warns_rather_than_failing(
     mock_aiohttp: aioresponses,
 ) -> None:
-    """The ONLY place warn is reachable in the whole tool.
+    """warn's first producer, and the precedent the other two follow.
 
-    category_names is the one expected name MigrationState records, so a
-    category title is the one name comparison possible. It warns rather than
-    fails because the entity exists and its content is intact: someone renamed
-    a heading, nothing was lost.
+    Until 2.17.0 this was warn's ONLY producer, because category_names was the
+    one expected name MigrationState recorded. channel_renamed and role_renamed
+    joined it once the two name maps were added, and all three warn for the same
+    reason: the entity exists and its content is intact, and only the label
+    moved. Someone renamed a heading, nothing was lost.
 
     Kills an implementation reporting a cosmetic rename as fail, which would
     exit non-zero on a migration that is entirely intact.
@@ -966,11 +967,17 @@ async def test_the_tail_check_never_emits_warn(
     high_water: int | None,
     count: int,
 ) -> None:
-    """SC-3.13. warn belongs to the category title check, and nowhere else.
+    """SC-3.13. warn belongs to the NAME comparisons, and never to the tail.
 
     Driven across every tail scenario. Kills reintroducing the inverted-severity
     warn that critique round 2 removed, and documents in executable form that a
-    warn appearing in a report can only have come from a renamed category.
+    warn in a report can only have come from a name comparison: a renamed
+    category, channel or role. The tail check has no expected name to compare,
+    so it has nothing to warn about.
+
+    The assertion below is unchanged by 2.17.0 adding two more warn producers,
+    because it filters to tail: results and both new producers live in the
+    structure pass. Only this docstring needed correcting.
     """
     _register_tail(mock_aiohttp, window)
     report = await run_check(
@@ -1794,3 +1801,55 @@ async def test_a_channel_object_with_no_name_is_not_reported_renamed(
     assert len(channel_results) == 2
     assert {r.kind for r in channel_results} == {"channel_present"}
     assert report.counts()["warn"] == 0
+
+
+def test_no_prose_still_claims_warn_has_a_single_home() -> None:
+    """SC-5.13. A claim asserted only in prose is the shape this project ships wrong.
+
+    warn had exactly one producer until 2.17.0, and that fact was written into
+    five places: two in verify.py's own module comment and three here. The design
+    counted three and a fresh-context review confirmed three, so two survived
+    both. This scans instead of counting.
+
+    It reads the files as text rather than importing them, because the claims
+    live in comments, which no runtime introspection can reach.
+    """
+    import pathlib
+
+    # Built from fragments so the literals never appear in this file, which
+    # would otherwise make the scan match its own search terms. That is not
+    # hypothetical: the first version of this test failed against itself.
+    stale = [
+        "ONLY place warn" + " is reachable",
+        "only warn in" + " the tool",
+        "can only have come" + " from a renamed category",
+        "single legitimate" + " home",
+        "the only such difference" + " is a category title",
+    ]
+    root = pathlib.Path(__file__).resolve().parent.parent
+    targets = [
+        root / "src" / "discord_ferry" / "migrator" / "verify.py",
+        root / "tests" / "test_verify.py",
+    ]
+    for path in targets:
+        assert path.exists(), f"{path} moved; update this test rather than deleting it"
+        text = path.read_text(encoding="utf-8")
+        for phrase in stale:
+            assert phrase not in text, (
+                f"{path.name} still claims warn has one home: {phrase!r}. "
+                "It has three producers: category_title_mismatch, channel_renamed "
+                "and role_renamed."
+            )
+
+
+def test_the_kind_vocabulary_lists_both_rename_kinds() -> None:
+    """SC-3.12. The docstring table is the contract another batch reads.
+
+    docs/plans is gitignored, so the CheckResult docstring is the only durable
+    record of the kind vocabulary the repair tool will dispatch on.
+    """
+    from discord_ferry.migrator.verify import CheckResult
+
+    doc = CheckResult.__doc__ or ""
+    assert "channel_renamed" in doc
+    assert "role_renamed" in doc

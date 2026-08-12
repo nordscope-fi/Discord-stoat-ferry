@@ -53,11 +53,18 @@ CheckStatus = Literal["ok", "warn", "fail", "unverifiable"]
 #: extension of a permission map leave its expansion behind.
 #:
 #: ``warn`` exists for a cosmetic difference on an entity whose content is
-#: intact. Today the only such difference is a category title, because
-#: ``category_names`` is the only expected name ``MigrationState`` records. A
-#: design review found ``warn`` promised in two acceptance criteria and produced
-#: by no code path at all, so its single legitimate home is stated here rather
-#: than left implicit.
+#: intact. It has exactly **three** producers, all name comparisons, and they are
+#: enumerated here rather than left implicit because a design review once found
+#: ``warn`` promised in two acceptance criteria and produced by no code path at
+#: all:
+#:
+#: * ``category_title_mismatch``, since v2.16.0
+#: * ``channel_renamed`` and ``role_renamed``, since 2.17.0, once
+#:   ``created_channel_names`` and ``created_role_names`` gave the check an
+#:   expected name to compare against
+#:
+#: The tail check emits no ``warn`` at all, which
+#: ``test_the_tail_check_never_emits_warn`` pins across every tail scenario.
 STATUSES: tuple[CheckStatus, ...] = get_args(CheckStatus)
 
 
@@ -78,8 +85,8 @@ class CheckResult:
     Family              Kinds
     ==================  ====================================================
     Channel identity    ``channel_present``, ``channel_missing``,
-                        ``channel_not_visible``
-    Role identity       ``role_present``, ``role_missing``
+                        ``channel_not_visible``, ``channel_renamed``
+    Role identity       ``role_present``, ``role_missing``, ``role_renamed``
     Category identity   ``category_present``, ``category_missing``,
                         ``category_title_mismatch``, ``category_title_unknown``
     Emoji identity      ``emoji_present``, ``emoji_missing``
