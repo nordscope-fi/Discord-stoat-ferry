@@ -21,6 +21,15 @@ check is a recorded result, not the absence of one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from discord_ferry.errors import ValidationError
+
+if TYPE_CHECKING:
+    import aiohttp
+
+    from discord_ferry.core.events import EventCallback
+    from discord_ferry.state import MigrationState
 
 #: Every status the tool can report, in the order a summary line names them.
 #:
@@ -106,3 +115,44 @@ class CheckReport:
         category, which is the fastest way to teach people to ignore the tool.
         """
         return any(r.status == "fail" for r in self.results)
+
+
+async def run_check(
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+    on_event: EventCallback,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> CheckReport:
+    """Verify a finished migration against a live Stoat server.
+
+    Takes an already-loaded :class:`~discord_ferry.state.MigrationState` rather
+    than an output directory, so every test drives it with no filesystem. Takes
+    ``stoat_url`` and ``token`` directly and reports through ``on_event``,
+    matching ``run_probe``, so nothing here needs a ``FerryConfig`` and nothing
+    under ``migrator/`` imports a shell.
+
+    Both preconditions raise before any request is made. That ordering is the
+    behaviour under test: checking after the first fetch would spend a request
+    and, on a dry-run state, would go looking for ``dry-ch-`` sentinels that
+    name channels nobody ever created.
+
+    Raises:
+        ValidationError: the state is from a dry run, or records no server.
+    """
+    if state.is_dry_run:
+        raise ValidationError(
+            "Cannot check a dry-run state. A dry run records placeholder ids for "
+            "channels and messages that were never created, so there is nothing on "
+            "the server to verify against. Run a real migration first."
+        )
+    if not state.stoat_server_id:
+        raise ValidationError(
+            "This state records no Stoat server id, so there is nothing to check "
+            "against. The migration may not have reached the structure phase."
+        )
+
+    report = CheckReport()
+    _ = (stoat_url, token, session, on_event)  # wired up in the next chunks
+    return report

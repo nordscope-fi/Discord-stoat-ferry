@@ -10,7 +10,26 @@ against what they guarded.
 
 from __future__ import annotations
 
-from discord_ferry.migrator.verify import CheckReport, CheckResult
+import pytest
+from aioresponses import aioresponses
+
+from discord_ferry.errors import ValidationError
+from discord_ferry.migrator.verify import CheckReport, CheckResult, run_check
+from discord_ferry.state import MigrationState
+
+BASE_URL = "https://api.test"
+TOKEN = "test-session-token"
+
+
+@pytest.fixture()
+def mock_aiohttp() -> object:
+    with aioresponses() as m:
+        yield m
+
+
+def _noop_event(_event: object) -> None:
+    return None
+
 
 # ---------------------------------------------------------------------------
 # CheckResult / CheckReport (task #250)
@@ -86,3 +105,58 @@ def test_a_result_carries_the_entity_ids_a_repair_would_need() -> None:
     assert result.stoat_id == "01JSTOATCH00000000000AAA"
     assert result.expected is None
     assert result.found is None
+
+
+# ---------------------------------------------------------------------------
+# run_check preconditions (task #251)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_dry_run_state_is_refused_before_any_request() -> None:
+    """A dry run records dry-ch- and dry-msg- sentinels for entities that were
+    never created, so there is nothing on a server to check against.
+
+    --resume has refused a dry-run state since it was written and --incremental
+    gained the same refusal in v2.15.0. This is the third sibling.
+
+    No route is registered, so the refusal is proven by the absence of a
+    request rather than only by the exception: an implementation checking the
+    flag AFTER its first fetch would raise a different error here.
+    """
+    state = MigrationState()
+    state.is_dry_run = True
+    state.stoat_server_id = "01JSTOATSRV0000000000AAA"
+    with aioresponses(), pytest.raises(ValidationError, match="dry-run"):
+        await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+
+async def test_an_empty_server_id_is_refused_before_any_request() -> None:
+    """Without a server id there is nothing to check against, and the URL would
+    be built with an empty path segment rather than failing honestly."""
+    state = MigrationState()
+    state.stoat_server_id = ""
+    with aioresponses(), pytest.raises(ValidationError, match="server"):
+        await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+
+async def test_a_state_predating_this_feature_is_not_refused() -> None:
+    """An older state.json loads with its newer optional fields defaulted,
+    because load_state reads every one through data.get.
+
+    Kills an implementation that hard-requires a field a released state file
+    does not carry, which would make the tool useless for exactly the
+    migrations it exists to inspect.
+
+    Scoped to what this layer can actually prove: the preconditions do not
+    reject it. The fuller claim, that the CHECKS degrade and report what they
+    cannot determine, needs checks to exist and is pinned in chunk 3 and chunk
+    4. Registering mock routes here would have made this look like an
+    integration test while asserting nothing, because the skeleton makes no
+    requests yet.
+    """
+    state = MigrationState()
+    state.stoat_server_id = "01JSTOATSRV0000000000AAA"
+    # No channel_map, no message_map, no channel_high_water, no
+    # channel_message_counts: the shape an early state.json presents.
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    assert report.counts()["fail"] == 0
