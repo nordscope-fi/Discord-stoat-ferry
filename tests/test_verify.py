@@ -107,6 +107,31 @@ def test_a_result_carries_the_entity_ids_a_repair_would_need() -> None:
     assert result.found is None
 
 
+SRV = "01JSTOATSRV0000000000AAA"
+
+
+def _state_with_channels(channel_map: dict[str, str]) -> MigrationState:
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = dict(channel_map)
+    return state
+
+
+def _server_payload(all_ids: list[str], visible: list[dict[str, str]]) -> dict[str, object]:
+    """A ServerWithChannels body.
+
+    The two lists are separate on purpose and that is the whole point of this
+    route: ``server.channels`` is returned unfiltered and names every channel
+    id, while the sibling array holds only objects the caller may ViewChannel.
+    """
+    return {"server": {"_id": SRV, "channels": all_ids}, "channels": visible}
+
+
+def _register(mock: aioresponses, payload: dict[str, object]) -> None:
+    mock.get(f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=payload)
+    mock.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+
+
 # ---------------------------------------------------------------------------
 # run_check preconditions (task #251)
 # ---------------------------------------------------------------------------
@@ -139,7 +164,9 @@ async def test_an_empty_server_id_is_refused_before_any_request() -> None:
         await run_check(BASE_URL, TOKEN, state, _noop_event)
 
 
-async def test_a_state_predating_this_feature_is_not_refused() -> None:
+async def test_a_state_predating_this_feature_degrades_rather_than_refusing(
+    mock_aiohttp: aioresponses,
+) -> None:
     """An older state.json loads with its newer optional fields defaulted,
     because load_state reads every one through data.get.
 
@@ -147,16 +174,137 @@ async def test_a_state_predating_this_feature_is_not_refused() -> None:
     does not carry, which would make the tool useless for exactly the
     migrations it exists to inspect.
 
-    Scoped to what this layer can actually prove: the preconditions do not
-    reject it. The fuller claim, that the CHECKS degrade and report what they
-    cannot determine, needs checks to exist and is pinned in chunk 3 and chunk
-    4. Registering mock routes here would have made this look like an
-    integration test while asserting nothing, because the skeleton makes no
-    requests yet.
+    Scoped to the preconditions in chunk 2, where run_check made no requests
+    and this could assert nothing more. Chunk 3 gave it something to degrade,
+    so it now drives the real structure pass over an empty state and asserts
+    the run completes with nothing to report rather than raising.
     """
     state = MigrationState()
-    state.stoat_server_id = "01JSTOATSRV0000000000AAA"
+    state.stoat_server_id = SRV
     # No channel_map, no message_map, no channel_high_water, no
     # channel_message_counts: the shape an early state.json presents.
+    _register(mock_aiohttp, _server_payload([], []))
     report = await run_check(BASE_URL, TOKEN, state, _noop_event)
     assert report.counts()["fail"] == 0
+    assert report.results == []
+
+
+# ---------------------------------------------------------------------------
+# structure: channel identity, the three-way rule (task #252)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_channel_present_in_both_lists_is_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The ordinary case."""
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(
+        mock_aiohttp,
+        _server_payload([stoat_id], [{"_id": stoat_id, "name": "general"}]),
+    )
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
+    )
+    channel_results = [r for r in report.results if r.discord_id == "d-100"]
+    assert [r.status for r in channel_results] == ["ok"]
+    assert channel_results[0].stoat_id == stoat_id
+
+
+async def test_a_channel_absent_from_the_id_list_is_a_failure(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Deleted, and reportable as such.
+
+    Kills an implementation that consults only the visible-objects array. That
+    one cannot tell deletion from a permission filter, so it would have to
+    report unverifiable here, and `channel_missing` would be unreachable.
+    Reporting a deleted channel is the point of the tool.
+    """
+    _register(mock_aiohttp, _server_payload([], []))
+    report = await run_check(
+        BASE_URL,
+        TOKEN,
+        _state_with_channels({"d-100": "01JSTOATCH00000000000AAA"}),
+        _noop_event,
+    )
+    result = next(r for r in report.results if r.discord_id == "d-100")
+    assert result.status == "fail"
+    assert result.kind == "channel_missing"
+    assert report.has_failures is True
+
+
+async def test_a_channel_the_token_cannot_see_is_unverifiable_not_a_failure(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Present in the unfiltered id list, absent from the permission-filtered
+    objects: the channel exists and this token simply may not view it.
+
+    Kills an implementation treating any absence from the objects array as
+    deletion, which would report fail on every private channel and teach users
+    to ignore the tool. The two fixtures differ ONLY in the objects array, so
+    this test and the one above cannot both pass against a one-list
+    implementation.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(mock_aiohttp, _server_payload([stoat_id], []))
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
+    )
+    result = next(r for r in report.results if r.discord_id == "d-100")
+    assert result.status == "unverifiable"
+    assert result.kind == "channel_not_visible"
+    assert report.has_failures is False
+
+
+async def test_a_renamed_channel_is_not_reported(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """KNOWN LIMIT, pinned deliberately. This is NOT coverage of an intended check.
+
+    MigrationState records no channel name. Its only name fields are
+    category_names, forum_category_names and author_names, and every write to
+    channel_map is id to id. So there is no expected name to compare a found
+    name against, and a renamed channel is undetectable.
+
+    Tracked as spec P2 S11, which would record the names for FUTURE migrations.
+    It cannot help any migration that already exists, which is the population
+    this tool serves, so it was deferred rather than built.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(
+        mock_aiohttp,
+        _server_payload([stoat_id], [{"_id": stoat_id, "name": "renamed-by-someone"}]),
+    )
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
+    )
+    result = next(r for r in report.results if r.discord_id == "d-100")
+    assert result.status == "ok"
+
+
+async def test_a_forum_index_entry_is_checked_as_an_ordinary_channel(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """channel_map keys are not all Discord channel ids.
+
+    The forum index writer stores a SYNTHETIC key, `forum-index-{forum_key}`,
+    whose value is nonetheless a real Stoat channel id. Identity checking is
+    valid for it because only the value is sent to the server.
+
+    Kills an implementation that assumes every key is a Discord snowflake and
+    skips, or crashes on, the ones that are not.
+    """
+    stoat_id = "01JSTOATIDX00000000000AA"
+    _register(
+        mock_aiohttp,
+        _server_payload([stoat_id], [{"_id": stoat_id, "name": "forum-index"}]),
+    )
+    report = await run_check(
+        BASE_URL,
+        TOKEN,
+        _state_with_channels({"forum-index-cat-9": stoat_id}),
+        _noop_event,
+    )
+    result = next(r for r in report.results if r.discord_id == "forum-index-cat-9")
+    assert result.status == "ok"
