@@ -2388,3 +2388,62 @@ def test_check_json_does_not_wrap_a_long_detail(runner: CliRunner, tmp_path: Pat
     assert len(result.output) > 200, "payload too short to force a wrap; this test is inert"
     parsed = json.loads(result.output)
     assert parsed["results"][0]["detail"].endswith("verylongword")
+
+
+def test_check_json_strips_c1_controls_and_the_synthetic_id(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Two gaps the first version of the stripping had, both measured.
+
+    "It parses" was never the right test. json.dumps escapes a control character
+    in the JSON TEXT, so the document always parses and then hands the raw byte
+    back to whoever parses it. The threat is downstream of parsing, which is why
+    these assertions read the PARSED values.
+
+    C1: \\x9b is CSI, the single-byte equivalent of ESC[. Its ordinal is 155, so
+    an `ord(ch) >= 32` filter passes it straight through. The first version of
+    _strip_control used exactly that filter.
+
+    discord_id: not always a Discord snowflake. The forum index writer stores a
+    synthetic `forum-index-forum-{parent_channel_name}`, and that name comes from
+    the export, so a forum named with an escape byte puts it into this key. It
+    was not stripped at all.
+    """
+    report = CheckReport()
+    report.add(
+        name="channel:forum-index-forum-my\x1b[2Jforum",
+        status="ok",
+        kind="channel_present",
+        detail="fine\x9b2J here",
+        discord_id="forum-index-forum-my\x1b[2Jforum",
+        stoat_id="01JSTOAT\x9bCH000000000AAA",
+    )
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    row = json.loads(result.output)["results"][0]
+    for field in ("name", "detail", "discord_id", "stoat_id"):
+        assert "\x1b" not in row[field], f"{field} still carries an ESC after parsing"
+        assert "\x9b" not in row[field], f"{field} still carries a C1 CSI after parsing"
+    # The surrounding text survives, so this is stripping and not blanking.
+    assert row["discord_id"] == "forum-index-forum-my[2Jforum"
+    assert row["detail"] == "fine2J here"
+
+
+def test_check_json_keeps_a_tab_and_ordinary_unicode(runner: CliRunner, tmp_path: Path) -> None:
+    """The strip must not be a blunt ASCII filter.
+
+    A tab is deliberately kept, and U+00A0 is category Zs rather than Cc, so a
+    non-breaking space and any ordinary non-ASCII text must survive. A filter
+    written as `ch.isprintable()` would drop both.
+    """
+    report = CheckReport()
+    report.add(
+        name="channel:d-100",
+        status="ok",
+        kind="channel_present",
+        detail="col\tumn   café 日本語",
+    )
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    detail = json.loads(result.output)["results"][0]["detail"]
+    assert detail == "col\tumn   café 日本語"

@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import textwrap
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -1454,8 +1455,18 @@ def _strip_control(text: str) -> str:
     Newlines go too. A JSON string escapes them safely, but a consumer that
     prints a ``detail`` straight to a terminal would otherwise inherit whatever
     line breaks the server chose.
+
+    "It parses" was never the right test, and the first version of this function
+    failed on that mistake. ``json.dumps`` escapes a control character in the
+    JSON **text**, so the document always parses, and then hands the raw byte
+    back to whoever parses it. The threat is downstream of parsing.
+
+    ``unicodedata`` category ``Cc`` rather than a hand-rolled range, because the
+    hand-rolled one missed the C1 block: ``\\x9b`` is CSI, the single-byte
+    equivalent of ``ESC[``, and its ordinal is 155, so an ``ord(ch) >= 32``
+    filter passes it straight through. ``Cc`` covers C0, DEL and C1 exactly.
     """
-    return "".join(ch for ch in text if ch == "\t" or (ord(ch) >= 32 and ord(ch) != 127))
+    return "".join(ch for ch in text if ch == "\t" or unicodedata.category(ch) != "Cc")
 
 
 def _check_report_as_dict(report: CheckReport) -> dict[str, Any]:
@@ -1473,8 +1484,15 @@ def _check_report_as_dict(report: CheckReport) -> dict[str, Any]:
                 "status": r.status,
                 "kind": r.kind,
                 "detail": _strip_control(r.detail),
-                "discord_id": r.discord_id,
-                "stoat_id": r.stoat_id,
+                # Stripped too, and not obviously: discord_id is not always a
+                # Discord snowflake. The forum index writer stores a synthetic
+                # `forum-index-forum-{parent_channel_name}`, and that name comes
+                # from the export, so a forum named with an ESC byte puts it
+                # straight into this key. stoat_id comes from an API response,
+                # which this project also treats as attacker-influenced.
+                # `status` and `kind` are internal literals and need nothing.
+                "discord_id": _strip_control(r.discord_id) if r.discord_id else r.discord_id,
+                "stoat_id": _strip_control(r.stoat_id) if r.stoat_id else r.stoat_id,
                 "expected": _strip_control(r.expected) if r.expected is not None else None,
                 "found": _strip_control(r.found) if r.found is not None else None,
             }
