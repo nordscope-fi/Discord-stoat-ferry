@@ -1661,3 +1661,136 @@ async def test_the_rename_comparison_costs_no_extra_request(
         if "/servers/" in str(key[1]) and "/messages" not in str(key[1])
     ]
     assert len(structure_calls) == 2, f"expected 2 structure requests, got {structure_calls}"
+
+
+# ---------------------------------------------------------------------------
+# role_renamed, and the guard reading a name introduces (#296, SC-3.4, SC-3.9)
+# ---------------------------------------------------------------------------
+
+
+def _roles_payload(roles: dict[str, object]) -> dict[str, object]:
+    """A ServerWithChannels body carrying only roles."""
+    return {"server": {"_id": SRV, "channels": [], "roles": roles}, "channels": []}
+
+
+async def test_a_renamed_role_reports_warn(mock_aiohttp: aioresponses) -> None:
+    """SC-3.4. The role half of the rename check.
+
+    Roles have no permission-filtered sibling list, so presence is unambiguous
+    and the comparison sits inside the present branch on the same reasoning as
+    channels: a missing role takes the other branch and cannot be renamed too.
+    """
+    stoat_id = "01JSTOATRL0000000000AAA"
+    _register(mock_aiohttp, _roles_payload({stoat_id: {"name": "moderators"}}))
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.role_map = {"d-role-1": stoat_id}
+    state.created_role_names = {"d-role-1": "mods"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    result = next(r for r in report.results if r.name == "role:d-role-1")
+    assert result.status == "warn"
+    assert result.kind == "role_renamed"
+    assert result.expected == "mods"
+    assert result.found == "moderators"
+    assert report.has_failures is False
+
+
+async def test_a_matching_role_name_emits_no_rename(mock_aiohttp: aioresponses) -> None:
+    """SC-3.4, the negative half. A match keeps role_present and nothing else."""
+    stoat_id = "01JSTOATRL0000000000AAA"
+    _register(mock_aiohttp, _roles_payload({stoat_id: {"name": "mods"}}))
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.role_map = {"d-role-1": stoat_id}
+    state.created_role_names = {"d-role-1": "mods"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    results = [r for r in report.results if r.name == "role:d-role-1"]
+    assert len(results) == 1
+    assert results[0].kind == "role_present"
+
+
+async def test_a_missing_role_is_not_also_renamed(mock_aiohttp: aioresponses) -> None:
+    """SC-3.4. One cause, one result, for roles."""
+    _register(mock_aiohttp, _roles_payload({}))
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.role_map = {"d-role-1": "01JSTOATRL0000000000AAA"}
+    state.created_role_names = {"d-role-1": "mods"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    results = [r for r in report.results if r.name == "role:d-role-1"]
+    assert len(results) == 1
+    assert results[0].kind == "role_missing"
+
+
+async def test_a_malformed_role_value_degrades_rather_than_raising(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.9. Reading a name introduces a raise that does not exist today.
+
+    Before this change the roles map was consumed with `set(...)`, which takes
+    the KEYS and never touches a value, so a None or a bare string was harmless.
+    Calling .get("name") on one raises AttributeError, and `mypy --strict` cannot
+    catch it because the payload is typed dict[str, Any]. The channel and
+    category branches both hand-write the same isinstance guard for exactly this
+    reason.
+
+    A malformed value degrades to no-name-found and keeps role_present, so a
+    broken response cannot turn into an aborted check.
+    """
+    none_id = "01JSTOATRL0000000000AAA"
+    str_id = "01JSTOATRL0000000000BBB"
+    list_id = "01JSTOATRL0000000000CCC"
+    _register(
+        mock_aiohttp,
+        _roles_payload({none_id: None, str_id: "not-an-object", list_id: ["also", "wrong"]}),
+    )
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.role_map = {"d-1": none_id, "d-2": str_id, "d-3": list_id}
+    state.created_role_names = {"d-1": "mods", "d-2": "admins", "d-3": "helpers"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    role_results = [r for r in report.results if r.name.startswith("role:")]
+    assert len(role_results) == 3
+    assert {r.kind for r in role_results} == {"role_present"}
+    assert report.has_failures is False
+
+
+async def test_a_channel_object_with_no_name_is_not_reported_renamed(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The channel half of the same defect the role guard exposed.
+
+    A channel object carrying no "name" key, or a non-string one, means Ferry
+    could not read a name. That is NOT an empty name, and comparing a recorded
+    name against "" would report a rename on every such channel, on a response
+    Ferry simply could not parse.
+
+    Found while writing the role guard: no existing channel fixture omits the
+    name, so nothing else in the suite reaches this.
+    """
+    absent = "01JSTOATCH00000000000AAA"
+    wrong_type = "01JSTOATCH00000000000BBB"
+    _register(
+        mock_aiohttp,
+        _server_payload(
+            [absent, wrong_type],
+            [{"_id": absent}, {"_id": wrong_type, "name": 12345}],
+        ),
+    )
+    state = _state_with_channels({"d-100": absent, "d-101": wrong_type})
+    state.created_channel_names = {"d-100": "general", "d-101": "random"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    channel_results = [r for r in report.results if r.name.startswith("channel:")]
+    assert len(channel_results) == 2
+    assert {r.kind for r in channel_results} == {"channel_present"}
+    assert report.counts()["warn"] == 0
