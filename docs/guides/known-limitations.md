@@ -129,7 +129,7 @@ These limitations relate to platform-level features that either work differently
 
 **A channel that gained more than 100 messages since the migration cannot be checked.** The window no longer reaches back to the message Ferry recorded, so Check reports `unverifiable` rather than guessing. This is common on an active server.
 
-**A renamed channel or role is not detected.** Ferry records the identifiers it created but not the names it gave them, so there is nothing to compare a current name against. Renamed *categories* are detected, because category names are recorded.
+**A renamed channel or role is only detected for migrations run under 2.17.0 or later.** From that release Ferry records the name it gave each channel and role, so `ferry check` can compare it against the current one and reports a rename as a warning. A migration run by an earlier version recorded no such names, and nothing can recover them after the fact, so a rename there stays invisible. Renamed *categories* have always been detected, because category names were recorded from the start.
 
 **A message accepted as a duplicate cannot be confirmed.** When Stoat recognises a retry and refuses it, it does not say which message it already had, so Ferry has no identifier to check later. Channels affected this way report `unverifiable`.
 
