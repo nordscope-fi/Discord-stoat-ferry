@@ -1421,11 +1421,11 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None) -> None
         console.print(f"[bold red]Cannot check this migration:[/] {_safe(exc)}")
         sys.exit(1)
 
-    _render_check_report(report)
+    _render_check_report(report, state.thread_strategy)
     sys.exit(1 if report.has_failures else 0)
 
 
-def _render_check_report(report: CheckReport) -> None:
+def _render_check_report(report: CheckReport, thread_strategy: str = "") -> None:
     """Print the results table and the summary line.
 
     The summary leads with counts and states the exit code, so neither has to be
@@ -1468,11 +1468,33 @@ def _render_check_report(report: CheckReport) -> None:
         f"   (exit {exit_code})"
     )
     if counts["unverifiable"]:
+        # The causes worth naming depend on what the migration actually did, and
+        # since 2.17.0 state.json records that. Before it did, this sentence
+        # offered merge to every user including the ones who never used it,
+        # which is the wording issue #267 exists to correct.
+        #
+        # verify.py carries the matching per-result detail, which is what --json
+        # serialises and what the repair tool reads in-process. This is what a
+        # human reads, and fixing one without the other leaves half the audience
+        # with the wrong explanation.
+        if thread_strategy == "merge":
+            cause = (
+                "which is expected under --thread-strategy=merge, after a duplicate "
+                "send, or for a channel this token cannot read"
+            )
+        elif thread_strategy:
+            cause = (
+                f"which for a --thread-strategy={thread_strategy} migration means a "
+                "duplicate send, or a channel this token cannot read"
+            )
+        else:
+            cause = (
+                "which is expected when --thread-strategy=merge was used, after a "
+                "duplicate send, or for a channel this token cannot read"
+            )
         console.print(
             f"[cyan]{counts['unverifiable']} checks could not be verified.[/] Ferry did "
-            "not record what it would need to confirm them, which is expected when "
-            "--thread-strategy=merge was used, after a duplicate send, or for a channel "
-            "this token cannot read."
+            f"not record what it would need to confirm them, {cause}."
         )
 
 

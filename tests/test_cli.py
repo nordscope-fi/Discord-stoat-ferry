@@ -2136,3 +2136,58 @@ def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_pa
     # module-level Rich Console wraps at 80 columns off a TTY and would split a longer one.
     assert "'id'" in result.output
     assert "srv1" not in result.output
+
+
+def test_check_summary_does_not_offer_merge_on_a_flatten_migration(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """#267's problem sentence, and it lives here rather than in verify.py.
+
+    The summary told every user an unverifiable result is "expected when
+    --thread-strategy=merge was used, after a duplicate send, or for a channel
+    this token cannot read". On a flatten migration the first of those three is
+    false, and Ferry now records which strategy actually ran.
+
+    verify.py's per-result detail was fixed in #293. That is what --json
+    serialises and what the repair tool reads in-process. This is what a human
+    reads, and fixing one without the other leaves half the audience wrong.
+    """
+    order: list[str] = []
+    state = MigrationState(stoat_server_id="srv1")
+    state.thread_strategy = "flatten"
+    report = _check_report(("unverifiable", "tail_not_recorded"))
+
+    a, _b, _c, d = _patched(order, report)
+    with a, _b, patch("discord_ferry.cli.load_state", return_value=state), d:
+        result = runner.invoke(
+            main, ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"]
+        )
+
+    assert result.exit_code == 0
+    assert "could not be verified" in result.output
+    assert "merge" not in result.output
+
+
+def test_check_summary_keeps_the_old_wording_when_no_strategy_was_recorded(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A state.json written before 2.17.0 records no strategy.
+
+    It must keep the v2.16.0 sentence listing the possibilities, because that is
+    genuinely all Ferry knows about that migration. Naming an unknown strategy
+    would read as a defect rather than as an old file.
+    """
+    order: list[str] = []
+    state = MigrationState(stoat_server_id="srv1")
+    assert state.thread_strategy == ""
+    report = _check_report(("unverifiable", "tail_not_recorded"))
+
+    a, _b, _c, d = _patched(order, report)
+    with a, _b, patch("discord_ferry.cli.load_state", return_value=state), d:
+        result = runner.invoke(
+            main, ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"]
+        )
+
+    assert result.exit_code == 0
+    assert "merge" in result.output
+    assert "duplicate send" in result.output
