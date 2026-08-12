@@ -2130,4 +2130,9 @@ def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_pa
 
     assert result.exit_code == 1
     assert "Build failed:" in result.output
+    # Assert the diagnostic reached the user, not only that the value did not. Without
+    # this the test passes against MigrationError(""), which is the shape this project
+    # keeps shipping: a condition that cannot fail. Match a short fragment, because the
+    # module-level Rich Console wraps at 80 columns off a TTY and would split a longer one.
+    assert "'id'" in result.output
     assert "srv1" not in result.output
