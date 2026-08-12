@@ -1381,7 +1381,13 @@ def probe_cmd(
     # make this the only one of Ferry's four token options behaving that way.
     help="Stoat user token. Prefer the STOAT_TOKEN environment variable",
 )
-def check_cmd(output_dir: str, stoat_url: str | None, token: str | None) -> None:
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the report as JSON instead of a table",
+)
+def check_cmd(output_dir: str, stoat_url: str | None, token: str | None, as_json: bool) -> None:
     """Verify a finished migration against the live Stoat server.
 
     Reads the state file in OUTPUT_DIR and asks the server whether everything it
@@ -1421,8 +1427,61 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None) -> None
         console.print(f"[bold red]Cannot check this migration:[/] {_safe(exc)}")
         sys.exit(1)
 
-    _render_check_report(report, state.thread_strategy)
+    if as_json:
+        # click.echo, not console.print: the module-level Console has
+        # soft_wrap=False and falls back to 80 columns off a terminal, so it
+        # inserts a real newline wherever the wrap lands, including inside a
+        # string value, which makes the output unparseable (issue #145).
+        click.echo(json.dumps(_check_report_as_dict(report)))
+    else:
+        _render_check_report(report, state.thread_strategy)
     sys.exit(1 if report.has_failures else 0)
+
+
+def _strip_control(text: str) -> str:
+    """Remove every C0 and C1 control character except tab.
+
+    Applied on the JSON path ONLY. ``CheckResult.detail`` can embed a
+    server-supplied error body, which this project treats as attacker-influenced.
+    On the Rich path an escape sequence is defanged incidentally, because Rich
+    interleaves its own style codes between the ESC and the following ``[`` so it
+    never reaches the terminal contiguously. ``click.echo`` does no such thing and
+    would print the ESC verbatim.
+
+    Stripping at the dataclass, or in ``report.add``, would also change what the
+    Rich table prints, and that output shipped in v2.16.0.
+
+    Newlines go too. A JSON string escapes them safely, but a consumer that
+    prints a ``detail`` straight to a terminal would otherwise inherit whatever
+    line breaks the server chose.
+    """
+    return "".join(ch for ch in text if ch == "\t" or (ord(ch) >= 32 and ord(ch) != 127))
+
+
+def _check_report_as_dict(report: CheckReport) -> dict[str, Any]:
+    """The report as a JSON-ready document.
+
+    An explicit serialiser rather than ``dataclasses.asdict``, so a field added
+    to ``CheckResult`` later does not enter the published output without someone
+    deciding it should. The repair tool consumes the dataclass in process; this
+    is the surface a script sees, and the two can move independently.
+    """
+    return {
+        "results": [
+            {
+                "name": _strip_control(r.name),
+                "status": r.status,
+                "kind": r.kind,
+                "detail": _strip_control(r.detail),
+                "discord_id": r.discord_id,
+                "stoat_id": r.stoat_id,
+                "expected": _strip_control(r.expected) if r.expected is not None else None,
+                "found": _strip_control(r.found) if r.found is not None else None,
+            }
+            for r in report.results
+        ],
+        "counts": report.counts(),
+    }
 
 
 def _render_check_report(report: CheckReport, thread_strategy: str = "") -> None:
