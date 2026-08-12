@@ -207,6 +207,14 @@ async def run_migration(
             # Carry over ID maps so structure phases are skipped / reused
             state.channel_map = dict(prior.channel_map)
             state.role_map = dict(prior.role_map)
+            # Beside their id maps, and mandatory rather than tidy. A carried
+            # channel skips creation entirely (run_channels snapshots
+            # pre_existing_channel_ids before its create loop), and roles do the
+            # same, so nothing re-records a name on an incremental run. Without
+            # these two lines every incremental run ends with an empty name map
+            # and ferry check reports ok for a renamed channel.
+            state.created_channel_names = dict(prior.created_channel_names)
+            state.created_role_names = dict(prior.created_role_names)
             # C1: carry finalized-roles so incremental skips re-editing (load_state seeds `prior`
             # for old-ferry states). Without this every incremental run re-PATCHes all roles.
             state.roles_finalized = set(prior.roles_finalized)
@@ -250,6 +258,9 @@ async def run_migration(
             state.native_fidelity_counts = dict(prior.native_fidelity_counts)
             # Carry-over audit (every MigrationState field classified):
             #   CARRY: role_map / channel_map / category_map / emoji_map,
+            #     created_channel_names / created_role_names (a carried entity
+            #     skips creation, so nothing re-records its name; omitting these
+            #     makes ferry check report ok for a renamed channel),
             #     category_names, channel_categories, message_map, avatar_cache,
             #     upload_cache, author_names, stoat_server_id, autumn_url,
             #     invite_code / invite_url, channel_message_offsets,
@@ -267,7 +278,10 @@ async def run_migration(
             #     reactions/pins phases — carrying a stale list would re-pin/re-react);
             #     warnings / errors, validation_results, embeds_* / replies_*
             #     (per-run fidelity counters); current_phase, started_at,
-            #     completed_at, export_completed, rollback_progress, is_dry_run.
+            #     completed_at, export_completed, rollback_progress, is_dry_run;
+            #     thread_strategy, which describes THIS run and is set from
+            #     config after this block, at the point the four state paths
+            #     converge.
             #   DECISION: autumn_uploads / referenced_autumn_ids stay reset —
             #     orphan-sweep is per-run; carrying matters only if a cross-run
             #     sweep is added (none today).

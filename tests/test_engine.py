@@ -2253,3 +2253,32 @@ async def test_a_resume_records_the_resuming_runs_strategy(tmp_path: Path) -> No
     config = _make_config(tmp_path, resume=True, thread_strategy="merge")
     state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
     assert state.thread_strategy == "merge"
+
+
+async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
+    """SC-5.7. Omitting these two carries degrades rename detection to silence.
+
+    A carried channel SKIPS creation entirely: run_channels snapshots
+    pre_existing_channel_ids before its create loop and reuses the mapped id
+    without calling the API, and roles do the same through
+    pre_existing_role_ids. So nothing re-records a name on an incremental run.
+
+    Without the carry, every incremental run ends with an empty name map, and
+    ferry check then reports ok for a renamed channel. No existing test sees it,
+    which is why this one drives the ids and the names as distinct literals.
+    """
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(
+        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
+        created_channel_names={"d-100": "general"},
+        role_map={"d-role-1": "01JSTOATRL0000000000AAA"},
+        created_role_names={"d-role-1": "mods"},
+    )
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+
+    assert state.created_channel_names == {"d-100": "general"}
+    assert state.created_role_names == {"d-role-1": "mods"}
