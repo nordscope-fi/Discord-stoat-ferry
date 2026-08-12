@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session
-from discord_ferry.errors import CheckError
+from discord_ferry.errors import CheckError, FerryError
 from discord_ferry.migrator.api import (
     api_fetch_emoji_list,
     api_fetch_messages,
@@ -437,9 +437,30 @@ async def _check_tails(
             # report it twice, doubling the apparent damage and sending a repair
             # after a channel that may not exist.
             continue
-        window = await api_fetch_messages(
-            sess, stoat_url, token, stoat_id, limit=_WINDOW, sort="Latest"
-        )
+        try:
+            window = await api_fetch_messages(
+                sess, stoat_url, token, stoat_id, limit=_WINDOW, sort="Latest"
+            )
+        except FerryError as exc:
+            # One channel failing is a RESULT, not the end of the run. This is
+            # the deliberate contrast with the validate_after block in
+            # run_migration, whose blanket handler writes a warning and leaves
+            # its result dict empty, so a check that failed reads exactly like
+            # one that passed.
+            #
+            # unverifiable rather than fail: Ferry could not look, which is not
+            # the same as finding something wrong. Only FerryError is caught, so
+            # a programming error still surfaces as a crash rather than being
+            # filed as a server problem.
+            report.add(
+                name=f"tail:{discord_id}",
+                status="unverifiable",
+                kind="check_error",
+                detail=f"could not read this channel's messages: {exc}",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+            continue
         window_ids = [m["_id"] for m in window if isinstance(m, dict) and "_id" in m]
         status, kind, detail = _classify_tail(
             expected=_expected_tail(state, discord_id),
