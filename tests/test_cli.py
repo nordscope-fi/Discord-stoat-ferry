@@ -2447,3 +2447,31 @@ def test_check_json_keeps_a_tab_and_ordinary_unicode(runner: CliRunner, tmp_path
 
     detail = json.loads(result.output)["results"][0]["detail"]
     assert detail == "col\tumn   café 日本語"
+
+
+def test_the_summary_does_not_claim_an_exclusive_cause(runner: CliRunner, tmp_path: Path) -> None:
+    """`unverifiable` has FIVE producers, and the summary must not imply fewer.
+
+    channel_not_visible, category_title_unknown, check_error, tail_not_recorded
+    and tail_window_exhausted all produce it. An earlier draft of this sentence
+    said a non-merge migration "means a duplicate send, or a channel this token
+    cannot read", which claimed exclusivity and omitted three. The whole-branch
+    review caught it.
+
+    Each branch now points at the per-result detail instead of enumerating, so
+    this asserts the pointer is there rather than trying to list five causes in
+    a summary line.
+    """
+    for strategy in ("flatten", "merge", "archive"):
+        state = MigrationState(stoat_server_id="srv1")
+        state.thread_strategy = strategy
+        report = _check_report(("unverifiable", "tail_window_exhausted"))
+        order: list[str] = []
+        a, b, _c, d = _patched(order, report)
+        with a, b, patch("discord_ferry.cli.load_state", return_value=state), d:
+            result = runner.invoke(
+                main, ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"]
+            )
+        assert "Each result above says which cause applies" in result.output, (
+            f"the {strategy} summary does not point at the per-result detail"
+        )
