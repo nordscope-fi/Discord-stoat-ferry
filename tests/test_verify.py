@@ -10,6 +10,9 @@ against what they guarded.
 
 from __future__ import annotations
 
+import re
+
+import aiohttp
 import pytest
 from aioresponses import aioresponses
 
@@ -127,9 +130,41 @@ def _server_payload(all_ids: list[str], visible: list[dict[str, str]]) -> dict[s
     return {"server": {"_id": SRV, "channels": all_ids}, "channels": visible}
 
 
+def _allow_any_message_window(mock: aioresponses) -> None:
+    """Serve an empty message window for ANY channel.
+
+    For tests whose subject is the structure pass: the tail check still runs and
+    needs somewhere to send its request.
+    """
+    mock.get(re.compile(r".*/channels/.*/messages.*"), payload=[], repeat=True)
+
+
 def _register(mock: aioresponses, payload: dict[str, object]) -> None:
+    """Register the two structure routes, plus an empty message window for every
+    channel id the payload mentions.
+
+    The tail check runs for every entry in channel_map, so a structure-focused
+    test still needs a message route or it fails on a missing mock rather than
+    on what it is testing. An empty window with a zero recorded count reports
+    ok/nothing_expected, which these tests ignore.
+    """
     mock.get(f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=payload)
     mock.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    server = payload.get("server") or {}
+    ids = set(server.get("channels") or [])
+    ids.update(
+        c["_id"] for c in (payload.get("channels") or []) if isinstance(c, dict) and "_id" in c
+    )
+    for cid in ids:
+        mock.get(
+            f"{BASE_URL}/channels/{cid}/messages?limit=100&sort=Latest",
+            payload=[],
+            repeat=True,
+        )
+    # Also cover a channel the payload does not list. Until task #259 lands, the
+    # tail check runs for every channel_map entry even when the structure pass
+    # already failed it, so the request still has to go somewhere.
+    _allow_any_message_window(mock)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +241,7 @@ async def test_a_channel_present_in_both_lists_is_ok(
     report = await run_check(
         BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
     )
-    channel_results = [r for r in report.results if r.discord_id == "d-100"]
+    channel_results = [r for r in report.results if r.name == "channel:d-100"]
     assert [r.status for r in channel_results] == ["ok"]
     assert channel_results[0].stoat_id == stoat_id
 
@@ -228,7 +263,7 @@ async def test_a_channel_absent_from_the_id_list_is_a_failure(
         _state_with_channels({"d-100": "01JSTOATCH00000000000AAA"}),
         _noop_event,
     )
-    result = next(r for r in report.results if r.discord_id == "d-100")
+    result = next(r for r in report.results if r.name == "channel:d-100")
     assert result.status == "fail"
     assert result.kind == "channel_missing"
     assert report.has_failures is True
@@ -251,7 +286,7 @@ async def test_a_channel_the_token_cannot_see_is_unverifiable_not_a_failure(
     report = await run_check(
         BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
     )
-    result = next(r for r in report.results if r.discord_id == "d-100")
+    result = next(r for r in report.results if r.name == "channel:d-100")
     assert result.status == "unverifiable"
     assert result.kind == "channel_not_visible"
     assert report.has_failures is False
@@ -279,7 +314,7 @@ async def test_a_renamed_channel_is_not_reported(
     report = await run_check(
         BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
     )
-    result = next(r for r in report.results if r.discord_id == "d-100")
+    result = next(r for r in report.results if r.name == "channel:d-100")
     assert result.status == "ok"
 
 
@@ -306,7 +341,7 @@ async def test_a_forum_index_entry_is_checked_as_an_ordinary_channel(
         _state_with_channels({"forum-index-cat-9": stoat_id}),
         _noop_event,
     )
-    result = next(r for r in report.results if r.discord_id == "forum-index-cat-9")
+    result = next(r for r in report.results if r.name == "channel:forum-index-cat-9")
     assert result.status == "ok"
 
 
@@ -326,6 +361,7 @@ async def test_a_missing_role_is_a_failure(mock_aiohttp: aioresponses) -> None:
         payload={"server": {"_id": SRV, "channels": [], "roles": {}}, "channels": []},
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     state = MigrationState()
     state.stoat_server_id = SRV
     state.role_map = {"d-r1": "01JSTOATROLE0000000000A"}
@@ -347,6 +383,7 @@ async def test_a_present_role_is_ok(mock_aiohttp: aioresponses) -> None:
         },
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     state = MigrationState()
     state.stoat_server_id = SRV
     state.role_map = {"d-r1": role_id}
@@ -361,6 +398,7 @@ async def test_a_missing_emoji_is_a_failure(mock_aiohttp: aioresponses) -> None:
         payload={"server": {"_id": SRV, "channels": []}, "channels": []},
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     state = MigrationState()
     state.stoat_server_id = SRV
     state.emoji_map = {"d-e1": "01JAUTUMNEMOJI00000000A"}
@@ -381,6 +419,7 @@ async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
         f"{BASE_URL}/servers/{SRV}/emojis",
         payload=[{"_id": emoji_id, "name": "party"}],
     )
+    _allow_any_message_window(mock_aiohttp)
     state = MigrationState()
     state.stoat_server_id = SRV
     state.emoji_map = {"d-e1": emoji_id}
@@ -427,6 +466,7 @@ async def test_a_renamed_category_warns_rather_than_failing(
         },
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     report = await run_check(BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event)
     result = next(r for r in report.results if r.discord_id == "d-cat-1")
     assert result.status == "warn"
@@ -451,6 +491,7 @@ async def test_a_matching_category_title_is_ok(mock_aiohttp: aioresponses) -> No
         },
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     report = await run_check(BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event)
     assert next(r for r in report.results if r.discord_id == "d-cat-1").status == "ok"
 
@@ -462,6 +503,7 @@ async def test_a_missing_category_is_a_failure(mock_aiohttp: aioresponses) -> No
         payload={"server": {"_id": SRV, "channels": [], "categories": []}, "channels": []},
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     report = await run_check(
         BASE_URL, TOKEN, _state_with_category("01JSTOATCAT00000000000A", "Original"), _noop_event
     )
@@ -484,6 +526,7 @@ async def test_an_absent_categories_key_does_not_crash(
         payload={"server": {"_id": SRV, "channels": []}, "channels": []},
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     report = await run_check(
         BASE_URL, TOKEN, _state_with_category("01JSTOATCAT00000000000A", "Original"), _noop_event
     )
@@ -540,6 +583,7 @@ async def test_the_structure_family_costs_exactly_two_requests(
         repeat=True,
         payload=[{"_id": e, "name": "e"} for e in emoji.values()],
     )
+    _allow_any_message_window(mock_aiohttp)
 
     state = MigrationState()
     state.stoat_server_id = SRV
@@ -551,9 +595,17 @@ async def test_the_structure_family_costs_exactly_two_requests(
 
     report = await run_check(BASE_URL, TOKEN, state, _noop_event)
 
-    requests_made = sum(len(v) for v in mock_aiohttp.requests.values())
-    assert requests_made == 2, f"expected 2 requests for 91 entities, made {requests_made}"
-    assert len(report.results) == 91
+    # Count the STRUCTURE requests only. The tail check deliberately costs one
+    # request per channel and is budgeted separately; counting everything here
+    # was only accidentally right while the tail check did not exist yet.
+    structure_calls = sum(
+        len(v) for k, v in mock_aiohttp.requests.items() if "/servers/" in str(k[1])
+    )
+    assert structure_calls == 2, (
+        f"expected 2 structure requests for 91 entities, made {structure_calls}"
+    )
+    structure_results = [r for r in report.results if not r.name.startswith("tail:")]
+    assert len(structure_results) == 91
     assert report.has_failures is False
 
 
@@ -581,6 +633,7 @@ async def test_a_category_with_no_recorded_title_is_unverifiable_not_ok(
         },
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     state = MigrationState()
     state.stoat_server_id = SRV
     state.category_map = {"d-cat-1": cat_id}
@@ -620,9 +673,183 @@ async def test_a_malformed_channel_object_never_reports_a_false_deletion(
         payload={"server": {"_id": SRV, "channels": [stoat_id]}, "channels": malformed},
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    _allow_any_message_window(mock_aiohttp)
     report = await run_check(
         BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
     )
-    result = report.results[0]
+    result = next(r for r in report.results if r.name == "channel:d-100")
     assert result.status == "unverifiable"
     assert report.has_failures is False
+
+
+# ---------------------------------------------------------------------------
+# the tail check (tasks #256, #257, #258, #259)
+# ---------------------------------------------------------------------------
+
+CH1 = "01JSTOATCH00000000000AAA"
+
+
+def _sid(n: int) -> str:
+    """A 26-char Stoat message id, monotonic in n.
+
+    Stoat ids are ULIDs whose leading bits are a millisecond timestamp in
+    Crockford base32, so lexicographic order on equal-length ids is time order.
+    These are not real ULIDs but they share the two properties the classifier
+    depends on: fixed width, and sorting in creation order.
+    """
+    return f"01JSTOATMSG{n:015d}"
+
+
+def _did(n: int) -> str:
+    """A Discord message id. Visibly different from the Stoat id for the same
+    message, so a comparison against the wrong one cannot pass by accident."""
+    return f"d-msg-{n}"
+
+
+def _tail_state(
+    *,
+    high_water: int | None,
+    count: int,
+    mapped: bool = True,
+    channel: str = "d-100",
+) -> MigrationState:
+    """A state describing one migrated channel.
+
+    ``high_water`` is the index of the last message Ferry believes it sent.
+    ``mapped`` False leaves message_map without an entry for it, which is the
+    409 DuplicateNonce shape: the send landed but batch 7 deliberately records
+    no id for it.
+    """
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {channel: CH1}
+    state.channel_message_counts = {channel: count}
+    if high_water is not None:
+        state.channel_high_water[channel] = _did(high_water)
+        if mapped:
+            state.message_map[_did(high_water)] = _sid(high_water)
+    return state
+
+
+def _register_tail(mock: aioresponses, window: list[int], *, channel_id: str = CH1) -> None:
+    """Register the structure routes plus one channel's message window.
+
+    The window is served NEWEST FIRST, which is what MessageSort::Latest
+    produces upstream: doc!{"_id": -1}, not reversed downstream.
+    """
+    mock.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={
+            "server": {"_id": SRV, "channels": [channel_id]},
+            "channels": [{"_id": channel_id, "name": "general"}],
+        },
+    )
+    mock.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    mock.get(
+        f"{BASE_URL}/channels/{channel_id}/messages?limit=100&sort=Latest",
+        payload=[{"_id": _sid(n)} for n in sorted(window, reverse=True)],
+    )
+
+
+def _tail_result(report: CheckReport) -> CheckResult:
+    return next(r for r in report.results if r.name.startswith("tail:"))
+
+
+async def test_the_tail_is_the_newest_message(mock_aiohttp: aioresponses) -> None:
+    """SC-3.1. The ordinary flatten case."""
+    _register_tail(mock_aiohttp, list(range(10)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    result = _tail_result(report)
+    assert result.status == "ok"
+    assert result.kind == "tail_present"
+
+
+async def test_a_channel_shorter_than_the_window_is_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.2. The window is the whole channel."""
+    _register_tail(mock_aiohttp, list(range(5)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=4, count=5), _noop_event)
+    assert _tail_result(report).status == "ok"
+
+
+async def test_a_merge_parent_with_content_after_the_tail_is_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.3. Forty merged thread messages sit after the parent's own tail.
+
+    This is the case the window approach exists for. An equality test asking
+    "is the recorded tail the NEWEST message" fails here, and would fail on
+    every merge parent, which is spec S3 criterion 5.
+    """
+    _register_tail(mock_aiohttp, list(range(50)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    assert _tail_result(report).status == "ok"
+
+
+async def test_a_channel_that_migrated_nothing_is_ok_and_does_not_raise(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.8. An ordinary empty Discord channel.
+
+    channel_high_water is written only under `if _channel_max_id:`, so a channel
+    that sent nothing has NO entry. Kills the unconditional two-hop lookup,
+    which raises KeyError here and reports the commonest correct case as a check
+    error. Added by critique round 1.
+    """
+    _register_tail(mock_aiohttp, [])
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=None, count=0), _noop_event)
+    result = _tail_result(report)
+    assert result.status == "ok"
+    assert result.kind == "nothing_expected"
+
+
+async def test_a_high_water_id_with_no_map_entry_is_unverifiable(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.9. KNOWN GAP, pinned deliberately, tracked as #240.
+
+    A send that returned 409 DuplicateNonce landed on the server, but batch 7
+    deliberately writes no message_map entry for it because an empty-valued
+    entry is worse than none. So the expected Stoat id cannot be resolved.
+
+    unverifiable is the honest answer, and it must not raise. This asserts
+    CURRENT behaviour and is not coverage of an intended outcome; #240 would
+    close it by recording those sends durably.
+    """
+    _register_tail(mock_aiohttp, list(range(10)))
+    report = await run_check(
+        BASE_URL, TOKEN, _tail_state(high_water=9, count=10, mapped=False), _noop_event
+    )
+    result = _tail_result(report)
+    assert result.status == "unverifiable"
+    assert result.kind == "tail_not_recorded"
+
+
+async def test_post_migration_activity_under_the_window_is_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.10. Someone posted after the migration. Not a defect."""
+    _register_tail(mock_aiohttp, list(range(60)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    assert _tail_result(report).status == "ok"
+
+
+async def test_run_check_does_not_close_an_injected_session(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-I4. Mirrors test_probe_does_not_close_an_injected_session.
+
+    A caller that supplied the session owns it. Closing it would break a caller
+    reusing one across calls, which batch 10's repair tool will do.
+    """
+    _register_tail(mock_aiohttp, list(range(3)))
+    async with aiohttp.ClientSession() as injected:
+        await run_check(
+            BASE_URL,
+            TOKEN,
+            _tail_state(high_water=2, count=3),
+            _noop_event,
+            session=injected,
+        )
+        assert injected.closed is False
