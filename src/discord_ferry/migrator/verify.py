@@ -23,7 +23,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, get_args
 
+from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.http import new_session
 from discord_ferry.errors import CheckError
+from discord_ferry.migrator.api import (
+    api_fetch_emoji_list,
+    api_fetch_server_with_channels,
+)
 
 if TYPE_CHECKING:
     import aiohttp
@@ -169,5 +175,86 @@ async def run_check(
         )
 
     report = CheckReport()
-    _ = (stoat_url, token, session, on_event)  # wired up in the next chunks
+    own_session = session is None
+    sess = session or new_session()
+    try:
+        await _check_structure(sess, stoat_url, token, state, report, on_event)
+    finally:
+        if own_session:
+            await sess.close()
     return report
+
+
+async def _check_structure(
+    sess: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+    report: CheckReport,
+    on_event: EventCallback,
+) -> None:
+    """Compare every recorded entity against the server, by id.
+
+    Two requests for the whole family, whatever the entity count: the server
+    fetch carries roles and categories as full objects alongside the channels,
+    and emoji need one more because ``Server`` has no emoji field.
+    """
+    on_event(
+        MigrationEvent(
+            phase="check",
+            status="started",
+            message="Checking server structure...",
+        )
+    )
+    payload = await api_fetch_server_with_channels(sess, stoat_url, token, state.stoat_server_id)
+    await api_fetch_emoji_list(sess, stoat_url, token, state.stoat_server_id)
+
+    server = payload.get("server") or {}
+    # Two lists, and the pair is the discriminator. `server.channels` comes back
+    # UNFILTERED and names every channel id; the sibling array holds only the
+    # objects this token may ViewChannel. Consulting the objects alone cannot
+    # tell a deleted channel from one merely hidden, which would make
+    # `channel_missing` unreachable and lose the point of the tool.
+    all_channel_ids = set(server.get("channels") or [])
+    visible_ids = {
+        c["_id"] for c in (payload.get("channels") or []) if isinstance(c, dict) and "_id" in c
+    }
+
+    for discord_id, stoat_id in state.channel_map.items():
+        # `discord_id` is not always a Discord snowflake: the forum index writer
+        # stores a synthetic `forum-index-{key}`. Only the VALUE is sent to the
+        # server, so identity checking is valid for those entries too.
+        if stoat_id in visible_ids:
+            report.add(
+                name=f"channel:{discord_id}",
+                status="ok",
+                kind="channel_present",
+                detail="channel exists under its recorded id",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+        elif stoat_id in all_channel_ids:
+            report.add(
+                name=f"channel:{discord_id}",
+                status="unverifiable",
+                kind="channel_not_visible",
+                detail=(
+                    "the server lists this channel but did not return it, which "
+                    "means this token cannot view it. Its contents cannot be checked."
+                ),
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+        else:
+            report.add(
+                name=f"channel:{discord_id}",
+                status="fail",
+                kind="channel_missing",
+                detail="the server does not list this channel at all",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+
+    # No branch for a `dry-ch-` value. It is written only under config.dry_run,
+    # and the same run sets state.is_dry_run, which run_check refuses above. The
+    # branch is unreachable by construction, so it is not written.
