@@ -427,9 +427,7 @@ async def test_a_renamed_category_warns_rather_than_failing(
         },
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
-    report = await run_check(
-        BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event
-    )
+    report = await run_check(BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event)
     result = next(r for r in report.results if r.discord_id == "d-cat-1")
     assert result.status == "warn"
     assert result.kind == "category_title_mismatch"
@@ -453,9 +451,7 @@ async def test_a_matching_category_title_is_ok(mock_aiohttp: aioresponses) -> No
         },
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
-    report = await run_check(
-        BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event
-    )
+    report = await run_check(BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event)
     assert next(r for r in report.results if r.discord_id == "d-cat-1").status == "ok"
 
 
@@ -492,3 +488,70 @@ async def test_an_absent_categories_key_does_not_crash(
         BASE_URL, TOKEN, _state_with_category("01JSTOATCAT00000000000A", "Original"), _noop_event
     )
     assert next(r for r in report.results if r.discord_id == "d-cat-1").status == "fail"
+
+
+# ---------------------------------------------------------------------------
+# structure: the request budget (task #255)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_structure_family_costs_exactly_two_requests(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Cost is a separate property from correctness and needs its own assertion.
+
+    Kills a per-entity implementation: a loop calling api_fetch_channel per
+    channel produces entirely CORRECT verdicts and 91 requests here, so any
+    test checking only outcomes passes against it. On a 200-channel server that
+    is 200 extra round trips against a 5-per-10-second bucket.
+
+    Deliberately oversized fixture, 91 entities against 2 requests, so the two
+    numbers cannot be confused for each other.
+    """
+    channels = {f"d-c{i}": f"01JSTOATCH{i:013d}" for i in range(40)}
+    roles = {f"d-r{i}": f"01JSTOATRL{i:013d}" for i in range(15)}
+    cats = {f"d-k{i}": f"01JSTOATCT{i:013d}" for i in range(6)}
+    emoji = {f"d-e{i}": f"01JAUTUMNEM{i:012d}" for i in range(30)}
+    assert len(channels) + len(roles) + len(cats) + len(emoji) == 91
+
+    # repeat=True on BOTH routes is load-bearing for this test's honesty.
+    # aioresponses serves a registered route once by default, so an
+    # implementation making extra calls would die on ClientConnectionError
+    # before the count assertion below ever ran, and the test would "pass"
+    # against the mutant for entirely the wrong reason. Serving repeats lets
+    # the over-fetching implementation succeed, so the count is the only thing
+    # that can catch it. Verified by mutation: a duplicated server fetch now
+    # fails on the count line, not on a connection error.
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        repeat=True,
+        payload={
+            "server": {
+                "_id": SRV,
+                "channels": list(channels.values()),
+                "roles": dict.fromkeys(roles.values(), {"name": "r"}),
+                "categories": [{"id": cid, "title": "t", "channels": []} for cid in cats.values()],
+            },
+            "channels": [{"_id": c, "name": "n"} for c in channels.values()],
+        },
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}/emojis",
+        repeat=True,
+        payload=[{"_id": e, "name": "e"} for e in emoji.values()],
+    )
+
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = channels
+    state.role_map = roles
+    state.category_map = cats
+    state.category_names = dict.fromkeys(cats, "t")
+    state.emoji_map = emoji
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    requests_made = sum(len(v) for v in mock_aiohttp.requests.values())
+    assert requests_made == 2, f"expected 2 requests for 91 entities, made {requests_made}"
+    assert len(report.results) == 91
+    assert report.has_failures is False
