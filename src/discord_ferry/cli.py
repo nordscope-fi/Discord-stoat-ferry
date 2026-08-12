@@ -1367,7 +1367,21 @@ def probe_cmd(
 @main.command(name="check")
 @click.argument("output_dir", type=click.Path(exists=True))
 @click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
-@click.option("--token", envvar="STOAT_TOKEN", default=None, help="Stoat user token")
+@click.option(
+    "--token",
+    envvar="STOAT_TOKEN",
+    default=None,
+    # Prefer the environment variable, and say so here rather than only in the
+    # guide: a token passed as an argument lands in shell history and in `ps`.
+    #
+    # A review proposed hide_input=True. Click consumes that in exactly one
+    # place, prompt_for_value, so on an option that never prompts it does
+    # nothing at all: it would read as a fix in the diff and change no
+    # behaviour. Making it real needs prompt=True, which breaks the
+    # non-interactive use the exit-code contract exists to serve, and would
+    # make this the only one of Ferry's four token options behaving that way.
+    help="Stoat user token. Prefer the STOAT_TOKEN environment variable",
+)
 def check_cmd(output_dir: str, stoat_url: str | None, token: str | None) -> None:
     """Verify a finished migration against the live Stoat server.
 
