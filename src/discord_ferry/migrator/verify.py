@@ -278,6 +278,57 @@ async def _check_structure(
             stoat_id=stoat_id,
         )
 
+    # Categories are the ONE entity whose expected name Ferry records, in
+    # state.category_names, so this is the only name comparison in the tool. A
+    # channel or role rename is undetectable, which is stated as a limit rather
+    # than approximated (spec P2 S11).
+    #
+    # `categories` is Optional upstream: the key can be absent entirely on a
+    # server that never had one, not merely an empty list.
+    found_titles = {
+        c["id"]: c.get("title", "")
+        for c in (server.get("categories") or [])
+        if isinstance(c, dict) and "id" in c
+    }
+    for discord_id, stoat_id in state.category_map.items():
+        if stoat_id not in found_titles:
+            report.add(
+                name=f"category:{discord_id}",
+                status="fail",
+                kind="category_missing",
+                detail="the server does not list this category",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+            continue
+        expected_title = state.category_names.get(discord_id)
+        actual_title = found_titles[stoat_id]
+        if expected_title is not None and expected_title != actual_title:
+            # warn, not fail. The category exists and its channels are intact;
+            # only a heading differs. This is the single reachable warn in the
+            # tool, and it is why the status exists at all: a design review
+            # found warn promised in two acceptance criteria and produced by no
+            # code path.
+            report.add(
+                name=f"category:{discord_id}",
+                status="warn",
+                kind="category_title_mismatch",
+                detail="the category exists but its title differs from the recorded one",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+                expected=expected_title,
+                found=actual_title,
+            )
+        else:
+            report.add(
+                name=f"category:{discord_id}",
+                status="ok",
+                kind="category_present",
+                detail="category exists under its recorded id",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+
     emoji_ids = {e["_id"] for e in emoji if isinstance(e, dict) and "_id" in e}
     for discord_id, stoat_id in state.emoji_map.items():
         present = stoat_id in emoji_ids
