@@ -1474,3 +1474,190 @@ async def test_an_empty_strategy_and_flatten_are_different_claims() -> None:
     assert details[""] != details["flatten"]
     assert "flatten" in details["flatten"]
     assert "flatten" not in details[""]
+
+
+# ---------------------------------------------------------------------------
+# channel_renamed (#295, SC-3.3, SC-3.5, SC-3.7, SC-3.8, SC-3.11, SC-3.13, SC-3.14)
+# ---------------------------------------------------------------------------
+#
+# Fixture rule throughout: the Discord id, the Stoat id, the recorded name and
+# the server's name are four distinct literals, so no assertion can pass by
+# comparing a value with itself.
+
+
+async def test_a_renamed_channel_reports_warn(mock_aiohttp: aioresponses) -> None:
+    """SC-3.3. The feature this release exists for.
+
+    warn rather than fail: the channel exists under its recorded id and its
+    content is intact, and only the label moved. That matches what a renamed
+    category has reported since v2.16.0, and it keeps the exit code at 0.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(
+        mock_aiohttp, _server_payload([stoat_id], [{"_id": stoat_id, "name": "renamed-here"}])
+    )
+    state = _state_with_channels({"d-100": stoat_id})
+    state.created_channel_names = {"d-100": "general"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    result = next(r for r in report.results if r.name == "channel:d-100")
+    assert result.status == "warn"
+    assert result.kind == "channel_renamed"
+    assert result.expected == "general"
+    assert result.found == "renamed-here"
+
+
+async def test_a_matching_name_emits_no_rename_result(mock_aiohttp: aioresponses) -> None:
+    """SC-3.5. A match keeps channel_present and emits nothing extra.
+
+    Not a rename result with status ok: exactly one result for the channel, and
+    it is the identity verdict.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(mock_aiohttp, _server_payload([stoat_id], [{"_id": stoat_id, "name": "general"}]))
+    state = _state_with_channels({"d-100": stoat_id})
+    state.created_channel_names = {"d-100": "general"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    results = [r for r in report.results if r.name == "channel:d-100"]
+    assert len(results) == 1
+    assert results[0].status == "ok"
+    assert results[0].kind == "channel_present"
+
+
+async def test_a_missing_channel_yields_exactly_one_result(mock_aiohttp: aioresponses) -> None:
+    """SC-3.7. One cause, one result, and it is structural rather than guarded.
+
+    A recorded name exists here, so an implementation that compared names before
+    deciding presence would emit a rename alongside the failure. The comparison
+    lives inside the arm that has already decided the channel is present, so a
+    missing channel takes a different arm and cannot reach it.
+
+    COUNT the results rather than checking the first one.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(mock_aiohttp, _server_payload([], []))
+    state = _state_with_channels({"d-100": stoat_id})
+    state.created_channel_names = {"d-100": "general"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    results = [r for r in report.results if r.name == "channel:d-100"]
+    assert len(results) == 1
+    assert results[0].kind == "channel_missing"
+    assert results[0].status == "fail"
+
+
+async def test_an_invisible_channel_yields_exactly_one_result(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.8. The same rule for the middle arm of the three-way conditional."""
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(mock_aiohttp, _server_payload([stoat_id], []))
+    state = _state_with_channels({"d-100": stoat_id})
+    state.created_channel_names = {"d-100": "general"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    results = [r for r in report.results if r.name == "channel:d-100"]
+    assert len(results) == 1
+    assert results[0].kind == "channel_not_visible"
+    assert results[0].status == "unverifiable"
+
+
+async def test_a_channel_with_no_recorded_name_reports_present(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.6, the back-compatibility half. KNOWN LIMIT, pinned deliberately.
+
+    This is NOT a missing check. A state.json written before 2.17.0 records no
+    channel name, so there is nothing to compare against and a renamed channel is
+    undetectable for that migration. Documented in
+    docs/guides/known-limitations.md, and it is what makes an old state file
+    honest rather than noisy.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(
+        mock_aiohttp, _server_payload([stoat_id], [{"_id": stoat_id, "name": "renamed-here"}])
+    )
+    state = _state_with_channels({"d-100": stoat_id})
+    assert state.created_channel_names == {}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    result = next(r for r in report.results if r.name == "channel:d-100")
+    assert result.status == "ok"
+    assert result.kind == "channel_present"
+
+
+async def test_a_rename_keeps_the_exit_code_at_zero(mock_aiohttp: aioresponses) -> None:
+    """SC-3.10. warn is not fail, and the v2.16.0 exit contract is unchanged."""
+    stoat_id = "01JSTOATCH00000000000AAA"
+    _register(mock_aiohttp, _server_payload([stoat_id], [{"_id": stoat_id, "name": "renamed"}]))
+    state = _state_with_channels({"d-100": stoat_id})
+    state.created_channel_names = {"d-100": "general"}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    assert report.counts()["warn"] == 1
+    assert report.has_failures is False
+
+
+async def test_the_truncation_cases_report_ok_end_to_end(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.13 and SC-3.14. The check side of the trap the recording avoids.
+
+    A Discord name over 32 characters is sent truncated, and a collision pair is
+    sent with a numeric suffix. Because the RECORDED value is what Ferry sent,
+    both compare equal against the live server and report ok. Recording ch.name
+    would report a rename for both, against a server nobody edited.
+    """
+    long_truncated = "this-channel-name-is-definitely-"
+    collided = "a-very-long-channel-name-that-c-1"
+    first, second = "01JSTOATCH00000000000AAA", "01JSTOATCH00000000000BBB"
+    _register(
+        mock_aiohttp,
+        _server_payload(
+            [first, second],
+            [{"_id": first, "name": long_truncated}, {"_id": second, "name": collided}],
+        ),
+    )
+    state = _state_with_channels({"d-100": first, "d-101": second})
+    state.created_channel_names = {"d-100": long_truncated, "d-101": collided}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    channel_results = [r for r in report.results if r.name.startswith("channel:")]
+    assert len(channel_results) == 2
+    assert {r.status for r in channel_results} == {"ok"}
+
+
+async def test_the_rename_comparison_costs_no_extra_request(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.11. The structure family is still two requests at any entity count.
+
+    The names were already in the response the check has always made, so the
+    comparison is free. This drives several renamed channels and several renamed
+    roles at once and counts the structure requests.
+    """
+    ids = [f"01JSTOATCH0000000000{i:03d}" for i in range(6)]
+    _register(
+        mock_aiohttp,
+        _server_payload(ids, [{"_id": i, "name": f"live-{n}"} for n, i in enumerate(ids)]),
+    )
+    state = _state_with_channels({f"d-{n}": i for n, i in enumerate(ids)})
+    state.created_channel_names = {f"d-{n}": f"recorded-{n}" for n in range(6)}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    assert report.counts()["warn"] == 6
+    structure_calls = [
+        key
+        for key in mock_aiohttp.requests
+        if "/servers/" in str(key[1]) and "/messages" not in str(key[1])
+    ]
+    assert len(structure_calls) == 2, f"expected 2 structure requests, got {structure_calls}"

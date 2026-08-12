@@ -286,6 +286,33 @@ async def _check_structure(
         # server, so identity checking is valid for those entries too.
         if stoat_id in visible_ids:
             verified.add(discord_id)
+            # The rename comparison lives INSIDE this arm, which has already
+            # decided the channel is present. That satisfies "one cause, one
+            # result" structurally rather than by a guard: a channel taking
+            # either arm below cannot reach this code, so a missing or invisible
+            # channel can never also be reported as renamed.
+            #
+            # A channel with no recorded name skips the comparison entirely and
+            # keeps `channel_present`. That is what makes a state file written
+            # before 2.17.0 honest rather than noisy, and it is a documented
+            # limit rather than a missing check.
+            recorded = state.created_channel_names.get(discord_id)
+            found_name = visible_names.get(stoat_id, "")
+            if recorded is not None and recorded != found_name:
+                report.add(
+                    name=f"channel:{discord_id}",
+                    status="warn",
+                    kind="channel_renamed",
+                    detail=(
+                        "the channel exists and its content is intact, but it has "
+                        "been renamed on the server since the migration"
+                    ),
+                    discord_id=discord_id,
+                    stoat_id=stoat_id,
+                    expected=recorded,
+                    found=found_name,
+                )
+                continue
             report.add(
                 name=f"channel:{discord_id}",
                 status="ok",
