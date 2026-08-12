@@ -1319,3 +1319,35 @@ async def test_all_seven_populations_in_one_run(mock_aiohttp: aioresponses) -> N
 
     assert report.has_failures is False
     assert report.counts()["fail"] == 0
+
+
+async def test_tail_results_keep_channel_map_order_despite_the_fan_out(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The tail checks run concurrently, so their ORDER is a property worth
+    pinning rather than an accident.
+
+    asyncio.gather returns in INPUT order regardless of completion order, so a
+    slow channel does not shuffle the report. Kills an append-as-completed
+    implementation, which would render the CLI table in a different order on
+    every run and make two reports of the same server impossible to diff.
+    """
+    ids = [f"01JSTOATCH0000000000000{n}" for n in range(6)]
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server(ids))
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    for cid in ids:
+        mock_aiohttp.get(
+            f"{BASE_URL}/channels/{cid}/messages?limit=100&sort=Latest",
+            payload=[{"_id": _sid(9)}],
+        )
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {f"d-{n}": cid for n, cid in enumerate(ids)}
+    for n in range(6):
+        state.channel_high_water[f"d-{n}"] = _did(9)
+        state.channel_message_counts[f"d-{n}"] = 1
+    state.message_map[_did(9)] = _sid(9)
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    tail_order = [r.discord_id for r in report.results if r.name.startswith("tail:")]
+    assert tail_order == [f"d-{n}" for n in range(6)]
