@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.16.1] - 2026-08-12
+
+### Fixed
+
+- **Creating a new Stoat server no longer fails immediately.** Any migration that did not
+  reuse an existing server stopped at the start of the server phase with
+  `Phase server failed: '_id'`, before a single channel was made. Stoat replies to the
+  create-server call with the server nested beside the channels it makes alongside it,
+  and Ferry read the reply as though the server were at the top level. Point Ferry at a
+  fresh server and it now proceeds. Migrations run with `--server-id`, and resumed or
+  incremental runs carrying a server id, were never affected (#265).
+- `ferry build`, which creates a server from a blueprint or a preset template, read the
+  same reply the same wrong way and failed the same way. Fixed with it.
+
 ## [2.16.0] - 2026-08-12
 
 ### Added
