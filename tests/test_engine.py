@@ -2418,3 +2418,23 @@ def test_completeness_is_deliberately_not_applied_to_an_incremental_state() -> N
         "tests/test_structure.py. Applying it to an incremental state reports a "
         "false alarm on a legitimate pre-2.17.0 upgrade. See SC-5.8."
     )
+
+
+async def test_an_invalid_thread_strategy_is_recorded_as_the_effective_one(
+    tmp_path: Path,
+) -> None:
+    """The recorded strategy must describe what RAN, not what was asked for.
+
+    run_messages falls back to "flatten" for any value outside
+    _THREAD_STRATEGIES. Recording config.thread_strategy raw would let state.json
+    name a strategy the run never used, and ferry check would then report that as
+    the cause of an unverifiable result, which is the exact failure this field
+    exists to prevent.
+
+    The CLI cannot reach this, because click.Choice validates there. The GUI
+    reads its value back from a storage file it does not re-validate, and a
+    programmatic FerryConfig is unconstrained. Found by the chunk 1 review.
+    """
+    config = _make_config(tmp_path, thread_strategy="not-a-strategy")
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.thread_strategy == "flatten"
