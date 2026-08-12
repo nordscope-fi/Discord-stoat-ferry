@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-08-12
+
+### Added
+
+- **`ferry check` now detects a renamed channel or role.** Ferry records the name it gives
+  each channel and role as it creates them, so Check can compare that against the current
+  name on the server and report a rename as a warning rather than passing it silently. A
+  rename does not fail the command, because nothing has been lost. This works for
+  migrations run under 2.17.0 or later: an earlier migration recorded no such names, and
+  nothing can recover them after the fact, so a rename there stays invisible (#269).
+- **`ferry check --json`** prints the whole report as a single JSON document instead of a
+  table, for a script that wants the individual results rather than a pass or fail. Every
+  free-text value has control characters stripped, because a consumer that parses the
+  document and prints a value would otherwise inherit whatever the server sent (#266).
+
+### Changed
+
+- **`ferry check` now names why a result could not be verified**, instead of listing every
+  possible cause. Ferry records which thread strategy a migration ran under, so a merge
+  parent is reported as expected rather than as one of three possibilities. A migration run
+  by an earlier version recorded no strategy, and Check still lists the possibilities for
+  those (#267).
+
+### Fixed
+
+- The recorded thread strategy is the one that actually ran. A configuration carrying a
+  value outside `flatten`, `merge` and `archive` runs as `flatten`, and the state file now
+  says so rather than repeating what was asked for. The CLI rejects such a value outright;
+  the GUI reads its setting back from a file it does not re-validate.
+
 ## [2.16.1] - 2026-08-12
 
 ### Fixed
