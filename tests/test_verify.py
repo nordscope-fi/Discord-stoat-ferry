@@ -853,3 +853,129 @@ async def test_run_check_does_not_close_an_injected_session(
             session=injected,
         )
         assert injected.closed is False
+
+
+async def test_a_deleted_tail_inside_the_window_is_a_failure(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.6. THE MANDATORY DISCRIMINATOR. Do not delete this test.
+
+    A five-message channel whose recorded tail was deleted, with messages still
+    present on BOTH sides of where it should be. So the window's oldest id sorts
+    BELOW the expected tail and its newest sorts ABOVE it.
+
+    This is the only one of the twelve tail scenarios that kills either ordering
+    mutant, measured on the runnable prototype at
+    docs/plans/designs/2026-08-11-check-tool-classifier-prototype.py:
+
+        read the NEWEST id where the oldest belongs (max)   -> only this one
+        take the oldest positionally as window[0]           -> only this one
+
+    Every other scenario either contains the tail, so the oldest id is never
+    consulted, or overflows the window, where both ends sort above the expected
+    id and min and max agree. This is the only input where the two ends of the
+    window disagree.
+
+    Omitting it ships the ordering bug green while the suite looks thorough, and
+    that bug inverts the verdicts: real data loss reported as unverifiable,
+    ordinary post-migration activity reported as fail.
+    """
+    _register_tail(mock_aiohttp, [0, 1, 2, 3, 5, 6, 7, 8, 9])
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=4, count=5), _noop_event)
+    result = _tail_result(report)
+    assert result.status == "fail"
+    assert result.kind == "tail_absent"
+
+
+async def test_the_whole_window_predating_the_tail_is_a_failure(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.11. Every id in the window sorts below the expected tail, so the
+    tail AND everything after it is gone while older content survives.
+
+    An earlier acceptance criterion asked for warn here. Running the classifier
+    across its whole input space showed warn was reachable from no path at all,
+    and working out the meaning inverts the severity: this is STRONGER evidence
+    of loss than SC-3.6, where only the tail itself is missing. It is a fail
+    with its own kind, because a repair tool would treat the two differently.
+    """
+    _register_tail(mock_aiohttp, list(range(50)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=200, count=201), _noop_event)
+    result = _tail_result(report)
+    assert result.status == "fail"
+    assert result.kind == "tail_and_after_absent"
+
+
+async def test_a_merge_parent_whose_tail_overflowed_the_window_is_unverifiable(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.4. Three hundred merged messages pushed the parent's own tail out.
+
+    The window is entirely NEWER than the expected tail, so it simply does not
+    reach far enough back. That is not evidence of loss, and calling it fail
+    would break spec S3 criterion 5: a merge migration must produce zero fail.
+    """
+    _register_tail(mock_aiohttp, list(range(210, 310)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    result = _tail_result(report)
+    assert result.status == "unverifiable"
+    assert result.kind == "tail_not_recorded"
+
+
+async def test_post_migration_activity_over_the_window_is_unverifiable(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.12. Same shape as the merge overflow, different cause.
+
+    Both are "the window does not reach the tail", and neither is a defect.
+    """
+    _register_tail(mock_aiohttp, list(range(150, 250)))
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    assert _tail_result(report).status == "unverifiable"
+
+
+async def test_an_empty_channel_that_should_have_messages_is_a_failure(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.7. State records ten migrated messages; the server returns none."""
+    _register_tail(mock_aiohttp, [])
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    result = _tail_result(report)
+    assert result.status == "fail"
+    assert result.kind == "channel_empty"
+
+
+@pytest.mark.parametrize(
+    ("window", "high_water", "count"),
+    [
+        pytest.param(list(range(10)), 9, 10, id="tail-is-newest"),
+        pytest.param(list(range(5)), 4, 5, id="channel-shorter-than-window"),
+        pytest.param(list(range(50)), 9, 10, id="merge-parent-small"),
+        pytest.param(list(range(210, 310)), 9, 10, id="merge-parent-overflow"),
+        pytest.param([0, 1, 2, 3, 5, 6, 7, 8, 9], 4, 5, id="deleted-tail"),
+        pytest.param([], 9, 10, id="empty-channel"),
+        pytest.param([], None, 0, id="nothing-expected"),
+        pytest.param(list(range(60)), 9, 10, id="human-activity-small"),
+        pytest.param(list(range(150, 250)), 9, 10, id="human-activity-overflow"),
+        pytest.param(list(range(50)), 200, 201, id="whole-window-predates-tail"),
+    ],
+)
+async def test_the_tail_check_never_emits_warn(
+    mock_aiohttp: aioresponses,
+    window: list[int],
+    high_water: int | None,
+    count: int,
+) -> None:
+    """SC-3.13. warn belongs to the category title check, and nowhere else.
+
+    Driven across every tail scenario. Kills reintroducing the inverted-severity
+    warn that critique round 2 removed, and documents in executable form that a
+    warn appearing in a report can only have come from a renamed category.
+    """
+    _register_tail(mock_aiohttp, window)
+    report = await run_check(
+        BASE_URL, TOKEN, _tail_state(high_water=high_water, count=count), _noop_event
+    )
+    tail_statuses = {r.status for r in report.results if r.name.startswith("tail:")}
+    assert "warn" not in tail_statuses
+    assert tail_statuses <= {"ok", "fail", "unverifiable"}

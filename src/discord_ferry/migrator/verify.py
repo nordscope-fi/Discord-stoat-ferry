@@ -493,4 +493,49 @@ def _classify_tail(
         )
     if expected in set(window_ids):
         return ("ok", "tail_present", "the last message Ferry recorded is still present")
-    return ("unverifiable", "tail_not_recorded", "placeholder, refined in task #257")
+
+    # The tail is absent. Two very different reasons, and telling them apart is
+    # what makes this check worth running.
+    #
+    # Stoat message ids are ULIDs, whose leading 48 bits are a millisecond
+    # timestamp in Crockford base32, so lexicographic order on equal-length ids
+    # IS time order. That lets the window's position be compared against the
+    # expected tail without any timestamps.
+    #
+    # min() and max(), never window[0] or window[-1]. MessageSort::Latest is
+    # doc!{"_id": -1} upstream and the vector is not reversed, so element zero
+    # is the NEWEST. Reading it as the oldest inverts both verdicts below: real
+    # loss would report unverifiable while ordinary post-migration activity
+    # would report fail. Taking the extremes by value also makes this
+    # independent of whatever order the server chooses to send.
+    newest = max(window_ids)
+    oldest = min(window_ids)
+    if newest < expected:
+        # Everything on the server predates the tail, so the tail and every
+        # message after it is gone while older content survives. Stronger
+        # evidence of loss than the branch below, where only the tail itself is
+        # missing, and separated because a repair would treat them differently.
+        return (
+            "fail",
+            "tail_and_after_absent",
+            "every recent message predates the last one Ferry recorded, so that "
+            "message and everything after it is missing",
+        )
+    if oldest < expected:
+        # The window spans the tail's own position in time and the tail is not
+        # in it. It was deleted.
+        return (
+            "fail",
+            "tail_absent",
+            "the last message Ferry recorded is missing, though messages from "
+            "both before and after it are present",
+        )
+    # The whole window is newer than the tail: more than the window's worth of
+    # messages arrived since. Not evidence of loss. This is the branch that
+    # keeps a large merge, and a busy channel, off the failure list.
+    return (
+        "unverifiable",
+        "tail_not_recorded",
+        f"more than {_WINDOW} messages have arrived since the last one Ferry "
+        "recorded, so the window does not reach far enough back to confirm it",
+    )
