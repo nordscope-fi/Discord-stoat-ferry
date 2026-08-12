@@ -407,6 +407,68 @@ ferry stats ~/migrations/my-server-2026-05-15/
 
 ---
 
+## `ferry check`
+
+Verify a migration you have already run. Check reads the state file Ferry wrote and asks the live Stoat server whether everything it recorded is still there: every channel, role, category and emoji by id, and each channel's most recent messages. It is read-only, creating, editing and deleting nothing.
+
+```
+ferry check <output-dir> [OPTIONS]
+```
+
+Point it at the same output directory the migration used. Use it after a migration finishes, after a resume, or weeks later to confirm nothing has been lost.
+
+This is not the same command as [`ferry validate`](#ferry-validate), which inspects a Discord export before you migrate it and never contacts a server.
+
+### Options
+
+| Flag | Environment Variable | Description |
+|------|----------------------|-------------|
+| `--stoat-url TEXT` | `STOAT_URL` | Stoat API base URL *(required)* |
+| `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)* |
+
+### What the four statuses mean
+
+| Status | Meaning |
+|--------|---------|
+| `ok` | Found, and it matches what Ferry recorded |
+| `warn` | It exists and its content is intact, but a name differs. Today this only ever means a category was renamed |
+| `fail` | Something Ferry recorded is gone, or a channel lost messages |
+| `unverifiable` | Ferry cannot answer, and says why. Not a pass and not a failure |
+
+`unverifiable` is worth reading rather than skimming past. It is the honest answer when Ferry never recorded what it would need to confirm something, which happens for good reasons: you migrated with `--thread-strategy=merge`, a send was accepted as a duplicate, or the token you gave Check cannot see a particular channel.
+
+### Exit codes
+
+| Code | When |
+|------|------|
+| `0` | Every result was `ok`, `warn` or `unverifiable` |
+| `1` | Any result was `fail`, or the migration could not be checked at all |
+
+A `warn` on its own does not fail the command, because nothing has been lost. Use the exit code in a script; there is no separate machine-readable flag.
+
+### What Check cannot tell you
+
+Check reads the most recent 100 messages in each channel and confirms the last one Ferry recorded sending is still among them. That is cheap enough to run on any server, and it is honest about what it misses:
+
+- **A gap in the middle of a channel is invisible.** An `ok` means the recorded last message is present. It does not mean the channel is complete.
+- **If more than 100 messages arrived after your migration**, Check can no longer see far enough back and reports `unverifiable` rather than guessing.
+- **A renamed channel or role is not detected.** Ferry never recorded the names it gave them, so there is nothing to compare against. Renamed *categories* are detected, because those names are recorded.
+- **A duplicate forum index** is not detected.
+- **Check will not run against a dry run.** A dry run records placeholders for things that were never created, so there is nothing on a server to compare with.
+
+### Examples
+
+```bash
+# Check a migration you have just run
+ferry check ./ferry-output --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+
+# In a script: fail the job if anything is missing
+if ! ferry check ./ferry-output; then
+  echo "migration verification failed" >&2
+  exit 1
+fi
+```
+
 ## `ferry probe`
 
 Check what a live Stoat instance actually supports before you migrate to it. Probe measures upload size limits, checks whether voice channels can be created (Stoat Bug #194), checks webhook availability, and inspects rate-limit behaviour. It is most useful for self-hosted instances, where limits differ from the official service.

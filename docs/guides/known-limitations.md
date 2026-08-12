@@ -121,6 +121,24 @@ These limitations relate to platform-level features that either work differently
 
 ---
 
+## Verifying a Migration
+
+`ferry check` confirms a finished migration against the live server. What it proves is narrower than it might appear, and the limits below are deliberate rather than unfinished work.
+
+**A gap in the middle of a channel is invisible.** Check reads each channel's most recent 100 messages and confirms the last one Ferry recorded is still among them. If messages went missing earlier in the channel while the last one survived, Check reports `ok`. Read an `ok` as "the recorded last message is present", never as "this channel is complete".
+
+**A channel that gained more than 100 messages since the migration cannot be checked.** The window no longer reaches back to the message Ferry recorded, so Check reports `unverifiable` rather than guessing. This is common on an active server.
+
+**A renamed channel or role is not detected.** Ferry records the identifiers it created but not the names it gave them, so there is nothing to compare a current name against. Renamed *categories* are detected, because category names are recorded.
+
+**A message accepted as a duplicate cannot be confirmed.** When Stoat recognises a retry and refuses it, it does not say which message it already had, so Ferry has no identifier to check later. Channels affected this way report `unverifiable`.
+
+**A channel your token cannot read reports `unverifiable`.** Check can tell this apart from a deleted channel, because the server lists every channel's identifier even when it will not return the channel itself.
+
+**A duplicate forum index message is not detected.** Ferry records only the most recent index message it posted.
+
+**Check refuses to run against a dry run.** A dry run records placeholders for channels and messages that were never created, so there is nothing on a server to compare them with.
+
 ## See Also
 
 - [Troubleshooting](troubleshooting.md) — solutions for common migration errors
