@@ -167,8 +167,9 @@ async def run_server(
             else:
                 name = "Ferry Server"
 
-            result = await api_create_server(session, config.stoat_url, config.token, name)
-            state.stoat_server_id = result["_id"]
+            state.stoat_server_id = await api_create_server(
+                session, config.stoat_url, config.token, name
+            )
             # S2: persist immediately so a kill before the post-phase save still records the
             # server id — on --resume the reuse branch fires instead of creating a duplicate.
             save_state(state, config.output_dir)

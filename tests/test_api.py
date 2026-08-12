@@ -203,13 +203,22 @@ def mock_aiohttp() -> aioresponses:
 # ---------------------------------------------------------------------------
 
 
-async def test_api_create_server(mock_aiohttp: aioresponses) -> None:
-    """POST /servers/create returns the new server dict including _id."""
-    mock_aiohttp.post(f"{BASE_URL}/servers/create", payload={"_id": "srv123", "name": "Test"})
+async def test_api_create_server_wrapped_response(mock_aiohttp: aioresponses) -> None:
+    """SC-1.1. The live shape nests the server beside the channels created with it.
+
+    Regression guard for #265: every fixture in the suite used to mock a bare
+    ``{"_id": ...}``, which no current Stoat returns.
+    """
+    mock_aiohttp.post(
+        f"{BASE_URL}/servers/create",
+        payload={
+            "server": {"_id": "srv123", "name": "Test"},
+            "channels": [{"_id": "ch_default"}],
+        },
+    )
     async with aiohttp.ClientSession() as session:
-        result = await api_create_server(session, BASE_URL, TOKEN, "Test")
-    assert result["_id"] == "srv123"
-    assert result["name"] == "Test"
+        server_id = await api_create_server(session, BASE_URL, TOKEN, "Test")
+    assert server_id == "srv123"
 
 
 # ---------------------------------------------------------------------------

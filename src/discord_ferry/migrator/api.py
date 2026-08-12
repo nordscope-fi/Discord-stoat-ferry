@@ -361,8 +361,18 @@ async def api_create_server(
     stoat_url: str,
     token: str,
     name: str,
-) -> dict[str, Any]:
-    """Create a new server on the Stoat instance.
+) -> str:
+    """Create a new server on the Stoat instance and return its id.
+
+    The route answers with ``CreateServerLegacyResponse`` (``create_server`` in upstream
+    ``routes/servers/server_create.rs``), which nests the server beside the channels
+    Stoat creates with it::
+
+        {"server": {"_id": ..., ...}, "channels": [...]}
+
+    There is no ``serde(flatten)``, so reading ``_id`` off the top level raised
+    ``KeyError`` and killed the server phase (#265). The ``channels`` member is
+    discarded: Ferry creates its own channels and does not adopt the default one.
 
     Args:
         session: An active aiohttp ClientSession.
@@ -371,10 +381,42 @@ async def api_create_server(
         name: Display name for the new server.
 
     Returns:
-        Server object dict from the API (includes ``_id``).
+        The new server's id.
+
+    Raises:
+        MigrationError: If the response carries no recognisable server id. The message
+            names the route and the key names received, never a value: on the
+            ``ferry build`` path nothing downstream redacts it.
     """
     url = f"{stoat_url.rstrip('/')}/servers/create"
-    return await _api_request(session, "POST", url, token, {"name": name})
+    version_hint = "The Stoat instance may be running an incompatible API version."
+    # ``object`` local: _api_request is declared -> dict[str, Any] but returns whatever
+    # JSON arrived, so isinstance narrowing is required rather than optional.
+    raw: object = await _api_request(session, "POST", url, token, {"name": name})
+    if not isinstance(raw, dict):
+        # Never sorted(raw) here: on a list that sorts the elements into the message.
+        raise MigrationError(
+            f"Stoat returned {type(raw).__name__} from {url}, expected an object. {version_hint}"
+        )
+    server = raw.get("server")
+    if server is None:
+        raise MigrationError(
+            f"Stoat returned no 'server' member from {url}; keys were {sorted(raw)}. {version_hint}"
+        )
+    if not isinstance(server, dict):
+        raise MigrationError(
+            f"Stoat returned a {type(server).__name__} as 'server' from {url}, "
+            f"expected an object. {version_hint}"
+        )
+    server_id = server.get("_id")
+    if not isinstance(server_id, str) or not server_id:
+        # Nested keys, not top-level: an upstream rename of _id leaves the top level
+        # looking exactly as Ferry expects, so naming it would read like success.
+        raise MigrationError(
+            f"Stoat returned no server id from {url}; 'server' keys were "
+            f"{sorted(server)}. {version_hint}"
+        )
+    return server_id
 
 
 async def api_fetch_server(

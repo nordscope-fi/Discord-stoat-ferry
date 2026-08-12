@@ -490,7 +490,7 @@ writing a new callback — no engine changes needed.
 
 | Function | HTTP | Purpose |
 |----------|------|---------|
-| `api_create_server` | `POST /servers` | Create new Stoat server |
+| `api_create_server` | `POST /servers/create` | Create new Stoat server, returns its id |
 | `api_fetch_server` | `GET /servers/:id` | Verify server exists |
 | `api_edit_server` | `PATCH /servers/:id` | Update server settings |
 | `api_create_role` | `POST /servers/:id/roles` | Create role |

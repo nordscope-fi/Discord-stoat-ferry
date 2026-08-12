@@ -183,7 +183,7 @@ async def test_permission_bootstrap_failure_is_warned_not_fatal(tmp_path: Path) 
         # Server creation succeeds.
         m.post(
             f"{config.stoat_url}/servers/create",
-            payload={"_id": "stoat-server-001"},
+            payload={"server": {"_id": "stoat-server-001"}, "channels": []},
         )
         # Icon upload and PATCH icon — skip (no icon in fixture guild without a real file).
         # First PATCH (icon) is never reached since guild_icon.png doesn't exist locally.
