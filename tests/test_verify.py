@@ -919,7 +919,7 @@ async def test_a_merge_parent_whose_tail_overflowed_the_window_is_unverifiable(
     report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
     result = _tail_result(report)
     assert result.status == "unverifiable"
-    assert result.kind == "tail_not_recorded"
+    assert result.kind == "tail_window_exhausted"
 
 
 async def test_post_migration_activity_over_the_window_is_unverifiable(
@@ -1151,7 +1151,7 @@ async def test_a_whole_merge_migration_produces_zero_failures(
     assert tails["d-plain"] == ("ok", "tail_present")
     assert tails["forum-index-cat-9"] == ("ok", "tail_present")
     assert tails["d-empty"] == ("ok", "nothing_expected")
-    assert tails["d-big"] == ("unverifiable", "tail_not_recorded")
+    assert tails["d-big"] == ("unverifiable", "tail_window_exhausted")
 
 
 async def test_one_channel_failing_does_not_abort_the_others(
@@ -1312,7 +1312,9 @@ async def test_all_seven_populations_in_one_run(mock_aiohttp: aioresponses) -> N
 
     assert tails["d-flat"] == ("ok", "tail_present")
     assert tails["d-merge-small"] == ("ok", "tail_present")
-    assert tails["d-merge-big"] == ("unverifiable", "tail_not_recorded")
+    # A DIFFERENT kind from d-dupe below, deliberately: this one is merely out
+    # of the window's reach, while that one can never be confirmed at all.
+    assert tails["d-merge-big"] == ("unverifiable", "tail_window_exhausted")
     assert tails["forum-index-cat-9"] == ("ok", "tail_present")
     assert tails["d-dupe"] == ("unverifiable", "tail_not_recorded")
     assert tails["d-silent"] == ("ok", "nothing_expected")

@@ -69,6 +69,35 @@ class CheckResult:
     purpose. This report is the contract the repair tool consumes, and a status
     plus a sentence is not actionable: a repair needs the entity's ids and an
     enumerable defect category it can dispatch on, not prose to parse.
+
+    The complete ``kind`` vocabulary lives here rather than only in the design
+    document, because that directory is gitignored and this is the contract
+    another batch will be written against:
+
+    ==================  ====================================================
+    Family              Kinds
+    ==================  ====================================================
+    Channel identity    ``channel_present``, ``channel_missing``,
+                        ``channel_not_visible``
+    Role identity       ``role_present``, ``role_missing``
+    Category identity   ``category_present``, ``category_missing``,
+                        ``category_title_mismatch``, ``category_title_unknown``
+    Emoji identity      ``emoji_present``, ``emoji_missing``
+    Tail                ``nothing_expected``, ``tail_present``,
+                        ``channel_empty``,
+                        ``tail_absent``, ``tail_and_after_absent``,
+                        ``tail_not_recorded``, ``tail_window_exhausted``
+    Failure to look     ``check_error``
+    ==================  ====================================================
+
+    Two pairs are deliberately NOT collapsed, both for the same reason.
+    ``tail_absent`` against ``tail_and_after_absent``: one message gone, against
+    everything from that point on. ``tail_not_recorded`` against
+    ``tail_window_exhausted``: Ferry recorded no id and can never confirm it,
+    against the id being merely out of a 100-message window's reach, which a
+    tool willing to page further back could resolve. Collapsing either pair
+    forces a repair to parse the prose detail, which is what a ``kind`` exists
+    to avoid.
     """
 
     name: str
@@ -642,9 +671,16 @@ def _classify_tail(
     # The whole window is newer than the tail: more than the window's worth of
     # messages arrived since. Not evidence of loss. This is the branch that
     # keeps a large merge, and a busy channel, off the failure list.
+    # A DIFFERENT kind from the `expected is None` branch above, and the two are
+    # separated for the same reason the two fail kinds are. That one is
+    # permanently unanswerable: Ferry recorded no id, so no amount of looking
+    # will ever confirm it. This one is merely out of reach of a 100-message
+    # window, and a repair tool willing to page further back could resolve it.
+    # Collapsing them would force that tool to parse the prose detail, which is
+    # what having a kind exists to avoid.
     return (
         "unverifiable",
-        "tail_not_recorded",
+        "tail_window_exhausted",
         f"more than {_WINDOW} messages have arrived since the last one Ferry "
         "recorded, so the window does not reach far enough back to confirm it",
     )
