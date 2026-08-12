@@ -221,6 +221,71 @@ async def test_api_create_server_wrapped_response(mock_aiohttp: aioresponses) ->
     assert server_id == "srv123"
 
 
+async def test_api_create_server_array_body(mock_aiohttp: aioresponses) -> None:
+    """SC-2.1. A JSON array is named by type, and its elements never reach the message.
+
+    ``sorted()`` on a list sorts its contents, so a single shared ``sorted(raw)``
+    would put response data into the error text.
+    """
+    mock_aiohttp.post(f"{BASE_URL}/servers/create", payload=[{"_id": "srv123"}])
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_create_server(session, BASE_URL, TOKEN, "Test")
+    assert "list" in str(exc.value)
+    assert "srv123" not in str(exc.value)
+
+
+async def test_api_create_server_no_server_member(mock_aiohttp: aioresponses) -> None:
+    """SC-2.2. The flat pre-2023 shape is rejected, naming the top-level keys."""
+    mock_aiohttp.post(f"{BASE_URL}/servers/create", payload={"id": "srv123", "name": "Test"})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_create_server(session, BASE_URL, TOKEN, "Test")
+    assert "servers/create" in str(exc.value)
+    assert "'id'" in str(exc.value)
+    assert "'name'" in str(exc.value)
+
+
+async def test_api_create_server_server_not_an_object(mock_aiohttp: aioresponses) -> None:
+    """SC-2.3. A non-object 'server' member is named by type, not by value."""
+    mock_aiohttp.post(f"{BASE_URL}/servers/create", payload={"server": "srv1", "channels": []})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_create_server(session, BASE_URL, TOKEN, "Test")
+    assert "str" in str(exc.value)
+    assert "srv1" not in str(exc.value)
+
+
+async def test_api_create_server_renamed_id_names_nested_keys(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-2.4. If upstream renamed _id, the message must name the NESTED keys.
+
+    The top level still reads ``{"server": ..., "channels": ...}``, exactly what Ferry
+    expects, so a message naming only the top-level keys would describe a body that
+    looks healthy while the parse had in fact failed.
+    """
+    mock_aiohttp.post(
+        f"{BASE_URL}/servers/create",
+        payload={"server": {"id": "srv1", "name": "Test"}, "channels": []},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_create_server(session, BASE_URL, TOKEN, "Test")
+    message = str(exc.value)
+    assert "'id'" in message
+    assert "'name'" in message
+    assert "channels" not in message
+
+
+async def test_api_create_server_empty_id(mock_aiohttp: aioresponses) -> None:
+    """SC-2.5. An empty id would become a GET /servers/ URL on the next resume."""
+    mock_aiohttp.post(f"{BASE_URL}/servers/create", payload={"server": {"_id": ""}, "channels": []})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError):
+            await api_create_server(session, BASE_URL, TOKEN, "Test")
+
+
 # ---------------------------------------------------------------------------
 # api_fetch_server
 # ---------------------------------------------------------------------------
