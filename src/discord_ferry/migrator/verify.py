@@ -179,8 +179,9 @@ async def run_check(
     own_session = session is None
     sess = session or new_session()
     try:
-        await _check_structure(sess, stoat_url, token, state, report, on_event)
-        await _check_tails(sess, stoat_url, token, state, report, on_event)
+        verified: set[str] = set()
+        await _check_structure(sess, stoat_url, token, state, report, on_event, verified)
+        await _check_tails(sess, stoat_url, token, state, report, on_event, verified)
     finally:
         if own_session:
             await sess.close()
@@ -194,8 +195,13 @@ async def _check_structure(
     state: MigrationState,
     report: CheckReport,
     on_event: EventCallback,
+    verified: set[str],
 ) -> None:
     """Compare every recorded entity against the server, by id.
+
+    ``verified`` is filled with the channel keys that came back readable. The
+    tail check consults it and skips the rest, so one deleted channel yields one
+    finding rather than two.
 
     Two requests for the whole family, whatever the entity count: the server
     fetch carries roles and categories as full objects alongside the channels,
@@ -238,6 +244,7 @@ async def _check_structure(
         # stores a synthetic `forum-index-{key}`. Only the VALUE is sent to the
         # server, so identity checking is valid for those entries too.
         if stoat_id in visible_ids:
+            verified.add(discord_id)
             report.add(
                 name=f"channel:{discord_id}",
                 status="ok",
@@ -385,6 +392,12 @@ async def _check_structure(
         )
 
 
+#: The prefix `structure.py` puts on a forum index channel's synthetic
+#: `channel_map` key. Its message id lives under the BARE key in
+#: `forum_index_message_ids`, so one of the two has to be translated.
+_FORUM_INDEX_PREFIX = "forum-index-"
+
+
 #: How many messages the tail check asks for per channel.
 #:
 #: 100 is the upstream maximum and costs exactly what 1 costs, because the rate
@@ -401,6 +414,7 @@ async def _check_tails(
     state: MigrationState,
     report: CheckReport,
     on_event: EventCallback,
+    verified: set[str],
 ) -> None:
     """Confirm each channel still holds the last message Ferry recorded sending.
 
@@ -417,6 +431,12 @@ async def _check_tails(
         )
     )
     for discord_id, stoat_id in state.channel_map.items():
+        if discord_id not in verified:
+            # The structure pass could not read this channel, and has already
+            # said so. Fetching its messages would fail for the same cause and
+            # report it twice, doubling the apparent damage and sending a repair
+            # after a channel that may not exist.
+            continue
         window = await api_fetch_messages(
             sess, stoat_url, token, stoat_id, limit=_WINDOW, sort="Latest"
         )
@@ -453,6 +473,18 @@ def _expected_tail(state: MigrationState, discord_id: str) -> str | None:
     raise: an unconditional lookup reports the commonest correct case as a
     crash.
     """
+    # A forum index channel's newest message is the index itself, posted by
+    # _rebuild_forum_indexes AFTER the messages phase, and recorded in its own
+    # map rather than in message_map.
+    #
+    # The two maps are keyed differently, which is the trap: channel_map holds
+    # `forum-index-{key}` while forum_index_message_ids holds the bare `{key}`.
+    # Looking the prefixed key up in the second map never matches and drops
+    # every forum index channel into unverifiable.
+    if discord_id.startswith(_FORUM_INDEX_PREFIX):
+        forum_key = discord_id[len(_FORUM_INDEX_PREFIX) :]
+        return state.forum_index_message_ids.get(forum_key)
+
     high_water = state.channel_high_water.get(discord_id)
     if high_water is None:
         return None
@@ -471,12 +503,19 @@ def _classify_tail(
     channel that legitimately received nothing is never dragged through the
     lookups below it.
     """
-    if recorded_count == 0:
+    if recorded_count == 0 and expected is None:
         return (
             "ok",
             "nothing_expected",
             "no messages were migrated to this channel, and none were expected",
         )
+    # The `and expected is None` half is not belt-and-braces. A forum index
+    # channel has NO channel_message_counts entry, because that map is keyed by
+    # real export channels and the index channel is synthetic. Its expected
+    # message is nonetheless known, from forum_index_message_ids. Firing the
+    # zero-count rule on count alone would report "nothing expected" for a
+    # channel whose one message Ferry can actually verify, and would leave the
+    # forum branch of _expected_tail permanently unreachable.
     if not window_ids:
         return (
             "fail",

@@ -979,3 +979,93 @@ async def test_the_tail_check_never_emits_warn(
     tail_statuses = {r.status for r in report.results if r.name.startswith("tail:")}
     assert "warn" not in tail_statuses
     assert tail_statuses <= {"ok", "fail", "unverifiable"}
+
+
+async def test_a_forum_index_channel_resolves_through_its_own_map(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-3.5. The two maps are keyed DIFFERENTLY, and that is the whole test.
+
+    _rebuild_forum_indexes reads state.channel_map.get(f"forum-index-{key}") but
+    writes state.forum_index_message_ids[key], bare. So the check must strip the
+    prefix before the second lookup.
+
+    Kills looking up forum_index_message_ids[channel_map_key], which never
+    matches and drops every forum index channel into unverifiable. Only a
+    fixture using the literal prefixed key makes that visible, which is why the
+    key here is spelled out rather than built from a variable.
+
+    The index message is legitimately the newest in its channel, because
+    _rebuild_forum_indexes runs AFTER the messages phase.
+    """
+    index_channel = "01JSTOATIDX00000000000AA"
+    index_message = "01JSTOATIDXMSG0000000AA"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={
+            "server": {"_id": SRV, "channels": [index_channel]},
+            "channels": [{"_id": index_channel, "name": "forum-index"}],
+        },
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/{index_channel}/messages?limit=100&sort=Latest",
+        payload=[{"_id": index_message}],
+    )
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {"forum-index-cat-9": index_channel}
+    # NO channel_message_counts entry, deliberately. That map is keyed by real
+    # export channels and a forum index channel is synthetic, so a real state
+    # never has one. An earlier version of this test set a count of 1, which
+    # fabricated a shape that does not occur and let the zero-count rule hide
+    # the fact that the forum branch was never reached.
+    state.forum_index_message_ids = {"cat-9": index_message}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = _tail_result(report)
+    assert result.status == "ok"
+    assert result.kind == "tail_present"
+
+
+async def test_a_channel_that_failed_the_structure_check_is_not_checked_again(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-I2. One deleted channel should yield ONE finding, not two.
+
+    No message route is registered for the missing channel, so the absence of a
+    request is what proves the skip rather than only the result count: an
+    implementation that fetched anyway would raise here.
+
+    Kills reporting both channel_missing and channel_empty for the same cause,
+    which doubles the apparent damage and sends a repair tool after a channel
+    that does not exist.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    for_channel = [r for r in report.results if r.discord_id == "d-100"]
+    assert len(for_channel) == 1
+    assert for_channel[0].kind == "channel_missing"
+
+
+async def test_an_unverifiable_channel_is_also_skipped(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """A channel this token cannot view cannot have its messages read either.
+
+    Kills skipping only on fail: an invisible channel would then be fetched,
+    get a 403, and surface a second, confusing result for a cause already
+    reported.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": [CH1]}, "channels": []},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
+    for_channel = [r for r in report.results if r.discord_id == "d-100"]
+    assert len(for_channel) == 1
+    assert for_channel[0].kind == "channel_not_visible"
