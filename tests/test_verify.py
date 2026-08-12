@@ -555,3 +555,74 @@ async def test_the_structure_family_costs_exactly_two_requests(
     assert requests_made == 2, f"expected 2 requests for 91 entities, made {requests_made}"
     assert len(report.results) == 91
     assert report.has_failures is False
+
+
+async def test_a_category_with_no_recorded_title_is_unverifiable_not_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The category exists but nothing says what it should be called.
+
+    Kills reporting ok here, which would claim the title was verified when it
+    was never compared. Unreachable for a state a current Ferry writes, because
+    category_map and category_names are written on adjacent lines; reachable for
+    a state.json written before category_names existed, which is the population
+    the degrade-rather-than-refuse rule serves.
+    """
+    cat_id = "01JSTOATCAT00000000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={
+            "server": {
+                "_id": SRV,
+                "channels": [],
+                "categories": [{"id": cat_id, "title": "Whatever", "channels": []}],
+            },
+            "channels": [],
+        },
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.category_map = {"d-cat-1": cat_id}
+    # category_names deliberately left empty: an older state.json.
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = next(r for r in report.results if r.discord_id == "d-cat-1")
+    assert result.status == "unverifiable"
+    assert result.kind == "category_title_unknown"
+    assert result.found == "Whatever"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        pytest.param(["not-a-dict"], id="element-is-not-a-dict"),
+        pytest.param([{"name": "general"}], id="element-lacks-_id"),
+        pytest.param([{"id": "01JSTOATCH00000000000AAA"}], id="element-uses-id-not-_id"),
+    ],
+)
+async def test_a_malformed_channel_object_never_reports_a_false_deletion(
+    mock_aiohttp: aioresponses, malformed: list[object]
+) -> None:
+    """A property the three-way rule gives for free, pinned so it stays.
+
+    A chunk review predicted that the isinstance filter would make a real
+    channel look deleted. It cannot: the unfiltered server.channels id list is a
+    SECOND, independent witness, and a fail needs both witnesses to agree the
+    channel is absent. Whatever goes wrong with the object array degrades to
+    unverifiable instead.
+
+    Kills any refactor that drops the id list and decides from the objects
+    alone, which would turn every one of these into a false report of deletion.
+    """
+    stoat_id = "01JSTOATCH00000000000AAA"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": [stoat_id]}, "channels": malformed},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
+    )
+    result = report.results[0]
+    assert result.status == "unverifiable"
+    assert report.has_failures is False
