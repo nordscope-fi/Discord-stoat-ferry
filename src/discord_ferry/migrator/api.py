@@ -1001,6 +1001,16 @@ async def api_fetch_messages(
     per 10 seconds keyed per channel id, because upstream routes to
     ``messaging`` only on POST.
     """
+    # ValueError, not MigrationError, and deliberately so. These two guards
+    # catch a CALLER passing arguments this route cannot accept, which is a
+    # programming error, not a migration failure. Both values are supplied by
+    # Ferry itself and no CLI flag feeds either, so neither is reachable from
+    # user input. Raising a FerryError here would let the CLI's per-command
+    # handler print a bad call as though the migration had failed, hiding the
+    # bug; an uncaught ValueError points a developer straight at the call site.
+    # A chunk review proposed converting these and the proposal was checked
+    # rather than taken: the CLI genuinely does not catch ValueError, but the
+    # path is unreachable by construction.
     if not 1 <= limit <= 100:
         raise ValueError(f"limit must be between 1 and 100, got {limit}")
     if sort not in ("Latest", "Oldest"):
