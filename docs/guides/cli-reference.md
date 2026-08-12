@@ -425,17 +425,20 @@ This is not the same command as [`ferry validate`](#ferry-validate), which inspe
 |------|----------------------|-------------|
 | `--stoat-url TEXT` | `STOAT_URL` | Stoat API base URL *(required)* |
 | `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)* |
+| `--json` | | Print the report as a single JSON document instead of a table |
 
 ### What the four statuses mean
 
 | Status | Meaning |
 |--------|---------|
 | `ok` | Found, and it matches what Ferry recorded |
-| `warn` | It exists and its content is intact, but a name differs. Today this only ever means a category was renamed |
+| `warn` | It exists and its content is intact, but a name differs: a channel, a role or a category was renamed on the server |
 | `fail` | Something Ferry recorded is gone, or a channel lost messages |
 | `unverifiable` | Ferry cannot answer, and says why. Not a pass and not a failure |
 
 `unverifiable` is worth reading rather than skimming past. It is the honest answer when Ferry never recorded what it would need to confirm something, which happens for good reasons: you migrated with `--thread-strategy=merge`, a send was accepted as a duplicate, or the token you gave Check cannot see a particular channel.
+
+From 2.17.0 Ferry records which thread strategy a migration ran under, so Check names the cause that applies rather than listing all three. A migration run by an earlier version recorded no strategy, and Check still lists the possibilities for those.
 
 ### Exit codes
 
@@ -444,7 +447,7 @@ This is not the same command as [`ferry validate`](#ferry-validate), which inspe
 | `0` | Every result was `ok`, `warn` or `unverifiable` |
 | `1` | Any result was `fail`, or the migration could not be checked at all |
 
-A `warn` on its own does not fail the command, because nothing has been lost. Use the exit code in a script; there is no separate machine-readable flag.
+A `warn` on its own does not fail the command, because nothing has been lost. Use the exit code in a script, and `--json` when you want the individual results rather than a pass or fail.
 
 ### What Check cannot tell you
 
@@ -452,7 +455,7 @@ Check reads the most recent 100 messages in each channel and confirms the last o
 
 - **A gap in the middle of a channel is invisible.** An `ok` means the recorded last message is present. It does not mean the channel is complete.
 - **If more than 100 messages arrived after your migration**, Check can no longer see far enough back and reports `unverifiable` rather than guessing.
-- **A renamed channel or role is not detected.** Ferry never recorded the names it gave them, so there is nothing to compare against. Renamed *categories* are detected, because those names are recorded.
+- **A renamed channel or role is only detected for migrations run under 2.17.0 or later.** Ferry records the names it gives channels and roles from that release on. A migration run by an earlier version recorded none, so there is nothing to compare against and a rename there stays invisible. Renamed *categories* have always been detected.
 - **A duplicate forum index** is not detected.
 - **Check will not run against a dry run.** A dry run records placeholders for things that were never created, so there is nothing on a server to compare with.
 
