@@ -209,6 +209,17 @@ async def _check_structure(
     payload = await api_fetch_server_with_channels(sess, stoat_url, token, state.stoat_server_id)
     emoji = await api_fetch_emoji_list(sess, stoat_url, token, state.stoat_server_id)
 
+    # Three id conventions arrive in this ONE response, verified against
+    # upstream rather than assumed, because they do not agree with each other:
+    #
+    #   channel objects   ->  "_id"   (Channel carries serde(rename = "_id"))
+    #   category objects  ->  "id"    (Category has NO rename)
+    #   roles             ->  the KEY of a HashMap<String, Role>, so the map's
+    #                         keys are read, not each Role's inner "_id"
+    #
+    # A later pass that "makes these consistent" breaks two of the three. The
+    # sibling hazard is already recorded for messages, which use "_id" while
+    # Ferry's webhook id field uses "id".
     server = payload.get("server") or {}
     # Two lists, and the pair is the discriminator. `server.channels` comes back
     # UNFILTERED and names every channel id; the sibling array holds only the
@@ -262,6 +273,9 @@ async def _check_structure(
     # Roles arrive as a map keyed by role id, so membership is a key lookup.
     # There is no second list and no permission filter here, unlike channels, so
     # an absence is unambiguous and reports fail rather than unverifiable.
+    # set() over the MAP, so these are its KEYS. Roles are keyed by id upstream;
+    # each Role object also carries an inner "_id", which is deliberately not
+    # what is read here. See the three-conventions note above.
     role_ids = set(server.get("roles") or {})
     for discord_id, stoat_id in state.role_map.items():
         present = stoat_id in role_ids
@@ -303,7 +317,30 @@ async def _check_structure(
             continue
         expected_title = state.category_names.get(discord_id)
         actual_title = found_titles[stoat_id]
-        if expected_title is not None and expected_title != actual_title:
+        if expected_title is None:
+            # The category exists, but nothing records what it should be called,
+            # so the title half of this check cannot be answered. Reporting ok
+            # would claim more than was verified.
+            #
+            # Unreachable for a state written by a current Ferry: structure.py
+            # writes category_map and category_names on the same line, twice
+            # over, and the only unpaired writes are the dry-run ones the
+            # precondition refuses. It IS reachable for a state.json written
+            # before category_names existed, which is exactly the population
+            # the degrade-rather-than-refuse rule exists for.
+            report.add(
+                name=f"category:{discord_id}",
+                status="unverifiable",
+                kind="category_title_unknown",
+                detail=(
+                    "the category exists, but this state records no expected title "
+                    "for it, so the title cannot be compared"
+                ),
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+                found=actual_title,
+            )
+        elif expected_title != actual_title:
             # warn, not fail. The category exists and its channels are intact;
             # only a heading differs. This is the single reachable warn in the
             # tool, and it is why the status exists at all: a design review
