@@ -3568,3 +3568,133 @@ async def test_the_recorded_role_name_comes_from_the_response(tmp_path: Path) ->
         await run_roles(config, state, exports, [].append)
 
     assert state.created_role_names == {"d-role-1": "moderators-normalised"}
+
+
+# ---------------------------------------------------------------------------
+# Predicate 1: completeness, after a FRESH structure run (#292)
+# ---------------------------------------------------------------------------
+
+
+def assert_names_complete(state: MigrationState) -> None:
+    """Every non-sentinel id-map entry carries a recorded name.
+
+    THE SENTINEL TEST READS THE MAP'S VALUE, not its key. A dry run writes
+    "dry-ch-{id}" and "dry-role-{id}" as the VALUE while the key stays an
+    ordinary Discord id, so a predicate filtering on the key sees a real channel
+    and fails every dry run.
+
+    Applied after a FRESH structure run ONLY. It is deliberately not applied to
+    an incremental state, and that omission is a decision rather than an
+    oversight: a runnable prototype measured it raising a false alarm on a
+    legitimate pre-2.17.0 upgrade, where channel_map is carried and no name
+    exists to carry. tests/test_engine.py::assert_nothing_dropped is the guard
+    for that path, and the two must not be merged. See SC-5.8.
+    """
+    for key, value in state.channel_map.items():
+        if not value.startswith("dry-ch-"):
+            assert key in state.created_channel_names, (
+                f"channel {key} has an id ({value}) but no recorded name. "
+                "A create site wrote channel_map without writing created_channel_names."
+            )
+    for key, value in state.role_map.items():
+        if not value.startswith("dry-role-"):
+            assert key in state.created_role_names, (
+                f"role {key} has an id ({value}) but no recorded name. "
+                "A create site wrote role_map without writing created_role_names."
+            )
+
+
+async def test_a_fresh_structure_run_records_a_name_for_every_id(tmp_path: Path) -> None:
+    """SC-2.10. Channels, a forum index and a role, all in one run.
+
+    This is the guard that catches a create site added later by someone who
+    never read the design. Removing any one of the three write sites fails it.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    role = DCERole(id="d-role-1", name="Moderators")
+    exports = [
+        _make_export(
+            channel_id="d-100",
+            channel_name="first-post",
+            channel_type=15,
+            is_thread=True,
+            parent_channel_name="my-forum",
+            category_id="cat1",
+            category="General",
+            message_count=42,
+            messages=[_make_message("m1", roles=[role])],
+        ),
+        _make_export(
+            channel_id="d-101",
+            channel_name="second-post",
+            channel_type=15,
+            is_thread=True,
+            parent_channel_name="my-forum",
+            category_id="cat1",
+            category="General",
+            message_count=7,
+        ),
+    ]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "01JSTOATRL0000000000AAA", "name": "Moderators"},
+        )
+        await run_roles(config, state, exports, [].append)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": "my-forum-first-post"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000BBB", "name": "my-forum-second-post"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATIX00000000000AAA", "name": "my-forum-index"},
+        )
+        m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages", payload={"_id": "m1"})
+        m.put(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        await run_channels(config, state, exports, [].append)
+
+    # Three channel ids and one role id, every one of them named.
+    assert len(state.channel_map) == 3
+    assert len(state.role_map) == 1
+    assert_names_complete(state)
+
+
+async def test_a_dry_run_records_no_names_and_still_passes_the_guard(tmp_path: Path) -> None:
+    """SC-2.9 and SC-2.12 together.
+
+    A dry run makes no request, so there is no response to record a name from,
+    and both name maps stay empty. The guard must pass anyway.
+
+    This is the test that kills a predicate filtering on the map's KEY: the keys
+    here are ordinary Discord ids with no prefix, so a key-based sentinel test
+    treats them as real channels and fails.
+    """
+    config = _make_config(tmp_path, dry_run=True)
+    state = MigrationState(stoat_server_id="dry-server-111")
+    role = DCERole(id="d-role-1", name="Moderators")
+    exports = [
+        _make_export(
+            channel_id="d-100",
+            channel_name="general",
+            category_id="",
+            messages=[_make_message("m1", roles=[role])],
+        )
+    ]
+
+    await run_roles(config, state, exports, [].append)
+    await run_channels(config, state, exports, [].append)
+
+    assert state.channel_map == {"d-100": "dry-ch-d-100"}
+    assert state.role_map == {"d-role-1": "dry-role-d-role-1"}
+    assert state.created_channel_names == {}
+    assert state.created_role_names == {}
+    assert_names_complete(state)
