@@ -28,6 +28,7 @@ from discord_ferry.core.http import new_session
 from discord_ferry.errors import CheckError
 from discord_ferry.migrator.api import (
     api_fetch_emoji_list,
+    api_fetch_messages,
     api_fetch_server_with_channels,
 )
 
@@ -179,6 +180,7 @@ async def run_check(
     sess = session or new_session()
     try:
         await _check_structure(sess, stoat_url, token, state, report, on_event)
+        await _check_tails(sess, stoat_url, token, state, report, on_event)
     finally:
         if own_session:
             await sess.close()
@@ -381,3 +383,114 @@ async def _check_structure(
             discord_id=discord_id,
             stoat_id=stoat_id,
         )
+
+
+#: How many messages the tail check asks for per channel.
+#:
+#: 100 is the upstream maximum and costs exactly what 1 costs, because the rate
+#: bucket counts REQUESTS. Asking for the whole window rather than the single
+#: newest message is what lets a merge parent, a forum index channel, and a
+#: channel someone posted in since all report ok instead of unverifiable.
+_WINDOW = 100
+
+
+async def _check_tails(
+    sess: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+    report: CheckReport,
+    on_event: EventCallback,
+) -> None:
+    """Confirm each channel still holds the last message Ferry recorded sending.
+
+    One request per channel, whatever the channel's size. Reads land in the
+    ``channels`` bucket, 15 per 10 seconds keyed per channel id, because
+    upstream routes to ``messaging`` only on POST, so separate channels do not
+    contend with each other.
+    """
+    on_event(
+        MigrationEvent(
+            phase="check",
+            status="started",
+            message="Checking each channel's most recent messages...",
+        )
+    )
+    for discord_id, stoat_id in state.channel_map.items():
+        window = await api_fetch_messages(
+            sess, stoat_url, token, stoat_id, limit=_WINDOW, sort="Latest"
+        )
+        window_ids = [m["_id"] for m in window if isinstance(m, dict) and "_id" in m]
+        status, kind, detail = _classify_tail(
+            expected=_expected_tail(state, discord_id),
+            window_ids=window_ids,
+            recorded_count=state.channel_message_counts.get(discord_id, 0),
+        )
+        report.add(
+            name=f"tail:{discord_id}",
+            status=status,
+            kind=kind,
+            detail=detail,
+            discord_id=discord_id,
+            stoat_id=stoat_id,
+            expected=_expected_tail(state, discord_id),
+        )
+
+
+def _expected_tail(state: MigrationState, discord_id: str) -> str | None:
+    """The Stoat id of the last message Ferry believes it sent to this channel.
+
+    TWO hops, and both can miss without either being an error.
+
+    ``channel_high_water`` is keyed by DISCORD channel id and holds a DISCORD
+    message id, so it must be resolved through ``message_map`` to become a Stoat
+    id. Comparing without that hop compares a Discord id against a Stoat one and
+    never matches.
+
+    A missing high-water entry means the channel sent nothing, which is ordinary
+    for an empty Discord channel. A missing map entry means the send returned
+    409 DuplicateNonce, where batch 7 deliberately records no id. Neither may
+    raise: an unconditional lookup reports the commonest correct case as a
+    crash.
+    """
+    high_water = state.channel_high_water.get(discord_id)
+    if high_water is None:
+        return None
+    return state.message_map.get(high_water)
+
+
+def _classify_tail(
+    *,
+    expected: str | None,
+    window_ids: list[str],
+    recorded_count: int,
+) -> tuple[CheckStatus, str, str]:
+    """Decide one channel's verdict. A pure function, deliberately.
+
+    Order matters and is not arbitrary. The zero-count rule runs FIRST so a
+    channel that legitimately received nothing is never dragged through the
+    lookups below it.
+    """
+    if recorded_count == 0:
+        return (
+            "ok",
+            "nothing_expected",
+            "no messages were migrated to this channel, and none were expected",
+        )
+    if not window_ids:
+        return (
+            "fail",
+            "channel_empty",
+            "state records messages for this channel but the server returned none",
+        )
+    if expected is None:
+        return (
+            "unverifiable",
+            "tail_not_recorded",
+            "Ferry recorded no id for this channel's last message, which happens "
+            "when a send was accepted as a duplicate. Its delivery cannot be "
+            "confirmed here (see issue #240).",
+        )
+    if expected in set(window_ids):
+        return ("ok", "tail_present", "the last message Ferry recorded is still present")
+    return ("unverifiable", "tail_not_recorded", "placeholder, refined in task #257")
