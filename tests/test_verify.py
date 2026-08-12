@@ -1827,3 +1827,55 @@ def test_the_kind_vocabulary_lists_both_rename_kinds() -> None:
     doc = CheckResult.__doc__ or ""
     assert "channel_renamed" in doc
     assert "role_renamed" in doc
+
+
+def test_every_emitted_kind_is_documented_and_a_literal() -> None:
+    """The kind vocabulary is a contract, and `kind: str` does not enforce it.
+
+    Two failures this catches, and neither is hypothetical:
+
+    Adding a kind without documenting it. The CheckResult docstring is the only
+    durable record of this vocabulary, because docs/plans is gitignored, and the
+    batch-10 repair tool dispatches on it. An undocumented kind is a contract
+    change nobody can see.
+
+    Interpolating external text into a kind. Today every one is a string literal,
+    either at the call site or returned from _classify_tail. Nothing in the type
+    prevents `kind=f"channel_{something}"`, and the --json serialiser does not
+    strip `kind` precisely because it is internal. That argument holds only while
+    this test does.
+    """
+    import pathlib
+    import re
+
+    from discord_ferry.migrator.verify import CheckResult
+
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "src"
+        / "discord_ferry"
+        / "migrator"
+        / "verify.py"
+    ).read_text(encoding="utf-8")
+
+    # Literals assigned at a call site, plus literals returned by the classifier
+    # as the middle element of its (status, kind, detail) tuple.
+    at_call_site = set(re.findall(r'kind="([a-z_]+)"', source))
+    classifier = set(re.findall(r'^\s+"([a-z_]+)",$', source, re.M))
+    documented = set(re.findall(r"``([a-z_]+)``", CheckResult.__doc__ or ""))
+
+    emitted = (at_call_site | classifier) & documented
+    assert len(emitted) >= 15, f"only found {len(emitted)} kinds; the regex has drifted"
+
+    undocumented = at_call_site - documented
+    assert undocumented == set(), (
+        f"kind(s) emitted but absent from the CheckResult docstring: {sorted(undocumented)}. "
+        "That docstring is the only durable record of this vocabulary."
+    )
+
+    # No kind is ever built by interpolation, which is what lets the --json
+    # serialiser leave `kind` unstripped.
+    assert re.search(r"kind=f['\"]", source) is None, (
+        "a kind is being built by interpolation. The --json serialiser does not "
+        "strip `kind`, on the argument that it is always an internal literal."
+    )
