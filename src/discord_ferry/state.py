@@ -62,6 +62,22 @@ class MigrationState:
     channel_map: dict[str, str] = field(default_factory=dict)
     category_map: dict[str, str] = field(default_factory=dict)
     category_names: dict[str, str] = field(default_factory=dict)  # discord_cat_id -> title
+    # The names Ferry SENT to Stoat, keyed exactly as the id maps above.
+    #
+    # NOT the Discord name, and the difference is not cosmetic.
+    # make_unique_channel_name truncates to 32 characters and appends "-1" on a
+    # collision; roles pass through truncate_name. Recording the Discord name
+    # would report a rename for every channel whose name exceeds 32 characters
+    # and every collision-suffixed duplicate, against a server nobody edited.
+    #
+    # The value is taken from the create RESPONSE, so it is what the server
+    # stored rather than what Ferry believes it sent.
+    #
+    # Contrast category_names directly above, which records the DISCORD title.
+    # Same suffix, opposite meaning, which is why these are not called
+    # channel_names.
+    created_channel_names: dict[str, str] = field(default_factory=dict)
+    created_role_names: dict[str, str] = field(default_factory=dict)
     # discord_ch_id -> effective discord_cat_id (the forum key for forum channels).
     # Persisted so incremental re-runs can re-attach carried channels to the
     # CORRECT category in the full-replace upsert, even with multiple
@@ -123,6 +139,14 @@ class MigrationState:
 
     # Dry-run flag — persisted so resume logic can reject dry-run states
     is_dry_run: bool = False
+
+    # The thread strategy of the MOST RECENT run. "" means never recorded, which
+    # is what every migration predating this field reports.
+    #
+    # "" and "flatten" are different claims: unknown, against chosen. A default
+    # of "flatten" would assert a strategy nobody selected, and ferry check
+    # would then name a cause it cannot know.
+    thread_strategy: str = ""
 
     # Export phase tracking (for smart resume)
     export_completed: bool = False
@@ -260,6 +284,9 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "channel_map": state.channel_map,
         "category_map": state.category_map,
         "category_names": state.category_names,
+        "created_channel_names": state.created_channel_names,
+        "created_role_names": state.created_role_names,
+        "thread_strategy": state.thread_strategy,
         "channel_categories": state.channel_categories,
         "message_map": state.message_map,
         "emoji_map": state.emoji_map,
@@ -334,6 +361,9 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             channel_map=data.get("channel_map", {}),
             category_map=data.get("category_map", {}),
             category_names=data.get("category_names", {}),
+            created_channel_names=data.get("created_channel_names", {}),
+            created_role_names=data.get("created_role_names", {}),
+            thread_strategy=data.get("thread_strategy", ""),
             channel_categories=data.get("channel_categories", {}),
             message_map=data.get("message_map", {}),
             emoji_map=data.get("emoji_map", {}),

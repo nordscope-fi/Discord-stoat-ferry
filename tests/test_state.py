@@ -844,6 +844,28 @@ _KNOWN_STATE_FIELDS = frozenset(
         "channel_map",
         "category_map",
         "category_names",
+        # All three below are STRUCTURAL, not free text, and the reason differs
+        # per field rather than being one blanket claim.
+        #
+        # created_channel_names / created_role_names hold attacker-influenced
+        # text, since a Discord user chooses a channel name. They are still
+        # structural, because what _TEXT_MEMBERS guards is a FERRY SECRET
+        # reaching disk through an exception repr, and a name never travels that
+        # path. Classifying them as free text would be actively harmful:
+        # SecureTokenStore.sanitize does unbounded substring replacement, so a
+        # recorded name containing a registered secret as a substring would be
+        # rewritten, and ferry check would then report a rename nobody made.
+        # See test_a_recorded_name_containing_a_secret_is_not_rewritten.
+        #
+        # thread_strategy is validated against a closed set of three values at
+        # the CLI boundary by click.Choice. That does NOT hold for the GUI, which
+        # builds its config from a storage file it does not re-validate, which is
+        # why messages.py falls back to "flatten" when the value is not in
+        # _THREAD_STRATEGIES. The widest value it can hold is a short string from
+        # a local user's own storage file, and it never carries a Ferry secret.
+        "created_channel_names",
+        "created_role_names",
+        "thread_strategy",
         "channel_categories",
         "message_map",
         "emoji_map",
@@ -1076,3 +1098,38 @@ def test_repeated_checkpoints_overwrite_on_windows(
         save_state(MigrationState(stoat_server_id=f"run-{n}"), tmp_path)
 
     assert load_state(tmp_path).stoat_server_id == "run-4"
+
+
+def test_contract_fields_roundtrip(tmp_path: Path) -> None:
+    """thread_strategy and the two name maps survive save/load.
+
+    The name maps record what Ferry SENT to Stoat, never the Discord name, so a
+    fixture here uses a value that has already been through truncation.
+    """
+    state = MigrationState(
+        thread_strategy="merge",
+        created_channel_names={"d-100": "general"},
+        created_role_names={"d-role-1": "mods"},
+    )
+    save_state(state, tmp_path)
+
+    loaded = load_state(tmp_path)
+    assert loaded.thread_strategy == "merge"
+    assert loaded.created_channel_names == {"d-100": "general"}
+    assert loaded.created_role_names == {"d-role-1": "mods"}
+
+
+def test_contract_fields_default_when_absent(tmp_path: Path) -> None:
+    """A state.json written before 2.17.0 loads with safe defaults.
+
+    The empty string is NOT the same claim as "flatten": it means no strategy was
+    recorded, which is what every migration predating the field will report. A
+    default of "flatten" would assert a strategy that was never chosen.
+    """
+    minimal = {"stoat_server_id": "s", "current_phase": "report"}
+    (tmp_path / "state.json").write_text(json.dumps(minimal), encoding="utf-8")
+
+    loaded = load_state(tmp_path)
+    assert loaded.thread_strategy == ""
+    assert loaded.created_channel_names == {}
+    assert loaded.created_role_names == {}
