@@ -1303,6 +1303,13 @@ async def run_channels(
                 # Insert at position 0 so it appears at the top of the category.
                 category_channels.setdefault(forum_cat_stoat_id, []).insert(0, index_channel_id)
                 state.channel_map[f"forum-index-{forum_key}"] = index_channel_id
+                # Keyed identically to the id above, synthetic prefix and all, so
+                # the rename check needs no special case for it. index_name came
+                # from make_unique_channel_name, so it is truncated exactly as an
+                # ordinary channel's is.
+                state.created_channel_names[f"forum-index-{forum_key}"] = (
+                    idx_result.get("name") or index_name
+                )
 
                 on_event(
                     MigrationEvent(
