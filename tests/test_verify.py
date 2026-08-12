@@ -1069,3 +1069,253 @@ async def test_an_unverifiable_channel_is_also_skipped(
     for_channel = [r for r in report.results if r.discord_id == "d-100"]
     assert len(for_channel) == 1
     assert for_channel[0].kind == "channel_not_visible"
+
+
+# ---------------------------------------------------------------------------
+# Integration (chunk 4 gate)
+# ---------------------------------------------------------------------------
+
+
+def _multi_server(visible: list[str], all_ids: list[str] | None = None) -> dict[str, object]:
+    return {
+        "server": {"_id": SRV, "channels": all_ids if all_ids is not None else visible},
+        "channels": [{"_id": c, "name": f"ch-{c[-3:]}"} for c in visible],
+    }
+
+
+async def test_a_whole_merge_migration_produces_zero_failures(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-I1. Spec S3 criterion 5, and the single most important outcome here.
+
+    Three merge parents whose own tails sit UNDER later merged thread content,
+    one of them so far under that the window cannot reach it, plus a forum index
+    channel and an empty channel. Every one of these is a correct migration.
+
+    Kills any regression to newest-message equality, which fails every merge
+    parent, and any classifier change routing a window overflow to fail. A tool
+    that cries wolf on a correct migration gets switched off, and then it
+    protects nothing.
+    """
+    small, big, plain = (
+        "01JSTOATCH00000000000001",
+        "01JSTOATCH00000000000002",
+        "01JSTOATCH00000000000003",
+    )
+    idx, empty = "01JSTOATIDX00000000000AA", "01JSTOATCH00000000000004"
+    visible = [small, big, plain, idx, empty]
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server(visible)
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+
+    def window(cid: str, ns: list[int]) -> None:
+        mock_aiohttp.get(
+            f"{BASE_URL}/channels/{cid}/messages?limit=100&sort=Latest",
+            payload=[{"_id": _sid(n)} for n in sorted(ns, reverse=True)],
+        )
+
+    window(small, list(range(40)))  # tail at 9, 30 merged after it
+    window(big, list(range(400, 500)))  # tail at 9, far out of reach
+    window(plain, list(range(12)))  # ordinary flatten channel
+    window(idx, [900])  # the index message
+    window(empty, [])  # never received anything
+
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {
+        "d-small": small,
+        "d-big": big,
+        "d-plain": plain,
+        "forum-index-cat-9": idx,
+        "d-empty": empty,
+    }
+    for key, hw, count in (("d-small", 9, 10), ("d-big", 9, 10), ("d-plain", 11, 12)):
+        state.channel_high_water[key] = _did(hw)
+        state.message_map[_did(hw)] = _sid(hw)
+        state.channel_message_counts[key] = count
+    state.forum_index_message_ids = {"cat-9": _sid(900)}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    failures = [r for r in report.results if r.status == "fail"]
+    assert failures == [], f"a correct merge migration reported {len(failures)} failures"
+    assert report.has_failures is False
+
+    # "Zero failures" alone would also be satisfied by an implementation that
+    # reported unverifiable for everything, which would be useless while
+    # technically meeting the criterion. Pin the actual verdicts so this cannot
+    # pass by giving up.
+    tails = {r.discord_id: (r.status, r.kind) for r in report.results if r.name.startswith("tail:")}
+    assert tails["d-small"] == ("ok", "tail_present")
+    assert tails["d-plain"] == ("ok", "tail_present")
+    assert tails["forum-index-cat-9"] == ("ok", "tail_present")
+    assert tails["d-empty"] == ("ok", "nothing_expected")
+    assert tails["d-big"] == ("unverifiable", "tail_not_recorded")
+
+
+async def test_one_channel_failing_does_not_abort_the_others(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-I3. A per-channel error is a RESULT, not the end of the run.
+
+    This is the deliberate contrast with the existing validate_after block,
+    which catches everything into a warning and leaves its result dict empty, so
+    a check that failed is indistinguishable from one that passed. Here a
+    failure to check is recorded.
+
+    Kills an asyncio.gather that propagates the first exception, and equally one
+    using return_exceptions=True that then discards what it collected, which is
+    a recorded silent-failure pattern in this project.
+    """
+    good1, bad, good2 = (
+        "01JSTOATCH00000000000001",
+        "01JSTOATCH00000000000002",
+        "01JSTOATCH00000000000003",
+    )
+    visible = [good1, bad, good2]
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server(visible)
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    for cid in (good1, good2):
+        mock_aiohttp.get(
+            f"{BASE_URL}/channels/{cid}/messages?limit=100&sort=Latest",
+            payload=[{"_id": _sid(9)}],
+        )
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/{bad}/messages?limit=100&sort=Latest",
+        status=500,
+        payload={},
+        repeat=True,
+    )
+
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {"d-1": good1, "d-2": bad, "d-3": good2}
+    for key in ("d-1", "d-2", "d-3"):
+        state.channel_high_water[key] = _did(9)
+        state.channel_message_counts[key] = 10
+    state.message_map[_did(9)] = _sid(9)
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    tails = {r.discord_id: r for r in report.results if r.name.startswith("tail:")}
+    assert set(tails) == {"d-1", "d-2", "d-3"}
+    assert tails["d-1"].status == "ok"
+    assert tails["d-3"].status == "ok"
+    assert tails["d-2"].status == "unverifiable"
+    assert tails["d-2"].kind == "check_error"
+    # check_error is unverifiable, not fail, so it does not fail the command:
+    # Ferry could not look, which is not the same as finding something wrong.
+    assert report.has_failures is False
+
+
+async def test_a_flatten_migration_with_later_activity_is_all_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-I5. The third strategy, with humans having posted since."""
+    a, b = "01JSTOATCH00000000000001", "01JSTOATCH00000000000002"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server([a, b])
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    for cid, extra in ((a, 30), (b, 5)):
+        mock_aiohttp.get(
+            f"{BASE_URL}/channels/{cid}/messages?limit=100&sort=Latest",
+            payload=[{"_id": _sid(n)} for n in range(9 + extra, -1, -1)],
+        )
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {"d-a": a, "d-b": b}
+    for key in ("d-a", "d-b"):
+        state.channel_high_water[key] = _did(9)
+        state.channel_message_counts[key] = 10
+    state.message_map[_did(9)] = _sid(9)
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    assert {r.status for r in report.results} == {"ok"}
+
+
+async def test_all_seven_populations_in_one_run(mock_aiohttp: aioresponses) -> None:
+    """SC-I6. Every population the design names, together, in one report.
+
+    Kills a fix for one population that breaks another, which per-population
+    tests structurally cannot see. The eighth population, a dry-run state, is
+    absent on purpose: the precondition refuses that whole state before this
+    point is reached, which is why its spec criterion was struck as unreachable
+    rather than implemented.
+    """
+    flat = "01JSTOATCH00000000000001"
+    merge_small = "01JSTOATCH00000000000002"
+    merge_big = "01JSTOATCH00000000000003"
+    idx = "01JSTOATIDX00000000000AA"
+    dupe = "01JSTOATCH00000000000004"
+    hidden = "01JSTOATCH00000000000005"
+    silent = "01JSTOATCH00000000000006"
+
+    visible = [flat, merge_small, merge_big, idx, dupe, silent]
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        # `hidden` is in the unfiltered id list but NOT among the objects: the
+        # shape ViewChannel filtering produces.
+        payload=_multi_server(visible, all_ids=[*visible, hidden]),
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+
+    def window(cid: str, ns: list[int]) -> None:
+        mock_aiohttp.get(
+            f"{BASE_URL}/channels/{cid}/messages?limit=100&sort=Latest",
+            payload=[{"_id": _sid(n)} for n in sorted(ns, reverse=True)],
+        )
+
+    window(flat, list(range(10)))
+    window(merge_small, list(range(40)))
+    window(merge_big, list(range(400, 500)))
+    window(idx, [900])
+    window(dupe, list(range(10)))
+    window(silent, [])
+    # No window for `hidden`: the tail pass must skip it. If it fetched anyway
+    # this test fails on a missing mock, which is the point.
+
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.channel_map = {
+        "d-flat": flat,
+        "d-merge-small": merge_small,
+        "d-merge-big": merge_big,
+        "forum-index-cat-9": idx,
+        "d-dupe": dupe,
+        "d-hidden": hidden,
+        "d-silent": silent,
+    }
+    for key in ("d-flat", "d-merge-small", "d-merge-big", "d-dupe", "d-hidden"):
+        state.channel_high_water[key] = _did(9)
+        state.channel_message_counts[key] = 10
+    # message_map maps the Discord id to a DIFFERENT-looking Stoat id, which is
+    # what makes a comparison against the wrong one impossible to pass.
+    state.message_map[_did(9)] = _sid(9)
+    # d-dupe's tail landed under a 409 DuplicateNonce, so batch 7 recorded no id
+    # for it. Give it its own unmapped high-water.
+    state.channel_high_water["d-dupe"] = _did(99)
+    state.forum_index_message_ids = {"cat-9": _sid(900)}
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    structure = {
+        r.discord_id: (r.status, r.kind) for r in report.results if r.name.startswith("channel:")
+    }
+    tails = {r.discord_id: (r.status, r.kind) for r in report.results if r.name.startswith("tail:")}
+
+    assert structure["d-hidden"] == ("unverifiable", "channel_not_visible")
+    assert "d-hidden" not in tails, "an unreadable channel must not be reported twice"
+
+    assert tails["d-flat"] == ("ok", "tail_present")
+    assert tails["d-merge-small"] == ("ok", "tail_present")
+    assert tails["d-merge-big"] == ("unverifiable", "tail_not_recorded")
+    assert tails["forum-index-cat-9"] == ("ok", "tail_present")
+    assert tails["d-dupe"] == ("unverifiable", "tail_not_recorded")
+    assert tails["d-silent"] == ("ok", "nothing_expected")
+
+    assert report.has_failures is False
+    assert report.counts()["fail"] == 0
