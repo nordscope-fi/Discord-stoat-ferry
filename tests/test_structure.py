@@ -3460,3 +3460,63 @@ async def test_a_voice_retry_records_the_retrys_response(tmp_path: Path) -> None
 
     assert state.channel_map == {"d-100": "01JSTOATCH00000000000AAA"}
     assert state.created_channel_names == {"d-100": "voice-room-as-text"}
+
+
+async def test_the_forum_index_channel_records_its_name(tmp_path: Path) -> None:
+    """SC-2.7. channel_map keys are not all Discord snowflakes.
+
+    The forum index writer stores a synthetic `forum-index-{key}`, and its name
+    goes through make_unique_channel_name like any other, so it truncates
+    identically. Recording only at the main create site leaves every forum index
+    channel nameless, and ferry check then reports ok for a renamed one.
+
+    The name is keyed exactly as the id, so the check's lookup needs no special
+    case for the synthetic key.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [
+        _make_export(
+            channel_id="d-100",
+            channel_name="first-post",
+            channel_type=15,
+            is_thread=True,
+            parent_channel_name="my-forum",
+            category_id="cat1",
+            category="General",
+            message_count=42,
+        ),
+        _make_export(
+            channel_id="d-101",
+            channel_name="second-post",
+            channel_type=15,
+            is_thread=True,
+            parent_channel_name="my-forum",
+            category_id="cat1",
+            category="General",
+            message_count=7,
+        ),
+    ]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": "my-forum-first-post"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000BBB", "name": "my-forum-second-post"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATIX00000000000AAA", "name": "my-forum-index"},
+        )
+        m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages", payload={"_id": "m1"})
+        m.put(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        await run_channels(config, state, exports, [].append)
+
+    index_key = "forum-index-forum-my-forum"
+    assert state.channel_map[index_key] == "01JSTOATIX00000000000AAA"
+    assert state.created_channel_names[index_key] == "my-forum-index"
+
