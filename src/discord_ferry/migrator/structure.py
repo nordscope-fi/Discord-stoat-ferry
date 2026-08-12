@@ -1086,6 +1086,18 @@ async def run_channels(
                         raise
 
                 state.channel_map[ch.id] = stoat_channel_id
+                # Beside the id write, and OUTSIDE the try, deliberately. The
+                # voice-to-text retry above reassigns `result` inside its except
+                # block, so `result` here is whichever attempt succeeded. A name
+                # recorded next to the first `result["_id"]` read would never run
+                # on the retry path, because the exception jumps past it, and
+                # every voice channel would end up with no recorded name.
+                #
+                # From the RESPONSE rather than from unique_name: this records
+                # what the server stored, so any normalisation upstream cannot
+                # show up later as a rename nobody made. The fallback covers a
+                # response that omits the key.
+                state.created_channel_names[ch.id] = result.get("name") or unique_name
 
                 # Apply channel permission overrides from Discord metadata.
                 if ch_meta and not config.dry_run:
