@@ -298,6 +298,22 @@ async def run_migration(
         state.started_at = datetime.now(UTC).isoformat()
         state.is_dry_run = config.dry_run
 
+    # Set AFTER the four state paths converge, deliberately, and not inside any
+    # of them. --resume loads, --incremental either carries from a prior state or
+    # constructs fresh, and neither flag constructs fresh. A fifth path must also
+    # reach here to run the phases, so it inherits this without anyone having to
+    # remember. Measured rather than assumed: moving this line beside
+    # `state = MigrationState()` kills four of the five tests covering it and
+    # leaves the fresh-run test passing, which is what makes that placement look
+    # correct to whoever writes it.
+    #
+    # This records the strategy of the MOST RECENT run. A resume under a
+    # different --thread-strategy than the original therefore describes the
+    # resuming run while most of the content was migrated under the first, which
+    # is why verify.py words its detail as the recorded strategy rather than as
+    # the strategy every message in the channel was migrated under.
+    state.thread_strategy = config.thread_strategy
+
     # Preflight: surface any proxy configuration Ferry found but cannot use.
     # core/http.py returns data and never emits; the engine decides. Emitted at
     # "notice" rather than "warning" because cli.py gates warnings behind

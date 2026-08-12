@@ -2168,3 +2168,88 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
         "Reporting a failure that did not happen is the same defect as the FailedMessage "
         "on the message path, in a different place"
     )
+
+
+# ---------------------------------------------------------------------------
+# thread_strategy is recorded on every state path (#286, SC-1.3 to SC-1.7)
+# ---------------------------------------------------------------------------
+#
+# run_migration resolves state four ways and they all rejoin before the proxy
+# preflight loop. The assignment sits at that rejoin point rather than in any
+# branch, so a fifth path added later inherits it. Each path gets its own test
+# because the natural implementation, setting it beside `state = MigrationState()`,
+# covers the fresh path and passes every test of it.
+
+
+async def test_a_fresh_run_records_the_thread_strategy(tmp_path: Path) -> None:
+    """SC-1.3. Neither --resume nor --incremental."""
+    config = _make_config(tmp_path, thread_strategy="merge")
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.thread_strategy == "merge"
+
+
+async def test_a_resume_records_the_thread_strategy(tmp_path: Path) -> None:
+    """SC-1.4. The mutant this kills is the natural implementation.
+
+    Placing the assignment beside `state = MigrationState()` covers the fresh
+    path, and every test of that path passes. Only a resume sees the omission,
+    because --resume calls load_state and never constructs. A resumed migration
+    would then keep the vague unverifiable wording forever.
+    """
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(current_phase="channels", started_at="2024-01-01T00:00:00+00:00")
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, resume=True, thread_strategy="archive")
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.thread_strategy == "archive"
+
+
+async def test_an_incremental_with_a_prior_records_the_thread_strategy(tmp_path: Path) -> None:
+    """SC-1.5. The carry-over branch constructs, then copies fields forward.
+
+    The strategy is NOT among them: it describes this run, not the prior one.
+    """
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(
+        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
+        thread_strategy="flatten",
+    )
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, incremental=True, thread_strategy="merge")
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.thread_strategy == "merge"
+
+
+async def test_an_incremental_with_no_prior_records_the_thread_strategy(tmp_path: Path) -> None:
+    """SC-1.6. The fallback branch, which constructs fresh and warns."""
+    config = _make_config(tmp_path, incremental=True, thread_strategy="archive")
+    events: list[MigrationEvent] = []
+    state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+    assert state.thread_strategy == "archive"
+    assert any("no prior state" in e.message for e in events)
+
+
+async def test_a_resume_records_the_resuming_runs_strategy(tmp_path: Path) -> None:
+    """SC-1.7. The field describes the MOST RECENT run, deliberately.
+
+    A resume under a different --thread-strategy than the original therefore
+    describes the resuming run while most of the content was migrated under the
+    first. This spec makes that mismatch legible for the first time; it does not
+    create it. verify.py's wording must not overclaim on the strength of it.
+    """
+    from discord_ferry.state import save_state
+
+    prior = MigrationState(
+        current_phase="channels",
+        started_at="2024-01-01T00:00:00+00:00",
+        thread_strategy="flatten",
+    )
+    save_state(prior, tmp_path)
+
+    config = _make_config(tmp_path, resume=True, thread_strategy="merge")
+    state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.thread_strategy == "merge"
