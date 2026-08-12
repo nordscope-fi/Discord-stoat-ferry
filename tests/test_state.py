@@ -851,11 +851,15 @@ _KNOWN_STATE_FIELDS = frozenset(
         # text, since a Discord user chooses a channel name. They are still
         # structural, because what _TEXT_MEMBERS guards is a FERRY SECRET
         # reaching disk through an exception repr, and a name never travels that
-        # path. Classifying them as free text would be actively harmful:
-        # SecureTokenStore.sanitize does unbounded substring replacement, so a
-        # recorded name containing a registered secret as a substring would be
-        # rewritten, and ferry check would then report a rename nobody made.
-        # See test_a_recorded_name_containing_a_secret_is_not_rewritten.
+        # path.
+        #
+        # Listing them here would in fact be INERT rather than harmful, measured
+        # by mutation rather than assumed: scrub_document descends one level into
+        # LISTS of dicts, and these are dict[str, str], so _mask_entries returns
+        # them untouched. Structural is still the correct classification, on the
+        # reason above. See
+        # test_a_recorded_name_containing_a_secret_is_not_rewritten for what does
+        # threaten them, which is a future widening of scrub_document itself.
         #
         # thread_strategy is validated against a closed set of three values at
         # the CLI boundary by click.Choice. That does NOT hold for the GUI, which
@@ -1133,3 +1137,42 @@ def test_contract_fields_default_when_absent(tmp_path: Path) -> None:
     assert loaded.thread_strategy == ""
     assert loaded.created_channel_names == {}
     assert loaded.created_role_names == {}
+
+
+def test_a_recorded_name_containing_a_secret_is_not_rewritten() -> None:
+    """SC-5.4. A recorded name reaches disk byte-identical, so the rename
+    comparison in verify.py compares like with like.
+
+    WHAT THIS DOES NOT GUARD, corrected after running the mutation rather than
+    reasoning about it. Adding created_channel_names to _TEXT_MEMBERS does
+    NOTHING: scrub_document's _mask_entries returns early on anything that is not
+    a list, and this field is a dict[str, str]. The mutant survives. The spec and
+    design for this change both claimed otherwise, through two review rounds.
+
+    WHAT IT DOES GUARD is the widening ADR-014 actually warns against. If
+    scrub_document ever descends into dicts, SecureTokenStore.sanitize's
+    unbounded substring replacement rewrites any recorded name containing a
+    registered secret, verify.py then compares a scrubbed string against a live
+    one, and ferry check reports a rename nobody made. That is the same failure
+    shape ADR-014 measured for channel_message_offsets, where a rewritten value
+    is a silently wrong resume position.
+
+    THE POSITIVE CONTROL IS NOT OPTIONAL. The first assertion says a value is
+    unchanged, which passes just as well against a registry that never received
+    the secret. The second fails in that case, so the two together distinguish
+    "correctly left alone" from "nothing was scrubbed at all".
+    """
+    from discord_ferry.core.security import scrub_document
+    from discord_ferry.state import _state_to_dict
+
+    register_secret("proxy_password", "swordfish")
+    state = MigrationState(created_channel_names={"d-100": "team-swordfish-chat"})
+    state.warnings.append({"type": "x", "phase": "structure", "message": "proxy: swordfish"})
+
+    doc = scrub_document(_state_to_dict(state))
+
+    # The subject: a structural field is passed through untouched.
+    assert doc["created_channel_names"]["d-100"] == "team-swordfish-chat"
+    # The positive control: the same call DID scrub a classified field, so the
+    # assertion above cannot be passing because the registry was empty.
+    assert "swordfish" not in doc["warnings"][0]["message"]
