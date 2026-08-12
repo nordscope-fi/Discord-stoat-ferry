@@ -47,7 +47,7 @@ from discord_ferry.migrator.api import (
 from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
 from discord_ferry.migrator.emoji import run_emoji
-from discord_ferry.migrator.messages import _process_message, run_messages
+from discord_ferry.migrator.messages import _THREAD_STRATEGIES, _process_message, run_messages
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import run_categories, run_channels, run_roles, run_server
@@ -326,7 +326,17 @@ async def run_migration(
     # resuming run while most of the content was migrated under the first, which
     # is why verify.py words its detail as the recorded strategy rather than as
     # the strategy every message in the channel was migrated under.
-    state.thread_strategy = config.thread_strategy
+    #
+    # The EFFECTIVE strategy, not the requested one. run_messages falls back to
+    # "flatten" for any value outside _THREAD_STRATEGIES, so recording
+    # config.thread_strategy raw would let state.json name a strategy the run
+    # never used, and ferry check would then report that as the cause. --resume
+    # and the CLI cannot reach it, because click.Choice validates there, but the
+    # GUI reads its value back from a storage file it does not re-validate and a
+    # programmatic FerryConfig is unconstrained. Found by a chunk review.
+    state.thread_strategy = (
+        config.thread_strategy if config.thread_strategy in _THREAD_STRATEGIES else "flatten"
+    )
 
     # Preflight: surface any proxy configuration Ferry found but cannot use.
     # core/http.py returns data and never emits; the engine decides. Emitted at
