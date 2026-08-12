@@ -1351,3 +1351,55 @@ async def test_tail_results_keep_channel_map_order_despite_the_fan_out(
     report = await run_check(BASE_URL, TOKEN, state, _noop_event)
     tail_order = [r.discord_id for r in report.results if r.name.startswith("tail:")]
     assert tail_order == [f"d-{n}" for n in range(6)]
+
+
+@pytest.mark.parametrize(
+    ("label", "window", "high_water", "count", "expected_status"),
+    [
+        pytest.param(
+            "hole in the middle, tail intact",
+            [0, 1, 2, 7, 8, 9],
+            9,
+            10,
+            "ok",
+            id="hole-in-the-middle",
+        ),
+        pytest.param(
+            "tail deleted, then 100 newer messages arrived",
+            list(range(200, 300)),
+            9,
+            10,
+            "unverifiable",
+            id="tail-deleted-then-overflowed",
+        ),
+    ],
+)
+async def test_two_shapes_of_real_loss_this_check_cannot_see(
+    mock_aiohttp: aioresponses,
+    label: str,
+    window: list[int],
+    high_water: int,
+    count: int,
+    expected_status: str,
+) -> None:
+    """KNOWN LIMITS, pinned so nobody later claims the tool catches these.
+
+    Both inputs describe a channel that genuinely lost content, and neither is
+    reported as a failure. That is accepted, documented in the design, and the
+    direct consequence of checking a tail rather than reconciling every message.
+
+    A chunk review asserted there were NO such inputs. There are exactly these
+    two, which is why the claim is pinned in executable form rather than left
+    to prose that can drift.
+
+    An ok result here means "the recorded tail is present". It must never be
+    read, or worded, as "this channel is complete". Full per-message
+    reconciliation is batch 10's territory (spec P2 S9).
+    """
+    _register_tail(mock_aiohttp, window)
+    report = await run_check(
+        BASE_URL, TOKEN, _tail_state(high_water=high_water, count=count), _noop_event
+    )
+    result = _tail_result(report)
+    assert result.status == expected_status
+    assert report.has_failures is False
