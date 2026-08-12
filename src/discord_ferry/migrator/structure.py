@@ -1102,6 +1102,14 @@ async def run_channels(
                 # what the server stored, so any normalisation upstream cannot
                 # show up later as a rename nobody made. The fallback covers a
                 # response that omits the key.
+                #
+                # `or` rather than `.get("name", unique_name)`, and a review
+                # proposed the swap. Measured across the four response shapes:
+                # they differ only on an empty-string name, which Stoat's 1-to-32
+                # create validation makes unreachable, and `.get` with a default
+                # returns None on an explicit `"name": null`, putting None into a
+                # dict[str, str]. `or` is the safer of the two here. The same
+                # applies to the role and forum index sites below.
                 state.created_channel_names[ch.id] = result.get("name") or unique_name
 
                 # Apply channel permission overrides from Discord metadata.
