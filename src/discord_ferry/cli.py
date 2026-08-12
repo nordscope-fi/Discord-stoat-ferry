@@ -1554,17 +1554,26 @@ def _render_check_report(report: CheckReport, thread_strategy: str = "") -> None
         # serialises and what the repair tool reads in-process. This is what a
         # human reads, and fixing one without the other leaves half the audience
         # with the wrong explanation.
+        # Each branch points at the per-result detail rather than enumerating,
+        # because `unverifiable` has FIVE producers: channel_not_visible,
+        # category_title_unknown, check_error, tail_not_recorded and
+        # tail_window_exhausted. An earlier draft of this sentence said a
+        # non-merge migration "means a duplicate send, or a channel this token
+        # cannot read", which claimed exclusivity and omitted three of them. A
+        # wrong claim in prose is a defect, and the whole-branch review caught it.
         if thread_strategy == "merge":
             cause = (
-                "which is expected under --thread-strategy=merge, after a duplicate "
-                "send, or for a channel this token cannot read"
+                "and under --thread-strategy=merge that is expected for any channel "
+                "that absorbed thread content. Each result above says which cause applies"
             )
         elif thread_strategy:
             cause = (
-                f"which for a --thread-strategy={thread_strategy} migration means a "
-                "duplicate send, or a channel this token cannot read"
+                f"which a --thread-strategy={thread_strategy} migration does not cause "
+                "on its own. Each result above says which cause applies"
             )
         else:
+            # The exact wording v2.16.0 shipped, kept for a state file that
+            # records no strategy, which is every migration predating 2.17.0.
             cause = (
                 "which is expected when --thread-strategy=merge was used, after a "
                 "duplicate send, or for a channel this token cannot read"
