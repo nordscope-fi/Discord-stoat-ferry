@@ -27,7 +27,7 @@ from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
-from discord_ferry.errors import MigrationError, StateError
+from discord_ferry.errors import CheckError, MigrationError, StateError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
@@ -35,6 +35,7 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_set_role_permissions,
     api_upsert_categories,
+    init_request_semaphore,
 )
 from discord_ferry.parser.dce_parser import (
     acknowledgement_required,
@@ -46,6 +47,7 @@ from discord_ferry.stats import summarize_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.migrator.verify import CheckReport
     from discord_ferry.parser.models import DCEExport
     from discord_ferry.review import RollbackSummary
     from discord_ferry.stats import StateSummary
@@ -1360,6 +1362,92 @@ def probe_cmd(
         colour = {"ok": "green", "warn": "yellow", "fail": "red"}.get(c.status, "white")
         table.add_row(c.name, f"[{colour}]{c.status}[/]", c.detail)
     console.print(table)
+
+
+@main.command(name="check")
+@click.argument("output_dir", type=click.Path(exists=True))
+@click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
+@click.option("--token", envvar="STOAT_TOKEN", default=None, help="Stoat user token")
+def check_cmd(output_dir: str, stoat_url: str | None, token: str | None) -> None:
+    """Verify a finished migration against the live Stoat server.
+
+    Reads the state file in OUTPUT_DIR and asks the server whether everything it
+    records is still there. Read-only: it creates, edits and deletes nothing.
+    """
+    load_dotenv()
+    if not stoat_url:
+        console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
+        sys.exit(1)
+    if not token:
+        console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
+        sys.exit(1)
+
+    _print_proxy_notices(to_stderr=True)
+
+    # Same hazard probe_cmd documents: this command builds no FerryConfig, so
+    # the engine's _ensure_token_store hook never fires and the Stoat token has
+    # NO masking coverage for the whole run without this line. The regex
+    # backstop deliberately cannot match Stoat's opaque base64url values.
+    register_secret("stoat", token)
+
+    # Without this the module semaphore stays None, which _api_request treats as
+    # "no limit" rather than as an error. Nothing would report the omission.
+    init_request_semaphore(FerryConfig.max_concurrent_requests)
+
+    from discord_ferry.migrator.verify import run_check
+
+    try:
+        state = load_state(Path(output_dir))
+    except StateError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(exc)}")
+        sys.exit(1)
+
+    try:
+        report = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
+    except (CheckError, MigrationError) as exc:
+        console.print(f"[bold red]Cannot check this migration:[/] {_safe(exc)}")
+        sys.exit(1)
+
+    _render_check_report(report)
+    sys.exit(1 if report.has_failures else 0)
+
+
+def _render_check_report(report: CheckReport) -> None:
+    """Print the results table and the summary line.
+
+    The summary leads with counts and states the exit code, so neither has to be
+    inferred. When anything could not be verified it also says so in a sentence:
+    on a merge migration most tail results are unverifiable, and a bare count
+    beside three green ones reads like approval of something never examined.
+    """
+    colours = {"ok": "green", "warn": "yellow", "fail": "red", "unverifiable": "cyan"}
+    table = Table(title="Migration Check")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for result in report.results:
+        colour = colours.get(result.status, "white")
+        table.add_row(
+            escape(result.name),
+            f"[{colour}]{result.status}[/]",
+            escape(result.detail),
+        )
+    console.print(table)
+
+    counts = report.counts()
+    exit_code = 1 if report.has_failures else 0
+    console.print(
+        f"{counts['ok']} ok · {counts['fail']} failed · "
+        f"{counts['unverifiable']} unverifiable · {counts['warn']} warning"
+        f"   (exit {exit_code})"
+    )
+    if counts["unverifiable"]:
+        console.print(
+            f"[cyan]{counts['unverifiable']} checks could not be verified.[/] Ferry did "
+            "not record what it would need to confirm them, which is expected when "
+            "--thread-strategy=merge was used, after a duplicate send, or for a channel "
+            "this token cannot read."
+        )
 
 
 @main.command("tls-check")
