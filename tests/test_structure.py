@@ -3321,3 +3321,142 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
     assert pins == [], "a pin was attempted against a message id that was never returned"
     # The channel wiring does not depend on the message id and must still have run.
     assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
+
+
+# ---------------------------------------------------------------------------
+# created_channel_names: the name Ferry SENT, from the create response (#289)
+# ---------------------------------------------------------------------------
+#
+# Fixture rule for every test below: the Discord id, the Stoat id and the name
+# are three distinct literals. Seeding any two from one value is what lets a
+# rename test pass against a broken implementation.
+
+
+async def test_run_channels_records_the_created_name(tmp_path: Path) -> None:
+    """SC-2.2. The ordinary case."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_make_export(channel_id="d-100", channel_name="general", category_id="")]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": "general"},
+        )
+        await run_channels(config, state, exports, [].append)
+
+    assert state.channel_map == {"d-100": "01JSTOATCH00000000000AAA"}
+    assert state.created_channel_names == {"d-100": "general"}
+
+
+async def test_the_recorded_name_comes_from_the_response(tmp_path: Path) -> None:
+    """SC-2.3. In every OTHER test the sent name and the returned name are equal.
+
+    Only a response whose name differs from what Ferry sent can distinguish
+    recording result["name"] from recording the local unique_name. Without this
+    test both implementations pass the whole suite.
+
+    Recording the response is what makes any server-side normalisation invisible
+    to the rename check rather than a false positive on every affected channel.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_make_export(channel_id="d-100", channel_name="general", category_id="")]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": "general-normalised"},
+        )
+        await run_channels(config, state, exports, [].append)
+
+    assert state.created_channel_names == {"d-100": "general-normalised"}
+
+
+async def test_a_name_over_32_characters_records_the_truncated_value(tmp_path: Path) -> None:
+    """SC-2.4. The truncation trap, and the reason this field is not the Discord name.
+
+    make_unique_channel_name cuts to 32 characters. Recording ch.name would make
+    ferry check report channel_renamed for every long channel on a server nobody
+    edited, and it would only show on real data.
+    """
+    long_name = "this-channel-name-is-definitely-longer-than-thirty-two"
+    truncated = long_name[:32]
+    assert len(truncated) == 32
+    assert truncated != long_name
+
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [_make_export(channel_id="d-100", channel_name=long_name, category_id="")]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": truncated},
+        )
+        await run_channels(config, state, exports, [].append)
+
+    assert state.created_channel_names == {"d-100": truncated}
+
+
+async def test_a_collision_pair_records_distinct_suffixed_names(tmp_path: Path) -> None:
+    """SC-2.5. Two channels truncating to the same 32 characters.
+
+    make_unique_channel_name appends "-1" to the second. Recording ch.name would
+    record the same value twice and then report a rename for the suffixed one.
+    """
+    base = "a-very-long-channel-name-that-collides-here"
+    first = base[:32]
+    second = f"{base[: 32 - 2]}-1"
+
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [
+        _make_export(channel_id="d-100", channel_name=base, category_id=""),
+        _make_export(channel_id="d-101", channel_name=base, category_id=""),
+    ]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": first},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000BBB", "name": second},
+        )
+        await run_channels(config, state, exports, [].append)
+
+    assert state.created_channel_names == {"d-100": first, "d-101": second}
+    assert first != second
+
+
+async def test_a_voice_retry_records_the_retrys_response(tmp_path: Path) -> None:
+    """SC-2.6. The retry reassigns the response INSIDE an except block.
+
+    A voice channel that fails is retried as text (#194). The id-map write sits
+    OUTSIDE the try, so `result` there is whichever attempt succeeded, and the
+    name write belongs beside it.
+
+    A name write placed next to the first response read never executes on this
+    path, because the exception jumps past it, so that implementation records
+    nothing at all for every voice channel. A test driving only the success path
+    cannot see that, which is why the two responses carry different name
+    literals here.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [
+        _make_export(channel_id="d-100", channel_name="voice-room", category_id="", channel_type=2)
+    ]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", status=500, body="voice unsupported")
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "01JSTOATCH00000000000AAA", "name": "voice-room-as-text"},
+        )
+        await run_channels(config, state, exports, [].append)
+
+    assert state.channel_map == {"d-100": "01JSTOATCH00000000000AAA"}
+    assert state.created_channel_names == {"d-100": "voice-room-as-text"}
