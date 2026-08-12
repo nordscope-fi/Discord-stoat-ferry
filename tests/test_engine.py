@@ -2282,3 +2282,139 @@ async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
 
     assert state.created_channel_names == {"d-100": "general"}
     assert state.created_role_names == {"d-role-1": "mods"}
+
+
+# ---------------------------------------------------------------------------
+# Predicate 2: nothing dropped by the carry-over (#288, SC-5.6 to SC-5.11)
+# ---------------------------------------------------------------------------
+
+
+def assert_nothing_dropped(prior: MigrationState, carried: MigrationState) -> None:
+    """Every name the PRIOR state held is still held, and still equal.
+
+    NOT a completeness check, and the difference was measured on a prototype
+    rather than reasoned about. A completeness predicate over the carried state
+    alone cannot tell a dropped carry-over from a legitimate pre-2.17.0 upgrade:
+    both leave channel_map populated and created_channel_names empty, which is
+    byte-identical. Only taking the prior as an input separates them. Applying
+    completeness here would report incomplete on a correct run, which is a false
+    alarm against every existing user's first upgrade.
+
+    The `key in carried.channel_map` filter is UNREACHABLE today, because the
+    carry-over copies channel_map wholesale, so every prior key is present. It is
+    defensive against a future carry-over that selects rather than copies. Do not
+    delete it as a dead branch: a surviving mutant is not always a delete
+    instruction. test_the_carried_map_filter_is_unreachable_today pins it.
+    """
+    for key, name in prior.created_channel_names.items():
+        if key in carried.channel_map:
+            assert carried.created_channel_names.get(key) == name, (
+                f"channel {key}: prior recorded {name!r}, carried has "
+                f"{carried.created_channel_names.get(key)!r}"
+            )
+    for key, name in prior.created_role_names.items():
+        if key in carried.role_map:
+            assert carried.created_role_names.get(key) == name, (
+                f"role {key}: prior recorded {name!r}, carried has "
+                f"{carried.created_role_names.get(key)!r}"
+            )
+
+
+async def _incremental_from(tmp_path: Path, prior: MigrationState) -> MigrationState:
+    """Save *prior*, then run an --incremental migration against it."""
+    from discord_ferry.state import save_state
+
+    save_state(prior, tmp_path)
+    config = _make_config(tmp_path, incremental=True)
+    return await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
+
+
+async def test_a_2_17_prior_is_carried_intact(tmp_path: Path) -> None:
+    """SC-5.6. The ordinary case: names recorded, names carried."""
+    prior = MigrationState(
+        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
+        created_channel_names={"d-100": "general"},
+    )
+    state = await _incremental_from(tmp_path, prior)
+    assert_nothing_dropped(prior, state)
+    assert state.created_channel_names == {"d-100": "general"}
+
+
+async def test_an_incremental_from_a_pre_2_17_state_is_not_flagged(tmp_path: Path) -> None:
+    """SC-5.8. THE mandatory discriminator, and the reason there are two predicates.
+
+    A 2.16.1 state has channel_map entries and no names, because the fields did
+    not exist. That is byte-identical to a carry-over that DROPPED the names, and
+    a completeness predicate cannot separate them: it reports incomplete here,
+    which is a false alarm on a completely correct run.
+
+    Measured on the prototype at docs/plans/designs, which is gitignored: the
+    completeness predicate is wrong on 2 of 8 cases and this is one of them.
+    Applying it to an incremental state ships a spurious failure against every
+    existing user's first upgrade, while the suite looks thorough.
+
+    DO NOT DELETE THIS TEST, and do not "simplify" the two predicates into one.
+    """
+    prior = MigrationState(channel_map={"d-100": "01JSTOATCH00000000000AAA"})
+    state = await _incremental_from(tmp_path, prior)
+
+    assert_nothing_dropped(prior, state)  # passes: no names recorded, no obligation
+    assert state.channel_map == {"d-100": "01JSTOATCH00000000000AAA"}
+    assert state.created_channel_names == {}
+
+
+async def test_a_mixed_carried_and_nameless_prior_is_not_flagged(tmp_path: Path) -> None:
+    """SC-5.9. Half a pre-2.17.0 prior, half recorded under 2.17.0.
+
+    The carried nameless entry imposes no obligation and the recorded one is
+    honoured. The completeness predicate is wrong here too, which is the second
+    of its two measured failures.
+    """
+    prior = MigrationState(
+        channel_map={
+            "d-100": "01JSTOATCH00000000000AAA",  # from the old run, no name
+            "d-101": "01JSTOATCH00000000000BBB",  # recorded under 2.17.0
+        },
+        created_channel_names={"d-101": "announcements"},
+    )
+    state = await _incremental_from(tmp_path, prior)
+
+    assert_nothing_dropped(prior, state)
+    assert state.created_channel_names == {"d-101": "announcements"}
+
+
+def test_the_carried_map_filter_is_unreachable_today() -> None:
+    """SC-5.10. Diagnosis, not deletion.
+
+    The `key in carried.channel_map` filter has no input that reaches it today,
+    because the carry-over copies channel_map wholesale, so every prior key
+    survives. This drives the filter directly to prove it functions, and records
+    that nothing in production reaches it, so a later reader sees a diagnosed
+    defensive branch rather than an uncovered one to delete.
+    """
+    prior = MigrationState(
+        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
+        created_channel_names={"d-100": "general"},
+    )
+    carried = MigrationState()  # a carry-over that brought nothing forward
+    assert_nothing_dropped(prior, carried)  # the filter excludes the absent key
+
+
+def test_completeness_is_deliberately_not_applied_to_an_incremental_state() -> None:
+    """SC-5.11. The omission is a decision, recorded so it is not "fixed".
+
+    assert_names_complete lives in tests/test_structure.py and is applied after a
+    FRESH structure run only. It must not be imported here. Applying it to an
+    incremental state was measured to raise a false alarm on a legitimate
+    pre-2.17.0 upgrade, which is what SC-5.8 above pins.
+
+    This asserts the separation itself: the completeness helper is not reachable
+    from this module.
+    """
+    import tests.test_engine as this_module
+
+    assert not hasattr(this_module, "assert_names_complete"), (
+        "assert_names_complete belongs to the fresh-run guard in "
+        "tests/test_structure.py. Applying it to an incremental state reports a "
+        "false alarm on a legitimate pre-2.17.0 upgrade. See SC-5.8."
+    )
