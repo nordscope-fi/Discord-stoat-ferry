@@ -20,6 +20,7 @@ check is a recorded result, not the absence of one.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, get_args
 
@@ -392,6 +393,14 @@ async def _check_structure(
         )
 
 
+#: How many channels the tail check reads at once.
+#:
+#: Matches the default `init_request_semaphore` uses for a migration. The
+#: per-channel bucket allows 15 requests per 10 seconds EACH, so this is
+#: nowhere near a limit; it exists to avoid opening 200 sockets at once.
+_MAX_CONCURRENT_TAILS = 5
+
+
 #: The prefix `structure.py` puts on a forum index channel's synthetic
 #: `channel_map` key. Its message id lives under the BARE key in
 #: `forum_index_message_ids`, so one of the two has to be translated.
@@ -430,29 +439,70 @@ async def _check_tails(
             message="Checking each channel's most recent messages...",
         )
     )
-    for discord_id, stoat_id in state.channel_map.items():
-        if discord_id not in verified:
-            # The structure pass could not read this channel, and has already
-            # said so. Fetching its messages would fail for the same cause and
-            # report it twice, doubling the apparent damage and sending a repair
-            # after a channel that may not exist.
-            continue
+    # Fanned out, not sequential. The rate-limit bucket is keyed
+    # ("channels", channel_id), so separate channels never contend with each
+    # other, and 200 channels in series would be 200 round trips of pure
+    # latency for no reason.
+    #
+    # Bounded by a LOCAL semaphore rather than the module-level one in api.py.
+    # That one is initialised by whoever drives a migration, and a caller using
+    # this module directly may not have done so, in which case it is None and
+    # imposes no limit at all. A local bound cannot be forgotten.
+    #
+    # `_one_tail` is written so it CANNOT raise, which is what makes gather safe
+    # here. The recorded hazard is `gather(..., return_exceptions=True)`
+    # discarding what it collected; a coroutine with nothing to throw leaves
+    # gather nothing to swallow, and the ordinary form preserves input order so
+    # the report stays deterministic.
+    limiter = asyncio.Semaphore(_MAX_CONCURRENT_TAILS)
+    targets = [
+        (discord_id, stoat_id)
+        for discord_id, stoat_id in state.channel_map.items()
+        # The structure pass could not read these, and has already said so.
+        # Fetching them would fail for the same cause and report it twice,
+        # doubling the apparent damage and sending a repair after a channel
+        # that may not exist.
+        if discord_id in verified
+    ]
+    results = await asyncio.gather(
+        *(
+            _one_tail(sess, stoat_url, token, state, discord_id, stoat_id, limiter)
+            for discord_id, stoat_id in targets
+        )
+    )
+    for result in results:
+        report.results.append(result)
+
+
+async def _one_tail(
+    sess: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+    discord_id: str,
+    stoat_id: str,
+    limiter: asyncio.Semaphore,
+) -> CheckResult:
+    """One channel's tail verdict. Never raises, by construction.
+
+    Every failure becomes a result. That is what lets the caller use a plain
+    ``gather`` without ``return_exceptions``, and it is the deliberate contrast
+    with the ``validate_after`` block in ``run_migration``, whose blanket
+    handler leaves its result dict empty so a check that failed reads exactly
+    like one that passed.
+    """
+    expected = _expected_tail(state, discord_id)
+    async with limiter:
         try:
             window = await api_fetch_messages(
                 sess, stoat_url, token, stoat_id, limit=_WINDOW, sort="Latest"
             )
         except FerryError as exc:
-            # One channel failing is a RESULT, not the end of the run. This is
-            # the deliberate contrast with the validate_after block in
-            # run_migration, whose blanket handler writes a warning and leaves
-            # its result dict empty, so a check that failed reads exactly like
-            # one that passed.
-            #
-            # unverifiable rather than fail: Ferry could not look, which is not
-            # the same as finding something wrong. Only FerryError is caught, so
-            # a programming error still surfaces as a crash rather than being
+            # unverifiable, not fail: Ferry could not look, which is not the
+            # same as finding something wrong. Only FerryError is caught, so a
+            # programming error still surfaces as a crash rather than being
             # filed as a server problem.
-            report.add(
+            return CheckResult(
                 name=f"tail:{discord_id}",
                 status="unverifiable",
                 kind="check_error",
@@ -460,22 +510,21 @@ async def _check_tails(
                 discord_id=discord_id,
                 stoat_id=stoat_id,
             )
-            continue
-        window_ids = [m["_id"] for m in window if isinstance(m, dict) and "_id" in m]
-        status, kind, detail = _classify_tail(
-            expected=_expected_tail(state, discord_id),
-            window_ids=window_ids,
-            recorded_count=state.channel_message_counts.get(discord_id, 0),
-        )
-        report.add(
-            name=f"tail:{discord_id}",
-            status=status,
-            kind=kind,
-            detail=detail,
-            discord_id=discord_id,
-            stoat_id=stoat_id,
-            expected=_expected_tail(state, discord_id),
-        )
+    window_ids = [m["_id"] for m in window if isinstance(m, dict) and "_id" in m]
+    status, kind, detail = _classify_tail(
+        expected=expected,
+        window_ids=window_ids,
+        recorded_count=state.channel_message_counts.get(discord_id, 0),
+    )
+    return CheckResult(
+        name=f"tail:{discord_id}",
+        status=status,
+        kind=kind,
+        detail=detail,
+        discord_id=discord_id,
+        stoat_id=stoat_id,
+        expected=expected,
+    )
 
 
 def _expected_tail(state: MigrationState, discord_id: str) -> str | None:
