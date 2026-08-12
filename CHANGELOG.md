@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-08-12
+
+### Added
+
+- A new `ferry check` command verifies a migration you have already run. Point it at
+  the output directory and it asks the Stoat server whether everything Ferry recorded
+  is still there: every channel, role, category and emoji, and each channel's most
+  recent messages. It is read-only and creates nothing. Run it after a migration, after
+  a resume, or weeks later. It exits non-zero if anything is missing, so it can be used
+  in a script (#107 batch 9).
+- Results come back as one of four answers, and the fourth matters. `ok` means found
+  and matching, `warn` means a category was renamed but its contents are intact, `fail`
+  means something is gone, and `unverifiable` means Ferry cannot answer and says why.
+  A `warn` on its own does not fail the command.
+
+### Changed
+
+- Nothing existing changed behaviour. `--validate-after` still does what it did, and
+  `ferry validate` still inspects an export before a migration rather than checking one
+  afterwards.
+
+### Notes
+
+- What `ferry check` cannot tell you is documented alongside what it can. It reads the
+  100 most recent messages in each channel, so a gap in the middle of a channel is
+  invisible and an `ok` means "the last message Ferry recorded is present" rather than
+  "this channel is complete". A channel that has gained more than 100 messages since the
+  migration reports `unverifiable` rather than guessing. A renamed channel or role is not
+  detected, because Ferry never recorded the names it gave them; renamed categories are.
+  See the Known Limitations guide.
+
 ## [2.15.0] - 2026-08-11
 
 ### Added
