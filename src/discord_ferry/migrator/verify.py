@@ -544,6 +544,7 @@ async def _one_tail(
         expected=expected,
         window_ids=window_ids,
         recorded_count=state.channel_message_counts.get(discord_id, 0),
+        thread_strategy=state.thread_strategy,
     )
     return CheckResult(
         name=f"tail:{discord_id}",
@@ -590,11 +591,45 @@ def _expected_tail(state: MigrationState, discord_id: str) -> str | None:
     return state.message_map.get(high_water)
 
 
+def _tail_not_recorded_detail(thread_strategy: str) -> str:
+    """Word the one unverifiable case whose cause Ferry can sometimes name.
+
+    ``thread_strategy`` is ``""`` for every migration that predates the field,
+    and that is the only case where the possibilities have to be listed rather
+    than named. Keeping the v2.16.0 wording there is deliberate: naming an empty
+    or unknown strategy would read as a defect rather than as an old state file.
+
+    Under ``merge`` the cause is usually structural rather than a failure.
+    ``_merge_threads`` never writes ``message_map``, so a parent channel that
+    absorbed thread content legitimately has no recorded last message.
+    """
+    if not thread_strategy:
+        return (
+            "Ferry recorded no id for this channel's last message, which happens "
+            "when a send was accepted as a duplicate. Its delivery cannot be "
+            "confirmed here (see issue #240)."
+        )
+    if thread_strategy == "merge":
+        return (
+            "Ferry recorded no id for this channel's last message. The migration "
+            "ran with --thread-strategy=merge, under which a parent channel that "
+            "absorbed thread content records no id for what it sent, so this is "
+            "expected rather than a failure. A duplicate send produces the same "
+            "result (see issue #240)."
+        )
+    return (
+        "Ferry recorded no id for this channel's last message. The migration ran "
+        f"with --thread-strategy={thread_strategy}, which does not produce this "
+        "on its own, so a send was accepted as a duplicate (see issue #240)."
+    )
+
+
 def _classify_tail(
     *,
     expected: str | None,
     window_ids: list[str],
     recorded_count: int,
+    thread_strategy: str,
 ) -> tuple[CheckStatus, str, str]:
     """Decide one channel's verdict. A pure function, deliberately.
 
@@ -622,13 +657,7 @@ def _classify_tail(
             "state records messages for this channel but the server returned none",
         )
     if expected is None:
-        return (
-            "unverifiable",
-            "tail_not_recorded",
-            "Ferry recorded no id for this channel's last message, which happens "
-            "when a send was accepted as a duplicate. Its delivery cannot be "
-            "confirmed here (see issue #240).",
-        )
+        return ("unverifiable", "tail_not_recorded", _tail_not_recorded_detail(thread_strategy))
     if expected in set(window_ids):
         return ("ok", "tail_present", "the last message Ferry recorded is still present")
 

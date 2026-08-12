@@ -1405,3 +1405,72 @@ async def test_two_shapes_of_real_loss_this_check_cannot_see(
     result = _tail_result(report)
     assert result.status == expected_status
     assert report.has_failures is False
+
+
+# ---------------------------------------------------------------------------
+# The recorded thread strategy names the cause (#293, SC-1.2, SC-1.8, SC-1.9)
+# ---------------------------------------------------------------------------
+
+
+async def test_an_unrecorded_tail_names_the_recorded_strategy(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-1.8. The whole point of recording thread_strategy.
+
+    A merge parent legitimately has no recorded tail, because _merge_threads
+    never writes message_map. Naming the strategy turns a list of possibilities
+    into the one that applies.
+    """
+    _register_tail(mock_aiohttp, [0, 1, 2])
+    state = _tail_state(high_water=2, count=3, mapped=False)
+    state.thread_strategy = "merge"
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    result = next(r for r in report.results if r.name == "tail:d-100")
+    assert result.status == "unverifiable"
+    assert result.kind == "tail_not_recorded"
+    assert "merge" in result.detail
+
+
+async def test_an_unrecorded_tail_keeps_the_old_wording_when_unrecorded(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """SC-1.9. A state.json written before 2.17.0 has no recorded strategy.
+
+    It must keep the wording that shipped in v2.16.0 rather than naming an empty
+    or unknown strategy, which would read as a defect rather than as an old file.
+    """
+    _register_tail(mock_aiohttp, [0, 1, 2])
+    state = _tail_state(high_water=2, count=3, mapped=False)
+    assert state.thread_strategy == ""
+
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+
+    result = next(r for r in report.results if r.name == "tail:d-100")
+    assert result.status == "unverifiable"
+    assert result.kind == "tail_not_recorded"
+    assert "duplicate" in result.detail
+    assert "merge" not in result.detail
+
+
+async def test_an_empty_strategy_and_flatten_are_different_claims() -> None:
+    """SC-1.2. This is the test that kills defaulting the field to "flatten".
+
+    "" means no strategy was recorded, which every pre-2.17.0 migration reports.
+    "flatten" means one was chosen. A default of "flatten" would assert a
+    strategy nobody selected, and the check would then name a cause it cannot
+    know. The two must produce different text.
+    """
+    details: dict[str, str] = {}
+    for strategy in ("", "flatten"):
+        with aioresponses() as m:
+            _register_tail(m, [0, 1, 2])
+            state = _tail_state(high_water=2, count=3, mapped=False)
+            state.thread_strategy = strategy
+            report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+        details[strategy] = next(r for r in report.results if r.name == "tail:d-100").detail
+
+    assert details[""] != details["flatten"]
+    assert "flatten" in details["flatten"]
+    assert "flatten" not in details[""]
