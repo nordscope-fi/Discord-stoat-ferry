@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import certifi
@@ -14,6 +14,7 @@ from click.testing import CliRunner
 from discord_ferry.cli import main
 from discord_ferry.core.http import reset_http_state
 from discord_ferry.errors import MigrationError
+from discord_ferry.migrator.verify import CheckReport
 from discord_ferry.state import MigrationState
 
 if TYPE_CHECKING:
@@ -1873,3 +1874,190 @@ def test_tls_check_never_prints_userinfo_on_the_failure_path(proxy_env) -> None:
 
     assert "secret" not in out
     assert "user" not in out
+
+
+# ---------------------------------------------------------------------------
+# ferry check (#107 batch 9, tasks #261 and #262)
+# ---------------------------------------------------------------------------
+
+
+def _check_report(*results: tuple[str, str]) -> CheckReport:
+    report = CheckReport()
+    for status, kind in results:
+        report.add(name=f"x:{kind}", status=status, kind=kind, detail="detail")  # type: ignore[arg-type]
+    return report
+
+
+def _patched(order: list[str], report: CheckReport | None = None) -> Any:
+    """Patch the three things check_cmd must do, recording call order."""
+    return (
+        patch(
+            "discord_ferry.cli.register_secret",
+            side_effect=lambda *_a: order.append("register_secret"),
+        ),
+        patch(
+            "discord_ferry.cli.init_request_semaphore",
+            side_effect=lambda *_a: order.append("semaphore"),
+        ),
+        patch(
+            "discord_ferry.cli.load_state",
+            return_value=MigrationState(stoat_server_id="srv1"),
+        ),
+        patch(
+            "discord_ferry.migrator.verify.run_check",
+            new=AsyncMock(
+                side_effect=lambda *a, **k: (
+                    order.append("request") or (report if report is not None else _check_report())
+                )
+            ),
+        ),
+    )
+
+
+def test_check_registers_the_stoat_token_before_any_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Asserts the CALL, deliberately, and never the absence of a token in a
+    sample string.
+
+    An absence assertion passes against a value that simply did not appear in
+    that particular string. Ferry shipped unmasked Stoat tokens to its log file
+    for two releases behind exactly that shape of check.
+
+    probe_cmd's own comment records why the call is needed at all: a command
+    that bypasses FerryConfig never fires the engine's store hook, and the regex
+    backstop deliberately cannot match Stoat's opaque base64url values, so
+    without this line the whole command has no coverage.
+    """
+    order: list[str] = []
+    a, b, c, d = _patched(order)
+    with a, b, c, d:
+        runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    assert "register_secret" in order, "never registered for masking"
+    assert order.index("register_secret") < order.index("request")
+
+
+def test_check_initialises_the_request_semaphore_before_any_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Omitting this gives UNBOUNDED concurrency and no error at all.
+
+    _request_semaphore starts None and _api_request treats that as no limit, so
+    nothing anywhere reports the omission. On a 200-channel server that is 200
+    simultaneous sockets. Asserted as a call, for the same reason as above.
+    """
+    order: list[str] = []
+    a, b, c, d = _patched(order)
+    with a, b, c, d:
+        runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    assert "semaphore" in order, "the concurrency semaphore was never initialised"
+    assert order.index("semaphore") < order.index("request")
+
+
+def test_validate_still_resolves_to_the_export_validator(runner: CliRunner) -> None:
+    """`ferry validate` is TAKEN and means something else: parse and validate an
+    export, with no API calls. The new command had to be named `check`.
+
+    Kills registering the new command under the existing name, which would
+    silently replace a released one.
+    """
+    result = runner.invoke(main, ["validate", "--help"])
+    assert result.exit_code == 0
+    assert "export" in result.output.lower()
+    assert "--stoat-url" not in result.output
+
+
+def test_check_requires_a_url(runner: CliRunner, tmp_path: Path) -> None:
+    """Matches probe_cmd: a clear message rather than a traceback."""
+    result = runner.invoke(main, ["check", str(tmp_path), "--token", "t"], env={"STOAT_URL": ""})
+    assert result.exit_code != 0
+    assert "stoat-url" in result.output.lower()
+
+
+def test_check_exits_zero_when_everything_passed(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.4."""
+    order: list[str] = []
+    a, b, c, d = _patched(order, _check_report(("ok", "tail_present")))
+    with a, b, c, d:
+        result = runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    assert result.exit_code == 0
+
+
+def test_check_exits_non_zero_on_any_failure(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.5. The exit code IS the machine-readable interface, which is why no
+    --json is needed to ship."""
+    order: list[str] = []
+    report = _check_report(("ok", "tail_present"), ("fail", "channel_missing"))
+    a, b, c, d = _patched(order, report)
+    with a, b, c, d:
+        result = runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    assert result.exit_code != 0
+
+
+def test_a_warning_alone_still_exits_zero(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.7. A renamed category is cosmetic: the entity exists and its content
+    is intact. Exiting non-zero for it would fail a migration that is fine."""
+    order: list[str] = []
+    a, b, c, d = _patched(order, _check_report(("warn", "category_title_mismatch")))
+    with a, b, c, d:
+        result = runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    assert result.exit_code == 0
+
+
+def test_a_report_of_only_unverifiable_exits_zero_and_says_so(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-5.6. Exit 0, AND the summary must not read as a clean pass.
+
+    The exit code alone cannot separate "all fine" from "could not check any of
+    it", because both exit 0. On a merge migration most tail results are
+    unverifiable, so the count has to be visible or the tool looks like it
+    approved something it never examined.
+    """
+    order: list[str] = []
+    report = _check_report(
+        ("unverifiable", "tail_not_recorded"), ("unverifiable", "channel_not_visible")
+    )
+    a, b, c, d = _patched(order, report)
+    with a, b, c, d:
+        result = runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    assert result.exit_code == 0
+    assert "2 unverifiable" in result.output
+    assert "could not be verified" in result.output
+
+
+def test_the_summary_names_every_count_and_the_exit_code(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.6. Counts lead, and the exit code is stated rather than inferred."""
+    order: list[str] = []
+    report = _check_report(
+        ("ok", "tail_present"),
+        ("warn", "category_title_mismatch"),
+        ("fail", "channel_missing"),
+        ("unverifiable", "tail_not_recorded"),
+    )
+    a, b, c, d = _patched(order, report)
+    with a, b, c, d:
+        result = runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+        )
+    for fragment in ("1 ok", "1 failed", "1 unverifiable", "1 warning"):
+        assert fragment in result.output, f"summary omitted {fragment!r}"
