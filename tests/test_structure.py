@@ -131,7 +131,10 @@ async def test_run_server_creates_server(tmp_path: Path) -> None:
     exports = [_make_export()]
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
 
         await run_server(config, state, exports, events.append)
 
@@ -161,7 +164,10 @@ async def test_run_server_applies_description_and_nsfw(tmp_path: Path) -> None:
     patch_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         m.patch(
             f"{STOAT_URL}/servers/srv1",
             payload={},
@@ -198,7 +204,10 @@ async def test_run_server_omits_empty_description(tmp_path: Path) -> None:
     patch_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         m.patch(
             f"{STOAT_URL}/servers/srv1",
             payload={},
@@ -221,7 +230,10 @@ async def test_run_server_meta_skipped_without_metadata(tmp_path: Path) -> None:
     exports = [_make_export()]
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
 
         await run_server(config, state, exports, events.append)
@@ -257,7 +269,10 @@ async def test_run_server_uploads_icon(tmp_path: Path) -> None:
     exports = [_make_export(guild_icon_url=str(icon_file))]
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         m.post(f"{AUTUMN_URL}/icons", payload={"id": "icon-autumn-id"})
         m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
 
@@ -279,7 +294,10 @@ async def test_run_server_icon_upload_failure_is_non_fatal(tmp_path: Path) -> No
     exports = [_make_export(guild_icon_url=str(icon_file))]
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         m.post(f"{AUTUMN_URL}/icons", status=500)  # Autumn failure
 
         # Should NOT raise — icon failure is non-fatal.
@@ -2122,7 +2140,10 @@ async def test_banner_uploaded_and_applied(tmp_path: Path) -> None:
     patch_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         # CDN banner download.
         m.get(
             f"{BANNER_CDN}/111/abc123banner.png?size=1024",
@@ -2166,7 +2187,10 @@ async def test_banner_download_fails_graceful(tmp_path: Path) -> None:
     save_discord_metadata(meta, tmp_path)
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         # CDN returns 404.
         m.get(
             f"{BANNER_CDN}/111/abc123banner.png?size=1024",
@@ -2199,7 +2223,10 @@ async def test_no_banner_skipped(tmp_path: Path) -> None:
     save_discord_metadata(meta, tmp_path)
 
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "srv1", "name": "Test"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
         # No CDN mock — if banner download were attempted, aioresponses would raise.
 
         await run_server(config, state, exports, events.append)
@@ -2866,7 +2893,10 @@ async def test_create_path_description_has_no_lock_marker(tmp_path: Path) -> Non
     save_discord_metadata(_meta_with_description("Cosy"), tmp_path)
     bodies: list[dict[str, object]] = []
     with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "new1", "name": "S"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "new1", "name": "S"}, "channels": []},
+        )
         m.patch(
             f"{STOAT_URL}/servers/new1",
             payload={},
@@ -2896,7 +2926,10 @@ async def test_server_id_persisted_right_after_create(tmp_path: Path) -> None:
             side_effect=lambda s, d: recorded.append(s.stoat_server_id),
         ),
     ):
-        m.post(f"{STOAT_URL}/servers/create", payload={"_id": "new1", "name": "S"})
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "new1", "name": "S"}, "channels": []},
+        )
         m.patch(f"{STOAT_URL}/servers/new1", payload={}, repeat=True)
         await run_server(config, state, [_make_export()], lambda e: None)
     assert recorded and recorded[0] == "new1"  # persisted immediately after create

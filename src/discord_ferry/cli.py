@@ -860,8 +860,7 @@ def build(
     async def _build() -> None:
         async with new_session() as session:
             # Create server
-            result = await api_create_server(session, stoat_url, token, bp.name)
-            server_id = result["_id"]
+            server_id = await api_create_server(session, stoat_url, token, bp.name)
             console.print(f"  Created server '{_safe(bp.name)}' ({server_id})")
 
             # Create roles
