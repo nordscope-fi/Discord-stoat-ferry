@@ -386,3 +386,109 @@ async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
     state.emoji_map = {"d-e1": emoji_id}
     report = await run_check(BASE_URL, TOKEN, state, _noop_event)
     assert next(r for r in report.results if r.discord_id == "d-e1").status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# structure: categories, and the only warn in the tool (task #254)
+# ---------------------------------------------------------------------------
+
+
+def _state_with_category(stoat_cat_id: str, expected_title: str) -> MigrationState:
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.category_map = {"d-cat-1": stoat_cat_id}
+    state.category_names = {"d-cat-1": expected_title}
+    return state
+
+
+async def test_a_renamed_category_warns_rather_than_failing(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The ONLY place warn is reachable in the whole tool.
+
+    category_names is the one expected name MigrationState records, so a
+    category title is the one name comparison possible. It warns rather than
+    fails because the entity exists and its content is intact: someone renamed
+    a heading, nothing was lost.
+
+    Kills an implementation reporting a cosmetic rename as fail, which would
+    exit non-zero on a migration that is entirely intact.
+    """
+    cat_id = "01JSTOATCAT00000000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={
+            "server": {
+                "_id": SRV,
+                "channels": [],
+                "categories": [{"id": cat_id, "title": "Renamed", "channels": []}],
+            },
+            "channels": [],
+        },
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event
+    )
+    result = next(r for r in report.results if r.discord_id == "d-cat-1")
+    assert result.status == "warn"
+    assert result.kind == "category_title_mismatch"
+    assert result.expected == "Original"
+    assert result.found == "Renamed"
+    assert report.has_failures is False
+
+
+async def test_a_matching_category_title_is_ok(mock_aiohttp: aioresponses) -> None:
+    """Kills an implementation that warns on every category regardless."""
+    cat_id = "01JSTOATCAT00000000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={
+            "server": {
+                "_id": SRV,
+                "channels": [],
+                "categories": [{"id": cat_id, "title": "Original", "channels": []}],
+            },
+            "channels": [],
+        },
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_category(cat_id, "Original"), _noop_event
+    )
+    assert next(r for r in report.results if r.discord_id == "d-cat-1").status == "ok"
+
+
+async def test_a_missing_category_is_a_failure(mock_aiohttp: aioresponses) -> None:
+    """A category absent from the server is a real loss, not a cosmetic one."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": [], "categories": []}, "channels": []},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_category("01JSTOATCAT00000000000A", "Original"), _noop_event
+    )
+    result = next(r for r in report.results if r.discord_id == "d-cat-1")
+    assert result.status == "fail"
+    assert result.kind == "category_missing"
+
+
+async def test_an_absent_categories_key_does_not_crash(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Server.categories is Optional upstream, so the key can be absent entirely
+    rather than an empty list.
+
+    Kills an implementation doing server["categories"] or assuming a list,
+    which would raise on a server that has never had a category.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    report = await run_check(
+        BASE_URL, TOKEN, _state_with_category("01JSTOATCAT00000000000A", "Original"), _noop_event
+    )
+    assert next(r for r in report.results if r.discord_id == "d-cat-1").status == "fail"
