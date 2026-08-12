@@ -2061,3 +2061,73 @@ def test_the_summary_names_every_count_and_the_exit_code(runner: CliRunner, tmp_
         )
     for fragment in ("1 ok", "1 failed", "1 unverifiable", "1 warning"):
         assert fragment in result.output, f"summary omitted {fragment!r}"
+
+
+# ---------------------------------------------------------------------------
+# ferry build, driven through the real api_create_server wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_build_parses_the_real_create_response(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-3.1. Drive ferry build through the real wrapper, not a patched one.
+
+    Every other build test patches api_create_server out, so none of them touches the
+    response parsing. This one serves the wrapped body over aioresponses instead, which
+    is what spec story S3 actually asks for.
+    """
+    from aioresponses import aioresponses
+
+    from discord_ferry.blueprint import BlueprintRole, ServerBlueprint
+
+    bp = ServerBlueprint(name="Rebuilt", roles=[BlueprintRole(name="Mod")])
+    p = _write_bp(tmp_path, bp)
+
+    with aioresponses() as m:
+        # Register the whole chain. Leaving the roles route out would make aioresponses
+        # raise a connection error, which _api_request retries three times with backoff:
+        # seconds of runtime, ending in a MigrationError resembling the bug under test.
+        m.post(
+            "http://x/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Rebuilt"}, "channels": []},
+            repeat=True,
+        )
+        m.post(
+            "http://x/servers/srv1/roles",
+            payload={"id": "role1", "role": {"name": "Mod"}},
+            repeat=True,
+        )
+        result = runner.invoke(
+            main,
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert "Created role" in result.output
+
+
+def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-3.2. This path prints the error with no redaction available.
+
+    cli.py catches MigrationError and prints it through _safe, which is Rich markup
+    escaping rather than redaction, and build registers no secret. The message has to be
+    safe on its own, so it carries key names and never a value.
+    """
+    from aioresponses import aioresponses
+
+    from discord_ferry.blueprint import ServerBlueprint
+
+    bp = ServerBlueprint(name="Rebuilt")
+    p = _write_bp(tmp_path, bp)
+
+    with aioresponses() as m:
+        m.post("http://x/servers/create", payload={"id": "srv1"}, repeat=True)
+        result = runner.invoke(
+            main,
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 1
+    assert "Build failed:" in result.output
+    assert "srv1" not in result.output
