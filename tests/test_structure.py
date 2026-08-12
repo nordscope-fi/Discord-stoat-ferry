@@ -3520,3 +3520,51 @@ async def test_the_forum_index_channel_records_its_name(tmp_path: Path) -> None:
     assert state.channel_map[index_key] == "01JSTOATIX00000000000AAA"
     assert state.created_channel_names[index_key] == "my-forum-index"
 
+
+async def test_run_roles_records_the_created_name(tmp_path: Path) -> None:
+    """SC-2.8. The role name Ferry sent, taken from the create response.
+
+    Roles pass through truncate_name before the request, so recording role.name
+    would report a rename for every role whose Discord name exceeds the cap,
+    against a server nobody edited. The response is read for the same reason the
+    channel site reads it: it is what the server stored.
+
+    Note the id spelling. The role create response uses "id", while the channel
+    one uses "_id". Both are read here so a fixture cannot pass by accident.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    role = DCERole(id="d-role-1", name="Moderators")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "01JSTOATRL0000000000AAA", "name": "Moderators"},
+        )
+        await run_roles(config, state, exports, [].append)
+
+    assert state.role_map == {"d-role-1": "01JSTOATRL0000000000AAA"}
+    assert state.created_role_names == {"d-role-1": "Moderators"}
+
+
+async def test_the_recorded_role_name_comes_from_the_response(tmp_path: Path) -> None:
+    """SC-2.8, the discriminator half.
+
+    In every other role test the sent and returned names are equal. Only a
+    response whose name differs can tell recording result["name"] from recording
+    truncate_name(role.name).
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    role = DCERole(id="d-role-1", name="Moderators")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "01JSTOATRL0000000000AAA", "name": "moderators-normalised"},
+        )
+        await run_roles(config, state, exports, [].append)
+
+    assert state.created_role_names == {"d-role-1": "moderators-normalised"}

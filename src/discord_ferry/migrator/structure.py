@@ -566,6 +566,11 @@ async def run_roles(
                 raise
             stoat_role_id: str = result["id"]
             state.role_map[role.id] = stoat_role_id
+            # Beside the id write, and from the RESPONSE, matching the channel
+            # site. The fallback repeats truncate_name because that is the value
+            # actually sent: recording role.name would report a rename for every
+            # role whose Discord name exceeds the cap.
+            state.created_role_names[role.id] = result.get("name") or truncate_name(role.name)
             # S3: persist periodically so a hard-kill mid-create leaves role_map durable
             # (resume then skips already-created roles instead of duplicating them).
             if idx % 10 == 0:
