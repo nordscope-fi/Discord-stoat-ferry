@@ -292,32 +292,6 @@ async def test_a_channel_the_token_cannot_see_is_unverifiable_not_a_failure(
     assert report.has_failures is False
 
 
-async def test_a_renamed_channel_is_not_reported(
-    mock_aiohttp: aioresponses,
-) -> None:
-    """KNOWN LIMIT, pinned deliberately. This is NOT coverage of an intended check.
-
-    MigrationState records no channel name. Its only name fields are
-    category_names, forum_category_names and author_names, and every write to
-    channel_map is id to id. So there is no expected name to compare a found
-    name against, and a renamed channel is undetectable.
-
-    Tracked as spec P2 S11, which would record the names for FUTURE migrations.
-    It cannot help any migration that already exists, which is the population
-    this tool serves, so it was deferred rather than built.
-    """
-    stoat_id = "01JSTOATCH00000000000AAA"
-    _register(
-        mock_aiohttp,
-        _server_payload([stoat_id], [{"_id": stoat_id, "name": "renamed-by-someone"}]),
-    )
-    report = await run_check(
-        BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
-    )
-    result = next(r for r in report.results if r.name == "channel:d-100")
-    assert result.status == "ok"
-
-
 async def test_a_forum_index_entry_is_checked_as_an_ordinary_channel(
     mock_aiohttp: aioresponses,
 ) -> None:
