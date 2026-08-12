@@ -21,9 +21,9 @@ check is a recorded result, not the absence of one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 
-from discord_ferry.errors import ValidationError
+from discord_ferry.errors import CheckError
 
 if TYPE_CHECKING:
     import aiohttp
@@ -31,7 +31,18 @@ if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback
     from discord_ferry.state import MigrationState
 
-#: Every status the tool can report, in the order a summary line names them.
+#: Every status the tool can report.
+#:
+#: A ``Literal`` rather than a bare ``str`` so ``mypy --strict`` rejects a typo at
+#: the call site. This is not fussiness: a status of ``"faild"`` would leave
+#: :attr:`CheckReport.has_failures` False and the command exiting 0 while a real
+#: failure sat in the report. A runtime guard would catch it too, but only once
+#: the line actually runs, and the wrong branch may be the rare one.
+CheckStatus = Literal["ok", "warn", "fail", "unverifiable"]
+
+#: The same four, as a tuple, DERIVED from the type rather than restated beside
+#: it. A hand-maintained parallel list is how this project once let every
+#: extension of a permission map leave its expansion behind.
 #:
 #: ``warn`` exists for a cosmetic difference on an entity whose content is
 #: intact. Today the only such difference is a category title, because
@@ -39,7 +50,7 @@ if TYPE_CHECKING:
 #: design review found ``warn`` promised in two acceptance criteria and produced
 #: by no code path at all, so its single legitimate home is stated here rather
 #: than left implicit.
-STATUSES: tuple[str, ...] = ("ok", "warn", "fail", "unverifiable")
+STATUSES: tuple[CheckStatus, ...] = get_args(CheckStatus)
 
 
 @dataclass
@@ -53,7 +64,7 @@ class CheckResult:
     """
 
     name: str
-    status: str
+    status: CheckStatus
     kind: str
     detail: str
     discord_id: str | None = None
@@ -72,7 +83,7 @@ class CheckReport:
         self,
         *,
         name: str,
-        status: str,
+        status: CheckStatus,
         kind: str,
         detail: str,
         discord_id: str | None = None,
@@ -101,9 +112,13 @@ class CheckReport:
         there, so a summary line can always say "0 failed" out loud. A reader
         most wants that stated when it is zero.
         """
-        tally = dict.fromkeys(STATUSES, 0)
+        # Annotated dict[str, int] rather than inferred: dict.fromkeys over a
+        # Literal tuple infers dict[CheckStatus, int], which callers formatting a
+        # summary line would have to satisfy with literals. CheckStatus is a str,
+        # so the widening is free and the increment below still type-checks.
+        tally: dict[str, int] = dict.fromkeys(STATUSES, 0)
         for result in self.results:
-            tally[result.status] = tally.get(result.status, 0) + 1
+            tally[result.status] += 1
         return tally
 
     @property
@@ -139,16 +154,16 @@ async def run_check(
     name channels nobody ever created.
 
     Raises:
-        ValidationError: the state is from a dry run, or records no server.
+        CheckError: the state is from a dry run, or records no server.
     """
     if state.is_dry_run:
-        raise ValidationError(
+        raise CheckError(
             "Cannot check a dry-run state. A dry run records placeholder ids for "
             "channels and messages that were never created, so there is nothing on "
             "the server to verify against. Run a real migration first."
         )
     if not state.stoat_server_id:
-        raise ValidationError(
+        raise CheckError(
             "This state records no Stoat server id, so there is nothing to check "
             "against. The migration may not have reached the structure phase."
         )

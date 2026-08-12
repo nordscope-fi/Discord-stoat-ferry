@@ -9,6 +9,16 @@ class ValidationError(FerryError):
     """Export validation failed."""
 
 
+class CheckError(FerryError):
+    """A finished migration cannot be checked against a live server.
+
+    Distinct from :class:`ValidationError`, which is about a DiscordChatExporter
+    export being unusable as INPUT. This is about a recorded migration being
+    unusable as a SUBJECT: a dry-run state, or one that never reached the
+    structure phase and so records no server.
+    """
+
+
 class StoatConnectionError(FerryError):
     """Stoat API connection failed."""
 

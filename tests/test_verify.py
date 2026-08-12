@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from aioresponses import aioresponses
 
-from discord_ferry.errors import ValidationError
+from discord_ferry.errors import CheckError
 from discord_ferry.migrator.verify import CheckReport, CheckResult, run_check
 from discord_ferry.state import MigrationState
 
@@ -126,7 +126,7 @@ async def test_a_dry_run_state_is_refused_before_any_request() -> None:
     state = MigrationState()
     state.is_dry_run = True
     state.stoat_server_id = "01JSTOATSRV0000000000AAA"
-    with aioresponses(), pytest.raises(ValidationError, match="dry-run"):
+    with aioresponses(), pytest.raises(CheckError, match="dry-run"):
         await run_check(BASE_URL, TOKEN, state, _noop_event)
 
 
@@ -135,7 +135,7 @@ async def test_an_empty_server_id_is_refused_before_any_request() -> None:
     be built with an empty path segment rather than failing honestly."""
     state = MigrationState()
     state.stoat_server_id = ""
-    with aioresponses(), pytest.raises(ValidationError, match="server"):
+    with aioresponses(), pytest.raises(CheckError, match="server"):
         await run_check(BASE_URL, TOKEN, state, _noop_event)
 
 
