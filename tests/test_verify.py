@@ -308,3 +308,81 @@ async def test_a_forum_index_entry_is_checked_as_an_ordinary_channel(
     )
     result = next(r for r in report.results if r.discord_id == "forum-index-cat-9")
     assert result.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# structure: roles and emoji (task #253)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_missing_role_is_a_failure(mock_aiohttp: aioresponses) -> None:
+    """Server.roles is a map keyed by role id, so membership is a key lookup.
+
+    Unlike channels there is no second list and no permission filter, so an
+    absence here is unambiguous and reports fail rather than unverifiable.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": [], "roles": {}}, "channels": []},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.role_map = {"d-r1": "01JSTOATROLE0000000000A"}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = next(r for r in report.results if r.discord_id == "d-r1")
+    assert result.status == "fail"
+    assert result.kind == "role_missing"
+
+
+async def test_a_present_role_is_ok(mock_aiohttp: aioresponses) -> None:
+    """Kills an implementation reporting every role missing, which the failure
+    test above cannot catch on its own."""
+    role_id = "01JSTOATROLE0000000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={
+            "server": {"_id": SRV, "channels": [], "roles": {role_id: {"name": "mods"}}},
+            "channels": [],
+        },
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.role_map = {"d-r1": role_id}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    assert next(r for r in report.results if r.discord_id == "d-r1").status == "ok"
+
+
+async def test_a_missing_emoji_is_a_failure(mock_aiohttp: aioresponses) -> None:
+    """Emoji come from their own route, because Server carries no emoji field."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.emoji_map = {"d-e1": "01JAUTUMNEMOJI00000000A"}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = next(r for r in report.results if r.discord_id == "d-e1")
+    assert result.status == "fail"
+    assert result.kind == "emoji_missing"
+
+
+async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
+    """The emoji list is a list of objects keyed by _id, not a map."""
+    emoji_id = "01JAUTUMNEMOJI00000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}/emojis",
+        payload=[{"_id": emoji_id, "name": "party"}],
+    )
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.emoji_map = {"d-e1": emoji_id}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    assert next(r for r in report.results if r.discord_id == "d-e1").status == "ok"
