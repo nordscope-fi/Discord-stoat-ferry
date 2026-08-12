@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2191,3 +2192,199 @@ def test_check_summary_keeps_the_old_wording_when_no_strategy_was_recorded(
     assert result.exit_code == 0
     assert "merge" in result.output
     assert "duplicate send" in result.output
+
+
+# ---------------------------------------------------------------------------
+# ferry check --json (#300, SC-4.1 to SC-4.7)
+# ---------------------------------------------------------------------------
+
+
+def _invoke_check(runner: CliRunner, tmp_path: Path, report: CheckReport, *extra: str) -> Any:
+    """Drive check_cmd with a given report, optionally with extra flags."""
+    order: list[str] = []
+    a, b, c, d = _patched(order, report)
+    with a, b, c, d:
+        return runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t", *extra],
+        )
+
+
+def test_check_json_output_parses(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.1. Asserted BY PARSING, never by inspecting the string.
+
+    A substring assertion passes against output that is not valid JSON at all,
+    which is the whole failure mode issue #145 records: the module-level Console
+    falls back to 80 columns off a terminal and inserts a real newline wherever
+    the wrap lands, including inside a string value.
+    """
+    report = _check_report(("ok", "channel_present"), ("warn", "channel_renamed"))
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert isinstance(parsed, dict)
+
+
+def test_check_json_mirrors_the_report(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.2. Every CheckResult field, plus the counts summary."""
+    report = CheckReport()
+    report.add(
+        name="channel:d-100",
+        status="warn",
+        kind="channel_renamed",
+        detail="renamed on the server",
+        discord_id="d-100",
+        stoat_id="01JSTOATCH00000000000AAA",
+        expected="general",
+        found="renamed-here",
+    )
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    parsed = json.loads(result.output)
+    assert parsed["counts"]["warn"] == 1
+    (row,) = parsed["results"]
+    assert row == {
+        "name": "channel:d-100",
+        "status": "warn",
+        "kind": "channel_renamed",
+        "detail": "renamed on the server",
+        "discord_id": "d-100",
+        "stoat_id": "01JSTOATCH00000000000AAA",
+        "expected": "general",
+        "found": "renamed-here",
+    }
+
+
+def test_check_json_survives_a_control_character_in_a_detail(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-4.3. The discriminator for this story.
+
+    CheckResult.detail can embed a server-supplied error body. The protection
+    that exists on the Rich path is incidental: Rich interleaves its own style
+    codes between an ESC and the following '[', so the sequence never reaches the
+    terminal contiguously. click.echo does no such thing and would print the ESC
+    verbatim.
+    """
+    report = CheckReport()
+    report.add(
+        name="channel:d-100",
+        status="fail",
+        kind="check_error",
+        detail="server said: \x1b[2J\x07 wiped\nyour screen\r",
+    )
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    parsed = json.loads(result.output)
+    detail = parsed["results"][0]["detail"]
+    assert "\x1b" not in detail
+    assert "\x07" not in detail
+    assert "\r" not in detail
+    assert "wiped" in detail and "your screen" in detail
+
+
+def test_check_json_suppresses_the_table(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.4. Stdout is one JSON document and nothing else."""
+    report = _check_report(("ok", "channel_present"))
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    assert "Migration Check" not in result.output
+    assert "ok ·" not in result.output
+    json.loads(result.output)
+
+
+def test_the_rich_path_is_unchanged_by_the_stripping(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.5. Stripping at the wrong layer would alter shipped behaviour.
+
+    Applying it in CheckResult or in report.add would change what the Rich table
+    prints, which is output v2.16.0 already produces. Only this test catches
+    that, because every other assertion here reads the JSON path.
+    """
+    report = CheckReport()
+    report.add(
+        name="channel:d-100",
+        status="fail",
+        kind="check_error",
+        detail="server said: \x1b[2J oops",
+    )
+    result = _invoke_check(runner, tmp_path, report)
+
+    assert result.exit_code == 1
+    assert "Migration Check" in result.output
+    # The dataclass itself must still hold the raw text: the stripping belongs
+    # to the JSON path alone.
+    assert report.results[0].detail == "server said: \x1b[2J oops"
+
+
+def test_check_json_does_not_change_the_exit_code(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.6. The v2.16.0 contract: non-zero only when something failed."""
+    failing = _check_report(("fail", "channel_missing"))
+    passing = _check_report(("warn", "channel_renamed"), ("unverifiable", "tail_not_recorded"))
+
+    assert _invoke_check(runner, tmp_path, failing, "--json").exit_code == 1
+    assert _invoke_check(runner, tmp_path, failing).exit_code == 1
+    assert _invoke_check(runner, tmp_path, passing, "--json").exit_code == 0
+    assert _invoke_check(runner, tmp_path, passing).exit_code == 0
+
+
+def test_check_json_still_registers_the_token_and_the_semaphore(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-4.7. Asserts the CALLS, never an absence.
+
+    A test asserting a token is missing from some sample string passes against a
+    token that simply did not appear there, and Ferry shipped unmasked Stoat
+    tokens to its log file for two releases behind exactly that shape of check.
+    Both calls must still happen before the request on the --json path.
+    """
+    order: list[str] = []
+    a, b, c, d = _patched(order, _check_report(("ok", "channel_present")))
+    with a, b, c, d:
+        runner.invoke(
+            main,
+            [
+                "check",
+                str(tmp_path),
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                "t",
+                "--json",
+            ],
+        )
+
+    assert "register_secret" in order
+    assert "semaphore" in order
+    assert order.index("register_secret") < order.index("request")
+    assert order.index("semaphore") < order.index("request")
+
+
+def test_check_json_does_not_wrap_a_long_detail(runner: CliRunner, tmp_path: Path) -> None:
+    """The test that actually enforces issue #145, and the first seven did not.
+
+    Every other --json test here uses a short payload, and a short payload fits
+    inside 80 columns, so all seven passed against console.print as readily as
+    against click.echo. The rule was documented in a comment and guarded by
+    nothing.
+
+    Measured: a 275-character JSON line printed through the module-level Console
+    comes back with five newlines and fails to parse, because Console has
+    soft_wrap=False and falls back to 80 columns off a terminal. The wrap lands
+    inside a string value.
+
+    So the detail here is deliberately long enough to force that. If this test
+    is ever shortened it stops testing anything.
+    """
+    report = CheckReport()
+    report.add(
+        name="channel:d-100",
+        status="fail",
+        kind="check_error",
+        detail="could not read this channel's messages: " + ("verylongword" * 20),
+    )
+    result = _invoke_check(runner, tmp_path, report, "--json")
+
+    assert len(result.output) > 200, "payload too short to force a wrap; this test is inert"
+    parsed = json.loads(result.output)
+    assert parsed["results"][0]["detail"].endswith("verylongword")
