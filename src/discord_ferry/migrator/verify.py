@@ -274,7 +274,7 @@ async def _check_structure(
     # derived from this dict has exactly the membership the previous set
     # comprehension produced, malformed entries dropped identically.
     visible_names = {
-        c["_id"]: c.get("name", "")
+        c["_id"]: _readable_name(c)
         for c in (payload.get("channels") or [])
         if isinstance(c, dict) and "_id" in c
     }
@@ -297,8 +297,11 @@ async def _check_structure(
             # before 2.17.0 honest rather than noisy, and it is a documented
             # limit rather than a missing check.
             recorded = state.created_channel_names.get(discord_id)
-            found_name = visible_names.get(stoat_id, "")
-            if recorded is not None and recorded != found_name:
+            found_name = visible_names.get(stoat_id)
+            # `found_name is not None` is doing real work: an object Ferry could
+            # not read a name from must not be compared, or every such channel
+            # reports a rename nobody made.
+            if recorded is not None and found_name is not None and recorded != found_name:
                 report.add(
                     name=f"channel:{discord_id}",
                     status="warn",
@@ -362,6 +365,35 @@ async def _check_structure(
     role_ids = set(roles_map)
     for discord_id, stoat_id in state.role_map.items():
         present = stoat_id in role_ids
+        if present:
+            recorded_role = state.created_role_names.get(discord_id)
+            # Guard the VALUE, matching what the channel and category branches
+            # already do. Until this comparison existed the roles map was
+            # consumed with set(), which takes the KEYS and never touches a
+            # value, so a None or a bare string was harmless. Reading a name off
+            # one raises AttributeError, and mypy --strict cannot catch it
+            # because the payload is typed dict[str, Any]. A malformed value
+            # degrades to no-name-found rather than aborting the whole check.
+            found_role_name = _readable_name(roles_map.get(stoat_id))
+            if (
+                recorded_role is not None
+                and found_role_name is not None
+                and recorded_role != found_role_name
+            ):
+                report.add(
+                    name=f"role:{discord_id}",
+                    status="warn",
+                    kind="role_renamed",
+                    detail=(
+                        "the role exists and its permissions are intact, but it "
+                        "has been renamed on the server since the migration"
+                    ),
+                    discord_id=discord_id,
+                    stoat_id=stoat_id,
+                    expected=recorded_role,
+                    found=found_role_name,
+                )
+                continue
         report.add(
             name=f"role:{discord_id}",
             status="ok" if present else "fail",
@@ -633,6 +665,25 @@ def _expected_tail(state: MigrationState, discord_id: str) -> str | None:
     if high_water is None:
         return None
     return state.message_map.get(high_water)
+
+
+def _readable_name(obj: object) -> str | None:
+    """The ``name`` of an entity object, or None when it cannot be read.
+
+    None means "no name found", which is NOT the same as an empty name and must
+    not be compared against a recorded one. A malformed entry, or an object with
+    no ``name`` key, would otherwise read as ``""`` and differ from every
+    recorded name, reporting a rename nobody made on a response Ferry simply
+    could not parse.
+
+    The isinstance guards are hand-written because ``mypy --strict`` cannot help
+    here: the payload arrives as ``dict[str, Any]``, so every value off it is
+    ``Any``. The channel and category branches guard the same way.
+    """
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name")
+    return name if isinstance(name, str) else None
 
 
 def _tail_not_recorded_detail(thread_strategy: str) -> str:
