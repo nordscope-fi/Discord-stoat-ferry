@@ -13,7 +13,12 @@ import aiohttp
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.discord.client import download_role_icon
-from discord_ferry.discord.metadata import ChannelMeta, RoleMeta, load_discord_metadata
+from discord_ferry.discord.metadata import (
+    ChannelMeta,
+    PermissionPair,
+    RoleMeta,
+    load_discord_metadata,
+)
 from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
@@ -442,6 +447,55 @@ def _role_from_metadata(role_id: str, rm: RoleMeta) -> DCERole:
     return DCERole(id=role_id, name=rm.name, color=rm.color or None, position=rm.position)
 
 
+async def apply_role_permissions(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    stoat_role_id: str,
+    role_perms: PermissionPair | None,
+    label: str,
+    *,
+    phase: str,
+) -> None:
+    """Apply ONE role's translated Discord permissions to its Stoat role.
+
+    Deliberately scoped to one role. The ``api_set_server_default_permissions``
+    call that follows the loop this was extracted from is NOT included, and that
+    boundary is the point of the extraction rather than an accident of it: that
+    call merges ``server_default_permissions | FERRY_MIN_PERMISSIONS`` onto the
+    server's DEFAULT ROLE, so it is server-wide and tied to no single recreated
+    entity. A repair that re-fired it would re-impose a mask on a server whose
+    defaults may have changed since the migration, which is the class of defect
+    batch 5 of #107 existed to fix.
+
+    The ``roles_finalized`` and ``role_map`` guards stay at the call site. They
+    decide WHETHER to apply, which is caller policy, not application.
+
+    ``str(exc)`` needs no scrub at this append site for the same reason as
+    ``apply_channel_permissions``: ADR-014 redacts at the writer.
+    """
+    if not role_perms:
+        return
+    try:
+        await api_set_role_permissions(
+            session,
+            config.stoat_url,
+            config.token,
+            state.stoat_server_id,
+            stoat_role_id,
+            allow=role_perms.allow,
+            deny=role_perms.deny,
+        )
+    except Exception as exc:  # noqa: BLE001
+        state.warnings.append(
+            {
+                "phase": phase,
+                "type": "role_permissions_failed",
+                "message": f"Failed to set permissions for role '{label}': {exc}",
+            }
+        )
+
+
 async def run_roles(
     config: FerryConfig,
     state: MigrationState,
@@ -705,28 +759,15 @@ async def run_roles(
                 if not stoat_role_id_or_none:
                     continue
                 stoat_role_id = stoat_role_id_or_none
-                role_perms = discord_metadata.role_permissions.get(role.id)
-                if role_perms:
-                    try:
-                        await api_set_role_permissions(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            state.stoat_server_id,
-                            stoat_role_id,
-                            allow=role_perms.allow,
-                            deny=role_perms.deny,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        state.warnings.append(
-                            {
-                                "phase": "roles",
-                                "type": "role_permissions_failed",
-                                "message": (
-                                    f"Failed to set permissions for role '{role.name}': {exc}"
-                                ),
-                            }
-                        )
+                await apply_role_permissions(
+                    session,
+                    config,
+                    state,
+                    stoat_role_id,
+                    discord_metadata.role_permissions.get(role.id),
+                    role.name,
+                    phase="roles",
+                )
 
             # Apply @everyone server default permissions (merged with ferry minimum).
             if discord_metadata.server_default_permissions:
