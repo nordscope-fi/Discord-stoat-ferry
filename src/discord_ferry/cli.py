@@ -1656,7 +1656,12 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     try:
         exports = parse_export_directory(export_path)
     except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome here
-        click.echo(f"Error: could not read the export at {export_path}: {_safe(exc)}", err=True)
+        # Plain str(exc), NOT _safe(exc). _safe is Rich-markup escaping, and
+        # click.echo does not interpret markup, so escaping here would print a
+        # literal backslash in front of every bracket the error contains. It is
+        # not a redaction step and never was: the export holds no Stoat token,
+        # and documents are redacted at their writer.
+        click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
         sys.exit(2)
 
     config = FerryConfig(
