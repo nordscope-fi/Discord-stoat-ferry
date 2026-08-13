@@ -7,7 +7,7 @@ import contextlib
 import dataclasses
 import re
 import socket
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -1338,6 +1338,136 @@ def _clear_channel_state(
         ]
 
 
+def _ordered_messages(export: DCEExport) -> Iterator[DCEMessage]:
+    """This export's messages in the order the migration sent them.
+
+    Mirrors ``_process_single_channel`` exactly: stream from disk when a path is
+    known, otherwise sort the in-memory list by timestamp. The sort is not
+    cosmetic. Stoat orders by its own ULIDs, assigned on arrival, so sending out
+    of order puts the channel out of order permanently, and the tail Ferry then
+    records would not be the newest message.
+    """
+    if export.json_path is not None:
+        return stream_messages(export.json_path)
+    return iter(sorted(export.messages, key=lambda m: m.timestamp))
+
+
+def _warn_unrestored_merge_threads(
+    state: MigrationState,
+    export: DCEExport,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> None:
+    """Name the merged thread content a recreated parent does not get back.
+
+    Under ``--thread-strategy=merge`` a thread's messages were appended to the
+    PARENT's Stoat channel, and ``_merge_threads`` resolves that target by parent
+    channel NAME. A channel-scoped scan keyed on the parent's Discord id
+    therefore cannot reach them, and the merge path never wrote ``message_map``
+    either, so nothing in the state points at them.
+
+    The gap is stated rather than silent, which is the whole difference between
+    this and the defect a critique round found. Deferred as #310.
+    """
+    orphans = [
+        e.channel.name
+        for e in exports
+        if e.is_thread and e.parent_channel_name == export.channel.name
+    ]
+    if not orphans:
+        return
+    names = ", ".join(sorted(orphans))
+    message = (
+        f"Channel '{export.channel.name}' was migrated with --thread-strategy=merge, so "
+        f"{len(orphans)} thread(s) had their messages appended to it: {names}. "
+        "Repair restored the channel's own messages only. The merged thread content is "
+        "reachable by parent channel name rather than by id, so a channel-scoped resend "
+        "cannot find it (see issue #310)."
+    )
+    state.warnings.append(
+        {"phase": "repair", "type": "merge_thread_content_not_restored", "message": message}
+    )
+    on_event(MigrationEvent(phase="repair", status="warning", message=message))
+
+
+async def _resend_channel(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    export: DCEExport,
+    on_event: EventCallback,
+) -> int:
+    """Re-send every message this export holds. Returns the count that landed.
+
+    The origin header is sent here rather than left to ``_process_message``,
+    because it does not live there: ``_process_single_channel`` sends it, gated
+    on the channel being absent from ``channel_high_water``. Repair clears that
+    mark, so a loop over ``_process_message`` alone would drop a header the
+    original migration sent and the restored thread would lose the line saying
+    where it came from.
+    """
+    if export.is_thread and export.parent_channel_name:
+        header = (
+            f"[Forum post migrated from #{export.parent_channel_name}]"
+            if export.channel.type in (15, 16)
+            else f"[Thread migrated from #{export.parent_channel_name}]"
+        )
+        with contextlib.suppress(DuplicateSendError):
+            await api_send_message(
+                session,
+                config.stoat_url,
+                config.token,
+                state.channel_map[export.channel.id],
+                content=header,
+                masquerade={"name": "Discord Ferry"},
+                idempotency_key=f"ferry-header-{export.channel.id}",
+            )
+
+    # The mark is the max over EVERY id this export holds, not over the ones
+    # that landed, and taking the easier reading gives a NICER answer that is
+    # wrong. If the newest message fails to send, "max of successful" names the
+    # second-newest, which did land, so the next check finds it and reports
+    # ("ok", "tail_present") over a message that is genuinely missing. Taking
+    # the max over everything reports ("unverifiable", "tail_not_recorded"),
+    # which is honest: Ferry cannot confirm a tail it never sent.
+    #
+    # It matches the phase, where _channel_max_id advances before each send and
+    # is not rolled back on failure. That is safe rather than a permanent hole
+    # only because a failed send lands in state.failed_messages and the #76
+    # self-heal re-attempts any id found there even below the mark.
+    #
+    # isdigit(): real Discord ids are numeric snowflakes, but a system message
+    # can carry something else, and int() on it would abort the whole repair.
+    numeric_ids = [mid for mid in _channel_message_ids(export) if mid.isdigit()]
+
+    sent = 0
+    for msg in _ordered_messages(export):
+        try:
+            await _process_message(
+                msg=msg,
+                stoat_channel_id=state.channel_map[export.channel.id],
+                config=config,
+                state=state,
+                session=session,
+                on_event=on_event,
+                export_channel_id=export.channel.id,
+            )
+            sent += 1
+        except Exception:  # noqa: BLE001
+            # _process_message appends a FailedMessage and re-raises when
+            # channel_result is None, so the failure is already durable. Carrying
+            # on is deliberate: one bad message must not cost the rest of the
+            # channel, and `ferry retry` is what drains what is left.
+            continue
+
+    # _process_message does NOT write this; only the phase loops do. Without it
+    # a recreated channel reports tail_not_recorded, which is `unverifiable`
+    # rather than `ok`, and the repair looks unfinished when it is not.
+    if numeric_ids:
+        state.channel_high_water[export.channel.id] = max(numeric_ids, key=int)
+    return sent
+
+
 def _no_recorded_name(state: MigrationState, kind: str, discord_id: str) -> str:
     """Record why an entity could not be recreated, and return the message.
 
@@ -1725,6 +1855,20 @@ async def run_repair(
                     created = await _recreate_channel(
                         sess, config, state, result, exports, existing_names, on_event
                     )
+                    if created:
+                        matching = next((e for e in exports if e.channel.id == discord_id), None)
+                        label = state.created_channel_names.get(discord_id, discord_id)
+                        if matching is not None:
+                            if state.thread_strategy == "merge":
+                                _warn_unrestored_merge_threads(state, matching, exports, on_event)
+                            count = await _resend_channel(sess, config, state, matching, on_event)
+                            on_event(
+                                MigrationEvent(
+                                    phase="repair",
+                                    status="progress",
+                                    message=f"Re-sent {count} message(s) into {label}.",
+                                )
+                            )
                     if created and metadata:
                         await apply_channel_permissions(
                             sess,
