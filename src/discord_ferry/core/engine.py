@@ -38,6 +38,7 @@ from discord_ferry.migrator.api import (
     api_edit_message,
     api_edit_server,
     api_fetch_server,
+    api_fetch_server_with_channels,
     api_pin_message,
     api_send_message,
     api_upsert_categories,
@@ -1197,6 +1198,46 @@ _REPAIRABLE_TAIL = frozenset({"tail_absent", "tail_and_after_absent"})
 _UNREPAIRABLE_CHANNEL_PREFIX = "forum-index-"
 
 
+async def _live_channel_names(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+) -> set[str]:
+    """Every channel name currently on the server, for the collision set.
+
+    Repair names a recreated channel with ``make_unique_channel_name``, and what
+    differs from a migration is not the rule but its INPUT. ``run_channels``
+    builds its set across the whole export, because on a migration that is every
+    name about to exist. On a repair the correct set is what is on the server
+    NOW: a channel originally created as ``general-1``, whose collision partner
+    has since been deleted, should come back as ``general``.
+
+    Costs ONE request, on the ``/servers`` bucket at 5 per 10 seconds. It cannot
+    be taken from the ``CheckReport``, which is why repair pays for it
+    separately: ``visible_names`` is local to ``_check_structure`` and reaches a
+    ``CheckResult`` only through ``expected``/``found`` on a rename comparison,
+    so the far more common unchanged-name case carries no name at all.
+
+    Known limit, shared with ``ferry check`` itself and not introduced here: the
+    sibling ``channels`` array holds only what this token may ViewChannel, so a
+    channel it cannot see is absent from this set and a recreation could collide
+    with one. That is the same blindness ``channel_not_visible`` documents.
+    """
+    payload = await api_fetch_server_with_channels(
+        session, config.stoat_url, config.token, state.stoat_server_id
+    )
+    names: set[str] = set()
+    for channel in payload.get("channels") or []:
+        # isinstance rather than a bare .get: the payload is dict[str, Any], so
+        # mypy cannot help, and an entry Ferry cannot read must be skipped rather
+        # than contribute None to a set[str]. verify.py guards the same way.
+        if isinstance(channel, dict):
+            name = channel.get("name")
+            if isinstance(name, str):
+                names.add(name)
+    return names
+
+
 async def run_repair(
     config: FerryConfig,
     state: MigrationState,
@@ -1321,6 +1362,25 @@ async def run_repair(
             )
         )
         return
+
+    if structure_work:
+        # Only when something is actually being recreated. A repair with nothing
+        # to create should not spend a request on the /servers bucket, and a
+        # test asserts that.
+        own_session = session is None
+        sess = session or new_session()
+        try:
+            existing_names = await _live_channel_names(sess, config, state)
+        finally:
+            if own_session:
+                await sess.close()
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="progress",
+                message=f"{len(existing_names)} channel names already on the server.",
+            )
+        )
 
     # One save, at the end. Never under --dry-run, and not merely a save that
     # happens to change nothing: run_check REFUSES a dry-run state outright,
