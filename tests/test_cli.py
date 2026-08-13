@@ -2709,3 +2709,178 @@ def test_retry_with_an_unreadable_state_exits_two(runner: CliRunner, tmp_path: P
     assert result.exit_code == 2, result.output
     assert "No such command" not in result.output, "the command does not exist yet"
     assert "state.json" in result.output
+
+
+# ---------------------------------------------------------------------------
+# ferry repair (#107 batch 10, task #340)
+# ---------------------------------------------------------------------------
+
+
+def _repair_argv(out_dir: Path, export_dir: Path, *extra: str) -> list[str]:
+    return [
+        "repair",
+        str(out_dir),
+        "--export-dir",
+        str(export_dir),
+        "--stoat-url",
+        "https://api.test",
+        "--token",
+        "t",
+        *extra,
+    ]
+
+
+def test_repair_exits_zero_when_nothing_is_left_failing(runner: CliRunner, tmp_path: Path) -> None:
+    """The contract a script reads, alongside re-running ferry check --json."""
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+
+    async def _noop(*_a: Any, **_k: Any) -> None:
+        return None
+
+    with patch("discord_ferry.cli.run_repair", new=_noop):
+        result = runner.invoke(main, _repair_argv(out_dir, export_dir))
+    assert result.exit_code == 0, result.output
+
+
+def test_repair_exits_non_zero_when_a_message_is_still_failed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A repair that could not finish must not look like one that did."""
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+
+    async def _leaves_it(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        return None
+
+    with patch("discord_ferry.cli.run_repair", new=_leaves_it):
+        result = runner.invoke(main, _repair_argv(out_dir, export_dir))
+    assert result.exit_code == 1, result.output
+
+
+def test_a_repair_dry_run_always_exits_zero(runner: CliRunner, tmp_path: Path) -> None:
+    """A preview reports on a plan, not an outcome.
+
+    Exiting non-zero here would make --dry-run unusable in a script that treats
+    a non-zero code as "there is work to do, act now": the preview would look
+    exactly like a failed repair.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+    seen: dict[str, Any] = {}
+
+    async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        seen["dry_run"] = config.dry_run
+
+    with patch("discord_ferry.cli.run_repair", new=_capture):
+        result = runner.invoke(main, _repair_argv(out_dir, export_dir, "--dry-run"))
+
+    assert seen["dry_run"] is True, "the --dry-run flag never reached the config"
+    assert result.exit_code == 0, (
+        f"a dry run exited {result.exit_code}, which a script cannot tell from real work"
+    )
+
+
+def test_repair_passes_a_real_export_to_the_coroutine(runner: CliRunner, tmp_path: Path) -> None:
+    """The same hole ferry retry had: an empty exports list is a silent no-op.
+
+    A recreated channel's resend and a tail repair both resolve their messages
+    out of `exports`. Given an empty list they restore nothing and report
+    success.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    seen: dict[str, Any] = {}
+
+    async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        seen["exports"] = exports
+
+    with patch("discord_ferry.cli.run_repair", new=_capture):
+        runner.invoke(main, _repair_argv(out_dir, export_dir))
+
+    assert len(seen["exports"]) > 0, "an empty exports list restores nothing"
+
+
+def test_repair_registers_the_token_and_the_semaphore_before_any_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Asserted as CALLS, never as the absence of a token from output."""
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    order: list[str] = []
+
+    async def _noop(*_a: Any, **_k: Any) -> None:
+        order.append("request")
+
+    with (
+        patch(
+            "discord_ferry.cli.register_secret",
+            side_effect=lambda *_a: order.append("register_secret"),
+        ),
+        patch(
+            "discord_ferry.cli.init_request_semaphore",
+            side_effect=lambda *_a: order.append("semaphore"),
+        ),
+        patch("discord_ferry.cli.run_repair", new=_noop),
+    ):
+        runner.invoke(main, _repair_argv(out_dir, export_dir))
+
+    assert "register_secret" in order and "semaphore" in order
+    assert order.index("register_secret") < order.index("request")
+    assert order.index("semaphore") < order.index("request")
+
+
+def test_repair_reports_a_refusal_and_exits_one(runner: CliRunner, tmp_path: Path) -> None:
+    """CheckError reaches the operator as a sentence and a code, not a traceback.
+
+    run_repair raises it for a dry-run state and for a state recording no
+    server, and deliberately does not catch it.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+
+    async def _raises(*_a: Any, **_k: Any) -> None:
+        from discord_ferry.errors import CheckError
+
+        raise CheckError("cannot check a dry-run state")
+
+    with patch("discord_ferry.cli.run_repair", new=_raises):
+        result = runner.invoke(main, _repair_argv(out_dir, export_dir))
+
+    assert result.exit_code == 1, result.output
+    assert "dry-run state" in result.output
+
+
+def test_repair_with_a_missing_export_directory_exits_two(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Exit 2, the path intact, and the coroutine never reached."""
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+    missing = tmp_path / "not-here"
+    calls: list[str] = []
+
+    async def _record(*_a: Any, **_k: Any) -> None:
+        calls.append("ran")
+
+    with patch("discord_ferry.cli.run_repair", new=_record):
+        result = runner.invoke(main, _repair_argv(out_dir, missing))
+
+    assert result.exit_code == 2, result.output
+    assert str(missing) in result.output, "the path was wrapped or lost"
+    assert calls == [], "repair ran despite a missing export directory"
