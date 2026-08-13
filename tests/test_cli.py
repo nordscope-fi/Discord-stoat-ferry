@@ -2884,3 +2884,67 @@ def test_repair_with_a_missing_export_directory_exits_two(
     assert result.exit_code == 2, result.output
     assert str(missing) in result.output, "the path was wrapped or lost"
     assert calls == [], "repair ran despite a missing export directory"
+
+
+def test_repair_exits_non_zero_when_it_declined_a_repair(runner: CliRunner, tmp_path: Path) -> None:
+    """A defect repair could not fix REMAINS, so the code must say so.
+
+    A channel with no recorded name, one missing from the export, and a forum
+    index are all cases repair declines. None of them leaves a FailedMessage, so
+    an exit code reading only that queue would report 0 and tell a script the
+    server is whole when it is not.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+
+    async def _declines(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        state.warnings.append(
+            {
+                "phase": "repair",
+                "type": "no_recorded_name",
+                "message": "Cannot recreate channel 800000000000000001",
+            }
+        )
+
+    with patch("discord_ferry.cli.run_repair", new=_declines):
+        result = runner.invoke(main, _repair_argv(out_dir, export_dir))
+    assert result.exit_code == 1, (
+        f"a declined repair exited {result.exit_code}, which reads as success"
+    )
+
+
+def test_repair_still_exits_zero_on_a_documented_partial_restore(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """The other half, so the assertion above cannot be met by failing everything.
+
+    merge_thread_content_not_restored names a partial restore of something
+    repair DID fix, and no_discord_metadata is a degradation rather than an
+    unrepaired defect. Exiting 1 on either would make the code useless for the
+    strategy where it always fires.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+
+    async def _partial(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        state.warnings.append(
+            {
+                "phase": "repair",
+                "type": "merge_thread_content_not_restored",
+                "message": "thread content not restored",
+            }
+        )
+
+    with patch("discord_ferry.cli.run_repair", new=_partial):
+        result = runner.invoke(main, _repair_argv(out_dir, export_dir))
+    assert result.exit_code == 0, (
+        f"a documented partial restore exited {result.exit_code}, which fails every merge repair"
+    )

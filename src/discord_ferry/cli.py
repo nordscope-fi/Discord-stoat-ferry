@@ -1791,7 +1791,22 @@ def repair_cmd(
     # a script that treats non-zero as "act now".
     if dry_run:
         sys.exit(0)
-    sys.exit(1 if state.failed_messages else 0)
+
+    # "Non-zero when any defect remains", and a defect repair DECLINED remains
+    # just as surely as a message that would not send. A channel with no
+    # recorded name, one missing from the export, and a forum index are all
+    # cases repair cannot fix, and exiting 0 on them would tell a script the
+    # server is whole when it is not.
+    #
+    # merge_thread_content_not_restored is deliberately NOT here: that names a
+    # partial restore of something repair DID fix, and failing every merge
+    # repair on it would make the code useless. no_discord_metadata is likewise
+    # a degradation rather than an unrepaired defect.
+    unrepaired = {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
+    declined = [w for w in state.warnings if w.get("type") in unrepaired]
+    if state.failed_messages or declined:
+        sys.exit(1)
+    sys.exit(0)
 
 
 @main.command("tls-check")
