@@ -1484,6 +1484,99 @@ async def _resend_channel(
     return sent
 
 
+async def _repair_tail(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    result: CheckResult,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> bool:
+    """Re-send the one message a present channel lost. True when it was sent.
+
+    Both repairable tail kinds resolve to the same work. ``tail_absent`` means
+    the recorded last message is gone while messages around it survive;
+    ``tail_and_after_absent`` means everything from it onward is gone, and since
+    the mark IS the newest thing Ferry recorded, there is nothing after it in
+    Ferry's record either. One message, in both cases.
+
+    This deliberately goes around the high-water gate. Content at or below the
+    mark is unreachable by ``--resume``, ``--incremental`` and ``ferry retry``
+    alike, which ``docs/guides/earlier-migrations.md`` documents, and reaching it
+    is the point of this command rather than an oversight.
+    """
+    discord_id = result.discord_id or ""
+    tail_message_id = state.channel_high_water.get(discord_id)
+    if not tail_message_id:
+        # The check cannot report an absent tail without one, so this is
+        # unreachable today. Guarded anyway: a future kind arriving here with no
+        # mark would otherwise send nothing and report success.
+        return False
+
+    export = next((e for e in exports if e.channel.id == discord_id), None)
+    if export is None:
+        message = (
+            f"Cannot restore the last message of channel {discord_id}: it is not in the "
+            "export directory given. Re-run with the export the migration used."
+        )
+        state.warnings.append({"phase": "repair", "type": "not_in_export", "message": message})
+        on_event(MigrationEvent(phase="repair", status="warning", message=message))
+        return False
+
+    target = next((m for m in _ordered_messages(export) if m.id == tail_message_id), None)
+    if target is None:
+        message = (
+            f"Cannot restore message {tail_message_id} in channel {discord_id}: the export "
+            "given does not contain it. It may be narrower than the one the migration used."
+        )
+        state.warnings.append({"phase": "repair", "type": "not_in_export", "message": message})
+        on_event(MigrationEvent(phase="repair", status="warning", message=message))
+        return False
+
+    stoat_channel_id = state.channel_map[discord_id]
+    try:
+        await _process_message(
+            msg=target,
+            stoat_channel_id=stoat_channel_id,
+            config=config,
+            state=state,
+            session=session,
+            on_event=on_event,
+            export_channel_id=discord_id,
+            # Salted for the same reason a recreation's sends are, and the need
+            # is sharper here: this channel was NOT recreated, so its Stoat id is
+            # unchanged and the original send's key is exactly `ferry-{msg.id}`.
+            # Unsalted, Stoat's LRU would answer 409 and _process_message would
+            # treat a message the server has lost as already delivered.
+            idempotency_salt=stoat_channel_id,
+        )
+    except Exception:  # noqa: BLE001
+        # Already durable in state.failed_messages, and re-raised by
+        # _process_message when channel_result is None. `ferry retry` drains it.
+        return False
+
+    # The mark needs NO update, and the reason is worth stating because the plan
+    # asked for a formula here. A tail repair re-sends the message the mark
+    # already names, because `tail_message_id` is read out of
+    # `channel_high_water` at the top of this function and nothing between here
+    # and there writes it: `_process_message` never touches that map, only the
+    # phase loops do. So any "greater of the two" comparison compares a value
+    # with itself and can never fire.
+    #
+    # An earlier draft had exactly that comparison. A mutant replacing it with an
+    # unconditional write SURVIVED, which is what showed it was inert rather than
+    # protective. The recreation path in `_resend_channel` is where a real
+    # formula is needed, because there the mark was cleared first.
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=f"Restored the last message of channel {discord_id}.",
+        )
+    )
+    return True
+
+
 def _no_recorded_name(state: MigrationState, kind: str, discord_id: str) -> str:
     """Record why an entity could not be recreated, and return the message.
 
@@ -1899,6 +1992,34 @@ async def run_repair(
         finally:
             if own_session:
                 await sess.close()
+
+    if tail_work:
+        own_tail_session = session is None
+        tail_sess = session or new_session()
+        try:
+            restored = 0
+            for result in tail_work:
+                if await _repair_tail(tail_sess, config, state, result, exports, on_event):
+                    restored += 1
+                    save_state(state, config.output_dir)
+            on_event(
+                MigrationEvent(
+                    phase="repair",
+                    status="progress",
+                    message=f"Restored {restored} of {len(tail_work)} lost last message(s).",
+                )
+            )
+        finally:
+            if own_tail_session:
+                await tail_sess.close()
+
+    # Whatever is still in the dead-letter queue, including anything the two
+    # passes above just failed on. run_retry_failed is reused rather than
+    # reimplemented: it already resolves each FailedMessage back to a DCEMessage,
+    # rebuilds the queue from what still fails, and saves. It returns early on an
+    # empty queue, so this costs nothing when there is nothing to drain.
+    if state.failed_messages:
+        await run_retry_failed(config, state, exports, on_event)
 
     # One save, at the end. Never under --dry-run, and not merely a save that
     # happens to change nothing: run_check REFUSES a dry-run state outright,

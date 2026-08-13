@@ -4236,3 +4236,202 @@ async def test_the_origin_header_key_is_salted_too(tmp_path: Path) -> None:
 async def _noop_process(**_kw: Any) -> None:
     """A _process_message stand-in that sends nothing."""
     return None
+
+
+async def _repair_tail_run(
+    tmp_path: Path,
+    *,
+    kind: str = "tail_absent",
+    high_water: str | None = "100000000000000002",
+    export_ids: tuple[str, ...] = ("100000000000000001", "100000000000000002"),
+    fail: bool = False,
+) -> tuple[MigrationState, list[dict[str, Any]], list[MigrationEvent]]:
+    """Drive one tail repair against a channel that is PRESENT."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        created_channel_names={R_D_CHANNEL: "general"},
+    )
+    if high_water is not None:
+        state.channel_high_water[R_D_CHANNEL] = high_water
+    events: list[MigrationEvent] = []
+    calls: list[dict[str, Any]] = []
+
+    export = _export_for(R_D_CHANNEL)
+    export.messages.extend(_dce_msg(i) for i in export_ids)
+
+    report = CheckReport()
+    report.add(
+        name=f"tail:{R_D_CHANNEL}",
+        status="fail",
+        kind=kind,
+        detail="fixture",
+        discord_id=R_D_CHANNEL,
+        stoat_id=R_S_CHANNEL,
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    async def _capture(*, msg: Any, **kw: Any) -> None:
+        calls.append(
+            {
+                "id": msg.id,
+                "channel": kw.get("stoat_channel_id"),
+                "salt": kw.get("idempotency_salt", ""),
+            }
+        )
+        if fail:
+            raise MigrationError("send refused")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "_process_message", _capture),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        await run_repair(config, state, [export], events.append)
+    return state, calls, events
+
+
+@pytest.mark.parametrize("kind", ["tail_absent", "tail_and_after_absent"])
+async def test_a_lost_tail_is_re_sent(tmp_path: Path, kind: str) -> None:
+    """Both repairable tail kinds resolve to the same one message.
+
+    tail_absent means the recorded last message is gone while its neighbours
+    survive. tail_and_after_absent means everything from it onward is gone, and
+    since the mark IS the newest thing Ferry recorded there is nothing after it
+    in Ferry's record either.
+    """
+    _, calls, _ = await _repair_tail_run(tmp_path, kind=kind)
+    assert [c["id"] for c in calls] == ["100000000000000002"], (
+        f"the wrong message, or none, was re-sent: {calls}"
+    )
+    assert calls[0]["channel"] == R_S_CHANNEL, "it went to the wrong channel"
+
+
+async def test_a_tail_repair_salts_its_key_with_the_channel(tmp_path: Path) -> None:
+    """The need is SHARPER here than for a recreation.
+
+    This channel was not recreated, so its Stoat id is unchanged and the
+    original send's key is exactly ferry-{msg.id}. Unsalted, Stoat's 1000-entry
+    idempotency LRU would answer 409 and _process_message would treat a message
+    the server has LOST as already delivered: the repair would report success
+    and restore nothing.
+    """
+    _, calls, _ = await _repair_tail_run(tmp_path)
+    assert calls[0]["salt"] == R_S_CHANNEL, (
+        f"the tail repair did not salt its idempotency key: {calls}"
+    )
+
+
+async def test_a_tail_repair_declines_a_message_the_export_lacks(tmp_path: Path) -> None:
+    """A narrower re-export than the migration used cannot restore it.
+
+    Asserts ZERO sends, not merely a warning: a repair that sent the wrong
+    message and then warned would pass a message-only assertion.
+    """
+    state, calls, _ = await _repair_tail_run(tmp_path, export_ids=("100000000000000001",))
+    assert calls == [], f"repair sent something it could not identify: {calls}"
+    assert any(w.get("type") == "not_in_export" for w in state.warnings), state.warnings
+
+
+async def test_a_tail_repair_leaves_the_mark_exactly_where_it_was(tmp_path: Path) -> None:
+    """A tail repair needs NO high-water formula, and that is worth pinning.
+
+    The plan asked for one: "the greater of the existing mark and the highest id
+    this repair touched". Writing it revealed there is nothing to compare. The
+    message a tail repair sends is READ OUT of channel_high_water, and nothing
+    between the read and the write touches that map, so any comparison compares
+    a value with itself.
+
+    A mutant replacing the comparison with an unconditional write SURVIVED,
+    which is how the inertness surfaced. The guard is gone and this asserts the
+    property that actually holds: the mark is untouched.
+
+    _resend_channel is where a real formula is needed, because a recreation
+    clears the mark first and has to rebuild it.
+    """
+    state, _, _ = await _repair_tail_run(
+        tmp_path,
+        high_water="100000000000000009",
+        export_ids=("100000000000000009",),
+    )
+    assert state.channel_high_water[R_D_CHANNEL] == "100000000000000009"
+
+
+async def test_a_failed_tail_repair_is_counted_as_unrestored(tmp_path: Path) -> None:
+    """A repair that could not send must not report that it did."""
+    _, _, events = await _repair_tail_run(tmp_path, fail=True)
+    assert any("Restored 0 of 1" in e.message for e in events), (
+        f"a failed tail repair was reported as restored: {[e.message for e in events]}"
+    )
+
+
+async def test_repair_drains_the_dead_letter_queue(tmp_path: Path) -> None:
+    """Whatever the two passes left failed, plus anything already queued.
+
+    run_retry_failed is reused rather than reimplemented, so this asserts the
+    CALL and the arguments it received, not that a message happened to send.
+    """
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        failed_messages=[
+            FailedMessage(
+                discord_msg_id="100000000000000001",
+                stoat_channel_id=R_S_CHANNEL,
+                error="timeout",
+            )
+        ],
+    )
+    seen: dict[str, Any] = {}
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return CheckReport()
+
+    async def _fake_retry(cfg: Any, st: Any, exps: Any, _on: Any) -> None:
+        seen["exports"] = exps
+        seen["queued"] = len(st.failed_messages)
+
+    export = _export_for(R_D_CHANNEL)
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "run_retry_failed", _fake_retry),
+        aioresponses(),
+    ):
+        await run_repair(config, state, [export], lambda _e: None)
+
+    assert seen.get("queued") == 1, "repair never drained the dead-letter queue"
+    assert seen["exports"] == [export], "the drain was given the wrong exports"
+
+
+async def test_repair_skips_the_drain_when_nothing_is_queued(tmp_path: Path) -> None:
+    """The other half, so the assertion above can fail."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    called: list[str] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return CheckReport()
+
+    async def _fake_retry(*_a: Any, **_k: Any) -> None:
+        called.append("retry")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "run_retry_failed", _fake_retry),
+        aioresponses(),
+    ):
+        await run_repair(config, state, [], lambda _e: None)
+
+    assert called == [], "repair ran the drain with an empty queue"
