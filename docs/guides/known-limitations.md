@@ -139,6 +139,44 @@ These limitations relate to platform-level features that either work differently
 
 **Check refuses to run against a dry run.** A dry run records placeholders for channels and messages that were never created, so there is nothing on a server to compare them with.
 
+## Repairing a Migration
+
+`ferry repair` acts on what `ferry check` reports, so **it inherits every limit above**. It cannot
+restore what the check cannot see, and the cases below are deliberate rather than unfinished.
+
+**A gap in the middle of a channel cannot be repaired, because it cannot be found.** Check confirms
+the recorded last message is present; it has no way to notice messages missing earlier in the
+channel, so repair has nothing to act on.
+
+**A message accepted as a duplicate cannot be restored.** Ferry holds no identifier for it, so
+neither the check nor the repair can tell whether it is there.
+
+**Merged thread content is not restored.** Under `--thread-strategy=merge` a thread's messages were
+appended to its parent channel, and Ferry finds them by the parent's *name* rather than its
+identifier. A repair working from a channel's own export cannot reach them. If repair recreates a
+parent that absorbed thread content, it restores the parent's own messages and records a warning
+naming each thread it left behind. `flatten`, the default, gives every thread its own channel and is
+restored completely.
+
+**A missing forum index channel is declined.** Its index message is generated from the forum's
+posts rather than copied from the export, so there is nothing to re-send. Re-run the migration with
+`--incremental` to rebuild it.
+
+**A missing custom emoji is declined.** An emoji's identifier on Stoat *is* its uploaded file, so
+recreating one produces a different emoji that merely looks the same.
+
+**A migration run before 2.18.0 may not be repairable.** Repair recreates an entity under the name
+Ferry originally gave it, and that name is recorded only from 2.17.0 onward. Where it is missing,
+repair declines and says so rather than inventing one: an entity restored under a different name
+looks repaired and is not.
+
+**Repair never renames anything.** A renamed channel, role or category is reported by the check as a
+warning and left alone, because a rename almost always means you made it.
+
+**Repair refuses a rolled-back migration.** Rollback deliberately keeps the identifier maps as an
+audit trail, so a check against that state reports every channel missing. Repair stops rather than
+rebuilding a server you chose to remove.
+
 ## See Also
 
 - [Troubleshooting](troubleshooting.md) — solutions for common migration errors

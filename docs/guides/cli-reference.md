@@ -472,6 +472,104 @@ if ! ferry check ./ferry-output; then
 fi
 ```
 
+## `ferry repair`
+
+Restore what `ferry check` found missing. Repair runs the check itself, then acts only on what it
+reported as a failure.
+
+```bash
+ferry repair <output-dir> --export-dir <export-dir> [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| `--export-dir PATH` | **Required.** The DCE export the original migration used |
+| `--stoat-url URL` | Stoat API base URL. Or set `STOAT_URL` |
+| `--token TOKEN` | Stoat user token. Prefer the `STOAT_TOKEN` environment variable |
+| `--dry-run` | Report what would be repaired, and change nothing |
+
+The export is required because the content lives there and not in the state file. Point repair at
+the same export the migration used: a narrower one leaves repair unable to type a recreated channel
+or to find a lost message, and it says so rather than guessing.
+
+### What it repairs
+
+- A **missing channel, role or category**, recreated under the name Ferry originally gave it, with
+  its recorded permission overrides.
+- The **messages a recreated channel held**, re-sent in their original order, with the origin
+  header if it was a thread.
+- A **channel's lost last message**, re-sent into the channel that is still there.
+- Anything left in the **dead-letter queue**, the same work `ferry retry` does.
+
+### What it will not touch
+
+- **A renamed channel, role or category.** A rename almost always means you renamed it. Repair fixes
+  failures, not the edits you made on purpose.
+- **Anything the check could not verify.** If Check could not look, repair has nothing to act on and
+  guessing at a live server is worse than stopping.
+- **A rolled-back migration.** Rollback keeps the identifier maps as an audit trail, so a check
+  against a rolled-back state reports every channel missing. Repair refuses outright rather than
+  rebuilding a server you chose to remove.
+- **A missing forum index channel.** Its index message is derived content with nothing in the export
+  to restore it from.
+- **A missing custom emoji.** An emoji's identifier *is* its uploaded file, so recreating one mints
+  a different emoji rather than restoring the old one.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Nothing is left failing |
+| 1 | Something remains: a message would not send, or repair declined a defect it cannot fix |
+| 2 | The state file or the export directory could not be read |
+| 130 | Interrupted. State is saved after each repair, so re-running continues |
+
+`--dry-run` always exits 0. It reports on a plan rather than an outcome, so a script that treats a
+non-zero code as "act now" is not misled by a preview.
+
+### Examples
+
+```bash
+# See what is wrong, then fix it
+ferry check ./ferry-output --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+ferry repair ./ferry-output --export-dir ./export --stoat-url https://api.stoat.chat
+
+# Preview first
+ferry repair ./ferry-output --export-dir ./export --dry-run
+
+# In a script: repair, then confirm against the server rather than trusting the tool
+ferry repair ./ferry-output --export-dir ./export
+ferry check ./ferry-output --json > result.json
+```
+
+## `ferry retry`
+
+Re-send the messages that failed during a migration. These are the ones Ferry recorded in its
+dead-letter queue: sends that were refused or timed out, and were never retried.
+
+```bash
+ferry retry <output-dir> --export-dir <export-dir> [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| `--export-dir PATH` | **Required.** The DCE export the original migration used |
+| `--stoat-url URL` | Stoat API base URL. Or set `STOAT_URL` |
+| `--token TOKEN` | Stoat user token. Prefer the `STOAT_TOKEN` environment variable |
+
+Cheaper than `ferry repair`, and narrower. It contacts the server only to send, where repair spends
+a request per channel checking first. Use `retry` when you already know messages failed, and
+`repair` when you want to find out what is wrong.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The queue is empty |
+| 1 | Something is still failing |
+| 2 | The state file or the export directory could not be read |
+| 130 | Interrupted |
+
 ## `ferry probe`
 
 Check what a live Stoat instance actually supports before you migrate to it. Probe measures upload size limits, checks whether voice channels can be created (Stoat Bug #194), checks webhook availability, and inspects rate-limit behaviour. It is most useful for self-hosted instances, where limits differ from the official service.
