@@ -7,7 +7,9 @@ This guide walks through every screen of the Discord Ferry web interface. Ferry 
 
     The downloaded Windows and macOS apps draw their own window and do not launch a browser. A `pipx` install has no window toolkit bundled, so `ferry-gui` opens your browser instead.
 
-    Either way, `http://localhost:8765` reaches the same interface while Ferry is running. Use it if the window stays blank or never appears.
+    Either way, `http://localhost:8765` reaches the same interface while Ferry is running.
+
+    If the window cannot be drawn on your machine, Ferry says so in the window and opens your browser instead. Set `FERRY_NO_NATIVE=1` to skip the window from the start. See [Troubleshooting](troubleshooting.md#ferrys-window-says-it-could-not-be-drawn-and-your-browser-opens).
 
 ---
 
