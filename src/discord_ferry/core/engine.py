@@ -1284,7 +1284,12 @@ def _channel_message_ids(export: DCEExport) -> list[str]:
     return [msg.id for msg in export.messages]
 
 
-def _clear_channel_state(state: MigrationState, discord_id: str, message_ids: list[str]) -> None:
+def _clear_channel_state(
+    state: MigrationState,
+    discord_id: str,
+    message_ids: list[str],
+    old_stoat_id: str | None = None,
+) -> None:
     """Drop everything that described the channel that is now gone.
 
     Every per-channel field is keyed by DISCORD id, so only one map VALUE moved
@@ -1315,6 +1320,22 @@ def _clear_channel_state(state: MigrationState, discord_id: str, message_ids: li
     state.completed_channel_ids.discard(discord_id)
     for message_id in message_ids:
         state.message_map.pop(message_id, None)
+
+    # Queued pins and reactions naming the deleted channel can never succeed.
+    # Both lists survive a finished migration when their phase left failures
+    # behind: run_pins ends with `state.pending_pins = remaining`, which keeps
+    # exactly the ones that did not land, and run_reactions does the same. A
+    # later --incremental would retry them against a channel that is gone and
+    # collect another failure.
+    #
+    # Repair does not make that worse, the deletion did, so this is a tidy-up
+    # rather than a fix. It is here because this function's job is dropping
+    # everything that described the channel that is gone, and these do.
+    if old_stoat_id:
+        state.pending_pins = [p for p in state.pending_pins if p[0] != old_stoat_id]
+        state.pending_reactions = [
+            r for r in state.pending_reactions if r.get("channel_id") != old_stoat_id
+        ]
 
 
 def _no_recorded_name(state: MigrationState, kind: str, discord_id: str) -> str:
@@ -1440,7 +1461,9 @@ async def _recreate_channel(
     new_id: str = created["_id"]
     state.channel_map[discord_id] = new_id
     state.created_channel_names[discord_id] = created.get("name") or unique_name
-    _clear_channel_state(state, discord_id, _channel_message_ids(export))
+    # result.stoat_id is the id the check found missing, so it is the OLD one:
+    # channel_map was overwritten a line above and no longer holds it.
+    _clear_channel_state(state, discord_id, _channel_message_ids(export), result.stoat_id)
     on_event(
         MigrationEvent(
             phase="repair",
