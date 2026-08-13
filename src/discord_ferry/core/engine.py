@@ -1283,16 +1283,34 @@ async def run_repair(
         elif result.kind in _REPAIRABLE_TAIL:
             tail_work.append(result)
 
+    prefix = "[DRY RUN] " if config.dry_run else ""
     on_event(
         MigrationEvent(
             phase="repair",
             status="progress",
             message=(
-                f"{len(structure_work)} entities to recreate, "
+                f"{prefix}{len(structure_work)} entities to recreate, "
                 f"{len(tail_work)} channels with a lost tail."
             ),
         )
     )
+
+    if config.dry_run:
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="completed",
+                message="[DRY RUN] Nothing was created, sent or written.",
+            )
+        )
+        return
+
+    # One save, at the end. Never under --dry-run, and not merely a save that
+    # happens to change nothing: run_check REFUSES a dry-run state outright,
+    # because a dry run fills the id maps with `dry-` sentinels naming entities
+    # nobody created. Writing those into a real state file would leave the user
+    # with a migration that can never be checked again.
+    save_state(state, config.output_dir)
 
 
 # ---------------------------------------------------------------------------

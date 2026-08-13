@@ -22,7 +22,7 @@ from discord_ferry.core.engine import (
     run_retry_failed,
 )
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.errors import DuplicateSendError
+from discord_ferry.errors import CheckError, DuplicateSendError
 from discord_ferry.migrator.verify import CheckReport
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
 from discord_ferry.state import FailedMessage, MigrationState
@@ -2775,3 +2775,84 @@ async def test_repair_declines_a_missing_forum_index_channel(tmp_path: Path) -> 
         w.get("type") == "forum_index_not_repairable" and w.get("phase") == "repair"
         for w in state.warnings
     ), f"no warning names the declined forum index: {state.warnings}"
+
+
+async def _repair_recording_saves(
+    tmp_path: Path, report: CheckReport, **config_overrides: Any
+) -> tuple[list[Any], list[Any], list[MigrationEvent]]:
+    """Drive run_repair and record every save_state call and HTTP request."""
+    config = _make_repair_config(tmp_path, **config_overrides)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    events: list[MigrationEvent] = []
+    saves: list[Any] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: saves.append(a)),
+        aioresponses() as m,
+    ):
+        await run_repair(config, state, [], events.append)
+        requests = list(m.requests)
+    return saves, requests, events
+
+
+async def test_repair_dry_run_never_calls_save_state_at_all(tmp_path: Path) -> None:
+    """Not "called with no changes". NEVER CALLED.
+
+    run_check raises outright on a dry-run STATE, because a dry run fills the id
+    maps with `dry-` sentinels naming entities nobody created. So a repair that
+    wrote sentinels into a real state file would make that state permanently
+    uncheckable, which is the exact opposite of what this tool is for.
+
+    Paired with the non-dry-run test below, which is what stops this one being
+    inert: an implementation that never saved at all would satisfy this
+    assertion and look correct.
+    """
+    saves, requests, _ = await _repair_recording_saves(
+        tmp_path, _report_with("channel_missing", "fail"), dry_run=True
+    )
+    assert saves == [], "a dry run wrote state"
+    assert requests == [], "a dry run made a write request"
+
+
+async def test_repair_saves_state_once_when_not_a_dry_run(tmp_path: Path) -> None:
+    """The other half, so the dry-run assertion above can actually fail.
+
+    Without this, `save_state` removed entirely would pass the dry-run test.
+    """
+    saves, _, _ = await _repair_recording_saves(tmp_path, _report_with("channel_missing", "fail"))
+    assert len(saves) == 1, f"expected exactly one save_state call, saw {len(saves)}"
+
+
+async def test_repair_dry_run_says_what_it_would_have_done(tmp_path: Path) -> None:
+    """A dry run that reports nothing is indistinguishable from a broken one."""
+    _, _, events = await _repair_recording_saves(
+        tmp_path, _report_with("channel_missing", "fail"), dry_run=True
+    )
+    assert any("dry run" in e.message.lower() for e in events), (
+        f"the dry run never said it was one: {[e.message for e in events]}"
+    )
+    assert _partition_counts(events) == (1, 0), "the dry run did not report the work it found"
+
+
+async def test_repair_does_not_swallow_a_check_error(tmp_path: Path) -> None:
+    """CheckError propagates to the shell, which turns it into an exit code.
+
+    run_check raises it on a dry-run state and on a state recording no server.
+    Catching it here would leave the operator with a repair that reported
+    success against a state it never managed to read.
+    """
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER)
+
+    async def _raises(*_a: Any, **_k: Any) -> CheckReport:
+        raise CheckError("cannot check this migration")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_raises),
+        pytest.raises(CheckError),
+    ):
+        await run_repair(config, state, [], lambda _e: None)
