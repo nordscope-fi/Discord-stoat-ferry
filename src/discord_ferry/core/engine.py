@@ -32,6 +32,7 @@ from discord_ferry.exporter import (
 )
 from discord_ferry.migrator.api import (
     api_create_invite,
+    api_create_role,
     api_delete_channel,
     api_delete_emoji,
     api_delete_role,
@@ -1238,6 +1239,72 @@ async def _live_channel_names(
     return names
 
 
+def _no_recorded_name(state: MigrationState, kind: str, discord_id: str) -> str:
+    """Record why an entity could not be recreated, and return the message.
+
+    The name to recreate under is the one Ferry SENT, which lives in
+    ``created_channel_names`` or ``created_role_names``. A migration run before
+    2.17.0 recorded neither, and nothing in the state can reconstruct them: the
+    Discord name is not there, and even with the export in hand the collision
+    suffixes depended on the order that run happened to process channels in.
+
+    So repair declines rather than inventing a name. A recreated entity under a
+    different name is worse than an absent one: the operator sees something that
+    looks restored and is not, and ``ferry check`` would then report it renamed
+    forever after.
+    """
+    message = (
+        f"Cannot recreate {kind} {discord_id}: Ferry has no record of the name it gave it. "
+        "Migrations run before 2.17.0 did not record created names, and the name cannot be "
+        "reconstructed from this state. Recreate it by hand, or re-run the migration with "
+        "--incremental."
+    )
+    state.warnings.append({"phase": "repair", "type": "no_recorded_name", "message": message})
+    return message
+
+
+async def _recreate_role(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    result: CheckResult,
+    on_event: EventCallback,
+) -> bool:
+    """Recreate one missing role. Returns True when it was created."""
+    discord_id = result.discord_id or ""
+    recorded = state.created_role_names.get(discord_id)
+    if not recorded:
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="warning",
+                message=_no_recorded_name(state, "role", discord_id),
+            )
+        )
+        return False
+
+    # api_create_role answers with `id`; api_create_channel answers with `_id`.
+    # The five create routes disagree by design and a pass that "makes these
+    # consistent" breaks two of the three.
+    created = await api_create_role(
+        session, config.stoat_url, config.token, state.stoat_server_id, recorded
+    )
+    new_id: str = created["id"]
+    state.role_map[discord_id] = new_id
+    # From the RESPONSE, which is what the server actually stored, not from the
+    # local variable. 2.17.0's rule, and the reason it exists is that the two
+    # differ exactly when it matters.
+    state.created_role_names[discord_id] = created.get("name") or recorded
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=f"Recreated role '{state.created_role_names[discord_id]}' as {new_id}.",
+        )
+    )
+    return True
+
+
 async def run_repair(
     config: FerryConfig,
     state: MigrationState,
@@ -1371,16 +1438,19 @@ async def run_repair(
         sess = session or new_session()
         try:
             existing_names = await _live_channel_names(sess, config, state)
+            on_event(
+                MigrationEvent(
+                    phase="repair",
+                    status="progress",
+                    message=f"{len(existing_names)} channel names already on the server.",
+                )
+            )
+            for result in structure_work:
+                if result.kind == "role_missing":
+                    await _recreate_role(sess, config, state, result, on_event)
         finally:
             if own_session:
                 await sess.close()
-        on_event(
-            MigrationEvent(
-                phase="repair",
-                status="progress",
-                message=f"{len(existing_names)} channel names already on the server.",
-            )
-        )
 
     # One save, at the end. Never under --dry-run, and not merely a save that
     # happens to change nothing: run_check REFUSES a dry-run state outright,
