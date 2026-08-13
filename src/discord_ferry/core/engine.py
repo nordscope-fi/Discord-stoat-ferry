@@ -1443,10 +1443,20 @@ async def _resend_channel(
     #
     # isdigit(): real Discord ids are numeric snowflakes, but a system message
     # can carry something else, and int() on it would abort the whole repair.
-    numeric_ids = [mid for mid in _channel_message_ids(export) if mid.isdigit()]
-
     sent = 0
+    highest = 0
     for msg in _ordered_messages(export):
+        # Tracked HERE rather than in a second pass over the export. The send
+        # loop already visits every message, and for a streamed channel a
+        # separate pass would double the file reads. Materialising the messages
+        # to avoid that is not an option: streaming is what keeps a large export
+        # from exhausting memory, which is the OutOfMemoryException DCE 2.47.2
+        # fixed upstream.
+        #
+        # Advanced BEFORE the send and not rolled back on failure, so it covers a
+        # message that did not land. That is the whole point of the formula.
+        if msg.id.isdigit():
+            highest = max(highest, int(msg.id))
         try:
             await _process_message(
                 msg=msg,
@@ -1469,8 +1479,8 @@ async def _resend_channel(
     # _process_message does NOT write this; only the phase loops do. Without it
     # a recreated channel reports tail_not_recorded, which is `unverifiable`
     # rather than `ok`, and the repair looks unfinished when it is not.
-    if numeric_ids:
-        state.channel_high_water[export.channel.id] = max(numeric_ids, key=int)
+    if highest:
+        state.channel_high_water[export.channel.id] = str(highest)
     return sent
 
 
