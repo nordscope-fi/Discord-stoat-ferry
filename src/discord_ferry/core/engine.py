@@ -1458,6 +1458,7 @@ async def _resend_channel(
     # can carry something else, and int() on it would abort the whole repair.
     sent = 0
     highest = 0
+    succeeded: set[str] = set()
     for msg in _ordered_messages(export):
         # Tracked HERE rather than in a second pass over the export. The send
         # loop already visits every message, and for a streamed channel a
@@ -1482,6 +1483,7 @@ async def _resend_channel(
                 idempotency_salt=new_channel_id,
             )
             sent += 1
+            succeeded.add(msg.id)
         except Exception:  # noqa: BLE001
             # _process_message appends a FailedMessage and re-raises when
             # channel_result is None, so the failure is already durable. Carrying
@@ -1494,6 +1496,17 @@ async def _resend_channel(
     # rather than `ok`, and the repair looks unfinished when it is not.
     if highest:
         state.channel_high_water[export.channel.id] = str(highest)
+
+    # Anything this resend delivered is no longer a failure, and leaving it
+    # queued would make the drain send it a SECOND time. The two paths do not
+    # protect each other: this one salts its idempotency key with the new
+    # channel id and run_retry_failed does not, so Stoat sees two distinct
+    # nonces and accepts both. _merge_threads reconciles the same way and for
+    # the same reason, dropping from the queue whatever succeeded this run.
+    if succeeded:
+        state.failed_messages = [
+            fm for fm in state.failed_messages if fm.discord_msg_id not in succeeded
+        ]
     return sent
 
 

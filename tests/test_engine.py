@@ -4474,3 +4474,58 @@ async def test_a_recreated_channels_backlog_is_pointed_at_the_new_channel(
     assert targets["999000000000000009"] == "01JSTOATCHN0000000OTHER", (
         "another channel's queued failure was retargeted"
     )
+
+
+async def test_a_resent_message_is_dropped_from_the_dead_letter_queue(
+    tmp_path: Path,
+) -> None:
+    """Otherwise repair sends it twice and Stoat keeps both.
+
+    A message can be in the export of a recreated channel AND in
+    failed_messages, because it failed during the original migration. The resend
+    sends every message the export holds, including that one, and nothing
+    removed it from the queue, so the drain sent it again.
+
+    The idempotency keys do not save it: the resend salts with the new channel
+    id while the drain does not, so Stoat sees two distinct nonces and accepts
+    both. The user gets a duplicate.
+
+    _merge_threads reconciles the same way and for the same reason, dropping
+    from the queue anything that succeeded this run.
+    """
+    state = _state_for_rewrite()
+    state.failed_messages = [
+        FailedMessage(
+            discord_msg_id="100000000000000001",
+            stoat_channel_id=R_S_CHANNEL,
+            error="timeout",
+        ),
+        FailedMessage(
+            discord_msg_id="999000000000000009",
+            stoat_channel_id="01JSTOATCHN0000000OTHER",
+            error="timeout",
+        ),
+    ]
+    export = _export_for(R_D_CHANNEL)
+    export.messages.append(_dce_msg("100000000000000001"))
+
+    drained: list[str] = []
+
+    async def _fake_retry(_cfg: Any, st: Any, _exports: Any, _on: Any) -> None:
+        drained.extend(fm.discord_msg_id for fm in st.failed_messages)
+
+    async def _sends_fine(**_kw: Any) -> None:
+        return None
+
+    with (
+        patch.object(engine_module, "run_retry_failed", _fake_retry),
+        patch.object(engine_module, "_process_message", _sends_fine),
+    ):
+        state, _ = await _repair_with_state(tmp_path, state, [export])
+
+    assert "100000000000000001" not in drained, (
+        "the drain re-sent a message the resend had already delivered, so it lands twice"
+    )
+    assert "999000000000000009" in drained, (
+        "another channel's queued failure was dropped without being sent"
+    )
