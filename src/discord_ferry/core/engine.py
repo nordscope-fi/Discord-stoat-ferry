@@ -55,6 +55,8 @@ from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import (
     _stoat_channel_type,
+    apply_channel_permissions,
+    apply_role_permissions,
     make_unique_channel_name,
     run_categories,
     run_channels,
@@ -1520,13 +1522,54 @@ async def run_repair(
                     message=f"{len(existing_names)} channel names already on the server.",
                 )
             )
+            # Loaded once, not per entity. None means the file is absent, which
+            # is a real case: it is written during the migration and an operator
+            # repairing from a copied output directory may not have brought it.
+            metadata = load_discord_metadata(config.output_dir)
+            if metadata is None and structure_work:
+                message = (
+                    "discord_metadata.json is not in the output directory, so a recreated "
+                    "channel or role gets no permission overrides. It looks migrated and "
+                    "grants nobody the right to use it. Copy that file across from the "
+                    "original migration, or set the permissions by hand afterwards."
+                )
+                state.warnings.append(
+                    {"phase": "repair", "type": "no_discord_metadata", "message": message}
+                )
+                on_event(MigrationEvent(phase="repair", status="warning", message=message))
+
             for result in structure_work:
+                discord_id = result.discord_id or ""
                 if result.kind == "role_missing":
-                    await _recreate_role(sess, config, state, result, on_event)
+                    if await _recreate_role(sess, config, state, result, on_event) and metadata:
+                        # ONE role. The server-default call that follows the loop
+                        # this helper was extracted from is deliberately not here:
+                        # it writes a mask onto the server's DEFAULT ROLE, which
+                        # every member holds, and re-firing it during a one-role
+                        # repair is the defect batch 5 of #107 existed to fix.
+                        await apply_role_permissions(
+                            sess,
+                            config,
+                            state,
+                            state.role_map[discord_id],
+                            metadata.role_permissions.get(discord_id),
+                            state.created_role_names.get(discord_id, discord_id),
+                            phase="repair",
+                        )
                 elif result.kind == "channel_missing":
-                    await _recreate_channel(
+                    created = await _recreate_channel(
                         sess, config, state, result, exports, existing_names, on_event
                     )
+                    if created and metadata:
+                        await apply_channel_permissions(
+                            sess,
+                            config,
+                            state,
+                            state.channel_map[discord_id],
+                            metadata.channel_metadata.get(discord_id),
+                            state.created_channel_names.get(discord_id, discord_id),
+                            phase="repair",
+                        )
         finally:
             if own_session:
                 await sess.close()
