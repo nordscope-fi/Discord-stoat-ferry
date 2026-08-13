@@ -59,7 +59,7 @@ with a regex on the filename.
 ```json
 {
   "guild": { "id": "...", "name": "...", "iconUrl": "..." },
-  "channel": { "id": "...", "type": "GUILD_TEXT", "name": "...", "topic": "..." },
+  "channel": { "id": "...", "type": "GuildTextChat", "name": "...", "topic": "..." },
   "dateRange": { "after": null, "before": null },
   "exportedAt": "2024-01-15T12:00:00+00:00",
   "messages": [ ... ],
@@ -75,18 +75,27 @@ during validation.
 
 ## Channel Types
 
-DCE exports the Discord channel type as a string name. Ferry maps these to Stoat channel types:
+DCE 2.47 writes the channel type as its **own PascalCase enum name**, which is not the
+SCREAMING_SNAKE constant the Discord API documentation uses. Ferry normalises both to Discord's
+canonical integer on parse, in `_coerce_channel_type`, because every downstream branch works on the
+integer.
 
-| Discord type string | Type ID | Stoat target | Notes |
-|--------------------|---------|-------------|-------|
-| `GUILD_TEXT` | 0 | TextChannel | Direct mapping |
-| `GUILD_VOICE` | 2 | VoiceChannel | May create text channel on some instances (bug #194) |
-| `GUILD_CATEGORY` | 4 | Category | Two-step creation — see [Stoat API Notes](stoat-api-notes.md) |
-| `GUILD_ANNOUNCEMENT` | 5 | TextChannel | Treated as text |
-| `PUBLIC_THREAD` | 11 | TextChannel (flatten) | Becomes a standalone text channel |
-| `PRIVATE_THREAD` | 12 | TextChannel (flatten) | Becomes a standalone text channel |
-| `GUILD_FORUM` | 15 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the forum |
-| `GUILD_MEDIA` | 16 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the media channel |
+Exports written before 2.47 carry the integer directly, and the parser still accepts that shape:
+users hold old exports.
+
+| What DCE writes | Type ID | Stoat target | Notes |
+|-----------------|---------|-------------|-------|
+| `GuildTextChat` | 0 | TextChannel | Direct mapping |
+| `GuildVoiceChat` | 2 | VoiceChannel | May create a text channel on some instances (bug #194) |
+| `GuildCategory` | 4 | Category | Two-step creation, see [Stoat API Notes](stoat-api-notes.md) |
+| `GuildNews` | 5 | TextChannel | An announcement channel, treated as text |
+| `GuildNewsThread` | 10 | TextChannel (flatten) | Becomes a standalone text channel |
+| `GuildPublicThread` | 11 | TextChannel (flatten) | Becomes a standalone text channel |
+| `GuildPrivateThread` | 12 | TextChannel (flatten) | Becomes a standalone text channel |
+| `GuildStageVoice` | 13 | Not migrated | Stoat has no stage channel |
+| `GuildDirectory` | 14 | Not migrated | No Stoat equivalent |
+| `GuildForum` | 15 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the forum |
+| `GuildMedia` | 16 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the media channel |
 
 Stoat has exactly five channel types: SavedMessages, DirectMessage, Group, TextChannel, VoiceChannel.
 There are no native threads or forums, so Discord threads are flattened into regular text channels.

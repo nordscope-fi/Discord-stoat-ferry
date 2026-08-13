@@ -184,7 +184,7 @@ async def _report_autumn_reachable(
 async def _check_voice_bug(
     sess: aiohttp.ClientSession, stoat_url: str, token: str, server_id: str, report: ProbeReport
 ) -> None:
-    # SOURCE-VERIFIED (stoatchat/stoatchat core/models/v0/channels.rs): this fork has
+    # SOURCE-VERIFIED (stoatchat/stoatchat core/models/v0/channels.rs): Stoat has
     # NO VoiceChannel variant — every server channel serializes as
     # "channel_type":"TextChannel". A Voice request maps to TextChannel{ voice: Some(..) }.
     # So the real signal for "voice works on this instance" is the PRESENCE of a non-null

@@ -534,9 +534,10 @@ Stoat uses **fixed 10-second windows** (not sliding).
     Creating a channel, a role, and an emoji in quick succession all draw from the same
     5-per-10-second budget. Ferry paces structure creation phases to stay within this limit.
 
-**Response headers**: Stoat returns **no rate limit headers**. There are no
-`X-RateLimit-Remaining`, `X-RateLimit-Reset-After`, or `X-RateLimit-Bucket` headers on any
-response.
+**Response headers**: Stoat sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+`X-RateLimit-Reset-After` and `X-RateLimit-Bucket` on **every** response, and exposes them through
+CORS. `X-RateLimit-Reset-After` is in **milliseconds**, unlike Discord's identically named header.
+See [Stoat API Notes](stoat-api-notes.md#rate-limits).
 
 **429 response body**: `{ "retry_after": 4200 }` — Ferry sleeps for this duration (milliseconds)
 and retries. In addition, Ferry's adaptive 429-frequency optimizer tracks 429 frequency in a

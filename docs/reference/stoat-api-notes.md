@@ -8,22 +8,42 @@ focusing on non-obvious behaviour, gotchas, and Ferry-specific decisions.
 
 ## Rate Limits
 
-Stoat uses **fixed 10-second windows** (not sliding). Key buckets:
+Stoat uses **fixed 10-second windows** (not sliding). Buckets are chosen by
+`resolve_bucket()` in `crates/delta/src/util/ratelimits.rs`:
 
-| Bucket | Limit | Scope |
-|--------|-------|-------|
-| `/servers` | 5 per 10s | SHARED across server create, channel create, role create, emoji create, and category edit |
-| Messages | 10 per 10s | Dedicated — `POST /channels/:id/messages` only |
-| Catch-all | 20 per 10s | Everything else, including Autumn uploads |
+| Bucket | Limit | Keyed by | Covers |
+|--------|-------|----------|--------|
+| `servers` | 5 per 10s | the server id, so **shared** | Server create and edit, channel create, role create and edit, emoji create, category PATCH |
+| `channels` | 15 per 10s | **the channel id** | Everything else on an existing channel: edit, delete, and reading messages |
+| `messaging` | 10 per 10s | **the channel id** | `POST /channels/:id/messages` |
+| Catch-all | 20 per 10s | the route | Everything else, including Autumn uploads |
 
-!!! warning "The /servers bucket is shared"
-    Creating a channel, a role, and an emoji in quick succession all draw from the same 5/10s budget.
-    Ferry paces structure creation (ROLES, CATEGORIES, CHANNELS, EMOJI phases) to stay within this limit.
+!!! warning "Two of these are per channel, and that changes what concurrency buys you"
+    `channels` and `messaging` are keyed by channel id, so work spread across different channels
+    does **not** share a budget. Parallelism genuinely helps there. The `servers` bucket is shared,
+    so creating a channel, a role and an emoji in quick succession all draw on the same 5-per-10s
+    budget however they are scheduled, and parallelism buys nothing.
 
-**Stoat returns no rate limit headers.** There are no `X-RateLimit-Remaining`,
-`X-RateLimit-Reset-After`, or `X-RateLimit-Bucket` headers on responses.
+!!! note "A read costs the same as a big read"
+    Buckets count **requests**, not items, so asking a channel for 100 messages costs exactly what
+    asking for 1 does.
 
-On a 429 response the body contains:
+**Stoat sets rate limit headers on every response.** `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, `X-RateLimit-Reset-After` and `X-RateLimit-Bucket` are attached
+unconditionally in `crates/core/ratelimits/src/rocket.rs`, and exposed through CORS in
+`crates/delta/src/main.rs`.
+
+!!! warning "`X-RateLimit-Reset-After` is MILLISECONDS"
+    Discord's identically named header is **seconds**. Ferry has confused the two in both
+    directions: v2.8.2 read Stoat's as seconds and slept the 60-second cap on every 429, and v2.8.3
+    made the opposite mistake in the Autumn client and retried nine seconds early into a bucket that
+    was still closed.
+
+    An earlier version of this page said Stoat sends no such headers. That came from revolt.js's
+    binding documentation, which does not surface them. **A client binding's docs are not evidence
+    about server behaviour.** Reading the backend source settled it.
+
+On a 429 response the body also contains:
 
 ```json
 { "retry_after": 4200 }
