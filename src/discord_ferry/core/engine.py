@@ -37,6 +37,7 @@ from discord_ferry.migrator.api import (
     api_delete_channel,
     api_delete_emoji,
     api_delete_role,
+    api_edit_channel,
     api_edit_message,
     api_edit_server,
     api_fetch_server,
@@ -84,6 +85,8 @@ from discord_ferry.state import (
 )
 
 if TYPE_CHECKING:
+    from discord_ferry.discord.metadata import ChannelMeta
+
     # Type-only: run_check itself is imported inside run_repair, matching how
     # check_cmd reaches it, so the verify module stays off the engine's import
     # path at runtime.
@@ -1739,6 +1742,104 @@ async def _recreate_channel(
     return True
 
 
+async def _apply_channel_attributes(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    stoat_channel_id: str,
+    ch_meta: ChannelMeta | None,
+    label: str,
+) -> None:
+    """Restore a recreated channel's slowmode and voice user limit.
+
+    ``run_channels`` sets these with an ``api_edit_channel`` call after the
+    permission pass. A recreation that skipped it would come back with slowmode
+    off and a voice channel uncapped, which is a silent change to how the
+    channel behaves rather than to how it looks.
+    """
+    if ch_meta is None or config.dry_run:
+        return
+    edits: dict[str, Any] = {}
+    if ch_meta.slowmode > 0:
+        edits["slowmode"] = min(ch_meta.slowmode, 21600)
+    if ch_meta.user_limit > 0:
+        edits["user_limit"] = ch_meta.user_limit
+    if not edits:
+        return
+    try:
+        await api_edit_channel(session, config.stoat_url, config.token, stoat_channel_id, **edits)
+    except Exception as exc:  # noqa: BLE001
+        state.warnings.append(
+            {
+                "phase": "repair",
+                "type": "channel_attributes_failed",
+                "message": f"Could not restore slowmode or user limit for '{label}': {exc}",
+            }
+        )
+
+
+async def _reattach_to_category(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    discord_id: str,
+    new_channel_id: str,
+    live_categories: list[dict[str, Any]],
+    on_event: EventCallback,
+) -> None:
+    """Put a recreated channel back into the category it belonged to.
+
+    Category membership on Stoat lives ONLY in the server's categories array, so
+    a channel created with ``api_create_channel`` sits outside every category
+    until that array names it. ``run_channels`` handles this with an end-of-phase
+    upsert; a recreation has no such phase behind it.
+
+    Without this a repaired channel comes back bare, outside the category it was
+    in, permanently and with nothing said about it. That is a visible structural
+    change the operator did not ask for, and it is the primary path this release
+    exists to serve.
+
+    Mutates ``live_categories`` in place so a second recreation in the same run
+    sees the first one's placement rather than overwriting it.
+    """
+    discord_category_id = state.channel_categories.get(discord_id)
+    if not discord_category_id:
+        # Redundant with the next guard on its own, and kept deliberately:
+        # `category_map.get(None)` would also return None, so a mutant removing
+        # this line SURVIVES. It stays because it names a distinct case, a
+        # channel that belonged to no category, which the next line does not.
+        return
+    stoat_category_id = state.category_map.get(discord_category_id)
+    if not stoat_category_id:
+        return
+
+    target = next((c for c in live_categories if c.get("id") == stoat_category_id), None)
+    if target is None:
+        # The category is gone too. _recreate_category rebuilds its channel list
+        # from channel_categories and channel_map, and channel_map now holds the
+        # new id, so it will pick this channel up. Nothing to do here.
+        return
+    channels = target.get("channels")
+    if not isinstance(channels, list):
+        return
+    if new_channel_id in channels:
+        return
+    channels.append(new_channel_id)
+
+    await api_upsert_categories(
+        session, config.stoat_url, config.token, state.stoat_server_id, live_categories
+    )
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=(
+                f"Re-attached the channel to category '{target.get('title', stoat_category_id)}'."
+            ),
+        )
+    )
+
+
 async def _recreate_category(
     session: aiohttp.ClientSession,
     config: FerryConfig,
@@ -1969,7 +2070,31 @@ async def run_repair(
                 #
                 # Unreachable under --dry-run: that path returns above.
                 if result.kind == "role_missing":
-                    if await _recreate_role(sess, config, state, result, on_event) and metadata:
+                    role_created = await _recreate_role(sess, config, state, result, on_event)
+                    if role_created:
+                        # DECLINED, and said so rather than left silent. The
+                        # migration sets a role's colour, rank, hoist and icon in
+                        # two further api_edit_role passes, and the icon one
+                        # uploads a file to Autumn. Restoring those is a second
+                        # content path in a batch already carrying two commands,
+                        # and the reasoning that keeps emoji out of repair (#307)
+                        # applies to the icon. Recorded whether or not metadata
+                        # exists, because the attributes are lost either way.
+                        # Deferred as #344.
+                        role_label = state.created_role_names.get(discord_id, discord_id)
+                        state.warnings.append(
+                            {
+                                "phase": "repair",
+                                "type": "role_attributes_not_restored",
+                                "message": (
+                                    f"Role '{role_label}' was recreated with its name and "
+                                    "permissions. Its colour, rank, hoist setting and icon are "
+                                    "not restored: set them by hand, or re-run the migration "
+                                    "with --incremental (see issue #344)."
+                                ),
+                            }
+                        )
+                    if role_created and metadata:
                         # ONE role. The server-default call that follows the loop
                         # this helper was extracted from is deliberately not here:
                         # it writes a mask onto the server's DEFAULT ROLE, which
@@ -2004,6 +2129,16 @@ async def run_repair(
                                     message=f"Re-sent {count} message(s) into {label}.",
                                 )
                             )
+                    if created:
+                        await _reattach_to_category(
+                            sess,
+                            config,
+                            state,
+                            discord_id,
+                            state.channel_map[discord_id],
+                            live_categories,
+                            on_event,
+                        )
                     if created and metadata:
                         await apply_channel_permissions(
                             sess,
@@ -2013,6 +2148,14 @@ async def run_repair(
                             metadata.channel_metadata.get(discord_id),
                             state.created_channel_names.get(discord_id, discord_id),
                             phase="repair",
+                        )
+                        await _apply_channel_attributes(
+                            sess,
+                            config,
+                            state,
+                            state.channel_map[discord_id],
+                            metadata.channel_metadata.get(discord_id),
+                            state.created_channel_names.get(discord_id, discord_id),
                         )
                 save_state(state, config.output_dir)
         finally:
