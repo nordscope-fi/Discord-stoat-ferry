@@ -3020,3 +3020,101 @@ async def test_repair_fetches_the_collision_set_when_there_is_work(tmp_path: Pat
     assert any("names already on the server" in e.message for e in events), (
         f"repair never fetched the collision set: {[e.message for e in events]}"
     )
+
+
+D_ROLE = "900000000000000001"
+S_ROLE_OLD = "01JSTOATROL000000000OLD"
+S_ROLE_NEW = "01JSTOATROL000000000NEW"
+
+
+async def _repair_recreating_role(
+    tmp_path: Path,
+    *,
+    recorded_name: str | None = "moderator",
+    create_payload: dict[str, Any] | None = None,
+) -> tuple[MigrationState, list[Any], list[MigrationEvent]]:
+    """Drive run_repair against one role_missing result."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, role_map={D_ROLE: S_ROLE_OLD})
+    if recorded_name is not None:
+        state.created_role_names[D_ROLE] = recorded_name
+    events: list[MigrationEvent] = []
+
+    report = CheckReport()
+    report.add(
+        name=f"role:{D_ROLE}",
+        status="fail",
+        kind="role_missing",
+        detail="fixture",
+        discord_id=D_ROLE,
+        stoat_id=S_ROLE_OLD,
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels("general"),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/roles",
+            payload=create_payload if create_payload is not None else {"id": S_ROLE_NEW},
+        )
+        await run_repair(config, state, [], events.append)
+        requests = list(m.requests)
+    return state, requests, events
+
+
+async def test_repair_recreates_a_missing_role_and_records_its_new_id(tmp_path: Path) -> None:
+    """role_map moves to the new Stoat id under the UNCHANGED Discord key."""
+    state, _, _ = await _repair_recreating_role(tmp_path)
+    assert state.role_map[D_ROLE] == S_ROLE_NEW, (
+        f"role_map still names the deleted role: {state.role_map}"
+    )
+    assert D_ROLE in state.role_map, "the Discord key changed, which it must never do"
+
+
+async def test_a_recreated_role_records_the_name_from_the_response(tmp_path: Path) -> None:
+    """The RESPONSE, not the local variable, per the rule 2.17.0 established.
+
+    api_create_role answers with `id`, while api_create_channel answers with
+    `_id`. The five create routes disagree by design and a pass that makes them
+    consistent breaks two of the three. This drives a response whose name
+    DIFFERS from what was sent, because in every other case the two are equal
+    and nothing distinguishes recording one from the other.
+    """
+    state, _, _ = await _repair_recreating_role(
+        tmp_path, create_payload={"id": S_ROLE_NEW, "name": "moderator-renamed-by-server"}
+    )
+    assert state.created_role_names[D_ROLE] == "moderator-renamed-by-server", (
+        "the recorded name came from the local variable, not the create response"
+    )
+
+
+async def test_repair_declines_a_role_it_has_no_recorded_name_for(tmp_path: Path) -> None:
+    """A KNOWN LIMIT for a state written before 2.17.0, not a missing feature.
+
+    The name to recreate a role under is the one Ferry SENT, which lives in
+    created_role_names. A migration run before 2.17.0 recorded none, and there
+    is nothing to reconstruct it from: the Discord name is not in state, and
+    inventing one would produce a role that silently differs from what the
+    server lost. So repair declines and says so.
+
+    Asserts ZERO create requests, not merely that role_map is unchanged: a
+    repair that created a role and then failed to record it would pass the
+    weaker assertion while leaving an orphan on the server.
+    """
+    state, requests, _ = await _repair_recreating_role(tmp_path, recorded_name=None)
+    creates = [k for k in requests if str(k[1]).endswith("/roles")]
+    assert creates == [], "repair created a role it could not name correctly"
+    assert state.role_map[D_ROLE] == S_ROLE_OLD, "role_map moved without a creation"
+    assert any(
+        w.get("type") == "no_recorded_name" and w.get("phase") == "repair" for w in state.warnings
+    ), f"no warning explains why the role was skipped: {state.warnings}"
