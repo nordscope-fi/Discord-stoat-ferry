@@ -24,7 +24,12 @@ from rich.table import Table
 
 from discord_ferry import __version__
 from discord_ferry.config import FerryConfig
-from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
+from discord_ferry.core.engine import (
+    PHASE_ORDER,
+    run_migration,
+    run_retry_failed,
+    run_rollback,
+)
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
@@ -1582,6 +1587,102 @@ def _render_check_report(report: CheckReport, thread_strategy: str = "") -> None
             f"[cyan]{counts['unverifiable']} checks could not be verified.[/] Ferry did "
             f"not record what it would need to confirm them, {cause}."
         )
+
+
+@main.command(name="retry")
+@click.argument("output_dir", type=click.Path(exists=True))
+@click.option(
+    "--export-dir",
+    type=click.Path(file_okay=False),
+    required=True,
+    help="The DCE export directory the original migration used",
+)
+@click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
+@click.option(
+    "--token",
+    envvar="STOAT_TOKEN",
+    default=None,
+    help="Stoat user token. Prefer the STOAT_TOKEN environment variable",
+)
+def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: str | None) -> None:
+    """Re-send the messages that failed during a migration.
+
+    Reads state.json from OUTPUT_DIR and re-attempts every message in its
+    dead-letter queue. Needs the original export, because the message content
+    lives there and not in the state file.
+
+    Exits 0 when nothing is left failed, 1 when something still is, and 2 when
+    the state or the export cannot be read.
+    """
+    load_dotenv()
+    if not stoat_url:
+        console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
+        sys.exit(1)
+    if not token:
+        console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
+        sys.exit(1)
+
+    _print_proxy_notices()
+
+    # This command builds its own FerryConfig, so run_migration's token hook
+    # never fires for it. run_retry_failed calls _ensure_token_store itself, but
+    # that covers the engine's own store, not the process-wide registry the log
+    # redaction filter reads. Both are needed and neither is a superset.
+    register_secret("stoat", token)
+    init_request_semaphore(FerryConfig.max_concurrent_requests)
+
+    out_path = Path(output_dir)
+    try:
+        state = load_state(out_path)
+    except StateError as exc:
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        sys.exit(2)
+
+    # The export is NOT optional and NOT a placeholder, which is the whole point
+    # of this option. run_retry_failed resolves each FailedMessage back to a
+    # DCEMessage by scanning `exports`, so an empty list makes every retry a
+    # silent no-op that still reports a plausible result. `rollback_cmd` passes
+    # exports=[] because rollback genuinely never needs them; copying that here
+    # would produce a command that does nothing.
+    export_path = Path(export_dir)
+    # click.echo, not console.print, for anything carrying a path. The
+    # module-level Console has soft_wrap=False and falls back to 80 columns off
+    # a terminal, so it inserts a real newline wherever the wrap lands, which
+    # for a long temp path lands INSIDE the path and hands the user something
+    # they cannot copy. Same mechanism as issue #145, which was about JSON.
+    if not export_path.exists():
+        click.echo(f"Error: export directory not found: {export_path}", err=True)
+        sys.exit(2)
+    try:
+        exports = parse_export_directory(export_path)
+    except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome here
+        click.echo(f"Error: could not read the export at {export_path}: {_safe(exc)}", err=True)
+        sys.exit(2)
+
+    config = FerryConfig(
+        export_dir=export_path,
+        stoat_url=stoat_url,
+        token=token,
+        output_dir=out_path,
+        server_id=state.stoat_server_id or None,
+        skip_export=True,
+    )
+
+    def _on_event(event: MigrationEvent) -> None:
+        colour = {"error": "bold red", "warning": "yellow"}.get(event.status, "cyan")
+        console.print(f"[{colour}]{_safe(event.message)}[/]")
+
+    console.print("[bold]Discord Ferry[/] — retrying failed messages\n")
+    try:
+        asyncio.run(run_retry_failed(config, state, exports, _on_event))
+    except MigrationError as exc:
+        console.print(f"\n[bold red]Retry failed:[/] {_safe(exc)}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/] State saved — re-run to continue.")
+        sys.exit(130)
+
+    sys.exit(1 if state.failed_messages else 0)
 
 
 @main.command("tls-check")
