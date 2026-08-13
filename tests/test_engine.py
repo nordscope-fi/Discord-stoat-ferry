@@ -1,6 +1,7 @@
 """Tests for the migration engine orchestrator."""
 
 import asyncio
+import contextlib
 import json
 import re
 import shutil
@@ -2827,13 +2828,84 @@ async def test_repair_dry_run_never_calls_save_state_at_all(tmp_path: Path) -> N
     assert requests == [], "a dry run made a write request"
 
 
-async def test_repair_saves_state_once_when_not_a_dry_run(tmp_path: Path) -> None:
+async def test_repair_saves_state_when_not_a_dry_run(tmp_path: Path) -> None:
     """The other half, so the dry-run assertion above can actually fail.
 
     Without this, `save_state` removed entirely would pass the dry-run test.
+
+    Deliberately not an exact count. Repair saves after EACH recreation as well
+    as at the end, for the reason run_roles already saves mid-loop: a hard kill
+    between a create and the save leaves the id map naming the entity that is
+    gone, so the next run's check reports it missing again and repair creates a
+    SECOND one. Asserting a number here would make that durability property look
+    like a regression the next time it changes.
     """
     saves, _, _ = await _repair_recording_saves(tmp_path, _report_with("channel_missing", "fail"))
-    assert len(saves) == 1, f"expected exactly one save_state call, saw {len(saves)}"
+    assert saves, "a real run wrote no state at all"
+
+
+async def test_an_interrupted_repair_keeps_what_it_already_recreated(tmp_path: Path) -> None:
+    """The finding the chunk 4 review produced, and the reason for the per-entity save.
+
+    Two channels need recreating and the second create fails. Without a save
+    between them, the first channel's new id is lost: state still names the
+    deleted one, the next run's check reports it missing again, and repair
+    creates a duplicate. run_roles saves mid-loop for exactly this reason and
+    says so in its own comment.
+    """
+    second = "800000000000000002"
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL, second: "01JSTOATCHN0000000002ND"},
+        created_channel_names={R_D_CHANNEL: "general", second: "random"},
+    )
+    saved_ids: list[str] = []
+
+    report = CheckReport()
+    for did, sid in ((R_D_CHANNEL, R_S_CHANNEL), (second, "01JSTOATCHN0000000002ND")):
+        report.add(
+            name=f"channel:{did}",
+            status="fail",
+            kind="channel_missing",
+            detail="fixture",
+            discord_id=did,
+            stoat_id=sid,
+        )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    def _record_save(st: MigrationState, _out: Path) -> None:
+        saved_ids.append(st.channel_map[R_D_CHANNEL])
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", _record_save),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        m.post(f"{BASE_URL}/servers/{R_SERVER}/channels", status=500)
+        with contextlib.suppress(Exception):
+            await run_repair(
+                config,
+                state,
+                [_export_for(R_D_CHANNEL), _export_for(second, name="random")],
+                lambda _e: None,
+            )
+
+    assert "01JSTOATCHN000000000NEW" in saved_ids, (
+        "the first recreation was never persisted, so an interruption after it would "
+        "leave state naming the deleted channel and the next run would duplicate it"
+    )
 
 
 async def test_repair_dry_run_says_what_it_would_have_done(tmp_path: Path) -> None:
