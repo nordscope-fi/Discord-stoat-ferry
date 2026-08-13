@@ -496,6 +496,8 @@ or to find a lost message, and it says so rather than guessing.
 
 - A **missing channel, role or category**, recreated under the name Ferry originally gave it, with
   its recorded permission overrides.
+- A recreated channel's **category placement**, its permission overrides, its slowmode and its
+  voice user limit.
 - The **messages a recreated channel held**, re-sent in their original order, with the origin
   header if it was a thread.
 - A **channel's lost last message**, re-sent into the channel that is still there.
@@ -512,6 +514,8 @@ or to find a lost message, and it says so rather than guessing.
   rebuilding a server you chose to remove.
 - **A missing forum index channel.** Its index message is derived content with nothing in the export
   to restore it from.
+- **A recreated role's colour, rank, hoist setting or icon.** The name and the permissions come
+  back; the rest does not, and repair says so.
 - **A missing custom emoji.** An emoji's identifier *is* its uploaded file, so recreating one mints
   a different emoji rather than restoring the old one.
 

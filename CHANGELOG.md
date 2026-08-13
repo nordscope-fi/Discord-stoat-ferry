@@ -13,9 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **`ferry repair`, which acts on what `ferry check` found** (`core/engine.py`, `cli.py`). Check
   could name three kinds of damage and do nothing about them. Repair runs the check itself, then
   recreates a missing channel, role or category under the name Ferry originally gave it, applies its
-  recorded permission overrides, re-sends the messages a recreated channel held in their original
-  order, restores a channel's lost last message, and drains the dead-letter queue. `--dry-run`
-  reports the plan and changes nothing.
+  recorded permission overrides, puts it back in the category it belonged to, restores its slowmode
+  and voice user limit, re-sends the messages it held in their original order, restores a channel's
+  lost last message, and drains the dead-letter queue. A recreated role comes back with its name and
+  permissions; its colour, rank, hoist setting and icon are not restored and repair says so (#344).
+  `--dry-run` reports the plan and changes nothing.
 - **`ferry retry`, exposing a coroutine that had no user surface** (`cli.py`). `run_retry_failed`
   has been complete and tested since v1.x with no command able to reach it, so a user with failed
   messages in `state.json` had no way to re-send them. Cheaper and narrower than `repair`: it

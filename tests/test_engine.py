@@ -4529,3 +4529,172 @@ async def test_a_resent_message_is_dropped_from_the_dead_letter_queue(
     assert "999000000000000009" in drained, (
         "another channel's queued failure was dropped without being sent"
     )
+
+
+async def _repair_with_live_categories(
+    tmp_path: Path,
+    *,
+    live_categories: list[dict[str, Any]],
+    channel_categories: dict[str, str],
+    category_map: dict[str, str],
+    ch_meta_slowmode: int = 0,
+    ch_meta_user_limit: int = 0,
+) -> tuple[MigrationState, list[dict[str, Any]], list[Any]]:
+    """Recreate one channel and hand back every categories PATCH and edit sent."""
+    config = _make_repair_config(tmp_path)
+    _write_discord_metadata(config.output_dir)
+    if ch_meta_slowmode or ch_meta_user_limit:
+        from discord_ferry.discord.metadata import (
+            ChannelMeta,
+            DiscordMetadata,
+            PermissionPair,
+            _meta_to_dict,
+        )
+
+        meta = DiscordMetadata(
+            guild_id="900000000000000009",
+            fetched_at="2026-08-13T00:00:00+00:00",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={
+                R_D_CHANNEL: ChannelMeta(
+                    nsfw=False,
+                    default_override=PermissionPair(allow=1, deny=0),
+                    slowmode=ch_meta_slowmode,
+                    user_limit=ch_meta_user_limit,
+                )
+            },
+        )
+        (config.output_dir / "discord_metadata.json").write_text(
+            json.dumps(_meta_to_dict(meta)), encoding="utf-8"
+        )
+
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        created_channel_names={R_D_CHANNEL: "general"},
+        channel_categories=channel_categories,
+        category_map=category_map,
+    )
+    patches: list[dict[str, Any]] = []
+    edits: list[Any] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    payload = _server_with_channels("other")
+    payload["server"]["categories"] = live_categories  # type: ignore[index]
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "_process_message", _noop_process),
+        aioresponses() as m,
+    ):
+        m.get(re.compile(r".*/servers/.*include_channels.*"), payload=payload, repeat=True)
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        m.patch(f"{BASE_URL}/servers/{R_SERVER}", payload={}, repeat=True)
+        m.patch(re.compile(r".*/channels/.*"), payload={}, repeat=True)
+        m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
+        await run_repair(config, state, [_export_for(R_D_CHANNEL)], lambda _e: None)
+        for (method, url), calls in m.requests.items():
+            if method == "PATCH" and str(url).endswith(f"/servers/{R_SERVER}"):
+                body = calls[0].kwargs.get("json")
+                if isinstance(body, dict):
+                    patches.append(body)
+            elif method == "PATCH" and "/channels/" in str(url):
+                edits.append(calls[0].kwargs.get("json"))
+    return state, patches, edits
+
+
+async def test_a_recreated_channel_goes_back_into_its_category(tmp_path: Path) -> None:
+    """Found by the whole-branch review, and invisible to every chunk review.
+
+    Category membership on Stoat lives ONLY in the server's categories array, so
+    a channel made with api_create_channel sits outside every category until
+    that array names it. run_channels does this with an end-of-phase upsert; a
+    recreation has no phase behind it.
+
+    Without this a repaired channel comes back bare, outside the category it was
+    in, permanently, with nothing said about it. That is a visible structural
+    change the operator did not ask for, on the primary path this release
+    exists to serve.
+    """
+    live = [
+        {
+            "id": "01JSTOATCAT000000000AAA",
+            "title": "General",
+            "channels": ["01JSTOATCHN0000000OTHER"],
+        }
+    ]
+    _, patches, _ = await _repair_with_live_categories(
+        tmp_path,
+        live_categories=live,
+        channel_categories={R_D_CHANNEL: "700000000000000001"},
+        category_map={"700000000000000001": "01JSTOATCAT000000000AAA"},
+    )
+    assert patches, "no categories PATCH was sent, so the channel is outside every category"
+    cats = patches[-1]["categories"]
+    mine = next(c for c in cats if c["id"] == "01JSTOATCAT000000000AAA")
+    assert "01JSTOATCHN000000000NEW" in mine["channels"], (
+        f"the recreated channel was not put back in its category: {mine}"
+    )
+    assert "01JSTOATCHN0000000OTHER" in mine["channels"], (
+        "re-attaching evicted the category's other channel"
+    )
+
+
+async def test_a_channel_with_no_category_sends_no_patch(tmp_path: Path) -> None:
+    """The other half, so the assertion above cannot be met by patching always."""
+    _, patches, _ = await _repair_with_live_categories(
+        tmp_path,
+        live_categories=[{"id": "01JSTOATCAT000000000AAA", "title": "General", "channels": []}],
+        channel_categories={},
+        category_map={},
+    )
+    assert patches == [], f"a category PATCH was sent for a channel in no category: {patches}"
+
+
+async def test_a_recreated_channel_gets_its_slowmode_back(tmp_path: Path) -> None:
+    """run_channels sets slowmode with api_edit_channel after the permission pass.
+
+    A recreation that skipped it comes back with slowmode off, which is a silent
+    change to how the channel BEHAVES rather than how it looks.
+    """
+    _, _, edits = await _repair_with_live_categories(
+        tmp_path,
+        live_categories=[],
+        channel_categories={},
+        category_map={},
+        ch_meta_slowmode=30,
+    )
+    assert any(e and e.get("slowmode") == 30 for e in edits), f"slowmode was not restored: {edits}"
+
+
+async def test_a_recreated_channel_with_no_attributes_sends_no_edit(tmp_path: Path) -> None:
+    """The other half again: no attributes means no request."""
+    _, _, edits = await _repair_with_live_categories(
+        tmp_path, live_categories=[], channel_categories={}, category_map={}
+    )
+    assert edits == [], f"an edit was sent for a channel with nothing to set: {edits}"
+
+
+async def test_a_recreated_role_says_its_attributes_are_not_restored(tmp_path: Path) -> None:
+    """A DECLINE, recorded rather than silent.
+
+    The migration sets a role's colour, rank, hoist and icon in two further
+    api_edit_role passes, and the icon one uploads a file to Autumn. Restoring
+    those is a second content path in a batch already carrying two commands, and
+    the reasoning that keeps emoji out of repair applies to the icon too.
+
+    Declining is defensible. Declining silently is not: the operator would see a
+    role that looks restored and is uncoloured and unranked.
+    """
+    state, _, _ = await _repair_recreating_role(tmp_path)
+    assert any(
+        w.get("type") == "role_attributes_not_restored" and "#344" in w["message"]
+        for w in state.warnings
+    ), f"the role attribute decline was not recorded: {state.warnings}"
