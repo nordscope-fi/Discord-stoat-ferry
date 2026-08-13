@@ -3847,3 +3847,41 @@ async def test_the_offsets_clear_is_invisible_to_the_check_by_construction(
     """
     state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [_export_for(R_D_CHANNEL)])
     assert R_D_CHANNEL not in state.channel_message_offsets
+
+
+async def test_queued_pins_and_reactions_for_the_deleted_channel_are_dropped(
+    tmp_path: Path,
+) -> None:
+    """Entries naming the channel that is gone can never succeed.
+
+    Both lists survive a finished migration when their phase left failures
+    behind: run_pins ends with `state.pending_pins = remaining`, which keeps
+    exactly the ones that did not land, and run_reactions does the same. A later
+    --incremental would retry them against a channel that no longer exists and
+    collect another failure.
+
+    Repair did not create that situation, the deletion did, so this is a tidy-up
+    rather than a fix. It belongs here because this function's job is dropping
+    everything that described the channel that is gone.
+
+    Another channel's queued work must survive, which is what stops this being a
+    wholesale clear.
+    """
+    state = _state_for_rewrite()
+    state.pending_pins = [
+        (R_S_CHANNEL, "01JSTOATOLD0000000000BA"),
+        ("01JSTOATCHN0000000OTHER", "01JSTOATOTHER00000000CC"),
+    ]
+    state.pending_reactions = [
+        {"channel_id": R_S_CHANNEL, "message_id": "01JSTOATOLD0000000000BB", "emoji": "wave"},
+        {"channel_id": "01JSTOATCHN0000000OTHER", "message_id": "x", "emoji": "wave"},
+    ]
+
+    state, _ = await _repair_with_state(tmp_path, state, [_export_for(R_D_CHANNEL)])
+
+    assert state.pending_pins == [("01JSTOATCHN0000000OTHER", "01JSTOATOTHER00000000CC")], (
+        f"the deleted channel's queued pins were not dropped: {state.pending_pins}"
+    )
+    assert [r["channel_id"] for r in state.pending_reactions] == ["01JSTOATCHN0000000OTHER"], (
+        f"the deleted channel's queued reactions were not dropped: {state.pending_reactions}"
+    )
