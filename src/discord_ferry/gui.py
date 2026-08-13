@@ -11,6 +11,7 @@ import os
 import secrets
 import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import urlparse
@@ -550,7 +551,7 @@ def setup_page() -> None:
                             browse_btn = ui.button(icon="folder_open", on_click=_on_browse).props(
                                 "flat dense"
                             )
-                            if not _HAS_WEBVIEW:
+                            if not _native_enabled():
                                 browse_btn.disable()
                                 browse_btn.tooltip("Install pywebview for folder picker")
 
@@ -1859,15 +1860,132 @@ async def _pick_folder(window: Any | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Renderer fallback (issue #128)
+# ---------------------------------------------------------------------------
+
+# One source for the address, so the fallback cannot point somewhere the server is not.
+_HOST = "127.0.0.1"
+_PORT = 8765
+_URL = f"http://{_HOST}:{_PORT}"
+
+_RENDERER_DEAD_ROUTE = "/_ferry/renderer-dead"
+
+# NiceGUI's interface is built from ES modules. When the window's engine cannot run them
+# the app never starts, and the user gets a blank window with no way out (#128).
+#
+# Two things still work in that engine, and they are what this uses:
+#   - plain HTML and CSS render, so we can say what happened;
+#   - ordinary (non-module) JavaScript runs, so the page can tell us it is broken.
+#
+# A link is NOT enough: measured against a real window, clicking one navigates the dead
+# window itself rather than reaching the system browser. So the page reports itself and
+# Python opens the browser.
+_FALLBACK_BODY = f"""
+<div id="ferry-no-window">
+  <div style="max-width:34rem">
+    <h1 style="font-size:1.5rem;margin:0 0 .75rem">Ferry could not draw its window</h1>
+    <p style="margin:0 0 .75rem">This computer could not start the display Ferry uses for
+       its own window. Ferry itself is running normally.</p>
+    <p style="margin:0">Opening it in your browser instead. If nothing happens, go to
+       <strong>{_URL}</strong></p>
+  </div>
+</div>
+"""
+
+# The classic script is deliberately written in old JavaScript: `var`, `function` and
+# XMLHttpRequest, all of which predate ES modules by about a decade. `fetch` and arrow
+# functions would defeat the point, because the engine that fails here is the old one.
+#
+# The module script cancels both. A working window therefore reports nothing and shows
+# nothing, and a slow window cancels as soon as it starts, so there is no timer to tune
+# and no way to fire on a machine that was merely slow.
+_FALLBACK_HEAD = f"""
+<style>
+  #ferry-no-window {{
+    position: fixed; inset: 0; z-index: 2147483647;
+    display: flex; justify-content: center; align-items: center; text-align: center;
+    background: #fff; color: #222; font-family: system-ui, sans-serif; padding: 2rem;
+    opacity: 0; animation: ferry-no-window-reveal 0s 1s forwards;
+    /* Invisible for its first second, and full-screen, so it would otherwise swallow an
+       early click on a window that is about to work. Interactive only once revealed. */
+    pointer-events: none;
+  }}
+  @keyframes ferry-no-window-reveal {{ to {{ opacity: 1; pointer-events: auto; }} }}
+  /* NiceGUI's own wording ("does not support ES modules") means nothing to a Ferry
+     user, who is not in a browser and cannot choose one. Hide it, but leave the element
+     in place: its `#esm-fallback ~ *` rule is what keeps the broken app hidden. */
+  #esm-fallback {{ visibility: hidden !important; }}
+</style>
+<script>
+  window.__ferryRendererCheck = setTimeout(function () {{
+    var x = new XMLHttpRequest();
+    x.open("GET", "{_RENDERER_DEAD_ROUTE}", true);
+    x.send();
+  }}, 1000);
+</script>
+<script type="module">
+  clearTimeout(window.__ferryRendererCheck);
+  document.getElementById("ferry-no-window")?.remove();
+</script>
+"""
+
+_browser_opened = False
+
+
+def _native_enabled() -> bool:
+    """Whether Ferry should draw its own window.
+
+    ``FERRY_NO_NATIVE`` is the escape hatch for a machine whose window renderer is
+    broken. It has to be an environment variable rather than a command-line flag: a
+    double-clicked frozen executable has no arguments to read (see ``core/entry.py``).
+    """
+    return _HAS_WEBVIEW and not os.environ.get("FERRY_NO_NATIVE")
+
+
+def _install_renderer_fallback() -> None:
+    """Teach every page to report a renderer that cannot run the interface."""
+
+    @app.get(_RENDERER_DEAD_ROUTE)
+    def _renderer_dead() -> dict[str, str]:
+        global _browser_opened
+        if _browser_opened:
+            return {"status": "already-opened"}
+        _browser_opened = True
+        logger.warning(
+            "The native window could not run Ferry's interface, so it was opened in "
+            "your browser at %s instead. Set FERRY_NO_NATIVE=1 to skip the window "
+            "next time.",
+            _URL,
+        )
+        try:
+            if not webbrowser.open(_URL):
+                logger.warning(
+                    "No browser could be opened either. Ferry is still running: go to %s by hand.",
+                    _URL,
+                )
+        except OSError:
+            logger.warning(
+                "Opening a browser failed. Ferry is still running: go to %s by hand.",
+                _URL,
+                exc_info=True,
+            )
+        return {"status": "ok"}
+
+    ui.add_body_html(_FALLBACK_BODY, shared=True)
+    ui.add_head_html(_FALLBACK_HEAD, shared=True)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
 def _run_gui() -> None:
     """Start the UI and guarantee the native window child dies with the server."""
-    native = _HAS_WEBVIEW
+    native = _native_enabled()
 
     if native:
+        _install_renderer_fallback()
         # Fires on every path that reaches the ASGI lifespan shutdown: window close,
         # Cmd-Q, Dock quit, force quit (SIGTERM) and a single Ctrl-C.
         app.on_shutdown(_teardown_native_window_async)
@@ -1875,8 +1993,8 @@ def _run_gui() -> None:
     try:
         ui.run(
             title="Discord Ferry",
-            host="127.0.0.1",
-            port=8765,
+            host=_HOST,
+            port=_PORT,
             native=native,
             reload=False,
             storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),

@@ -142,17 +142,32 @@ xattr -dr com.apple.quarantine /Applications/Ferry.app
 
 The `-r` flag matters. Without it the quarantine flag is cleared only from the bundle folder, while the executable inside it stays blocked and the app still refuses to open. If you kept Ferry somewhere other than `/Applications`, substitute that path.
 
-### Ferry window is blank or says "Your browser does not support ES modules"
+### Ferry's window says it could not be drawn, and your browser opens
 
 | | |
 |---|---|
-| **Symptom** | The Ferry window opens but stays empty, or shows the message *"Your browser does not support ES modules."* |
-| **Cause** | Ferry draws its window using a renderer supplied by the operating system. On Windows that is the **Microsoft Edge WebView2 Runtime**, which is present on Windows 11 but not guaranteed on Windows 10. When it is missing or broken, the window falls back to a legacy engine that cannot run Ferry's interface. |
-| **Solution** | Install or repair the [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). If it is already installed, run the installer again; it repairs a broken install. |
+| **Symptom** | The Ferry window says *"Ferry could not draw its window"*, and Ferry opens in your browser instead. On versions before 2.19.0 the same situation gave a blank window, or the message *"Your browser does not support ES modules."* |
+| **Cause** | Ferry draws its window using a renderer supplied by the operating system. On Windows that is the **Microsoft Edge WebView2 Runtime**, which is present on Windows 11 but not guaranteed on Windows 10. When it is missing or broken, the window cannot run Ferry's interface. |
+| **Solution** | Nothing is required: the migration works the same in the browser. To get the window back, install or repair the [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). If it is already installed, run the installer again; it repairs a broken install. |
 
-!!! tip "Use `localhost:8765` meanwhile"
+!!! tip "If the browser does not open by itself"
     Ferry serves its interface at `http://localhost:8765` whether or not the window draws. Open
     that address in any browser and carry on.
+
+!!! info "Skipping the window entirely"
+    Set the environment variable `FERRY_NO_NATIVE=1` before starting Ferry and it will use your
+    browser from the outset, without trying to draw its own window. This is the reliable option on
+    a machine where the window never works.
+
+    ```powershell
+    # Windows PowerShell
+    $env:FERRY_NO_NATIVE = "1"; .\Ferry-windows-x86_64.exe
+    ```
+
+    ```bash
+    # macOS and Linux
+    FERRY_NO_NATIVE=1 ferry-gui
+    ```
 
 ### Ferry.exe ignores `--help` and every other command
 

@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-08-14
+
+### Fixed
+
+- **A window that cannot draw Ferry's interface now says so and opens your browser** (#128, the
+  last live piece of #123). Previously the window stayed blank, or showed NiceGUI's own
+  *"Your browser does not support ES modules"*, and there was no flag, variable or setting that
+  could get past it. The migration server was running and reachable at `localhost:8765` the whole
+  time, but nothing told the user that.
+
+  The page now carries its own message and reports itself. Ferry's interface is built from ES
+  modules; an engine that cannot run them still renders plain HTML and still runs ordinary
+  JavaScript, so the page shows an explanation and tells Ferry to open the system browser. A
+  working window cancels both before either is visible, so there is no timer and no waiting period
+  that could fire on a machine that was merely slow.
+
+  A link would not have been enough: measured against a real window, clicking one navigates the
+  dead window rather than reaching the system browser.
+
+### Added
+
+- **`FERRY_NO_NATIVE`** skips the native window and uses your browser from the start. It is an
+  environment variable rather than a command-line flag because a double-clicked frozen executable
+  has no arguments to read. It also disables the folder picker, which needs the window.
+
 ### Documentation
 
 - **Four reference claims corrected against source** (`stoat-api-notes.md`, `architecture.md`,
