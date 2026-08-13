@@ -1620,6 +1620,14 @@ async def run_repair(
 
             for result in structure_work:
                 discord_id = result.discord_id or ""
+                # Persist after EACH recreation, not once at the end. run_roles
+                # already does this mid-loop and says why: a hard kill between a
+                # create and the save leaves the id map naming the entity that is
+                # gone, so the next run's check reports it missing again and
+                # repair creates a SECOND one. One extra atomic write per
+                # recreated entity is cheap against a duplicate nobody asked for.
+                #
+                # Unreachable under --dry-run: that path returns above.
                 if result.kind == "role_missing":
                     if await _recreate_role(sess, config, state, result, on_event) and metadata:
                         # ONE role. The server-default call that follows the loop
@@ -1652,6 +1660,7 @@ async def run_repair(
                             state.created_channel_names.get(discord_id, discord_id),
                             phase="repair",
                         )
+                save_state(state, config.output_dir)
         finally:
             if own_session:
                 await sess.close()
