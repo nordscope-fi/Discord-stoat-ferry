@@ -13,9 +13,16 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core import engine as engine_module
-from discord_ferry.core.engine import PHASE_ORDER, PhaseFunction, run_migration, run_retry_failed
+from discord_ferry.core.engine import (
+    PHASE_ORDER,
+    PhaseFunction,
+    run_migration,
+    run_repair,
+    run_retry_failed,
+)
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import DuplicateSendError
+from discord_ferry.migrator.verify import CheckReport
 from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
 from discord_ferry.state import FailedMessage, MigrationState
 
@@ -2500,3 +2507,137 @@ async def test_an_invalid_thread_strategy_is_recorded_as_the_effective_one(
     config = _make_config(tmp_path, thread_strategy="not-a-strategy")
     state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
     assert state.thread_strategy == "flatten"
+
+
+# ---------------------------------------------------------------------------
+# run_repair (#107 batch 10, chunk #314)
+# ---------------------------------------------------------------------------
+
+R_SERVER = "01JSTOATSRV000000000AAA"
+R_D_CHANNEL = "800000000000000001"
+R_S_CHANNEL = "01JSTOATCHN000000000OLD"
+
+
+def _make_repair_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
+    """Config for repair tests, mirroring _make_retry_config above.
+
+    Kept as its own helper rather than reusing the retry one, because repair
+    reads output_dir for state and export_dir for content, and a test that
+    conflated them would pass for the wrong reason.
+    """
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    defaults: dict[str, Any] = {
+        "export_dir": export_dir,
+        "stoat_url": BASE_URL,
+        "token": TOKEN,
+        "output_dir": output_dir,
+        "message_rate_limit": 0.0,
+        "upload_delay": 0.0,
+    }
+    defaults.update(overrides)
+    return FerryConfig(**defaults)
+
+
+async def test_repair_refuses_a_rolled_back_state_without_a_single_request(
+    tmp_path: Path,
+) -> None:
+    """The most damaging thing this batch could get wrong.
+
+    Rollback NEVER mutates the id maps, deliberately, to preserve the
+    migration's audit trail (see RollbackProgress' docstring in state.py). So
+    `ferry check` run on a rolled-back state reports channel_missing for EVERY
+    channel it mapped, and a repair acting on that report would rebuild a server
+    the user deliberately destroyed.
+
+    rollback_progress is set once, at the start of run_rollback, is checkpointed
+    on both success and failure, and is never cleared. Refusing whenever it is
+    not None therefore also covers a rollback that failed at its very first
+    delete, which is the conservative and correct reading.
+
+    ASSERTS ZERO HTTP REQUESTS, not that an error was printed. A repair that
+    fetched the server and then refused would pass a message-only assertion
+    while having already spent the request that tells an operator it ran.
+    """
+    from discord_ferry.state import RollbackProgress
+
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        rollback_progress=RollbackProgress(started_at="2026-08-13T00:00:00+00:00"),
+    )
+    events: list[MigrationEvent] = []
+
+    with aioresponses() as m:
+        await run_repair(config, state, [], events.append)
+        assert not m.requests, (
+            f"repair made {len(m.requests)} request(s) against a rolled-back state"
+        )
+
+    assert any(e.status == "error" for e in events), "the refusal was not reported"
+    assert any("rollback" in e.message.lower() for e in events)
+
+
+async def test_repair_runs_the_check_when_the_state_was_never_rolled_back(
+    tmp_path: Path,
+) -> None:
+    """The other half of the guard, so the refusal cannot be unconditional.
+
+    Without this, a run_repair that refused everything would pass the test
+    above and look correct. The guard has to let an ordinary state through.
+    """
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    events: list[MigrationEvent] = []
+    seen: dict[str, Any] = {}
+
+    async def _fake_check(stoat_url: str, token: str, st: Any, on_event: Any, **_kw: Any) -> Any:
+        seen["called"] = True
+        return CheckReport()
+
+    with patch("discord_ferry.migrator.verify.run_check", new=_fake_check):
+        await run_repair(config, state, [], events.append)
+
+    assert seen.get("called"), "repair refused a state that was never rolled back"
+
+
+async def test_repair_populates_the_token_store_and_the_semaphore(tmp_path: Path) -> None:
+    """Both asserted as CALLS, for the reason recorded on the retry path.
+
+    A test asserting a token is absent from some string passes against a token
+    that simply never appeared in it.
+    """
+    config = _make_repair_config(tmp_path)
+    config.token_store = None
+    state = MigrationState(stoat_server_id=R_SERVER)
+    order: list[str] = []
+
+    real_store = engine_module._ensure_token_store
+
+    def _spy_store(cfg: FerryConfig) -> None:
+        order.append("token_store")
+        real_store(cfg)
+
+    async def _fake_check(*_a: Any, **_k: Any) -> Any:
+        order.append("check")
+        return CheckReport()
+
+    with (
+        patch.object(engine_module, "_ensure_token_store", _spy_store),
+        patch.object(
+            engine_module,
+            "init_request_semaphore",
+            lambda *_a: order.append("semaphore"),
+        ),
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+    ):
+        await run_repair(config, state, [], lambda _e: None)
+
+    assert "token_store" in order, "repair never built the token store"
+    assert "semaphore" in order, "repair never initialised the request semaphore"
+    assert order.index("token_store") < order.index("check")
+    assert order.index("semaphore") < order.index("check")
+    assert config.token_store is not None
