@@ -1060,6 +1060,13 @@ async def run_retry_failed(
     Uses a single-scan strategy: collects all failed message IDs, then
     scans exports once to find matching DCEMessage objects.
     """
+    # Same reason run_rollback calls it: this coroutine is invoked directly by a
+    # shell, which never sets the store, so without this every safe_sanitize on
+    # the retry path is an identity no-op and a Stoat token in an exception
+    # reaches state.failed_messages, and through it report.json, unredacted.
+    # Before the early return, so the store exists on every path out.
+    _ensure_token_store(config)
+
     if not state.failed_messages:
         on_event(
             MigrationEvent(

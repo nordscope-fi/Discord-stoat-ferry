@@ -12,6 +12,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core import engine as engine_module
 from discord_ferry.core.engine import PHASE_ORDER, PhaseFunction, run_migration, run_retry_failed
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import DuplicateSendError
@@ -842,6 +843,67 @@ async def test_retry_failed_missing_export_dir(tmp_path: Path) -> None:
     await run_retry_failed(config, state, [], events.append)
     assert any("export directory not found" in e.message for e in events)
     assert len(state.failed_messages) == 1  # Unchanged
+
+
+async def test_retry_failed_populates_the_token_store(tmp_path: Path) -> None:
+    """run_retry_failed must build the token store, as both its siblings do.
+
+    ``_ensure_token_store`` is called by ``run_migration`` and ``run_rollback``
+    and by nothing else. Without it ``config.token_store`` stays None for the
+    whole run, and ``_process_message``'s handler calls
+    ``safe_sanitize(config.token_store, str(exc))``, which is an identity no-op
+    with a None store. A Stoat token in an exception therefore reaches
+    ``state.failed_messages`` and, through it, report.json unredacted.
+
+    The defect was latent only because no command could reach this coroutine.
+    ``ferry retry`` makes it reachable, so this is that command's precondition.
+
+    ASSERTS THE CALL AND ITS EFFECT, never that a token is absent from a
+    message. An absence assertion passes against a token that simply never
+    appeared in that string, and this project shipped unredacted Stoat tokens
+    for two releases behind exactly that shape.
+    """
+    config = _make_retry_config(tmp_path)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    config.token_store = None
+
+    _write_dce_json(config.export_dir, "ch1", [_dce_msg_dict("100000000000000001")])
+    exports = _make_exports_from_dir(config.export_dir)
+
+    state = MigrationState(
+        channel_map={"800000000000000001": "01JSTOATCHN000000000OLD"},
+        autumn_url=AUTUMN_URL,
+        failed_messages=[
+            FailedMessage(
+                discord_msg_id="100000000000000001",
+                stoat_channel_id="01JSTOATCHN000000000OLD",
+                error="timeout",
+            )
+        ],
+    )
+
+    calls: list[str] = []
+    real = engine_module._ensure_token_store
+
+    def _spy(cfg: FerryConfig) -> None:
+        calls.append("ensure_token_store")
+        real(cfg)
+
+    with (
+        patch.object(engine_module, "_ensure_token_store", _spy),
+        aioresponses() as m,
+    ):
+        m.post(
+            f"{BASE_URL}/channels/01JSTOATCHN000000000OLD/messages",
+            payload={"_id": "01JSTOATMSG0000000000AA"},
+        )
+        await run_retry_failed(config, state, exports, lambda _e: None)
+
+    assert calls == ["ensure_token_store"], (
+        "run_retry_failed did not call _ensure_token_store, so every safe_sanitize "
+        "on this path is an identity no-op"
+    )
+    assert config.token_store is not None, "the call left token_store unset"
 
 
 async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
