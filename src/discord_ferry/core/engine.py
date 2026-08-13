@@ -1406,6 +1406,7 @@ async def _resend_channel(
     original migration sent and the restored thread would lose the line saying
     where it came from.
     """
+    new_channel_id = state.channel_map[export.channel.id]
     if export.is_thread and export.parent_channel_name:
         header = (
             f"[Forum post migrated from #{export.parent_channel_name}]"
@@ -1417,10 +1418,14 @@ async def _resend_channel(
                 session,
                 config.stoat_url,
                 config.token,
-                state.channel_map[export.channel.id],
+                new_channel_id,
                 content=header,
                 masquerade={"name": "Discord Ferry"},
-                idempotency_key=f"ferry-header-{export.channel.id}",
+                # Salted with the NEW channel id for the same reason the message
+                # keys are: the old key may still be in Stoat's LRU, and a 409
+                # there would silently drop the header from a channel that is
+                # genuinely new.
+                idempotency_key=f"ferry-header-{export.channel.id}-{new_channel_id}",
             )
 
     # The mark is the max over EVERY id this export holds, not over the ones
@@ -1445,12 +1450,13 @@ async def _resend_channel(
         try:
             await _process_message(
                 msg=msg,
-                stoat_channel_id=state.channel_map[export.channel.id],
+                stoat_channel_id=new_channel_id,
                 config=config,
                 state=state,
                 session=session,
                 on_event=on_event,
                 export_channel_id=export.channel.id,
+                idempotency_salt=new_channel_id,
             )
             sent += 1
         except Exception:  # noqa: BLE001

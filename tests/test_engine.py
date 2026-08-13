@@ -4116,3 +4116,123 @@ async def test_a_resend_sends_in_timestamp_order_not_list_order(tmp_path: Path) 
         "msg:100000000000000002",
         "msg:100000000000000003",
     ], f"the resend followed list order rather than timestamp order: {sent}"
+
+
+def test_the_migration_idempotency_key_is_unchanged_without_a_salt() -> None:
+    """The salt is additive: an unsalted call produces exactly the old key.
+
+    Every migration send goes through this path, and a changed key would make
+    Stoat treat a resumed migration's messages as new and duplicate them all.
+    """
+    import inspect
+
+    source = inspect.getsource(messages_module._process_message)
+    assert 'f"ferry-{msg.id}{_salt}"' in source
+    assert '_salt = f"-{idempotency_salt}" if idempotency_salt else ""' in source
+    signature = inspect.signature(messages_module._process_message)
+    assert signature.parameters["idempotency_salt"].default == "", (
+        "the salt must default to empty, or every migration key changes"
+    )
+
+
+async def test_a_resend_salts_its_idempotency_keys_with_the_new_channel(
+    tmp_path: Path,
+) -> None:
+    """Otherwise Stoat's LRU silently swallows the whole resend.
+
+    The per-message key is built from the DISCORD message id, which a recreated
+    channel does not change, and Stoat's Idempotency-Key store is a 1000-entry
+    in-memory LRU with NO TTL. A repair running while those keys are still
+    cached is answered 409 DuplicateNonce, and _process_message treats that as
+    "already on the server" and moves on. The channel holding those messages was
+    deleted, so it is not there at all: the repair would report success and
+    restore nothing.
+
+    Salting with the new Stoat channel id makes the key unique to the
+    recreation. Asserts the salt reached the call, not that a send succeeded.
+    """
+    export = _export_for(R_D_CHANNEL)
+    export.messages.append(_dce_msg("100000000000000001"))
+    seen: list[str] = []
+
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        created_channel_names={R_D_CHANNEL: "general"},
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    async def _capture(*, msg: Any, idempotency_salt: str = "", **_kw: Any) -> None:
+        seen.append(idempotency_salt)
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "_process_message", _capture),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        await run_repair(config, state, [export], lambda _e: None)
+
+    assert seen == ["01JSTOATCHN000000000NEW"], (
+        f"the resend did not salt its keys with the new channel id: {seen}"
+    )
+
+
+async def test_the_origin_header_key_is_salted_too(tmp_path: Path) -> None:
+    """The header has the same exposure and the same fix."""
+    export = _thread_export(R_D_CHANNEL, parent="general")
+    export.messages.append(_dce_msg("100000000000000001"))
+    keys: list[str] = []
+
+    async def _fake_send(*_a: Any, **kwargs: Any) -> dict[str, str]:
+        keys.append(str(kwargs.get("idempotency_key", "")))
+        return {"_id": "01JSTOATMSG0000000000AA"}
+
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        created_channel_names={R_D_CHANNEL: "general"},
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "api_send_message", _fake_send),
+        patch.object(engine_module, "_process_message", _noop_process),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        await run_repair(config, state, [export], lambda _e: None)
+
+    assert keys == ["ferry-header-800000000000000001-01JSTOATCHN000000000NEW"], (
+        f"the header key was not salted with the new channel: {keys}"
+    )
+
+
+async def _noop_process(**_kw: Any) -> None:
+    """A _process_message stand-in that sends nothing."""
+    return None
