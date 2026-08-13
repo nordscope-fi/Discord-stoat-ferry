@@ -1161,6 +1161,75 @@ async def run_retry_failed(
 
 
 # ---------------------------------------------------------------------------
+# Repair engine (#107 batch 10)
+# ---------------------------------------------------------------------------
+
+
+async def run_repair(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> None:
+    """Act on a CheckReport: restore missing structure and lost messages.
+
+    A sibling of :func:`run_retry_failed` and :func:`run_rollback`, not a phase.
+    ``PHASE_ORDER``, the phase list and the resume-by-name comparison are
+    untouched, and repair is not resumable by design: it re-derives its work
+    from a fresh check on every run, so there is nothing to checkpoint.
+
+    Raises:
+        CheckError: the state is from a dry run, or records no server. Both come
+            from ``run_check`` and are deliberately not caught here, because the
+            shell turns them into an exit code and a sentence.
+    """
+    # Rollback preserves the id maps as an audit trail and NEVER clears them
+    # (RollbackProgress' own docstring in state.py says so), which means a check
+    # on a rolled-back state reports channel_missing for every channel it
+    # mapped. A repair acting on that report would rebuild a server the user
+    # deliberately destroyed, so this refusal comes before any request.
+    #
+    # rollback_progress is set once, at the start of run_rollback, checkpointed
+    # on both success and failure, and never cleared, so a non-None value also
+    # covers a rollback that failed at its first delete. What it cannot see: a
+    # hand-edited state.json, or a fresh migration into the same output_dir.
+    if state.rollback_progress is not None:
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="error",
+                message=(
+                    "This state records a rollback, so every channel it maps was deleted "
+                    "on purpose. Rollback keeps the id maps as an audit trail, so a check "
+                    "reports them all missing and a repair would rebuild a server you "
+                    "chose to remove. Refusing."
+                ),
+            )
+        )
+        return
+
+    _ensure_token_store(config)
+    init_request_semaphore(config.max_concurrent_requests)
+
+    from discord_ferry.migrator.verify import run_check
+
+    report = await run_check(config.stoat_url, config.token, state, on_event, session=session)
+    counts = report.counts()
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=(
+                f"Check complete: {counts['fail']} failing, {counts['warn']} warned, "
+                f"{counts['unverifiable']} unverifiable."
+            ),
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rollback engine (issue #10)
 # ---------------------------------------------------------------------------
 
