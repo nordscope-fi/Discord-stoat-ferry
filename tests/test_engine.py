@@ -4435,3 +4435,42 @@ async def test_repair_skips_the_drain_when_nothing_is_queued(tmp_path: Path) -> 
         await run_repair(config, state, [], lambda _e: None)
 
     assert called == [], "repair ran the drain with an empty queue"
+
+
+async def test_a_recreated_channels_backlog_is_pointed_at_the_new_channel(
+    tmp_path: Path,
+) -> None:
+    """Otherwise a recreated channel can never clear its dead-letter queue.
+
+    FailedMessage.stoat_channel_id is recorded at migration time, against the id
+    that has since been deleted, and run_retry_failed sends to exactly that
+    field. Without the remap the drain posts every backlogged message of a
+    recreated channel to a dead id and collects a 404: the repair would recreate
+    the channel, restore its export, and still leave the backlog stuck forever.
+
+    Another channel's queued failure must keep its own target, which is what
+    stops this being a wholesale rewrite.
+    """
+    state = _state_for_rewrite()
+    state.failed_messages = [
+        FailedMessage(
+            discord_msg_id="100000000000000001",
+            stoat_channel_id=R_S_CHANNEL,
+            error="timeout",
+        ),
+        FailedMessage(
+            discord_msg_id="999000000000000009",
+            stoat_channel_id="01JSTOATCHN0000000OTHER",
+            error="timeout",
+        ),
+    ]
+
+    state, _ = await _repair_with_state(tmp_path, state, [_export_for(R_D_CHANNEL)])
+
+    targets = {fm.discord_msg_id: fm.stoat_channel_id for fm in state.failed_messages}
+    assert targets["100000000000000001"] == "01JSTOATCHN000000000NEW", (
+        "the backlog still points at the deleted channel, so the drain would 404"
+    )
+    assert targets["999000000000000009"] == "01JSTOATCHN0000000OTHER", (
+        "another channel's queued failure was retargeted"
+    )

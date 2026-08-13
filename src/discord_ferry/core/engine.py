@@ -1289,6 +1289,7 @@ def _clear_channel_state(
     discord_id: str,
     message_ids: list[str],
     old_stoat_id: str | None = None,
+    new_stoat_id: str | None = None,
 ) -> None:
     """Drop everything that described the channel that is now gone.
 
@@ -1320,6 +1321,18 @@ def _clear_channel_state(
     state.completed_channel_ids.discard(discord_id)
     for message_id in message_ids:
         state.message_map.pop(message_id, None)
+
+    # A queued FAILURE, on the other hand, is still worth sending: it just has to
+    # go to the channel that now exists. FailedMessage.stoat_channel_id was
+    # recorded at migration time against the id that has since been deleted, and
+    # run_retry_failed sends to exactly that field, so without this remap the
+    # drain posts every backlogged message of a recreated channel to a dead id
+    # and collects a 404. The repair would recreate the channel, restore its
+    # export, and still never clear its backlog.
+    if old_stoat_id and new_stoat_id:
+        for failed in state.failed_messages:
+            if failed.stoat_channel_id == old_stoat_id:
+                failed.stoat_channel_id = new_stoat_id
 
     # Queued pins and reactions naming the deleted channel can never succeed.
     # Both lists survive a finished migration when their phase left failures
@@ -1702,7 +1715,7 @@ async def _recreate_channel(
     state.created_channel_names[discord_id] = created.get("name") or unique_name
     # result.stoat_id is the id the check found missing, so it is the OLD one:
     # channel_map was overwritten a line above and no longer holds it.
-    _clear_channel_state(state, discord_id, _channel_message_ids(export), result.stoat_id)
+    _clear_channel_state(state, discord_id, _channel_message_ids(export), result.stoat_id, new_id)
     on_event(
         MigrationEvent(
             phase="repair",
