@@ -1266,6 +1266,57 @@ async def _live_server_view(
     return names, categories
 
 
+def _channel_message_ids(export: DCEExport) -> list[str]:
+    """Every Discord message id this export holds, in export order.
+
+    NEW work, not a reuse of the scan in ``run_retry_failed``. That one filters
+    on ``msg.id in failed_ids``, a MESSAGE predicate seeded from failures Ferry
+    already knows about. Repair needs a CHANNEL predicate, and nothing in
+    ``MigrationState`` can answer "which ``message_map`` entries belonged to
+    channel X": the map is keyed by message id with no channel anywhere in it.
+    The export is the only source.
+
+    Streams when a path is known, for the same reason ``run_retry_failed``
+    streams: a channel export can be large and there is no need to hold it.
+    """
+    if export.json_path is not None:
+        return [msg.id for msg in stream_messages(export.json_path)]
+    return [msg.id for msg in export.messages]
+
+
+def _clear_channel_state(state: MigrationState, discord_id: str, message_ids: list[str]) -> None:
+    """Drop everything that described the channel that is now gone.
+
+    Every per-channel field is keyed by DISCORD id, so only one map VALUE moved
+    (``channel_map``, written by the caller) and no key changes here.
+
+    ``channel_message_counts`` is the one that is easy to think unnecessary and
+    is not. ``_classify_tail``'s "nothing expected" shortcut requires the count
+    to be zero AND no expected id. Leaving a stale non-zero count while the
+    high-water mark is gone falls past that shortcut into ``channel_empty``,
+    which is a ``fail``: a repair that did everything it could would report as a
+    failure. It is observable ONLY when the resend puts nothing back, because a
+    successful resend repopulates it, which is why the test for it drives an
+    export holding nothing for this channel.
+
+    ``channel_message_offsets`` is cleared for a different reason and no check
+    can see it: nothing in ``_classify_tail`` or ``_expected_tail`` reads that
+    map. It is transient within-run resume state for a channel that no longer
+    exists, so it serves a later ``--resume`` rather than the next check. Not
+    dead, just unreachable by that predicate.
+
+    The ``message_map`` entries name messages deleted along with the channel.
+    They come from a channel-scoped scan of the export because no reverse index
+    from a channel to its messages exists anywhere in the state.
+    """
+    state.channel_high_water.pop(discord_id, None)
+    state.channel_message_counts.pop(discord_id, None)
+    state.channel_message_offsets.pop(discord_id, None)
+    state.completed_channel_ids.discard(discord_id)
+    for message_id in message_ids:
+        state.message_map.pop(message_id, None)
+
+
 def _no_recorded_name(state: MigrationState, kind: str, discord_id: str) -> str:
     """Record why an entity could not be recreated, and return the message.
 
@@ -1389,6 +1440,7 @@ async def _recreate_channel(
     new_id: str = created["_id"]
     state.channel_map[discord_id] = new_id
     state.created_channel_names[discord_id] = created.get("name") or unique_name
+    _clear_channel_state(state, discord_id, _channel_message_ids(export))
     on_event(
         MigrationEvent(
             phase="repair",

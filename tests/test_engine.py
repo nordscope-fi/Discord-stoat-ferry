@@ -25,7 +25,13 @@ from discord_ferry.core.engine import (
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import CheckError, DuplicateSendError
 from discord_ferry.migrator.verify import CheckReport
-from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
+from discord_ferry.parser.models import (
+    DCEAuthor,
+    DCEChannel,
+    DCEExport,
+    DCEGuild,
+    DCEMessage,
+)
 from discord_ferry.state import FailedMessage, MigrationState
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -3645,3 +3651,199 @@ async def test_repair_declines_a_category_it_has_no_recorded_title_for(tmp_path:
     state, sent, _ = await _repair_recreating_category(tmp_path, title=None)
     assert sent is None, "repair PATCHed a category it could not title"
     assert any(w.get("type") == "no_recorded_name" for w in state.warnings), state.warnings
+
+
+def _dce_msg(msg_id: str) -> DCEMessage:
+    """A minimal in-memory DCEMessage, for the non-streaming branch."""
+    return DCEMessage(
+        id=msg_id,
+        type="Default",
+        timestamp="2026-01-01T00:00:00+00:00",
+        content="hello",
+        author=DCEAuthor(id="700000000000000001", name="author", nickname="author"),
+    )
+
+
+def test_the_channel_scan_streams_from_disk_when_a_path_is_known(tmp_path: Path) -> None:
+    """A large channel export is not held in memory to list its ids.
+
+    run_retry_failed streams for the same reason. This asserts the path is
+    actually used, by leaving export.messages EMPTY while the file on disk holds
+    two messages: an implementation reading the in-memory list would return
+    nothing and the assertion would fail.
+    """
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    path = _write_dce_json(
+        export_dir,
+        "800000000000000001",
+        [_dce_msg_dict("100000000000000001"), _dce_msg_dict("100000000000000002")],
+    )
+    export = DCEExport(
+        guild=DCEGuild(id="900000000000000009", name="G", icon_url=""),
+        channel=DCEChannel(id="800000000000000001", type=0, name="general"),
+        messages=[],
+        json_path=path,
+    )
+    assert engine_module._channel_message_ids(export) == [
+        "100000000000000001",
+        "100000000000000002",
+    ]
+
+
+def test_the_channel_scan_falls_back_to_messages_held_in_memory() -> None:
+    """An export parsed with metadata_only=False carries its messages directly.
+
+    Paired with the test above so neither branch can be deleted unnoticed.
+    """
+    export = DCEExport(
+        guild=DCEGuild(id="900000000000000009", name="G", icon_url=""),
+        channel=DCEChannel(id="800000000000000001", type=0, name="general"),
+        messages=[_dce_msg("100000000000000003"), _dce_msg("100000000000000004")],
+    )
+    assert engine_module._channel_message_ids(export) == [
+        "100000000000000003",
+        "100000000000000004",
+    ]
+
+
+def test_the_channel_scan_is_empty_for_a_channel_with_no_messages() -> None:
+    """The case SC-3.2 later depends on: an export that fills nothing back."""
+    export = DCEExport(
+        guild=DCEGuild(id="900000000000000009", name="G", icon_url=""),
+        channel=DCEChannel(id="800000000000000001", type=0, name="general"),
+        messages=[],
+    )
+    assert engine_module._channel_message_ids(export) == []
+
+
+async def _repair_with_state(
+    tmp_path: Path, state: MigrationState, exports: list[Any]
+) -> tuple[MigrationState, list[MigrationEvent]]:
+    """Recreate one channel against a caller-supplied state."""
+    config = _make_repair_config(tmp_path)
+    events: list[MigrationEvent] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        await run_repair(config, state, exports, events.append)
+    return state, events
+
+
+def _state_for_rewrite(**overrides: Any) -> MigrationState:
+    """A state describing a channel that WAS migrated and is now deleted."""
+    defaults: dict[str, Any] = {
+        "stoat_server_id": R_SERVER,
+        "channel_map": {R_D_CHANNEL: R_S_CHANNEL},
+        "created_channel_names": {R_D_CHANNEL: "general"},
+        "channel_high_water": {R_D_CHANNEL: "100000000000000002"},
+        "channel_message_counts": {R_D_CHANNEL: 2},
+        "channel_message_offsets": {R_D_CHANNEL: "100000000000000001"},
+        "completed_channel_ids": {R_D_CHANNEL},
+        "message_map": {
+            "100000000000000001": "01JSTOATOLD0000000000BA",
+            "100000000000000002": "01JSTOATOLD0000000000BB",
+            "999000000000000009": "01JSTOATOTHER00000000CC",
+        },
+    }
+    defaults.update(overrides)
+    return MigrationState(**defaults)
+
+
+async def test_a_recreated_channels_new_id_lands_under_the_unchanged_key(
+    tmp_path: Path,
+) -> None:
+    """Only one map VALUE moves. No key changes anywhere."""
+    state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [_export_for(R_D_CHANNEL)])
+    assert state.channel_map == {R_D_CHANNEL: "01JSTOATCHN000000000NEW"}
+
+
+async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
+    tmp_path: Path,
+) -> None:
+    """The four Discord-keyed entries that described the channel that is gone."""
+    export = _export_for(R_D_CHANNEL)
+    export.messages.extend([_dce_msg("100000000000000001"), _dce_msg("100000000000000002")])
+    state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [export])
+
+    assert R_D_CHANNEL not in state.channel_high_water
+    assert R_D_CHANNEL not in state.channel_message_counts
+    assert R_D_CHANNEL not in state.channel_message_offsets
+    assert R_D_CHANNEL not in state.completed_channel_ids
+
+
+async def test_only_this_channels_message_map_entries_are_dropped(tmp_path: Path) -> None:
+    """The scan is channel-scoped, so another channel's entries survive.
+
+    A message_map wiped wholesale would strand every reply reference in the
+    migration, and nothing would report it: the map is consulted, never checked.
+    """
+    export = _export_for(R_D_CHANNEL)
+    export.messages.extend([_dce_msg("100000000000000001"), _dce_msg("100000000000000002")])
+    state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [export])
+
+    assert "100000000000000001" not in state.message_map
+    assert "100000000000000002" not in state.message_map
+    assert state.message_map.get("999000000000000009") == "01JSTOATOTHER00000000CC", (
+        "another channel's message_map entry was dropped"
+    )
+
+
+async def test_a_stale_message_count_does_not_survive_a_repair_that_resends_nothing(
+    tmp_path: Path,
+) -> None:
+    """SC-3.2. The ONLY test that can see the channel_message_counts clear.
+
+    Clearing the count is observable ONLY when the resend puts nothing back. A
+    successful resend repopulates it, and only a ZERO count changes any verdict:
+    _classify_tail's "nothing expected" shortcut requires recorded_count == 0
+    AND expected is None. With a stale count of 2 and the high-water mark gone,
+    control falls past that shortcut to `if not window_ids`, which returns
+    ("fail", "channel_empty"). A repair that did everything it could would then
+    report as a failure.
+
+    The runnable prototype measured this. Its first case set was all successful
+    resends, and the mutant that skips the clear SURVIVED. This is the shape
+    that kills it: an export holding NOTHING for this channel, which is what an
+    operator gets by pointing repair at a narrower re-export.
+
+    DO NOT weaken this to a successful resend. The clear then becomes
+    unobservable and can be deleted without any test noticing.
+    """
+    state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [_export_for(R_D_CHANNEL)])
+    assert state.channel_message_counts.get(R_D_CHANNEL, 0) == 0, (
+        "a stale non-zero count survived, so the next check reports channel_empty "
+        "for a channel repair restored as far as it could"
+    )
+
+
+async def test_the_offsets_clear_is_invisible_to_the_check_by_construction(
+    tmp_path: Path,
+) -> None:
+    """SC-3.9. Pins a KNOWN LIMIT, not a missing check.
+
+    The mutant that skips clearing channel_message_offsets SURVIVES the
+    prototype, correctly: nothing in _classify_tail or _expected_tail reads that
+    map, so no check verdict can observe the clear. It is not dead code, it
+    serves a later --resume.
+
+    So this asserts the STATE directly. Do not add an assertion that the check
+    notices it, because none can.
+    """
+    state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [_export_for(R_D_CHANNEL)])
+    assert R_D_CHANNEL not in state.channel_message_offsets
