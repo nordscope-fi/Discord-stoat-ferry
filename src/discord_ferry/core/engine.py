@@ -9,7 +9,7 @@ import re
 import socket
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
@@ -69,6 +69,12 @@ from discord_ferry.state import (
     load_state,
     save_state,
 )
+
+if TYPE_CHECKING:
+    # Type-only: run_check itself is imported inside run_repair, matching how
+    # check_cmd reaches it, so the verify module stays off the engine's import
+    # path at runtime.
+    from discord_ferry.migrator.verify import CheckResult
 
 PhaseFunction = Callable[
     [FerryConfig, MigrationState, list[DCEExport], EventCallback],
@@ -1164,6 +1170,32 @@ async def run_retry_failed(
 # Repair engine (#107 batch 10)
 # ---------------------------------------------------------------------------
 
+#: The only structure kinds repair acts on.
+#:
+#: Membership against a literal set, NEVER a test on ``status``. A ``fail`` kind
+#: added after this batch would be swept into a status test silently, and repair
+#: has no way to handle a defect it has not seen.
+_REPAIRABLE_STRUCTURE = frozenset({"channel_missing", "role_missing", "category_missing"})
+
+#: The only tail kinds repair acts on. ``tail_not_recorded`` and
+#: ``tail_window_exhausted`` are unverifiable: the check could not look, so
+#: there is nothing to act on and acting anyway is guessing at a live server.
+_REPAIRABLE_TAIL = frozenset({"tail_absent", "tail_and_after_absent"})
+
+#: A synthetic channel key repair declines even when the kind matches.
+#:
+#: The forum index writer stores ``channel_map["forum-index-{key}"]`` whose
+#: value is a real Stoat channel id, so a deleted index reports
+#: ``channel_missing`` exactly like any other channel. Generic recreation cannot
+#: restore it: there is no ``ChannelMeta`` for a synthetic id, a channel-scoped
+#: export scan finds zero messages because the key names no Discord channel, and
+#: nothing rebuilds the index message or ``forum_index_message_ids``.
+#: ``_select_invite_channel`` already excludes the same prefix. Deferred as #311.
+#:
+#: This is the second level of the rule above: a test on ``status`` sweeps in a
+#: future KIND, and a test on ``kind`` alone sweeps in a channel TYPE.
+_UNREPAIRABLE_CHANNEL_PREFIX = "forum-index-"
+
 
 async def run_repair(
     config: FerryConfig,
@@ -1224,6 +1256,40 @@ async def run_repair(
             message=(
                 f"Check complete: {counts['fail']} failing, {counts['warn']} warned, "
                 f"{counts['unverifiable']} unverifiable."
+            ),
+        )
+    )
+
+    structure_work: list[CheckResult] = []
+    tail_work: list[CheckResult] = []
+    for result in report.results:
+        if result.kind in _REPAIRABLE_STRUCTURE:
+            if (result.discord_id or "").startswith(_UNREPAIRABLE_CHANNEL_PREFIX):
+                state.warnings.append(
+                    {
+                        "phase": "repair",
+                        "type": "forum_index_not_repairable",
+                        "message": (
+                            f"The forum index channel {result.discord_id} is missing from the "
+                            "server. Repair cannot restore it: the index message is derived "
+                            "content with no messages in the export, and rebuilding it needs "
+                            "the forum's posts. Recreate the forum index by re-running the "
+                            "migration with --incremental (see issue #311)."
+                        ),
+                    }
+                )
+                continue
+            structure_work.append(result)
+        elif result.kind in _REPAIRABLE_TAIL:
+            tail_work.append(result)
+
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=(
+                f"{len(structure_work)} entities to recreate, "
+                f"{len(tail_work)} channels with a lost tail."
             ),
         )
     )

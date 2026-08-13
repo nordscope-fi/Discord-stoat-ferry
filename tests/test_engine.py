@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -2641,3 +2642,136 @@ async def test_repair_populates_the_token_store_and_the_semaphore(tmp_path: Path
     assert order.index("token_store") < order.index("check")
     assert order.index("semaphore") < order.index("check")
     assert config.token_store is not None
+
+
+def _report_with(kind: str, status: str, *, discord_id: str = R_D_CHANNEL) -> CheckReport:
+    """A one-result CheckReport, for driving the partition."""
+    report = CheckReport()
+    report.add(
+        name=f"channel:{discord_id}",
+        status=status,  # type: ignore[arg-type]
+        kind=kind,
+        detail="fixture",
+        discord_id=discord_id,
+        stoat_id=R_S_CHANNEL,
+    )
+    return report
+
+
+def _partition_counts(events: list[MigrationEvent]) -> tuple[int, int]:
+    """Read the (structure, tail) work counts out of run_repair's own event.
+
+    Without this the request-count assertions below are INERT until a later
+    chunk gives repair something to send: a mis-partition changes which lists
+    fill, and with nothing consuming those lists yet no request happens either
+    way. Measured, not assumed: swapping the `kind` test for a `status` one, and
+    widening the tail set, both survived until these counts were asserted.
+    """
+    for event in reversed(events):
+        match = re.search(r"(\d+) entities to recreate, (\d+) channels", event.message)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    raise AssertionError(f"run_repair emitted no partition summary: {[e.message for e in events]}")
+
+
+async def _repair_with_report(
+    tmp_path: Path, report: CheckReport
+) -> tuple[Any, list[Any], list[MigrationEvent]]:
+    """Drive run_repair against a fixed report and hand back the request log."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    events: list[MigrationEvent] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        aioresponses() as m,
+    ):
+        await run_repair(config, state, [], events.append)
+        requests = list(m.requests)
+    return state, requests, events
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "check_error",
+        "tail_not_recorded",
+        "tail_window_exhausted",
+        "channel_not_visible",
+        "category_title_unknown",
+    ],
+)
+async def test_repair_never_acts_on_an_unverifiable_result(tmp_path: Path, kind: str) -> None:
+    """The check could not look, so there is nothing to act on.
+
+    Acting anyway is guessing at a live server. Asserts the REQUEST COUNT: an
+    assertion that the report is unchanged would pass against a repair that
+    sent something and then failed.
+    """
+    _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, "unverifiable"))
+    assert requests == [], f"repair acted on an unverifiable {kind}"
+    assert _partition_counts(events) == (0, 0), f"an unverifiable {kind} entered the work lists"
+
+
+@pytest.mark.parametrize("kind", ["channel_renamed", "role_renamed", "category_title_mismatch"])
+async def test_repair_never_acts_on_a_warn_result(tmp_path: Path, kind: str) -> None:
+    """A rename almost always means the operator renamed it on purpose.
+
+    A user who asked to fix failures did not ask to have their own edits
+    overruled, which is why warn is excluded and fail is not.
+    """
+    _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, "warn"))
+    assert requests == [], f"repair acted on a warn: {kind}"
+    assert _partition_counts(events) == (0, 0), f"a warn {kind} entered the work lists"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "tail_present",
+        "channel_empty",
+        "nothing_expected",
+        "tail_not_recorded",
+        "tail_window_exhausted",
+    ],
+)
+async def test_repair_never_acts_on_a_non_actionable_tail_kind(tmp_path: Path, kind: str) -> None:
+    """Only tail_absent and tail_and_after_absent are repairable tails."""
+    status = "fail" if kind == "channel_empty" else "ok"
+    _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, status))
+    assert requests == [], f"repair acted on a non-actionable tail kind: {kind}"
+    assert _partition_counts(events) == (0, 0), f"{kind} entered the work lists"
+
+
+async def test_repair_declines_a_missing_forum_index_channel(tmp_path: Path) -> None:
+    """SC-3.17. A DELIBERATE EXCLUSION, not an unimplemented case.
+
+    The forum index writer stores its channel under a SYNTHETIC key,
+    `channel_map["forum-index-{forum_key}"]`, whose value is a real Stoat
+    channel id. So the check reports a deleted index as channel_missing exactly
+    like any other channel, and a membership test on `kind` alone would sweep it
+    into generic recreation.
+
+    Generic recreation cannot restore it. There is no ChannelMeta for a
+    synthetic id, the channel-scoped export scan finds zero messages because the
+    key names no Discord channel, and nothing rebuilds the index message or
+    forum_index_message_ids. _select_invite_channel already excludes the same
+    prefix for the same reason. Deferred as #311.
+
+    This is the second level of the lesson the partition comment records: a test
+    on `status` would sweep in a future kind, and a test on `kind` alone sweeps
+    in a channel TYPE nobody considered.
+    """
+    forum_key = "forum-index-800000000000000009"
+    report = _report_with("channel_missing", "fail", discord_id=forum_key)
+    state, requests, events = await _repair_with_report(tmp_path, report)
+
+    assert requests == [], "repair tried to recreate a forum index channel"
+    assert _partition_counts(events) == (0, 0), "the forum index entered the work lists"
+    assert any(
+        w.get("type") == "forum_index_not_repairable" and w.get("phase") == "repair"
+        for w in state.warnings
+    ), f"no warning names the declined forum index: {state.warnings}"
