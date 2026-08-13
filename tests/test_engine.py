@@ -3283,3 +3283,191 @@ async def test_the_collision_set_is_not_built_from_the_export(tmp_path: Path) ->
         "the collision set came from the exports, so the channel collided with its own "
         "entry there and took a suffix it does not need"
     )
+
+
+def _write_discord_metadata(
+    output_dir: Path,
+    *,
+    channel_id: str = R_D_CHANNEL,
+    role_id: str = D_ROLE,
+    with_channel_override: bool = True,
+    server_default: int = 4_194_304,
+) -> None:
+    """Write a real discord_metadata.json, round-tripped through the codec.
+
+    Built from the dataclasses and serialised with the module's own writer, so a
+    field renamed upstream breaks this fixture loudly rather than leaving it
+    silently describing a shape the loader no longer reads.
+    """
+    from discord_ferry.discord.metadata import (
+        ChannelMeta,
+        DiscordMetadata,
+        PermissionPair,
+        RoleOverride,
+        _meta_to_dict,
+    )
+
+    channel_meta = ChannelMeta(
+        nsfw=False,
+        default_override=PermissionPair(allow=1_048_576, deny=0) if with_channel_override else None,
+        role_overrides=[RoleOverride(discord_role_id=role_id, allow=2_097_152, deny=8)]
+        if with_channel_override
+        else [],
+    )
+    meta = DiscordMetadata(
+        guild_id="900000000000000009",
+        fetched_at="2026-08-13T00:00:00+00:00",
+        server_default_permissions=server_default,
+        role_permissions={role_id: PermissionPair(allow=4_194_304, deny=16)},
+        channel_metadata={channel_id: channel_meta},
+    )
+    (output_dir / "discord_metadata.json").write_text(
+        json.dumps(_meta_to_dict(meta)), encoding="utf-8"
+    )
+
+
+def _permission_calls(mock: aioresponses) -> list[str]:
+    """Every permission URL the run touched, in order."""
+    return [
+        str(url) for (_method, url), _calls in mock.requests.items() if "/permissions/" in str(url)
+    ]
+
+
+async def _repair_with_metadata(
+    tmp_path: Path, report: CheckReport, *, write_metadata: bool = True
+) -> tuple[MigrationState, list[str], list[MigrationEvent]]:
+    config = _make_repair_config(tmp_path)
+    if write_metadata:
+        _write_discord_metadata(config.output_dir)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        role_map={D_ROLE: S_ROLE_OLD},
+        created_channel_names={R_D_CHANNEL: "general"},
+        created_role_names={D_ROLE: "moderator"},
+    )
+    events: list[MigrationEvent] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        m.post(f"{BASE_URL}/servers/{R_SERVER}/roles", payload={"id": S_ROLE_NEW})
+        m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
+        await run_repair(config, state, [_export_for(R_D_CHANNEL)], events.append)
+        urls = _permission_calls(m)
+    return state, urls, events
+
+
+async def test_a_recreated_channel_gets_its_recorded_overrides(tmp_path: Path) -> None:
+    """SC-4.3. Both override kinds, through the chunk 1 helper."""
+    _, urls, _ = await _repair_with_metadata(tmp_path, _report_with("channel_missing", "fail"))
+    assert any(u.endswith("/channels/01JSTOATCHN000000000NEW/permissions/default") for u in urls), (
+        f"the default override was not applied: {urls}"
+    )
+    assert any(
+        u.endswith(f"/channels/01JSTOATCHN000000000NEW/permissions/{S_ROLE_OLD}") for u in urls
+    ), f"the role override was not applied: {urls}"
+
+
+async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) -> None:
+    """SC-4.6, and the highest-consequence assertion in this chunk.
+
+    api_set_server_default_permissions merges the recorded server defaults with
+    FERRY_MIN_PERMISSIONS onto the SERVER'S DEFAULT ROLE, which every member
+    holds. It is server-wide and tied to no single recreated entity, and it sits
+    AFTER the per-role loop in run_roles, which is why chunk 1 extracted only
+    the loop body. Re-firing it during a one-role repair would re-impose a mask
+    on a server whose defaults may have changed since the migration: the class
+    of defect batch 5 of #107 existed to fix.
+
+    Asserted by URL and as a count of ZERO, not by inspecting output.
+    """
+    report = CheckReport()
+    report.add(
+        name=f"role:{D_ROLE}",
+        status="fail",
+        kind="role_missing",
+        detail="fixture",
+        discord_id=D_ROLE,
+        stoat_id=S_ROLE_OLD,
+    )
+    _, urls, _ = await _repair_with_metadata(tmp_path, report)
+    server_default = [u for u in urls if u.endswith(f"/servers/{R_SERVER}/permissions/default")]
+    assert server_default == [], (
+        f"repair re-applied the server default mask, which every member holds: {server_default}"
+    )
+    assert any(u.endswith(f"/servers/{R_SERVER}/permissions/{S_ROLE_NEW}") for u in urls), (
+        f"the recreated role's own permissions were not applied: {urls}"
+    )
+
+
+async def test_a_repair_permission_failure_is_recorded_as_a_repair(tmp_path: Path) -> None:
+    """SC-4.5. phase="repair", not "channels".
+
+    ADR-014 relies on state.warnings and report.json being an honest record of
+    where a failure came from. The inline blocks hardcoded their phase, which is
+    why chunk 1 made it a parameter.
+    """
+    config = _make_repair_config(tmp_path)
+    _write_discord_metadata(config.output_dir)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        created_channel_names={R_D_CHANNEL: "general"},
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        m.put(re.compile(r".*/permissions/.*"), status=403, repeat=True)
+        await run_repair(config, state, [_export_for(R_D_CHANNEL)], lambda _e: None)
+
+    perm_warnings = [w for w in state.warnings if "perm" in w.get("type", "")]
+    assert perm_warnings, f"a 403 on every permission call recorded nothing: {state.warnings}"
+    assert all(w["phase"] == "repair" for w in perm_warnings), (
+        f"a repair-time failure was filed as a migration-time one: {perm_warnings}"
+    )
+
+
+async def test_repair_warns_by_name_when_the_metadata_file_is_absent(tmp_path: Path) -> None:
+    """SC-4.4. Naming the file, and making no permission call.
+
+    A silent pass here reproduces batch 5's defect exactly: a channel that looks
+    migrated and grants nobody the right to use it.
+    """
+    state, urls, _ = await _repair_with_metadata(
+        tmp_path, _report_with("channel_missing", "fail"), write_metadata=False
+    )
+    assert urls == [], f"permissions were applied with no metadata to apply: {urls}"
+    assert any(
+        w.get("type") == "no_discord_metadata" and "discord_metadata.json" in w["message"]
+        for w in state.warnings
+    ), f"nothing named the missing file: {state.warnings}"
