@@ -54,6 +54,7 @@ from discord_ferry.migrator.messages import _THREAD_STRATEGIES, _process_message
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import (
+    _generate_category_id,
     _stoat_channel_type,
     apply_channel_permissions,
     apply_role_permissions,
@@ -1209,12 +1210,26 @@ _REPAIRABLE_TAIL = frozenset({"tail_absent", "tail_and_after_absent"})
 _UNREPAIRABLE_CHANNEL_PREFIX = "forum-index-"
 
 
-async def _live_channel_names(
+async def _live_server_view(
     session: aiohttp.ClientSession,
     config: FerryConfig,
     state: MigrationState,
-) -> set[str]:
-    """Every channel name currently on the server, for the collision set.
+) -> tuple[set[str], list[dict[str, Any]]]:
+    """One fetch, two things repair needs: the collision set and the categories.
+
+    Returns ``(channel_names, categories)``. Both come from the same response
+    because both are needed only when something is being recreated, and the
+    /servers bucket allows 5 requests per 10 seconds.
+
+    The categories half exists because ``api_upsert_categories`` is a FULL-ARRAY
+    PATCH: it sets the server's entire categories list. Recreating one missing
+    category by sending only that category would delete every other one. So the
+    current array has to come back first, and a test drives two survivors.
+
+    ``server.categories`` is Optional upstream and the key can be absent
+    entirely, which is why it is read through ``or []`` rather than indexed.
+
+    The channel-names half, for the collision set:
 
     Repair names a recreated channel with ``make_unique_channel_name``, and what
     differs from a migration is not the rule but its INPUT. ``run_channels``
@@ -1246,7 +1261,9 @@ async def _live_channel_names(
             name = channel.get("name")
             if isinstance(name, str):
                 names.add(name)
-    return names
+    server = payload.get("server") or {}
+    categories = [c for c in (server.get("categories") or []) if isinstance(c, dict)]
+    return names, categories
 
 
 def _no_recorded_name(state: MigrationState, kind: str, discord_id: str) -> str:
@@ -1377,6 +1394,69 @@ async def _recreate_channel(
             phase="repair",
             status="progress",
             message=f"Recreated channel '{state.created_channel_names[discord_id]}' as {new_id}.",
+        )
+    )
+    return True
+
+
+async def _recreate_category(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    result: CheckResult,
+    live_categories: list[dict[str, Any]],
+    on_event: EventCallback,
+) -> bool:
+    """Recreate one missing category by PATCHing the whole array back.
+
+    Two things make this different from the channel and role cases.
+
+    First, ``api_upsert_categories`` sets the server's ENTIRE categories list.
+    Sending only the recreated category would delete every other one, so the
+    live array is read first and the new entry appended to it. A test drives two
+    existing categories and asserts both survive.
+
+    Second, a Stoat category carries its channels. Recreating one with an empty
+    channel list produces an empty category: a recreation that reports success
+    and restores nothing, the same shape as the forum index case this module
+    already declines. The channel list is rebuilt from ``channel_categories``,
+    which records ``discord_channel_id -> discord_category_id`` for exactly
+    this, mapped through ``channel_map`` to the ids the server knows.
+    """
+    discord_id = result.discord_id or ""
+    title = state.category_names.get(discord_id)
+    if not title:
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="warning",
+                message=_no_recorded_name(state, "category", discord_id),
+            )
+        )
+        return False
+
+    stoat_channel_ids = [
+        stoat_id
+        for discord_channel_id, category_id in state.channel_categories.items()
+        if category_id == discord_id
+        and (stoat_id := state.channel_map.get(discord_channel_id)) is not None
+    ]
+    new_id = state.category_map.get(discord_id) or _generate_category_id()
+    rebuilt = [c for c in live_categories if c.get("id") != new_id]
+    rebuilt.append({"id": new_id, "title": title, "channels": stoat_channel_ids})
+
+    await api_upsert_categories(
+        session, config.stoat_url, config.token, state.stoat_server_id, rebuilt
+    )
+    state.category_map[discord_id] = new_id
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=(
+                f"Recreated category '{title}' with {len(stoat_channel_ids)} channel(s), "
+                f"preserving {len(rebuilt) - 1} existing."
+            ),
         )
     )
     return True
@@ -1514,7 +1594,7 @@ async def run_repair(
         own_session = session is None
         sess = session or new_session()
         try:
-            existing_names = await _live_channel_names(sess, config, state)
+            existing_names, live_categories = await _live_server_view(sess, config, state)
             on_event(
                 MigrationEvent(
                     phase="repair",
@@ -1556,6 +1636,8 @@ async def run_repair(
                             state.created_role_names.get(discord_id, discord_id),
                             phase="repair",
                         )
+                elif result.kind == "category_missing":
+                    await _recreate_category(sess, config, state, result, live_categories, on_event)
                 elif result.kind == "channel_missing":
                     created = await _recreate_channel(
                         sess, config, state, result, exports, existing_names, on_event

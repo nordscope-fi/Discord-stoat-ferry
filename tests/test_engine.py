@@ -2957,7 +2957,7 @@ async def test_the_collision_set_comes_from_the_live_server(tmp_path: Path) -> N
             payload=_server_with_channels("general", "announcements"),
         )
         async with aiohttp.ClientSession() as session:
-            names = await engine_module._live_channel_names(session, config, state)
+            names, _ = await engine_module._live_server_view(session, config, state)
     assert names == {"general", "announcements"}
 
 
@@ -2982,7 +2982,7 @@ async def test_the_collision_set_skips_an_entry_it_cannot_read(tmp_path: Path) -
     with aioresponses() as m:
         m.get(f"{BASE_URL}/servers/{R_SERVER}?include_channels=true", payload=payload)
         async with aiohttp.ClientSession() as session:
-            names = await engine_module._live_channel_names(session, config, state)
+            names, _ = await engine_module._live_server_view(session, config, state)
     assert names == {"general"}
 
 
@@ -3471,3 +3471,105 @@ async def test_repair_warns_by_name_when_the_metadata_file_is_absent(tmp_path: P
         w.get("type") == "no_discord_metadata" and "discord_metadata.json" in w["message"]
         for w in state.warnings
     ), f"nothing named the missing file: {state.warnings}"
+
+
+D_CAT = "700000000000000001"
+S_CAT_OLD = "01JSTOATCAT000000000OLD"
+
+
+async def _repair_recreating_category(
+    tmp_path: Path,
+    *,
+    live_categories: list[dict[str, Any]] | None = None,
+    title: str | None = "Announcements",
+) -> tuple[MigrationState, dict[str, Any] | None, list[MigrationEvent]]:
+    """Drive run_repair against one category_missing result."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL, "800000000000000002": "01JSTOATCHN0000000002ND"},
+        channel_categories={R_D_CHANNEL: D_CAT, "800000000000000002": "other-category"},
+        category_map={D_CAT: S_CAT_OLD},
+    )
+    if title is not None:
+        state.category_names[D_CAT] = title
+    events: list[MigrationEvent] = []
+
+    report = CheckReport()
+    report.add(
+        name=f"category:{D_CAT}",
+        status="fail",
+        kind="category_missing",
+        detail="fixture",
+        discord_id=D_CAT,
+        stoat_id=S_CAT_OLD,
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    payload = _server_with_channels("general")
+    if live_categories is not None:
+        payload["server"]["categories"] = live_categories  # type: ignore[index]
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(re.compile(r".*/servers/.*include_channels.*"), payload=payload, repeat=True)
+        m.patch(f"{BASE_URL}/servers/{R_SERVER}", payload={})
+        await run_repair(config, state, [], events.append)
+        sent: dict[str, Any] | None = None
+        for (method, url), calls in m.requests.items():
+            if method == "PATCH" and str(url).endswith(f"/servers/{R_SERVER}"):
+                body = calls[0].kwargs.get("json")
+                sent = body if isinstance(body, dict) else None
+    return state, sent, events
+
+
+async def test_a_recreated_category_carries_its_channels(tmp_path: Path) -> None:
+    """An empty category is a recreation that restores nothing.
+
+    A Stoat category carries its channel list, so the PATCH has to rebuild it
+    from channel_categories, which records discord_channel_id to
+    discord_category_id for exactly this. Only the channels that belonged to
+    THIS category, mapped through channel_map to ids the server knows.
+    """
+    _, sent, _ = await _repair_recreating_category(tmp_path)
+    assert sent is not None, "no categories PATCH was sent"
+    mine = [c for c in sent["categories"] if c["title"] == "Announcements"]
+    assert mine, f"the recreated category is not in the PATCH: {sent}"
+    assert mine[0]["channels"] == [R_S_CHANNEL], (
+        f"the category was recreated with the wrong channels: {mine[0]}"
+    )
+
+
+async def test_recreating_one_category_does_not_delete_the_others(tmp_path: Path) -> None:
+    """The destructive failure mode this whole helper is shaped around.
+
+    api_upsert_categories sets the server's ENTIRE categories array. Sending
+    only the recreated entry would delete every other category on the server,
+    silently, as a side effect of restoring one. Two survivors are driven here
+    and both must come back in the PATCH.
+    """
+    live = [
+        {
+            "id": "01JSTOATCAT000000000AAA",
+            "title": "General",
+            "channels": ["01JSTOATCHN000000000AAA"],
+        },
+        {"id": "01JSTOATCAT000000000BBB", "title": "Voice", "channels": []},
+    ]
+    _, sent, _ = await _repair_recreating_category(tmp_path, live_categories=live)
+    assert sent is not None, "no categories PATCH was sent"
+    titles = {c["title"] for c in sent["categories"]}
+    assert {"General", "Voice"} <= titles, f"recreating one category deleted the others: {titles}"
+    assert "Announcements" in titles
+
+
+async def test_repair_declines_a_category_it_has_no_recorded_title_for(tmp_path: Path) -> None:
+    """The same known limit as the channel and role cases."""
+    state, sent, _ = await _repair_recreating_category(tmp_path, title=None)
+    assert sent is None, "repair PATCHed a category it could not title"
+    assert any(w.get("type") == "no_recorded_name" for w in state.warnings), state.warnings
