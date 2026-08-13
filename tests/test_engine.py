@@ -2794,6 +2794,15 @@ async def _repair_recording_saves(
         patch.object(engine_module, "save_state", lambda *a, **k: saves.append(a)),
         aioresponses() as m,
     ):
+        # The collision fetch fires whenever the partition found structure work.
+        # Registered with repeat so a report with none simply never uses it, which
+        # is what test_repair_fetches_the_collision_set_only_when_recreating then
+        # asserts by counting.
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels("general"),
+            repeat=True,
+        )
         await run_repair(config, state, [], events.append)
         requests = list(m.requests)
     return saves, requests, events
@@ -2917,4 +2926,97 @@ async def test_repair_dry_run_does_not_mutate_state_warnings(tmp_path: Path) -> 
     assert state.warnings == [], f"a dry run mutated state.warnings: {state.warnings}"
     assert any("forum index" in e.message.lower() for e in events), (
         "the dry run hid the exclusion instead of reporting it"
+    )
+
+
+def _server_with_channels(*names: str) -> dict[str, Any]:
+    """A ServerWithChannels body carrying the given visible channel names.
+
+    Stoat ids stay visibly different from the names, so a test cannot pass by
+    comparing a value with itself.
+    """
+    ids = [f"01JSTOATCHN00000000{i:04d}" for i in range(len(names))]
+    return {
+        "server": {"_id": R_SERVER, "channels": ids},
+        "channels": [{"_id": cid, "name": n} for cid, n in zip(ids, names, strict=True)],
+    }
+
+
+async def test_the_collision_set_comes_from_the_live_server(tmp_path: Path) -> None:
+    """The names currently on the server, not the names the export would produce.
+
+    A channel originally created as `general-1`, whose collision partner has
+    since been deleted, should come back as `general`. Building the set from the
+    export would carry the migration's input into a context where it is wrong.
+    """
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    with aioresponses() as m:
+        m.get(
+            f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
+            payload=_server_with_channels("general", "announcements"),
+        )
+        async with aiohttp.ClientSession() as session:
+            names = await engine_module._live_channel_names(session, config, state)
+    assert names == {"general", "announcements"}
+
+
+async def test_the_collision_set_skips_an_entry_it_cannot_read(tmp_path: Path) -> None:
+    """A malformed entry contributes nothing rather than None.
+
+    The payload is dict[str, Any], so mypy cannot catch a missing or non-string
+    name. An unreadable entry must be skipped, not coerced: a None in a set[str]
+    would blow up make_unique_channel_name later, far from the cause.
+    """
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    payload = {
+        "server": {"_id": R_SERVER, "channels": ["a", "b", "c", "d"]},
+        "channels": [
+            {"_id": "01JSTOATCHN000000000AAA", "name": "general"},
+            {"_id": "01JSTOATCHN000000000BBB"},  # no name key at all
+            {"_id": "01JSTOATCHN000000000CCC", "name": None},  # explicit null
+            "not-a-dict",  # not an object
+        ],
+    }
+    with aioresponses() as m:
+        m.get(f"{BASE_URL}/servers/{R_SERVER}?include_channels=true", payload=payload)
+        async with aiohttp.ClientSession() as session:
+            names = await engine_module._live_channel_names(session, config, state)
+    assert names == {"general"}
+
+
+async def test_repair_fetches_the_collision_set_only_when_recreating(tmp_path: Path) -> None:
+    """No structure work, no request on the /servers bucket.
+
+    Paired with the test below, which is what stops this one passing against a
+    repair that never fetches at all.
+    """
+    _, requests, _ = await _repair_recording_saves(tmp_path, _report_with("tail_absent", "fail"))
+    fetches = [k for k in requests if "include_channels" in str(k[1])]
+    assert fetches == [], "repair fetched the collision set with nothing to recreate"
+
+
+async def test_repair_fetches_the_collision_set_when_there_is_work(tmp_path: Path) -> None:
+    """The other half, so the assertion above can fail."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    events: list[MigrationEvent] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(
+            f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
+            payload=_server_with_channels("general"),
+        )
+        await run_repair(config, state, [], events.append)
+
+    assert any("names already on the server" in e.message for e in events), (
+        f"repair never fetched the collision set: {[e.message for e in events]}"
     )
