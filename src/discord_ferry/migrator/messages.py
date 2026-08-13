@@ -1163,6 +1163,7 @@ async def _process_message(
     on_event: EventCallback,
     channel_result: ChannelResult | None = None,
     export_channel_id: str = "",
+    idempotency_salt: str = "",
 ) -> None:
     """Process and send a single message.
 
@@ -1471,7 +1472,21 @@ async def _process_message(
     try:
         for part_idx, part_content in enumerate(parts):
             is_first = part_idx == 0
-            idem_key = f"ferry-{msg.id}" if len(parts) == 1 else f"ferry-{msg.id}_p{part_idx + 1}"
+            # The salt exists for ferry repair. Stoat's Idempotency-Key store is a
+            # 1000-entry in-memory LRU with no TTL, and this key is built from the
+            # DISCORD message id, which a recreated channel does not change. So a
+            # repair running while those keys are still cached would be answered
+            # 409 DuplicateNonce and treat the message as already delivered, when
+            # the channel holding it was deleted and it is not there at all.
+            # Repair passes the new Stoat channel id, which makes the key unique
+            # to that recreation. Empty for the migration, so its keys are
+            # unchanged.
+            _salt = f"-{idempotency_salt}" if idempotency_salt else ""
+            idem_key = (
+                f"ferry-{msg.id}{_salt}"
+                if len(parts) == 1
+                else f"ferry-{msg.id}{_salt}_p{part_idx + 1}"
+            )
             try:
                 result = await api_send_message(
                     session,
