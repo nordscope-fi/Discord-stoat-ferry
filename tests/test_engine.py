@@ -2856,3 +2856,65 @@ async def test_repair_does_not_swallow_a_check_error(tmp_path: Path) -> None:
         pytest.raises(CheckError),
     ):
         await run_repair(config, state, [], lambda _e: None)
+
+
+async def test_repair_declines_a_forum_index_whose_tail_is_missing(tmp_path: Path) -> None:
+    """The gap the chunk 3 review found, and the reason the exclusion moved.
+
+    Guarding only the structure branch let a forum index channel reporting
+    tail_absent through into the tail work. That path cannot restore it: the
+    tail of a forum index channel IS the index message, which lives in
+    forum_index_message_ids and has no message in any export to re-send.
+
+    The review that surfaced this described the mechanism wrongly, claiming the
+    `continue` dropped a tail result. A CheckResult has exactly one kind, so a
+    result taking the structure branch could never have taken the tail branch.
+    Running it found the real defect underneath.
+    """
+    report = CheckReport()
+    report.add(
+        name="tail:forum-index-800000000000000009",
+        status="fail",
+        kind="tail_absent",
+        detail="fixture",
+        discord_id="forum-index-800000000000000009",
+        stoat_id="01JSTOATCHN000000000IDX",
+    )
+    state, requests, events = await _repair_with_report(tmp_path, report)
+
+    assert _partition_counts(events) == (0, 0), "a forum index entered the tail work"
+    assert requests == [], "repair acted on a forum index tail"
+    assert any(w.get("type") == "forum_index_not_repairable" for w in state.warnings)
+
+
+async def test_repair_dry_run_does_not_mutate_state_warnings(tmp_path: Path) -> None:
+    """A preview that changes state is not a preview.
+
+    The forum index notice reaches the operator as an EVENT either way, so a dry
+    run loses no information by leaving state.warnings alone. Without this, a
+    dry run appended a warning it then never saved, which is a record nobody
+    asked for and nobody would ever see.
+    """
+    report = CheckReport()
+    report.add(
+        name="channel:forum-index-800000000000000009",
+        status="fail",
+        kind="channel_missing",
+        detail="fixture",
+        discord_id="forum-index-800000000000000009",
+        stoat_id="01JSTOATCHN000000000IDX",
+    )
+    config = _make_repair_config(tmp_path, dry_run=True)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    events: list[MigrationEvent] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    with patch("discord_ferry.migrator.verify.run_check", new=_fake_check):
+        await run_repair(config, state, [], events.append)
+
+    assert state.warnings == [], f"a dry run mutated state.warnings: {state.warnings}"
+    assert any("forum index" in e.message.lower() for e in events), (
+        "the dry run hid the exclusion instead of reporting it"
+    )
