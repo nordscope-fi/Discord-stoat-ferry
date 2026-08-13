@@ -1263,24 +1263,41 @@ async def run_repair(
     structure_work: list[CheckResult] = []
     tail_work: list[CheckResult] = []
     for result in report.results:
-        if result.kind in _REPAIRABLE_STRUCTURE:
-            if (result.discord_id or "").startswith(_UNREPAIRABLE_CHANNEL_PREFIX):
+        is_structure = result.kind in _REPAIRABLE_STRUCTURE
+        if not is_structure and result.kind not in _REPAIRABLE_TAIL:
+            continue
+
+        # The exclusion is tested ONCE, against both families, and that placement
+        # is the fix for a real gap rather than tidiness. Guarding only the
+        # structure branch let a forum index channel with `tail_absent` through
+        # into the tail work, and the tail of a forum index channel IS the index
+        # message: it lives in forum_index_message_ids and has no message in any
+        # export to re-send. Measured during the chunk 3 review.
+        if (result.discord_id or "").startswith(_UNREPAIRABLE_CHANNEL_PREFIX):
+            notice = (
+                f"Forum index channel {result.discord_id} needs repair ({result.kind}) and "
+                "repair cannot do it. The index message is derived content with no message "
+                "in the export to restore from, and rebuilding it needs the forum's posts. "
+                "Re-run the migration with --incremental to rebuild it (see issue #311)."
+            )
+            on_event(MigrationEvent(phase="repair", status="warning", message=notice))
+            # Not under --dry-run. A dry run reports and changes nothing, and
+            # state.warnings is state: mutating it during a preview would leave
+            # an in-memory record the run never persists and the operator never
+            # asked for. The event above carries the same information either way.
+            if not config.dry_run:
                 state.warnings.append(
                     {
                         "phase": "repair",
                         "type": "forum_index_not_repairable",
-                        "message": (
-                            f"The forum index channel {result.discord_id} is missing from the "
-                            "server. Repair cannot restore it: the index message is derived "
-                            "content with no messages in the export, and rebuilding it needs "
-                            "the forum's posts. Recreate the forum index by re-running the "
-                            "migration with --incremental (see issue #311)."
-                        ),
+                        "message": notice,
                     }
                 )
-                continue
+            continue
+
+        if is_structure:
             structure_work.append(result)
-        elif result.kind in _REPAIRABLE_TAIL:
+        else:
             tail_work.append(result)
 
     prefix = "[DRY RUN] " if config.dry_run else ""
