@@ -2475,3 +2475,237 @@ def test_the_summary_does_not_claim_an_exclusive_cause(runner: CliRunner, tmp_pa
         assert "Each result above says which cause applies" in result.output, (
             f"the {strategy} summary does not point at the per-result detail"
         )
+
+
+# ---------------------------------------------------------------------------
+# ferry retry (#107 batch 10, task #323)
+# ---------------------------------------------------------------------------
+
+D_MSG = "100000000000000001"
+S_CHANNEL = "01JSTOATCHN000000000OLD"
+
+
+def _write_minimal_export(export_dir: Path, channel_id: str = "800000000000000001") -> Path:
+    """A DCE export directory holding exactly one message.
+
+    Written by hand rather than reusing a fixture, so the message id is the
+    literal the retry state names. Discord and Stoat ids stay visibly different
+    throughout: a fixture that seeds both sides from one variable lets a test
+    pass by comparing a value with itself.
+    """
+    export_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "guild": {"id": "900000000000000001", "name": "Test Guild", "iconUrl": ""},
+        "channel": {
+            "id": channel_id,
+            "type": 0,
+            "name": "general",
+            "categoryId": "",
+            "category": "",
+            "topic": "",
+        },
+        "dateRange": {"after": None, "before": None},
+        "exportedAt": "2026-01-01T00:00:00+00:00",
+        "messageCount": 1,
+        "messages": [
+            {
+                "id": D_MSG,
+                "type": "Default",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "timestampEdited": None,
+                "content": "hello",
+                "author": {
+                    "id": "700000000000000001",
+                    "name": "author",
+                    "nickname": "author",
+                    "isBot": False,
+                    "avatarUrl": "",
+                },
+                "attachments": [],
+                "embeds": [],
+                "stickers": [],
+                "reactions": [],
+                "mentions": [],
+            }
+        ],
+    }
+    (export_dir / "general.json").write_text(json.dumps(payload), encoding="utf-8")
+    return export_dir
+
+
+def _write_state_with_one_failure(out_dir: Path) -> Path:
+    """An output directory whose state.json carries one failed message."""
+    from discord_ferry.state import FailedMessage, save_state
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state = MigrationState(
+        stoat_server_id="01JSTOATSRV000000000AAA",
+        channel_map={"800000000000000001": S_CHANNEL},
+        failed_messages=[
+            FailedMessage(discord_msg_id=D_MSG, stoat_channel_id=S_CHANNEL, error="timeout")
+        ],
+    )
+    save_state(state, out_dir)
+    return out_dir
+
+
+def _retry_argv(out_dir: Path, export_dir: Path) -> list[str]:
+    return [
+        "retry",
+        str(out_dir),
+        "--export-dir",
+        str(export_dir),
+        "--stoat-url",
+        "https://api.test",
+        "--token",
+        "t",
+    ]
+
+
+def test_retry_passes_a_real_export_to_the_coroutine(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.7. Asserts the parse happened AND that exports is non-empty.
+
+    This is the highest-value assertion in the command. run_retry_failed needs
+    both a real config.export_dir and a NON-EMPTY exports list, which it scans
+    to resolve each FailedMessage back to a DCEMessage. Given an empty list
+    every message takes the "not found in exports, skipping" branch, stays
+    failed, and the command still reports a plausible result.
+
+    A test asserting only the exit code passes against exactly that. Neither
+    obvious template wires it: rollback_cmd sets export_dir to a value it never
+    reads and passes exports=[], and check_cmd builds no FerryConfig at all.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+    seen: dict[str, Any] = {}
+
+    async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        seen["exports"] = exports
+        seen["export_dir"] = config.export_dir
+        # Stand in for a retry that succeeded, so the exit code reflects the
+        # command's contract rather than this stub doing nothing.
+        state.failed_messages.clear()
+
+    with patch("discord_ferry.cli.run_retry_failed", new=_capture):
+        result = runner.invoke(main, _retry_argv(out_dir, export_dir))
+
+    assert result.exit_code == 0, result.output
+    assert seen["export_dir"] == export_dir
+    assert len(seen["exports"]) > 0, (
+        "an empty exports list makes every retry a silent no-op that still reports success"
+    )
+    assert seen["exports"][0].channel.id == "800000000000000001"
+
+
+def test_retry_registers_the_token_and_the_semaphore_before_any_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-1.2 and SC-1.3. Asserts the CALLS and their ORDER.
+
+    Never the absence of a token from output: an absence assertion passes
+    against a token that simply did not appear in that string.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+    order: list[str] = []
+
+    async def _noop_coro(*_a: Any, **_k: Any) -> None:
+        order.append("request")
+
+    with (
+        patch(
+            "discord_ferry.cli.register_secret",
+            side_effect=lambda *_a: order.append("register_secret"),
+        ),
+        patch(
+            "discord_ferry.cli.init_request_semaphore",
+            side_effect=lambda *_a: order.append("semaphore"),
+        ),
+        patch("discord_ferry.cli.run_retry_failed", new=_noop_coro),
+    ):
+        runner.invoke(main, _retry_argv(out_dir, export_dir))
+
+    assert "register_secret" in order, "the Stoat token was never registered for masking"
+    assert "semaphore" in order, "the concurrency semaphore was never initialised"
+    assert order.index("register_secret") < order.index("request")
+    assert order.index("semaphore") < order.index("request")
+
+
+def test_retry_with_nothing_failed_exits_zero_in_the_coroutines_own_words(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-1.5. The wording comes from the engine event, not from the shell.
+
+    A separate CLI sentence would drift from the engine's the first time either
+    changed, and the engine is the one that knows.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+
+    result = runner.invoke(main, _retry_argv(out_dir, export_dir))
+    assert result.exit_code == 0, result.output
+    assert "No failed messages to retry." in result.output
+
+
+def test_retry_exits_non_zero_when_a_message_is_still_failed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-1.6. A retry that fixed nothing must not look like success."""
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+
+    async def _leaves_it_failed(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        state.failed_messages[0].retry_count += 1
+
+    with patch("discord_ferry.cli.run_retry_failed", new=_leaves_it_failed):
+        result = runner.invoke(main, _retry_argv(out_dir, export_dir))
+    assert result.exit_code == 1, result.output
+
+
+def test_retry_with_a_missing_export_directory_exits_two_and_makes_no_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-1.8. Asserts the request COUNT, not the message.
+
+    A command that reached the network and then failed would pass an assertion
+    that only reads stdout.
+    """
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+    missing = tmp_path / "not-here"
+    calls: list[str] = []
+
+    async def _record(*_a: Any, **_k: Any) -> None:
+        calls.append("request")
+
+    with patch("discord_ferry.cli.run_retry_failed", new=_record):
+        result = runner.invoke(main, _retry_argv(out_dir, missing))
+
+    assert result.exit_code == 2, result.output
+    assert str(missing) in result.output
+    assert calls == [], "the command reached the coroutine despite a missing export directory"
+
+
+def test_retry_with_an_unreadable_state_exits_two(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.1's error half: a corrupt state file is exit 2, matching rollback.
+
+    The exit code alone is NOT enough here, and the first draft of this test
+    proved it: Click returns 2 for "No such command 'retry'" too, so a bare
+    `exit_code == 2` assertion passed before the command existed at all. It
+    could not distinguish the case under test from the command being absent.
+
+    So it asserts the message names the state file, and that Click did not
+    reject the invocation itself.
+    """
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "state.json").write_text("{not json", encoding="utf-8")
+
+    result = runner.invoke(main, _retry_argv(out_dir, export_dir))
+    assert result.exit_code == 2, result.output
+    assert "No such command" not in result.output, "the command does not exist yet"
+    assert "state.json" in result.output
