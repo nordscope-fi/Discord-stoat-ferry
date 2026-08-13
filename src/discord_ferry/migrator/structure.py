@@ -13,7 +13,7 @@ import aiohttp
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.discord.client import download_role_icon
-from discord_ferry.discord.metadata import RoleMeta, load_discord_metadata
+from discord_ferry.discord.metadata import ChannelMeta, RoleMeta, load_discord_metadata
 from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
@@ -857,6 +857,80 @@ async def run_categories(
     )
 
 
+async def apply_channel_permissions(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    stoat_channel_id: str,
+    ch_meta: ChannelMeta | None,
+    label: str,
+    *,
+    phase: str,
+) -> None:
+    """Apply a channel's Discord permission overrides to its Stoat channel.
+
+    Extracted from ``run_channels`` so ``run_repair`` can apply the same
+    overrides to a channel it recreates. A recreated channel without them is
+    silently wrong in exactly the way batch 5 of #107 existed to fix.
+
+    ``phase`` is a parameter rather than the hardcoded ``"channels"`` it was
+    inline, so a repair-time failure is not recorded in ``state.warnings`` as a
+    migration-time one. ADR-014 relies on that document being an honest record.
+
+    The raw ``str(exc)`` below needs no ``safe_sanitize`` at this append site.
+    Redaction happens at the WRITER: ``scrub_document`` masks
+    ``warnings[].message`` on the way into ``state.json`` and ``report.json``
+    (``_TEXT_MEMBERS`` in ``core/security.py``). That is ADR-014's whole point,
+    a call site cannot forget a scrub it never has to make.
+
+    The early return replaces an ``if ch_meta and not config.dry_run:`` block
+    that wrapped the whole body. Same behaviour, one level less nesting.
+    """
+    if not ch_meta or config.dry_run:
+        return
+    if ch_meta.default_override:
+        try:
+            await api_set_channel_default_permissions(
+                session,
+                config.stoat_url,
+                config.token,
+                stoat_channel_id,
+                allow=ch_meta.default_override.allow,
+                deny=ch_meta.default_override.deny,
+            )
+            await asyncio.sleep(config.upload_delay)
+        except Exception as exc:  # noqa: BLE001
+            state.warnings.append(
+                {
+                    "phase": phase,
+                    "type": "channel_default_perm_failed",
+                    "message": f"Default override for '{label}': {exc}",
+                }
+            )
+    for ow in ch_meta.role_overrides:
+        stoat_role_id = state.role_map.get(ow.discord_role_id)
+        if stoat_role_id:
+            try:
+                await api_set_channel_role_permissions(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    stoat_channel_id,
+                    stoat_role_id,
+                    allow=ow.allow,
+                    deny=ow.deny,
+                )
+                await asyncio.sleep(config.upload_delay)
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": phase,
+                        "type": "channel_role_perm_failed",
+                        "message": f"Role override for '{label}': {exc}",
+                    }
+                )
+
+
 async def run_channels(
     config: FerryConfig,
     state: MigrationState,
@@ -1113,48 +1187,15 @@ async def run_channels(
                 state.created_channel_names[ch.id] = result.get("name") or unique_name
 
                 # Apply channel permission overrides from Discord metadata.
-                if ch_meta and not config.dry_run:
-                    if ch_meta.default_override:
-                        try:
-                            await api_set_channel_default_permissions(
-                                session,
-                                config.stoat_url,
-                                config.token,
-                                stoat_channel_id,
-                                allow=ch_meta.default_override.allow,
-                                deny=ch_meta.default_override.deny,
-                            )
-                            await asyncio.sleep(config.upload_delay)
-                        except Exception as exc:  # noqa: BLE001
-                            state.warnings.append(
-                                {
-                                    "phase": "channels",
-                                    "type": "channel_default_perm_failed",
-                                    "message": f"Default override for '{unique_name}': {exc}",
-                                }
-                            )
-                    for ow in ch_meta.role_overrides:
-                        stoat_role_id = state.role_map.get(ow.discord_role_id)
-                        if stoat_role_id:
-                            try:
-                                await api_set_channel_role_permissions(
-                                    session,
-                                    config.stoat_url,
-                                    config.token,
-                                    stoat_channel_id,
-                                    stoat_role_id,
-                                    allow=ow.allow,
-                                    deny=ow.deny,
-                                )
-                                await asyncio.sleep(config.upload_delay)
-                            except Exception as exc:  # noqa: BLE001
-                                state.warnings.append(
-                                    {
-                                        "phase": "channels",
-                                        "type": "channel_role_perm_failed",
-                                        "message": f"Role override for '{unique_name}': {exc}",
-                                    }
-                                )
+                await apply_channel_permissions(
+                    session,
+                    config,
+                    state,
+                    stoat_channel_id,
+                    ch_meta,
+                    unique_name,
+                    phase="channels",
+                )
 
                 # S1/S2 (native-fidelity batch 2): apply slowmode + voice user_limit.
                 if ch_meta is not None:
