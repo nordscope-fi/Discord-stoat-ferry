@@ -23,7 +23,8 @@ from discord_ferry.core.engine import (
     run_retry_failed,
 )
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.errors import CheckError, DuplicateSendError
+from discord_ferry.errors import CheckError, DuplicateSendError, MigrationError
+from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.verify import CheckReport
 from discord_ferry.parser.models import (
     DCEAuthor,
@@ -3653,12 +3654,12 @@ async def test_repair_declines_a_category_it_has_no_recorded_title_for(tmp_path:
     assert any(w.get("type") == "no_recorded_name" for w in state.warnings), state.warnings
 
 
-def _dce_msg(msg_id: str) -> DCEMessage:
+def _dce_msg(msg_id: str, timestamp: str = "2026-01-01T00:00:00+00:00") -> DCEMessage:
     """A minimal in-memory DCEMessage, for the non-streaming branch."""
     return DCEMessage(
         id=msg_id,
         type="Default",
-        timestamp="2026-01-01T00:00:00+00:00",
+        timestamp=timestamp,
         content="hello",
         author=DCEAuthor(id="700000000000000001", name="author", nickname="author"),
     )
@@ -3751,7 +3752,7 @@ def _state_for_rewrite(**overrides: Any) -> MigrationState:
         "stoat_server_id": R_SERVER,
         "channel_map": {R_D_CHANNEL: R_S_CHANNEL},
         "created_channel_names": {R_D_CHANNEL: "general"},
-        "channel_high_water": {R_D_CHANNEL: "100000000000000002"},
+        "channel_high_water": {R_D_CHANNEL: "100000000000000009"},
         "channel_message_counts": {R_D_CHANNEL: 2},
         "channel_message_offsets": {R_D_CHANNEL: "100000000000000001"},
         "completed_channel_ids": {R_D_CHANNEL},
@@ -3781,7 +3782,15 @@ async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
     export.messages.extend([_dce_msg("100000000000000001"), _dce_msg("100000000000000002")])
     state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [export])
 
-    assert R_D_CHANNEL not in state.channel_high_water
+    # The mark is CLEARED and then rewritten by the resend, so the observable
+    # end state is the export's newest id rather than the stale one. Asserting
+    # only that the key is absent would fail against correct behaviour, and
+    # asserting nothing about it would pass against never clearing it: the
+    # fixture's stale value is deliberately higher than anything in the export
+    # so the two are distinguishable.
+    assert state.channel_high_water[R_D_CHANNEL] == "100000000000000002", (
+        "the stale high-water mark survived the recreation"
+    )
     assert R_D_CHANNEL not in state.channel_message_counts
     assert R_D_CHANNEL not in state.channel_message_offsets
     assert R_D_CHANNEL not in state.completed_channel_ids
@@ -3885,3 +3894,225 @@ async def test_queued_pins_and_reactions_for_the_deleted_channel_are_dropped(
     assert [r["channel_id"] for r in state.pending_reactions] == ["01JSTOATCHN0000000OTHER"], (
         f"the deleted channel's queued reactions were not dropped: {state.pending_reactions}"
     )
+
+
+async def _repair_resending(
+    tmp_path: Path,
+    *,
+    exports: list[Any],
+    msg_ids: list[str],
+    fail_ids: tuple[str, ...] = (),
+    thread_strategy: str = "flatten",
+) -> tuple[MigrationState, list[str], list[MigrationEvent]]:
+    """Recreate one channel and resend it, returning the message bodies sent."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        created_channel_names={R_D_CHANNEL: "general"},
+        channel_high_water={R_D_CHANNEL: "100000000000000009"},
+        channel_message_counts={R_D_CHANNEL: len(msg_ids)},
+        thread_strategy=thread_strategy,
+    )
+    events: list[MigrationEvent] = []
+    bodies: list[str] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    async def _fake_send(*_a: Any, **kwargs: Any) -> dict[str, str]:
+        content = str(kwargs.get("content", ""))
+        bodies.append(content)
+        return {"_id": "01JSTOATMSG0000000000AA"}
+
+    real_process = messages_module._process_message
+
+    async def _process(*, msg: Any, **kw: Any) -> None:
+        if msg.id in fail_ids:
+            raise MigrationError(f"send failed for {msg.id}")
+        bodies.append(f"msg:{msg.id}")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "api_send_message", _fake_send),
+        patch.object(engine_module, "_process_message", _process),
+        aioresponses() as m,
+    ):
+        assert real_process is not None
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        await run_repair(config, state, exports, events.append)
+    return state, bodies, events
+
+
+def _thread_export(channel_id: str, *, parent: str, ch_type: int = 0) -> Any:
+    export = _export_for(channel_id, name="a-thread", ch_type=ch_type)
+    export.is_thread = True
+    export.parent_channel_name = parent
+    return export
+
+
+async def test_a_recreated_thread_channel_gets_its_origin_header_back(
+    tmp_path: Path,
+) -> None:
+    """The header lives in _process_single_channel, NOT in _process_message.
+
+    The migration sends it gated on the channel being absent from
+    channel_high_water. Repair clears that mark, so a loop over _process_message
+    alone would drop a line the original migration sent and the restored thread
+    would lose the note saying where it came from.
+    """
+    export = _thread_export(R_D_CHANNEL, parent="general")
+    export.messages.append(_dce_msg("100000000000000001"))
+    _, bodies, _ = await _repair_resending(
+        tmp_path, exports=[export], msg_ids=["100000000000000001"]
+    )
+    assert "[Thread migrated from #general]" in bodies, (
+        f"the origin header was not re-sent: {bodies}"
+    )
+
+
+async def test_a_recreated_forum_post_gets_the_forum_wording(tmp_path: Path) -> None:
+    """Discord channel types 15 and 16 are forums, and say so."""
+    export = _thread_export(R_D_CHANNEL, parent="ideas", ch_type=15)
+    export.messages.append(_dce_msg("100000000000000001"))
+    _, bodies, _ = await _repair_resending(
+        tmp_path, exports=[export], msg_ids=["100000000000000001"]
+    )
+    assert "[Forum post migrated from #ideas]" in bodies, bodies
+
+
+async def test_an_ordinary_channel_gets_no_origin_header(tmp_path: Path) -> None:
+    """The other half, so the header assertion above can fail."""
+    export = _export_for(R_D_CHANNEL)
+    export.messages.append(_dce_msg("100000000000000001"))
+    _, bodies, _ = await _repair_resending(
+        tmp_path, exports=[export], msg_ids=["100000000000000001"]
+    )
+    assert not any("migrated from" in b for b in bodies), (
+        f"a header was sent for a channel that is not a thread: {bodies}"
+    )
+
+
+async def test_the_high_water_mark_covers_a_message_that_failed_to_send(
+    tmp_path: Path,
+) -> None:
+    """The formula where the WRONG answer looks nicer, measured by the prototype.
+
+    Three messages, the newest fails. Taking the max over successful sends only
+    would name the second-newest, which did land, so the next check would find
+    it and report ("ok", "tail_present") over a message that is genuinely
+    missing: a false pass. Taking the max over every scanned id names the failed
+    one, which resolves through no message_map entry, so the check reports
+    ("unverifiable", "tail_not_recorded"). That is honest.
+
+    Safe rather than a permanent hole only because the failure is durable in
+    state.failed_messages and the #76 self-heal re-attempts any id found there
+    even below the mark.
+    """
+    export = _export_for(R_D_CHANNEL)
+    ids = ["100000000000000001", "100000000000000002", "100000000000000003"]
+    export.messages.extend(_dce_msg(i) for i in ids)
+    state, _, _ = await _repair_resending(
+        tmp_path, exports=[export], msg_ids=ids, fail_ids=("100000000000000003",)
+    )
+    assert state.channel_high_water[R_D_CHANNEL] == "100000000000000003", (
+        "the mark was taken over successful sends only, which reports a false pass "
+        "over the message that did not land"
+    )
+
+
+async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) -> None:
+    """A system message can carry a non-snowflake id, and int() on it would abort."""
+    export = _export_for(R_D_CHANNEL)
+    ids = ["100000000000000001", "not-a-snowflake"]
+    export.messages.extend(_dce_msg(i) for i in ids)
+    state, _, _ = await _repair_resending(tmp_path, exports=[export], msg_ids=ids)
+    assert state.channel_high_water[R_D_CHANNEL] == "100000000000000001"
+
+
+async def test_a_recreated_merge_parent_names_the_threads_it_cannot_restore(
+    tmp_path: Path,
+) -> None:
+    """PINS A KNOWN LIMIT (#310), not intended coverage.
+
+    Under --thread-strategy=merge a thread's messages were appended to the
+    PARENT's Stoat channel, and _merge_threads resolves that target by parent
+    channel NAME. A channel-scoped scan keyed on the parent's Discord id cannot
+    reach them, and the merge path never wrote message_map either.
+
+    ASSERTS THE WARNING EXISTS. Never that content is absent: an absence
+    assertion passes against a repair that restored nothing at all.
+    """
+    parent = _export_for(R_D_CHANNEL, name="general")
+    parent.messages.append(_dce_msg("100000000000000001"))
+    thread = _thread_export("800000000000000077", parent="general")
+    state, _, events = await _repair_resending(
+        tmp_path,
+        exports=[parent, thread],
+        msg_ids=["100000000000000001"],
+        thread_strategy="merge",
+    )
+    warning = [w for w in state.warnings if w.get("type") == "merge_thread_content_not_restored"]
+    assert warning, f"the merge gap was not recorded: {state.warnings}"
+    assert "a-thread" in warning[0]["message"], (
+        f"the warning does not name the thread it left behind: {warning[0]['message']}"
+    )
+    assert any("merge" in e.message for e in events)
+
+
+async def test_a_flatten_parent_gets_no_merge_warning(tmp_path: Path) -> None:
+    """The other half. Under flatten each thread has its own channel and is fine."""
+    parent = _export_for(R_D_CHANNEL, name="general")
+    parent.messages.append(_dce_msg("100000000000000001"))
+    thread = _thread_export("800000000000000077", parent="general")
+    state, _, _ = await _repair_resending(
+        tmp_path,
+        exports=[parent, thread],
+        msg_ids=["100000000000000001"],
+        thread_strategy="flatten",
+    )
+    assert not [
+        w for w in state.warnings if w.get("type") == "merge_thread_content_not_restored"
+    ], "a flatten migration was warned about merged thread content"
+
+
+async def test_a_resend_sends_in_timestamp_order_not_list_order(tmp_path: Path) -> None:
+    """The case that separates sorted from as-listed, added after a survivor.
+
+    A mutant dropping the sort SURVIVED every other resend test, because each
+    fixture happened to append its messages already in order: both
+    implementations produced the same sequence and nothing distinguished them.
+
+    Order is not cosmetic here. Stoat assigns its own ULIDs on arrival, so send
+    order becomes channel order permanently, and a channel restored backwards
+    reads backwards forever. _process_single_channel sorts for the same reason,
+    and this mirrors it.
+    """
+    export = _export_for(R_D_CHANNEL)
+    export.messages.extend(
+        [
+            _dce_msg("100000000000000003", "2026-01-03T00:00:00+00:00"),
+            _dce_msg("100000000000000001", "2026-01-01T00:00:00+00:00"),
+            _dce_msg("100000000000000002", "2026-01-02T00:00:00+00:00"),
+        ]
+    )
+    _, bodies, _ = await _repair_resending(
+        tmp_path,
+        exports=[export],
+        msg_ids=["100000000000000001", "100000000000000002", "100000000000000003"],
+    )
+    sent = [b for b in bodies if b.startswith("msg:")]
+    assert sent == [
+        "msg:100000000000000001",
+        "msg:100000000000000002",
+        "msg:100000000000000003",
+    ], f"the resend followed list order rather than timestamp order: {sent}"
