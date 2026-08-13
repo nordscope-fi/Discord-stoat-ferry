@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-08-13
+
+### Added
+
+- **`ferry repair`, which acts on what `ferry check` found** (`core/engine.py`, `cli.py`). Check
+  could name three kinds of damage and do nothing about them. Repair runs the check itself, then
+  recreates a missing channel, role or category under the name Ferry originally gave it, applies its
+  recorded permission overrides, re-sends the messages a recreated channel held in their original
+  order, restores a channel's lost last message, and drains the dead-letter queue. `--dry-run`
+  reports the plan and changes nothing.
+- **`ferry retry`, exposing a coroutine that had no user surface** (`cli.py`). `run_retry_failed`
+  has been complete and tested since v1.x with no command able to reach it, so a user with failed
+  messages in `state.json` had no way to re-send them. Cheaper and narrower than `repair`: it
+  contacts the server only to send, where repair spends a request per channel checking first.
+
+### Fixed
+
+- **`run_retry_failed` never populated the token store** (`core/engine.py`). `_ensure_token_store`
+  was called by `run_migration` and `run_rollback` and by nothing else, so `config.token_store`
+  stayed `None` for the whole retry path. `safe_sanitize` is an identity function with a `None`
+  store, so a Stoat token appearing in an exception reached `state.failed_messages`, and through it
+  `report.json`, unredacted. Latent only because no command could reach the coroutine, which
+  `ferry retry` changes.
+- **A repair's sends could be swallowed by Stoat's idempotency cache** (`migrator/messages.py`).
+  Every send key is built from a Discord identifier, which a recreated channel does not change, and
+  Stoat's key store is a 1000-entry in-memory cache with no expiry. A repair running while those
+  keys were still held would be answered "duplicate" and treat a message the server had lost as
+  already delivered, restoring nothing while reporting success. `_process_message` takes an
+  `idempotency_salt`, empty for a migration so its keys are unchanged, and repair passes the new
+  channel identifier.
+
+### Changed
+
+- **Permission application is callable from two places** (`migrator/structure.py`). The channel and
+  per-role override blocks are now `apply_channel_permissions` and `apply_role_permissions`, so a
+  repair applies exactly what a migration applies rather than recomputing a mask. The server-default
+  call that follows the role loop is deliberately not part of it: it writes onto the server's default
+  role, which every member holds. Both take the phase label as a parameter, so a repair-time failure
+  is recorded as one.
+
+### Documentation
+
+- `cli-reference.md` gains both commands, their options and their exit codes.
+- `known-limitations.md` gains what repair cannot reach: it inherits every limit of the check, and
+  a mid-channel gap, a message accepted as a duplicate, merged thread content, a forum index and a
+  custom emoji are each declined for a stated reason.
+
 ## [2.17.0] - 2026-08-12
 
 ### Added
