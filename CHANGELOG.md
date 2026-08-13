@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **Four reference claims corrected against source** (`stoat-api-notes.md`, `architecture.md`,
+  `dce-format.md`, `migrator/probe.py`). The last item on the #107 tracker, content only.
+  - **Stoat does send rate limit headers.** Two pages said it sends none.
+    `X-RateLimit-Limit`, `-Remaining`, `-Reset-After` and `-Bucket` are set unconditionally in
+    `crates/core/ratelimits/src/rocket.rs` and exposed through CORS. The false claim came from
+    revolt.js's binding documentation, which does not surface them, and the pages now say so:
+    a client binding's docs are not evidence about server behaviour.
+  - **The bucket table was wrong about keying**, which is the part that decides whether
+    concurrency helps. `channels` (15 per 10s) and `messaging` (10 per 10s) are keyed by CHANNEL
+    ID, so work spread across channels does not share a budget; only `servers` (5 per 10s) is
+    shared. The table had no row for `channels` at all.
+  - **DCE writes PascalCase enum names**, `GuildTextChat` and `GuildNews`, not the SCREAMING_SNAKE
+    constants the Discord API documentation uses. The type table listed the latter, and three of
+    its rows had no DCE spelling that matches anything. Three channel types it omitted are added.
+  - **A comment called Stoat "this fork".** Stoat is Revolt renamed, and that hedge is what let a
+    correct permission mapping get dropped once already.
+
 ## [2.18.0] - 2026-08-13
 
 ### Added
