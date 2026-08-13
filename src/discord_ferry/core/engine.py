@@ -1784,6 +1784,7 @@ async def _reattach_to_category(
     state: MigrationState,
     discord_id: str,
     new_channel_id: str,
+    old_channel_id: str | None,
     live_categories: list[dict[str, Any]],
     on_event: EventCallback,
 ) -> None:
@@ -1822,9 +1823,18 @@ async def _reattach_to_category(
     channels = target.get("channels")
     if not isinstance(channels, list):
         return
-    if new_channel_id in channels:
+    # Drop the dead id while adding the live one. Both can be present: if the
+    # CATEGORY was recreated earlier in this same run, _recreate_category built
+    # its channel list from channel_map, which still held the old id for a
+    # channel not yet recreated. Appending without removing would leave the
+    # category naming a channel that does not exist.
+    stale = old_channel_id is not None and old_channel_id in channels
+    if new_channel_id in channels and not stale:
         return
-    channels.append(new_channel_id)
+    if stale and old_channel_id is not None:
+        channels.remove(old_channel_id)
+    if new_channel_id not in channels:
+        channels.append(new_channel_id)
 
     await api_upsert_categories(
         session, config.stoat_url, config.token, state.stoat_server_id, live_categories
@@ -2136,6 +2146,7 @@ async def run_repair(
                             state,
                             discord_id,
                             state.channel_map[discord_id],
+                            result.stoat_id,
                             live_categories,
                             on_event,
                         )

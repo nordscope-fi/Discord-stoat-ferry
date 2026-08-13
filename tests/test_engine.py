@@ -4698,3 +4698,36 @@ async def test_a_recreated_role_says_its_attributes_are_not_restored(tmp_path: P
         w.get("type") == "role_attributes_not_restored" and "#344" in w["message"]
         for w in state.warnings
     ), f"the role attribute decline was not recorded: {state.warnings}"
+
+
+async def test_re_attaching_removes_the_dead_channel_id(tmp_path: Path) -> None:
+    """Both ids can be present, and leaving the dead one is a category that lies.
+
+    Found by reading the diff at ship time rather than by a review. If the
+    CATEGORY is recreated earlier in the same run, _recreate_category builds its
+    channel list from channel_map, which still holds the OLD id for a channel
+    not yet recreated. The later re-attach appends the new id, so without a
+    removal the category names both: one live channel and one that does not
+    exist.
+    """
+    live = [
+        {
+            "id": "01JSTOATCAT000000000AAA",
+            "title": "General",
+            # The dead id, as _recreate_category would have left it.
+            "channels": [R_S_CHANNEL, "01JSTOATCHN0000000OTHER"],
+        }
+    ]
+    _, patches, _ = await _repair_with_live_categories(
+        tmp_path,
+        live_categories=live,
+        channel_categories={R_D_CHANNEL: "700000000000000001"},
+        category_map={"700000000000000001": "01JSTOATCAT000000000AAA"},
+    )
+    assert patches, "no categories PATCH was sent"
+    mine = next(c for c in patches[-1]["categories"] if c["id"] == "01JSTOATCAT000000000AAA")
+    assert R_S_CHANNEL not in mine["channels"], (
+        f"the category still names the deleted channel: {mine['channels']}"
+    )
+    assert "01JSTOATCHN000000000NEW" in mine["channels"]
+    assert "01JSTOATCHN0000000OTHER" in mine["channels"], "an unrelated channel was evicted"
