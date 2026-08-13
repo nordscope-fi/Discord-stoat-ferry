@@ -31,6 +31,7 @@ from discord_ferry.exporter import (
     validate_discord_token,
 )
 from discord_ferry.migrator.api import (
+    api_create_channel,
     api_create_invite,
     api_create_role,
     api_delete_channel,
@@ -52,7 +53,14 @@ from discord_ferry.migrator.emoji import run_emoji
 from discord_ferry.migrator.messages import _THREAD_STRATEGIES, _process_message, run_messages
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
-from discord_ferry.migrator.structure import run_categories, run_channels, run_roles, run_server
+from discord_ferry.migrator.structure import (
+    _stoat_channel_type,
+    make_unique_channel_name,
+    run_categories,
+    run_channels,
+    run_roles,
+    run_server,
+)
 from discord_ferry.parser.dce_parser import parse_export_directory, stream_messages, validate_export
 from discord_ferry.parser.models import DCEExport, DCEMessage
 from discord_ferry.reporter import generate_markdown_report, generate_report
@@ -1305,6 +1313,73 @@ async def _recreate_role(
     return True
 
 
+async def _recreate_channel(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    result: CheckResult,
+    exports: list[DCEExport],
+    existing_names: set[str],
+    on_event: EventCallback,
+) -> bool:
+    """Recreate one missing channel. Returns True when it was created."""
+    discord_id = result.discord_id or ""
+    recorded = state.created_channel_names.get(discord_id)
+    if not recorded:
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="warning",
+                message=_no_recorded_name(state, "channel", discord_id),
+            )
+        )
+        return False
+
+    # The channel TYPE lives only in the export. Nothing in MigrationState
+    # records it, and a voice channel restored as text is a different channel:
+    # nobody can join it. So a channel the given export does not describe is
+    # declined rather than guessed at as Text.
+    export = next((e for e in exports if e.channel.id == discord_id), None)
+    if export is None:
+        message = (
+            f"Cannot recreate channel {discord_id}: it is not in the export directory given. "
+            "The channel type is recorded only in the export, and restoring a voice channel "
+            "as text would produce a channel nobody can join. Re-run with the export the "
+            "migration used."
+        )
+        state.warnings.append({"phase": "repair", "type": "not_in_export", "message": message})
+        on_event(MigrationEvent(phase="repair", status="warning", message=message))
+        return False
+
+    # The recorded name is what Ferry SENT, so it is already truncated to 32 and
+    # already carries whatever suffix the migration needed. Passing it through
+    # make_unique_channel_name against the LIVE set is what lets a suffix be
+    # dropped when its collision partner is gone, and forces a new one when the
+    # server has taken the name since.
+    unique_name = make_unique_channel_name(recorded, existing_names)
+    created = await api_create_channel(
+        session,
+        config.stoat_url,
+        config.token,
+        state.stoat_server_id,
+        name=unique_name,
+        channel_type=_stoat_channel_type(export.channel.type),
+        description=export.channel.topic or None,
+    )
+    # `_id` here, `id` for roles. Upstream's spelling, not ours.
+    new_id: str = created["_id"]
+    state.channel_map[discord_id] = new_id
+    state.created_channel_names[discord_id] = created.get("name") or unique_name
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=f"Recreated channel '{state.created_channel_names[discord_id]}' as {new_id}.",
+        )
+    )
+    return True
+
+
 async def run_repair(
     config: FerryConfig,
     state: MigrationState,
@@ -1448,6 +1523,10 @@ async def run_repair(
             for result in structure_work:
                 if result.kind == "role_missing":
                     await _recreate_role(sess, config, state, result, on_event)
+                elif result.kind == "channel_missing":
+                    await _recreate_channel(
+                        sess, config, state, result, exports, existing_names, on_event
+                    )
         finally:
             if own_session:
                 await sess.close()

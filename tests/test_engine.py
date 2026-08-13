@@ -3118,3 +3118,168 @@ async def test_repair_declines_a_role_it_has_no_recorded_name_for(tmp_path: Path
     assert any(
         w.get("type") == "no_recorded_name" and w.get("phase") == "repair" for w in state.warnings
     ), f"no warning explains why the role was skipped: {state.warnings}"
+
+
+def _export_for(
+    channel_id: str, *, name: str = "general", ch_type: int = 0, topic: str = ""
+) -> Any:
+    """One DCEExport carrying a channel's identity, with no messages."""
+    return DCEExport(
+        guild=DCEGuild(id="900000000000000009", name="Guild", icon_url=""),
+        channel=DCEChannel(id=channel_id, type=ch_type, name=name, topic=topic),
+        messages=[],
+    )
+
+
+async def _repair_recreating_channel(
+    tmp_path: Path,
+    *,
+    recorded_name: str | None = "general-1",
+    exports: list[Any] | None = None,
+    live_names: tuple[str, ...] = (),
+    create_payload: dict[str, Any] | None = None,
+) -> tuple[MigrationState, list[Any], list[MigrationEvent]]:
+    """Drive run_repair against one channel_missing result."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    if recorded_name is not None:
+        state.created_channel_names[R_D_CHANNEL] = recorded_name
+    events: list[MigrationEvent] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(*live_names),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload=create_payload
+            if create_payload is not None
+            else {"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+        )
+        await run_repair(
+            config,
+            state,
+            exports if exports is not None else [_export_for(R_D_CHANNEL)],
+            events.append,
+        )
+        sent = _created_channel_body(m)
+    return state, sent, events
+
+
+def _created_channel_body(mock: aioresponses) -> dict[str, Any] | None:
+    """The JSON body of the channel-create POST, or None if none was made.
+
+    aioresponses keys its request log by (method, URL), so the body has to be
+    read out of the call record rather than by indexing the key list.
+    """
+    for (method, url), calls in mock.requests.items():
+        if method == "POST" and str(url).endswith("/channels"):
+            body = calls[0].kwargs.get("json")
+            return body if isinstance(body, dict) else None
+    return None
+
+
+async def test_repair_recreates_a_missing_channel_and_records_its_new_id(
+    tmp_path: Path,
+) -> None:
+    """channel_map moves to the new Stoat id under the UNCHANGED Discord key."""
+    state, _, _ = await _repair_recreating_channel(tmp_path)
+    assert state.channel_map[R_D_CHANNEL] == "01JSTOATCHN000000000NEW"
+    assert state.created_channel_names[R_D_CHANNEL] == "general"
+
+
+async def test_a_recreated_channel_drops_a_suffix_its_partner_no_longer_needs(
+    tmp_path: Path,
+) -> None:
+    """The whole reason the collision set comes from the live server.
+
+    The channel was originally created as `general-1`, because a `general`
+    already existed at migration time. That partner has since been deleted, so
+    the live set does not contain `general` and the recreation should take the
+    unsuffixed name. Building the set from the export would carry the
+    migration's input into a context where it is wrong and keep the -1 forever.
+    """
+    _, sent, _ = await _repair_recreating_channel(
+        tmp_path, recorded_name="general-1", live_names=("announcements",)
+    )
+    assert sent is not None, "no channel was created"
+    assert sent["name"] == "general-1", (
+        "repair renamed a channel it was asked to restore; the recorded name is what "
+        "Ferry sent and must be reused verbatim when the live server has no conflict"
+    )
+
+
+async def test_a_recreated_channel_avoids_a_name_the_server_now_holds(tmp_path: Path) -> None:
+    """A name taken since the migration must not be reused.
+
+    Stoat would accept the duplicate, and the operator would end up with two
+    channels of the same name and no way to tell them apart in the client.
+    """
+    _, sent, _ = await _repair_recreating_channel(
+        tmp_path, recorded_name="general", live_names=("general",)
+    )
+    assert sent is not None, "no channel was created"
+    assert sent["name"] != "general", "repair reused a name the server already holds"
+    assert sent["name"].startswith("general-"), f"unexpected disambiguation: {sent['name']}"
+
+
+async def test_a_recreated_voice_channel_is_recreated_as_voice(tmp_path: Path) -> None:
+    """The type comes from the export, because state records none.
+
+    A voice channel restored as text is a different channel: nobody can join it.
+    Discord type 2 is the only one that maps to a Stoat Voice channel.
+    """
+    _, sent, _ = await _repair_recreating_channel(
+        tmp_path, exports=[_export_for(R_D_CHANNEL, name="Lounge", ch_type=2)]
+    )
+    assert sent is not None, "no channel was created"
+    assert sent.get("type") == "Voice", f"a voice channel was recreated as {sent.get('type')}"
+
+
+async def test_repair_declines_a_channel_missing_from_the_export(tmp_path: Path) -> None:
+    """A KNOWN LIMIT, not a missing feature.
+
+    The channel type lives only in the export, and a channel restored as the
+    wrong type is a different channel. If the operator points repair at a
+    narrower export than the migration used, repair declines that channel and
+    says so rather than guessing Text.
+    """
+    state, sent, _ = await _repair_recreating_channel(tmp_path, exports=[])
+    assert sent is None, "repair created a channel it could not type correctly"
+    assert state.channel_map[R_D_CHANNEL] == R_S_CHANNEL
+    assert any(w.get("type") == "not_in_export" for w in state.warnings), state.warnings
+
+
+async def test_the_collision_set_is_not_built_from_the_export(tmp_path: Path) -> None:
+    """The case that separates the live set from an export-derived one.
+
+    Added because a mutant building the set from the exports SURVIVED the other
+    channel tests. In each of those, both implementations happened to return the
+    same name, so nothing distinguished them: the fixture could not tell the
+    design decision from its opposite.
+
+    This one can. The channel being recreated is itself named in the exports, so
+    its own name is always in an exports-derived set, which would force a suffix
+    onto EVERY recreated channel. The live server holds no such name, so the
+    correct set is empty and the name is reused verbatim.
+    """
+    _, sent, _ = await _repair_recreating_channel(
+        tmp_path,
+        recorded_name="general",
+        live_names=(),  # the server holds nothing
+        exports=[_export_for(R_D_CHANNEL, name="general")],  # the exports hold itself
+    )
+    assert sent is not None, "no channel was created"
+    assert sent["name"] == "general", (
+        "the collision set came from the exports, so the channel collided with its own "
+        "entry there and took a suffix it does not need"
+    )
