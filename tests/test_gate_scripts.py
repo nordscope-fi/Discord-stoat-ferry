@@ -454,3 +454,38 @@ def test_sweep_still_fires_from_a_subdirectory(tmp_path: Path) -> None:
 
     assert from_root.returncode == 1
     assert from_sub.returncode == 1, "a subdirectory invocation missed the deferral"
+
+
+def test_sweep_finds_its_field_checker_from_a_subdirectory(tmp_path: Path) -> None:
+    """A relative $0 must be resolved before the script changes directory.
+
+    Regression guard. The repo-root anchoring introduced this: after `cd "$ROOT"`,
+    `$(dirname "../scripts/check-deferrals.sh")` no longer points at the scripts
+    directory, and the checker resolved to `/check-deferral-fields.sh`. A
+    legitimately justified deferral was then rejected with exit 2.
+
+    The existing subdirectory test does not cover this path, because without a
+    justification block the checker is never consulted.
+    """
+    repo = _repo_with_change(tmp_path, f"This is future work.\n\n{FOUR_FIELDS}")
+    (repo / "sub").mkdir()
+
+    from_root = subprocess.run(
+        ["bash", "scripts/check-deferrals.sh", "HEAD~1"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    from_sub = subprocess.run(
+        ["bash", "../scripts/check-deferrals.sh", "HEAD~1"],
+        cwd=repo / "sub",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert from_root.returncode == 0, from_root.stderr
+    assert from_sub.returncode == 0, (
+        "the field checker was not found from a subdirectory: " + from_sub.stderr
+    )
