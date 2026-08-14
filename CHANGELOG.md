@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Three repository gates, so four project rules are enforced by a script instead of by memory.**
+  No user-facing behaviour changes and nothing under `src/` was touched, so there is no version
+  bump.
+
+  - `scripts/assert-doc-refs.sh` checks that paths cited in the project's documentation resolve on
+    disk, and that every architecture decision record has a row in its index and vice versa. It
+    runs locally rather than in CI, because its inputs are not committed to this repository and a
+    CI runner therefore never receives them.
+  - `scripts/check-deferrals.sh` sweeps a pull request for language that defers work without
+    filing it. It runs in a new single-run `gates` CI job on every pull request, and reads the
+    pull request body as well as the diff and the commit messages. That matters here: this
+    repository rebase-merges most pull requests, which keeps the body out of git entirely, so a
+    sweep reading only git finds nothing. Measured across recent history: 0 matches in 60 commits,
+    5 in 110 merged pull request bodies.
+  - `scripts/mutate.sh` runs a mutation sweep over the three modules where a test that cannot fail
+    is most expensive: redaction, checkpoint state, and atomic writes. It self-tests first, with
+    one mutation the suite must catch and one it cannot see, and refuses to report if either
+    answer is wrong. Behind a `mutation` extra, so it is not installed in CI.
+
+- `scripts/check-deferral-fields.sh` is now part of the repository. It was previously untracked,
+  which meant the deferral sweep could not reach it from CI.
+
 ## [2.19.0] - 2026-08-14
 
 ### Fixed

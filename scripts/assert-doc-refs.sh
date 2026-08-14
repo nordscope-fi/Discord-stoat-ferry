@@ -16,12 +16,30 @@
 
 set -uo pipefail
 
-git rev-parse --git-dir >/dev/null 2>&1 || {
+# Anchor to the repo root. `git rev-parse --git-dir` only proves we are somewhere
+# inside a repository, not at the top of one, and every path below is relative.
+# Run from a subdirectory without this, the script finds no CLAUDE.md, no rules
+# and no ADR directory, checks nothing, and prints "clean" with exit 0. Measured
+# from src/ before the fix: a false pass indistinguishable from a real one, in
+# the very script written to stop checks from doing that.
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
   echo "assert-doc-refs: not a git repository" >&2; exit 2; }
+cd "$ROOT" || { echo "assert-doc-refs: cannot enter $ROOT" >&2; exit 2; }
 
 FAILURES=0
 DOCS="CLAUDE.md"
 for f in .claude/rules/*.md; do [ -e "$f" ] && DOCS="$DOCS $f"; done
+
+# Second belt: even at the root, if nothing readable was found there is nothing
+# to check and "clean" would be a lie. Same shape as the ADR row-count guard
+# below, applied to the inputs rather than to one sub-check.
+FOUND=0
+for doc in $DOCS; do [ -e "$doc" ] && FOUND=$((FOUND + 1)); done
+if [ "$FOUND" -eq 0 ]; then
+  echo "assert-doc-refs: found none of its input documents under $ROOT." >&2
+  echo "  Expected CLAUDE.md and/or .claude/rules/*.md. Checking nothing is not passing." >&2
+  exit 2
+fi
 
 # Global excludes disabled so a developer's own ~/.gitignore cannot hide drift
 # that CI-equivalent conditions would show. No global file is set on this machine
