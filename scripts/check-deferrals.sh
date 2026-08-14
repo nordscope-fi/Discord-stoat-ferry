@@ -60,7 +60,24 @@ for commit in $(git rev-list "$BASE..HEAD" 2>/dev/null); do
 $(git log -1 --pretty=%B "$commit" 2>/dev/null)"
 done
 
-BODY=$(printf '%s\n%s\n' "$ADDED" "$MSGS")
+# Third source, and the one that matters. Ferry's recorded failure is follow-ups
+# named in PULL REQUEST BODIES and never filed, and the branch policy sends
+# multi-commit pull requests down the rebase path, where the body never enters
+# git at all. Measured: 38 of the last 40 commits are rebase-merged, so a sweep
+# reading only git would be blind to the exact failure it exists to catch.
+PR_BODY=""
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+  if command -v gh >/dev/null 2>&1 && PR_BODY=$(gh pr view --json body --jq .body 2>/dev/null); then
+    :
+  else
+    PR_BODY=""
+    # Announced, never silent. A silent degradation here reproduces the blind
+    # spot this source was added to close, and would look identical to a clean run.
+    echo "PR body: unavailable, scanned diff and commits only" >&2
+  fi
+fi
+
+BODY=$(printf '%s\n%s\n%s\n' "$ADDED" "$MSGS" "$PR_BODY")
 MATCHES=$(printf '%s' "$BODY" | grep -niE "$PATTERN" || true)
 
 if [ -z "$MATCHES" ]; then
