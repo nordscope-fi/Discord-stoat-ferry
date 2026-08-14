@@ -48,10 +48,20 @@ fi
 # ---------------------------------------------------------------------------
 BACKUP=$(mktemp)
 cp "$TARGET" "$BACKUP"
-restore() { cp "$BACKUP" "$TARGET"; rm -f "$BACKUP"; }
+# Idempotent on purpose. It is called explicitly on the failure paths and again
+# by the trap, and a second call must be a no-op rather than a `cp` from a file
+# that is already gone. Measured: the target ends up correct either way, but a
+# restore that errors on its own second call is noise in exactly the situation
+# where the operator needs a clear signal.
+restore() {
+  [ -f "$BACKUP" ] || return 0
+  cp "$BACKUP" "$TARGET"
+  rm -f "$BACKUP"
+}
 trap restore EXIT INT TERM
 
 selftest_fail() {
+  trap - EXIT INT TERM
   echo "mutate: SELF-TEST FAILED, $1" >&2
   echo "  The harness cannot reliably tell a killed mutant from a surviving one," >&2
   echo "  so any sweep it produced would be meaningless. Not running the sweep." >&2
@@ -121,4 +131,19 @@ rm -f "$SESSION"
 uv run --extra mutation cosmic-ray init cosmic-ray.toml "$SESSION" || exit 2
 uv run --extra mutation cosmic-ray exec cosmic-ray.toml "$SESSION" || exit 2
 echo
+
+# cosmic-ray mutates tracked files in place during the sweep, so an interrupted
+# run can leave one behind. Observed: killing an earlier sweep left
+# src/discord_ferry/cli.py with a comparison flipped, and nothing said so. The
+# tree looks normal until a later `git add -A` commits the mutant.
+#
+# This cannot prevent it (SIGKILL runs no cleanup by definition) but it turns a
+# silent corruption into a named one on every path that does reach here.
+if ! git diff --quiet -- src/; then
+  echo "mutate: WARNING, src/ is dirty after the sweep." >&2
+  echo "  cosmic-ray mutates in place; a mutant may have been left behind." >&2
+  echo "  Inspect before committing anything:  git diff -- src/" >&2
+  git diff --stat -- src/ >&2
+fi
+
 uv run --extra mutation python scripts/mutation_report.py "$SESSION"
