@@ -67,3 +67,7 @@ site/
 # NiceGUI runtime storage (see .claude/rules/security.md — user-scoped GUI settings,
 # never tokens, but it is runtime state and must not be committed).
 .nicegui/
+
+# Cosmic Ray mutation session: a resumable artifact, not a result
+mutation-session.sqlite
+mutation-session.sqlite-*
