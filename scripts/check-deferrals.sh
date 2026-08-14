@@ -68,6 +68,30 @@ if [ -z "$MATCHES" ]; then
   exit 0
 fi
 
+# A justification shipped in the same diff accounts for the matches, but only if
+# it actually carries the four fields. Checking for the heading alone recreated
+# the exact hole this script exists to close: a two-line
+# "## Deferral Justification" / "TBD" block, in a file unrelated to the flagged
+# phrase, silenced every match in the diff. Pipe it into the one place the fields
+# are defined instead of re-implementing the check here.
+FIELDS_CHECK="$(cd "$(dirname "$0")" && pwd)/check-deferral-fields.sh"
+JUSTIFICATION=$(printf '%s' "$ADDED" | awk '/^## Deferral Justification/{f=1} f{print}')
+
+if [ -n "$JUSTIFICATION" ]; then
+  if [ ! -x "$FIELDS_CHECK" ]; then
+    # Fail closed, loudly. Failing open here would silence every match whenever
+    # the checker went missing, which is how a guard ends up doing nothing while
+    # reporting nothing.
+    echo "check-deferrals: a justification block is present but $FIELDS_CHECK" >&2
+    echo "  is missing or not executable, so its fields cannot be checked." >&2
+    exit 2
+  fi
+  if printf '%s' "$JUSTIFICATION" | "$FIELDS_CHECK" >/dev/null 2>&1; then
+    echo "Deferral sweep: matches justified by a four-field block in the same diff."
+    exit 0
+  fi
+fi
+
 printf '%s\n' "$MATCHES" >&2
 echo "check-deferrals: unjustified deferral language above." >&2
 exit 1
