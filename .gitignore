@@ -51,7 +51,6 @@ claude_log/
 # Internal design docs (kept locally, not in public repo)
 docs/plans/
 docs/architecture/
-scripts/check-deferral-fields.sh
 docs/superpowers/
 # Subagent-driven-development workspace: ledgers, briefs, per-task reports.
 # Scratch for one branch's build, never part of the product.
