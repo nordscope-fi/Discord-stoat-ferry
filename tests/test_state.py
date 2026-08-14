@@ -1176,3 +1176,53 @@ def test_a_recorded_name_containing_a_secret_is_not_rewritten() -> None:
     # The positive control: the same call DID scrub a classified field, so the
     # assertion above cannot be passing because the registry was empty.
     assert "swordfish" not in doc["warnings"][0]["message"]
+
+
+def test_every_integer_counter_starts_at_zero() -> None:
+    """Every `int` field declared with a zero default must actually be zero.
+
+    Found by the first mutation sweep: changing `retry_count: int = 0` to `= 1`
+    left all 64 tests in this file passing. Around thirty of that run's
+    ninety-six survivors were this one shape, across three dataclasses.
+
+    A counter that starts at one is not a crash. It is a silently wrong number in
+    every total the migration reports, and the kind of defect nobody writes a
+    single test for. One introspective assertion kills the whole class and covers
+    fields added later without anyone remembering to.
+
+    Derived from the dataclass fields rather than a hardcoded list on purpose: a
+    literal list drifts the moment a field is added, and the emptiness guard below
+    means a refactor that removes the fields fails here instead of turning this
+    into a test that checks nothing.
+    """
+    import dataclasses
+
+    cases = [
+        MigrationState(),
+        RollbackProgress(),
+        FailedMessage(discord_msg_id="1", stoat_channel_id="2", error="boom"),
+    ]
+
+    for instance in cases:
+        cls = type(instance)
+        # Select by TYPE, assert on VALUE. Selecting by `default == 0` and then
+        # asserting the value is 0 is circular: change a default to 1 and the
+        # field drops out of the selection, so nothing is checked and the test
+        # passes. The first version of this test did exactly that, and the
+        # mutation run that was meant to prove it caught only the one class where
+        # the emptiness guard below happened to fire.
+        int_fields = [f.name for f in dataclasses.fields(cls) if f.type in ("int", int)]
+        assert int_fields, (
+            f"{cls.__name__} declares no int fields. If that is deliberate, drop it "
+            "from this test; otherwise this check has stopped checking anything."
+        )
+
+        for name in int_fields:
+            actual = getattr(instance, name)
+            assert actual == 0, (
+                f"{cls.__name__}.{name} is an int field whose fresh-instance value "
+                f"is {actual!r}, not 0. Every int on these documents is a counter, "
+                "and one that does not start at zero misreports every total derived "
+                "from it. If a non-zero default is genuinely wanted, this test is "
+                "the place to say so explicitly."
+            )
