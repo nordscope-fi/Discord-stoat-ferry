@@ -51,5 +51,24 @@ for doc in $DOCS; do
   done < <(grep -oE '`[^`]+`' "$doc" 2>/dev/null | tr -d '`')
 done
 
-[ "$FAILURES" -eq 0 ] || { echo "assert-doc-refs: $FAILURES broken citation(s)" >&2; exit 1; }
+# ADR index parity, checked in BOTH directions. One direction alone would have
+# missed the ADR-018 collision that critique round 3 found: a second session had
+# taken the number, so a new file would have overwritten an Accepted record while
+# the index still showed one row.
+ADR_DIR="docs/architecture/adr"
+INDEX="$ADR_DIR/README.md"
+if [ -d "$ADR_DIR" ] && [ -f "$INDEX" ]; then
+  for f in "$ADR_DIR"/[0-9]*.md; do
+    [ -e "$f" ] || continue
+    n=$(basename "$f" | cut -c1-3)
+    grep -q "\[$n\](" "$INDEX" || {
+      echo "  ADR $n has no row in $INDEX" >&2; FAILURES=$((FAILURES + 1)); }
+  done
+  while IFS= read -r n; do
+    ls "$ADR_DIR/$n"-*.md >/dev/null 2>&1 || {
+      echo "  $INDEX row $n points at no file" >&2; FAILURES=$((FAILURES + 1)); }
+  done < <(grep -oE '^\| \[[0-9]{3}\]' "$INDEX" | grep -oE '[0-9]{3}')
+fi
+
+[ "$FAILURES" -eq 0 ] || { echo "assert-doc-refs: $FAILURES problem(s)" >&2; exit 1; }
 echo "assert-doc-refs: clean."
