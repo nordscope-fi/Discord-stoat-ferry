@@ -31,10 +31,19 @@ BASE="${1:-origin/main}"
 # Ferry's exclusion list is short because the instruction layer is gitignored and
 # never appears in a diff at all.
 #
+# Files that describe the pattern rather than commit one. Without these the sweep
+# reports itself: the test file necessarily contains deferral phrases as fixture
+# data, so every pull request touching it would be blocked. Found on this gate's
+# first real run against its own branch.
+#
 # Known blind spot, documented rather than hidden: these are whole-file
-# exclusions, not line-level. A genuine deferral added to this script itself is
-# invisible to it.
-EXCLUDES=(":(exclude)scripts/check-deferrals.sh")
+# exclusions, not line-level. A genuine deferral written inside either file is
+# invisible to this sweep. That is a narrow trade for a gate that would otherwise
+# refuse every change to itself.
+EXCLUDES=(
+  ":(exclude)scripts/check-deferrals.sh"
+  ":(exclude)tests/test_gate_scripts.py"
+)
 
 PATTERN='future (work|concern|hardening|enhancement|iteration|sprint|phase|fix|improvement|version)|v[0-9]+ scope|simpler for now|out of scope for (now|this (PR|pull request|change|slice|pass|iteration))|defer(red)? to (follow-?up|later|v[0-9]+|phase [0-9]+)|accepted trade-?off|we can (unify|fix|handle|address|do) (later|in v[0-9]+|in phase [0-9]+)|adds complexity|when we have time|punt(ed)? to|come back to (this|it|that)|in a (later|future|separate|follow-?up) (pass|PR|pull request|change|iteration|slice)|revisit (this|it|that|later)'
 
