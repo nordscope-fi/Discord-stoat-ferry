@@ -13,9 +13,23 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 DOC_REFS = REPO / "scripts" / "assert-doc-refs.sh"
+DEFERRALS = REPO / "scripts" / "check-deferrals.sh"
+FIELDS = REPO / "scripts" / "check-deferral-fields.sh"
+
+FOUR_FIELDS = (
+    "## Deferral Justification\n"
+    "Why not now: blocked on the upstream release\n"
+    "Cost comparison: 2h now, 2h later, no asymmetry\n"
+    "Owner: Peter Sterkenburg\n"
+    "Trigger: when the upstream release lands\n"
+)
 
 
 def _run(script: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -166,3 +180,154 @@ def test_adr_index_parity_passes_when_they_match(tmp_path: Path) -> None:
     result = _run(DOC_REFS, tmp_path)
 
     assert result.returncode == 0, result.stderr
+
+
+# --- the deferral sweep -------------------------------------------------------
+#
+# Each case builds its own throwaway repository rather than switching branches in
+# a shared one. A `git checkout -b` here trips branch-guard, which runs its status
+# check in its own working directory and so reports the Ferry tree's state rather
+# than the temp repo's.
+
+
+def _repo_with_change(path: Path, content: str, *, with_checker: bool = True) -> Path:
+    """Seed a repo, then add one commit introducing `content`.
+
+    The sweep resolves its four-field checker relative to its own location, so
+    testing the missing-checker path means copying the sweep somewhere the
+    checker is absent, not deleting it from the repo under test. An earlier
+    version of this test deleted the repo's copy and proved nothing, because the
+    sweep was still finding the real one beside itself.
+    """
+    scripts = path / "scripts"
+    scripts.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
+    (scripts / DEFERRALS.name).write_bytes(DEFERRALS.read_bytes())
+    (scripts / DEFERRALS.name).chmod(0o755)
+    if with_checker:
+        (scripts / FIELDS.name).write_bytes(FIELDS.read_bytes())
+        (scripts / FIELDS.name).chmod(0o755)
+    (path / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=path, check=True)
+    (path / "notes.md").write_text(content)
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "change"], cwd=path, check=True)
+    return path
+
+
+def _sweep(cwd: Path, base: str = "HEAD~1") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "scripts/check-deferrals.sh", base],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_sweep_fires_on_an_unjustified_deferral(tmp_path: Path) -> None:
+    """SC-2.1. Demonstrated against real history too: 5 of 110 merged PR bodies."""
+    repo = _repo_with_change(tmp_path, "This is future work, tracked separately.\n")
+
+    result = _sweep(repo)
+
+    assert result.returncode == 1
+    assert "future work" in result.stderr.lower()
+
+
+def test_sweep_accepts_a_four_field_justification(tmp_path: Path) -> None:
+    """SC-2.2: a real justification in the same diff accounts for the match."""
+    repo = _repo_with_change(tmp_path, f"This is future work.\n\n{FOUR_FIELDS}")
+
+    result = _sweep(repo)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_sweep_rejects_a_justification_heading_with_no_fields(tmp_path: Path) -> None:
+    """SC-2.3: the TBD hole.
+
+    Checking for the heading alone let a two-line block silence every match in the
+    diff, recreating the exact failure this gate closes. The block is piped into
+    the one place the four fields are defined.
+    """
+    repo = _repo_with_change(tmp_path, "This is future work.\n\n## Deferral Justification\nTBD\n")
+
+    result = _sweep(repo)
+
+    assert result.returncode == 1
+
+
+def test_sweep_fails_closed_when_the_field_checker_is_missing(tmp_path: Path) -> None:
+    """A justification it cannot check must not be treated as valid.
+
+    Failing open here would silence every match whenever the checker went missing,
+    which is how a guard ends up doing nothing while reporting nothing.
+    """
+    repo = _repo_with_change(tmp_path, f"This is future work.\n\n{FOUR_FIELDS}", with_checker=False)
+
+    result = _sweep(repo)
+
+    assert result.returncode == 2
+    assert "cannot be checked" in result.stderr
+
+
+def test_sweep_ignores_a_phrase_on_an_untouched_line(tmp_path: Path) -> None:
+    """SC-2.4: added lines only, never the whole diff.
+
+    Scanning the whole diff reported text three lines from an edit that nobody had
+    written. Harmless inside a skill, a blocked pull request once it runs in CI.
+    """
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    (scripts / DEFERRALS.name).write_bytes(DEFERRALS.read_bytes())
+    (scripts / DEFERRALS.name).chmod(0o755)
+    (tmp_path / "notes.md").write_text("This is future work.\nline2\nline3\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=tmp_path, check=True)
+    (tmp_path / "notes.md").write_text("This is future work.\nline2\nEDITED\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "edit"], cwd=tmp_path, check=True)
+
+    result = _sweep(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_sweep_exits_2_on_a_missing_base_ref(tmp_path: Path) -> None:
+    """SC-2.5: cannot-run blocks, and the error names the remedy.
+
+    A shallow CI checkout is the real case, and `fetch-depth` in the message is
+    what turns a red build into a one-line fix.
+    """
+    repo = _repo_with_change(tmp_path, "clean\n")
+
+    result = _sweep(repo, base="origin/definitely-not-a-ref")
+
+    assert result.returncode == 2
+    assert "fetch-depth" in result.stderr
+
+
+def test_sweep_announces_a_missing_gh_rather_than_passing_silently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SC-2.6: the one degradation, and it must be audible.
+
+    The PR body is the source that matters: 0 of 60 Ferry commits match the
+    pattern while 5 of 110 PR bodies do, because rebase merges keep the body out
+    of git. Degrading silently would reproduce the blind spot this source closes.
+    """
+    repo = _repo_with_change(tmp_path, "clean\n")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    result = _sweep(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "PR body: unavailable" in result.stderr
