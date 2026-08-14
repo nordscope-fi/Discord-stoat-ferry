@@ -130,6 +130,27 @@ def test_adr_index_parity_fails_when_a_row_has_no_file(tmp_path: Path) -> None:
     assert "003" in result.stderr
 
 
+def test_adr_index_parity_fails_when_the_row_format_changes(tmp_path: Path) -> None:
+    """The row->file direction must not silently stop checking.
+
+    That direction depends on the index's `| [NNN]` table format. If the format
+    changes, the extraction finds nothing and checks nothing, which looks exactly
+    like a pass. Found during chunk 1's review, by testing the guard rather than
+    reading it: the second-opinion model returned zero findings on this file.
+    """
+    _init_repo(tmp_path)
+    adr = tmp_path / "docs" / "architecture" / "adr"
+    adr.mkdir(parents=True)
+    (tmp_path / "CLAUDE.md").write_text("nothing cited\n")
+    (adr / "README.md").write_text("- [001](001-a.md) A\n")  # not the table format
+    (adr / "001-a.md").touch()
+
+    result = _run(DOC_REFS, tmp_path)
+
+    assert result.returncode == 1
+    assert "stopped checking" in result.stderr
+
+
 def test_adr_index_parity_passes_when_they_match(tmp_path: Path) -> None:
     """The control for the two tests above.
 

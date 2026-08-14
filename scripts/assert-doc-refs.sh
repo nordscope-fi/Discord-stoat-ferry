@@ -64,10 +64,25 @@ if [ -d "$ADR_DIR" ] && [ -f "$INDEX" ]; then
     grep -q "\[$n\](" "$INDEX" || {
       echo "  ADR $n has no row in $INDEX" >&2; FAILURES=$((FAILURES + 1)); }
   done
+  # The row->file direction depends on the index's table format. If that format
+  # ever changes, this extraction finds nothing and the direction silently checks
+  # nothing, which is indistinguishable from passing. Count what was parsed and
+  # fail loudly when the index has rows to find and none were found. The
+  # file->row direction above does not need this: it matches `[NNN](` anywhere,
+  # so it survives a format change.
+  ROWS=0
   while IFS= read -r n; do
+    ROWS=$((ROWS + 1))
     ls "$ADR_DIR/$n"-*.md >/dev/null 2>&1 || {
       echo "  $INDEX row $n points at no file" >&2; FAILURES=$((FAILURES + 1)); }
   done < <(grep -oE '^\| \[[0-9]{3}\]' "$INDEX" | grep -oE '[0-9]{3}')
+
+  ADR_COUNT=$(ls "$ADR_DIR"/[0-9]*.md 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$ROWS" -eq 0 ] && [ "$ADR_COUNT" -gt 0 ]; then
+    echo "  parsed 0 index rows from $INDEX while $ADR_COUNT ADR files exist." >&2
+    echo "  The row format changed and this check stopped checking anything." >&2
+    FAILURES=$((FAILURES + 1))
+  fi
 fi
 
 [ "$FAILURES" -eq 0 ] || { echo "assert-doc-refs: $FAILURES problem(s)" >&2; exit 1; }
