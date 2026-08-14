@@ -1226,3 +1226,16 @@ def test_every_integer_counter_starts_at_zero() -> None:
                 "from it. If a non-zero default is genuinely wanted, this test is "
                 "the place to say so explicitly."
             )
+
+        # Same invariant, same reasoning, one type over. A flag that starts True
+        # makes the migration believe it already did something it has not done:
+        # `categories_cleaned` and `is_dry_run` both gate real work.
+        for field_ in dataclasses.fields(cls):
+            if field_.type not in ("bool", bool):
+                continue
+            actual = getattr(instance, field_.name)
+            assert actual is False, (
+                f"{cls.__name__}.{field_.name} is a bool field whose fresh-instance "
+                f"value is {actual!r}, not False. These flags record what has already "
+                "happened, so one that starts True skips the work it guards."
+            )
