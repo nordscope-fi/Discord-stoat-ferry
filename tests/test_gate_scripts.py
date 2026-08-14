@@ -42,13 +42,39 @@ def _init_repo(path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
 
 
-def test_doc_refs_passes_on_the_current_tree() -> None:
-    """SC-3.2: the tree is clean today, so no baseline file is needed.
+def test_doc_refs_matches_the_checkout_it_is_run_in() -> None:
+    """SC-3.2, and the branch's own central fact, asserted rather than assumed.
 
-    A failure here means the extraction is wrong, not that the docs drifted.
+    The correct answer differs by checkout, and both answers are real assertions:
+
+    - **Locally** the instruction layer is present, the tree has no drift, so the
+      guard must pass. A failure here means the extraction broke, not that the
+      docs drifted.
+    - **In CI** the instruction layer does not exist. `CLAUDE.md` and
+      `.claude/rules/` are gitignored, so `actions/checkout` never fetches them.
+      The guard must then refuse with exit 2, because checking nothing is not
+      passing.
+
+    This is not a skip dressed as a test. Each branch asserts the behaviour that
+    is correct for that environment, and the CI branch is the one that caught the
+    first version of this test asserting exit 0 unconditionally: it passed
+    locally and failed on all three CI Python versions, which is precisely the
+    local-only assumption this whole branch exists to make visible.
     """
+    instruction_layer_present = (REPO / "CLAUDE.md").exists() or (
+        REPO / ".claude" / "rules"
+    ).is_dir()
+
     result = _run(DOC_REFS, REPO)
-    assert result.returncode == 0, result.stderr
+
+    if instruction_layer_present:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode == 2, (
+            "with no instruction layer to read, the guard must refuse rather than "
+            f"report clean. Got {result.returncode}: {result.stderr}"
+        )
+        assert "Checking nothing is not passing" in result.stderr
 
 
 def test_doc_refs_fails_on_a_broken_citation(tmp_path: Path) -> None:
