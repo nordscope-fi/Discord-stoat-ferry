@@ -392,3 +392,65 @@ def test_ci_gates_job_is_not_in_the_python_matrix() -> None:
     job = _gates_job()
     assert "strategy:" not in job
     assert "matrix" not in job
+
+
+# --- both gates must be anchored to the repo root ------------------------------
+#
+# Found by the whole-branch review, which read the three scripts side by side.
+# Per-chunk review could not see it: each script was correct in isolation and
+# they disagreed with each other. assert-doc-refs.sh trusted cwd, so from a
+# subdirectory it found none of its inputs, checked nothing, and printed
+# "clean" with exit 0. A check that stopped checking without failing, inside the
+# script written to stop checks doing that.
+
+
+def test_doc_refs_still_catches_drift_from_a_subdirectory(tmp_path: Path) -> None:
+    """Running from a subdirectory must not turn a real failure into a pass."""
+    _init_repo(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("See `src/does_not_exist.py`.\n")
+
+    from_root = _run(DOC_REFS, tmp_path)
+    from_sub = _run(DOC_REFS, tmp_path / "src")
+
+    assert from_root.returncode == 1
+    assert from_sub.returncode == 1, "a subdirectory invocation reported a false pass"
+    assert "does_not_exist.py" in from_sub.stderr
+
+
+def test_doc_refs_refuses_when_it_finds_no_input_documents(tmp_path: Path) -> None:
+    """Checking nothing is not passing.
+
+    Belt two: even anchored at the root, a tree with no CLAUDE.md and no rules
+    has nothing to check, and reporting clean there would be a lie.
+    """
+    _init_repo(tmp_path)
+
+    result = _run(DOC_REFS, tmp_path)
+
+    assert result.returncode == 2
+    assert "Checking nothing is not passing" in result.stderr
+
+
+def test_sweep_still_fires_from_a_subdirectory(tmp_path: Path) -> None:
+    """The sweep scopes its diff with `-- .`, so cwd could silently narrow it."""
+    repo = _repo_with_change(tmp_path, "This is future work, tracked separately.\n")
+    (repo / "sub").mkdir()
+
+    from_root = subprocess.run(
+        ["bash", "scripts/check-deferrals.sh", "HEAD~1"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    from_sub = subprocess.run(
+        ["bash", "../scripts/check-deferrals.sh", "HEAD~1"],
+        cwd=repo / "sub",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert from_root.returncode == 1
+    assert from_sub.returncode == 1, "a subdirectory invocation missed the deferral"
