@@ -58,6 +58,13 @@ dev = [
     "mypy",
     "pyinstaller>=6.0",
 ]
+# Mutation testing, kept out of `dev` on purpose: CI installs `dev` on five jobs
+# and never runs a mutation sweep, so putting cosmic-ray there would pay its
+# install cost on every push for a tool only used locally and on demand.
+#   uv sync --extra mutation && bash scripts/mutate.sh
+mutation = [
+    "cosmic-ray>=8.3",
+]
 docs = [
     "mkdocs-material>=9.0",
 ]
