@@ -47,10 +47,18 @@ EXCLUDES=(
 
 PATTERN='future (work|concern|hardening|enhancement|iteration|sprint|phase|fix|improvement|version)|v[0-9]+ scope|simpler for now|out of scope for (now|this (PR|pull request|change|slice|pass|iteration))|defer(red)? to (follow-?up|later|v[0-9]+|phase [0-9]+)|accepted trade-?off|we can (unify|fix|handle|address|do) (later|in v[0-9]+|in phase [0-9]+)|adds complexity|when we have time|punt(ed)? to|come back to (this|it|that)|in a (later|future|separate|follow-?up) (pass|PR|pull request|change|iteration|slice)|revisit (this|it|that|later)'
 
-# Anchor to the repo root before anything else. The diff below is scoped with
-# `-- .`, so from a subdirectory it would silently scan only that subtree and
-# report clean for a deferral added anywhere else. Same class of blind spot that
-# assert-doc-refs.sh had, found by reading the two side by side at ship time.
+# Resolve this script's own directory BEFORE anything changes the working
+# directory. $0 can be a relative path (`bash ../scripts/check-deferrals.sh`), and
+# a relative $0 resolved after a `cd` points somewhere else entirely: measured at
+# ship time, it produced `/check-deferral-fields.sh` and rejected a legitimately
+# justified deferral with exit 2. The anchoring below introduced that regression,
+# so the order of these two blocks is the fix, not an accident.
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd) || {
+  echo "check-deferrals: cannot resolve own directory from '$0'" >&2; exit 2; }
+
+# Anchor to the repo root. The diff below is scoped with `-- .`, so from a
+# subdirectory it would silently scan only that subtree and report clean for a
+# deferral added anywhere else. Same class of blind spot assert-doc-refs.sh had.
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
   echo "check-deferrals: not a git repository" >&2; exit 2; }
 cd "$ROOT" || { echo "check-deferrals: cannot enter $ROOT" >&2; exit 2; }
@@ -105,7 +113,7 @@ fi
 # "## Deferral Justification" / "TBD" block, in a file unrelated to the flagged
 # phrase, silenced every match in the diff. Pipe it into the one place the fields
 # are defined instead of re-implementing the check here.
-FIELDS_CHECK="$(cd "$(dirname "$0")" && pwd)/check-deferral-fields.sh"
+FIELDS_CHECK="$SCRIPT_DIR/check-deferral-fields.sh"
 JUSTIFICATION=$(printf '%s' "$ADDED" | awk '/^## Deferral Justification/{f=1} f{print}')
 
 if [ -n "$JUSTIFICATION" ]; then
