@@ -1197,10 +1197,23 @@ def test_every_integer_counter_starts_at_zero() -> None:
     """
     import dataclasses
 
+    from discord_ferry.migrator.messages import ChannelResult
+
+    # ChannelResult is here because the ship audit went looking for the same shape
+    # elsewhere and found it: eight counters, all defaulting to zero, feeding the
+    # same totals. Twenty other dataclasses also carry int or bool fields and are
+    # deliberately absent. FerryConfig is the clearest reason why: `max_channels =
+    # 200` and `create_invite = True` are correct non-zero defaults, so the
+    # invariant is "counters start at zero", not "every int is zero".
+    #
+    # ReviewSummary looked like a candidate and is not one: all nine of its fields
+    # are required, so it has no defaults to assert. A check over zero fields
+    # passes for the wrong reason.
     cases = [
         MigrationState(),
         RollbackProgress(),
         FailedMessage(discord_msg_id="1", stoat_channel_id="2", error="boom"),
+        ChannelResult(),
     ]
 
     for instance in cases:
