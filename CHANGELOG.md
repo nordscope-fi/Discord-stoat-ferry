@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Counters and flags on the migration documents are now asserted to start from zero.** Every
+  `int` field on `MigrationState`, `RollbackProgress`, `FailedMessage` and `ChannelResult` must be
+  `0` on a fresh instance, and every `bool` must be `False`. Test-only, nothing under `src/`
+  changed, so there is no version bump.
+
+  This came from the first mutation sweep. Changing a counter's default from `0` to `1` left the
+  entire state test suite passing: a counter that starts at one is not a crash, it is a silently
+  wrong number in every total the migration reports, and no single test was ever going to be
+  written for each of the twenty-eight fields individually. One assertion covers them all and
+  extends to fields added later. Measured: it kills thirty-eight mutants the suite previously
+  missed.
+
 - **Three repository gates, so four project rules are enforced by a script instead of by memory.**
   No user-facing behaviour changes and nothing under `src/` was touched, so there is no version
   bump.
