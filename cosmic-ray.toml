@@ -9,9 +9,22 @@
 # Run with:  uv sync --extra mutation && bash scripts/mutate.sh
 
 [cosmic-ray]
-module-path = "src/discord_ferry"
+# A LIST OF FILES, not the package root. `module-path = "src/discord_ferry"`
+# looks like it scopes the sweep and does not: cosmic_ray.modules.find_modules
+# globs `**/*.py` under a directory, so it produced 10,964 mutants across
+# messages.py, cli.py, engine.py and gui.py. Against these three test files
+# almost all of them survive trivially, so a three-hour run would have returned
+# thousands of meaningless survivors. Measured, not guessed.
+#
+# find_modules accepts a file path directly, so naming the three files is the
+# scoping mechanism. There is no `excluded-modules` key: an earlier version of
+# this file set one and cosmic-ray never read it.
+module-path = [
+  "src/discord_ferry/core/security.py",
+  "src/discord_ferry/state.py",
+  "src/discord_ferry/core/atomicio.py",
+]
 timeout = 30.0
-excluded-modules = []
 
 # The test command is the part most likely to be got wrong, and getting it wrong
 # makes a broken detector look like a clean codebase. Two recorded harness faults
