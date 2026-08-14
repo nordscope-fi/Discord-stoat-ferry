@@ -331,3 +331,64 @@ def test_sweep_announces_a_missing_gh_rather_than_passing_silently(
 
     assert result.returncode == 0, result.stderr
     assert "PR body: unavailable" in result.stderr
+
+
+# --- the CI wiring ------------------------------------------------------------
+#
+# Asserting on the workflow's text is appropriate here: a workflow file IS text,
+# and there is no behaviour to exercise locally. This is not the source-string
+# antipattern, which is about asserting on code text as a proxy for what the code
+# does.
+
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+
+
+def _gates_job() -> str:
+    """The `gates:` job block, comments stripped, header to next job or EOF.
+
+    Comments are removed so these assertions test configuration rather than
+    prose. The first version of this helper kept them and the matrix assertion
+    failed against the word "matrix" inside its own explanatory comment.
+    """
+    lines = CI_WORKFLOW.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "gates:")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i] and not lines[i].startswith("    ") and lines[i].startswith("  "):
+            end = i
+            break
+    return "\n".join(ln for ln in lines[start:end] if not ln.strip().startswith("#"))
+
+
+def test_ci_runs_the_deferral_sweep() -> None:
+    """SC-2.7: the sweep is actually wired into CI, not merely written."""
+    assert "check-deferrals.sh" in _gates_job()
+
+
+def test_ci_gates_job_sets_gh_token() -> None:
+    """Without it the sweep degrades on EVERY CI run while still passing.
+
+    gh is preinstalled on ubuntu-latest but does not authenticate on its own, so
+    the pull request body, the one source that finds Ferry's real deferrals, would
+    never be read. It would keep working locally, where a developer's gh session
+    is already authenticated, which is the worst failure shape available.
+    """
+    job = _gates_job()
+    assert "GH_TOKEN" in job
+    assert "pull-requests: read" in job
+
+
+def test_ci_gates_job_fetches_full_history() -> None:
+    """The sweep resolves origin/main; a shallow clone makes it exit 2."""
+    assert "fetch-depth: 0" in _gates_job()
+
+
+def test_ci_gates_job_is_not_in_the_python_matrix() -> None:
+    """One run per pull request, not three.
+
+    lint-and-test runs a three-version matrix. A step there would run the sweep
+    three times and make three gh calls for one answer.
+    """
+    job = _gates_job()
+    assert "strategy:" not in job
+    assert "matrix" not in job
