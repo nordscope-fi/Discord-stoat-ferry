@@ -1216,6 +1216,8 @@ def test_every_integer_counter_starts_at_zero() -> None:
         ChannelResult(),
     ]
 
+    bools_checked = 0
+
     for instance in cases:
         cls = type(instance)
         # Select by TYPE, assert on VALUE. Selecting by `default == 0` and then
@@ -1252,9 +1254,21 @@ def test_every_integer_counter_starts_at_zero() -> None:
         for field_ in dataclasses.fields(cls):
             if field_.type not in ("bool", bool):
                 continue
+            bools_checked += 1
             actual = getattr(instance, field_.name)
             assert actual is False, (
                 f"{cls.__name__}.{field_.name} is a bool field whose fresh-instance "
                 f"value is {actual!r}, not False. These flags record what has already "
                 "happened, so one that starts True skips the work it guards."
             )
+
+    # The bool loop gets an aggregate guard rather than a per-class one, because
+    # FailedMessage and ChannelResult legitimately have no bool fields and a
+    # per-class assertion would fail on them today. Without this the bool half
+    # could quietly drop to zero iterations everywhere and still pass, which is
+    # the exact failure the int half's guard exists to prevent. Three bool fields
+    # are checked at the time of writing.
+    assert bools_checked, (
+        "no bool field was checked on any of the cases above. The bool half of "
+        "this test has stopped checking anything."
+    )
