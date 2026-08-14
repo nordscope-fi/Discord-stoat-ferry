@@ -1224,6 +1224,12 @@ def test_every_integer_counter_starts_at_zero() -> None:
         # passes. The first version of this test did exactly that, and the
         # mutation run that was meant to prove it caught only the one class where
         # the emptiness guard below happened to fire.
+        # `("int", int)` is not belt and braces, it is required, and narrowing it
+        # to `f.type is int` would silently drop coverage rather than fail. The
+        # modules disagree on PEP 563: state.py has no `from __future__ import
+        # annotations`, so its field types are real type objects, while
+        # messages.py has it, so ChannelResult's are the strings "int" and "bool".
+        # Measured: `f.type is int` matches 0 of ChannelResult's 8 int fields.
         int_fields = [f.name for f in dataclasses.fields(cls) if f.type in ("int", int)]
         assert int_fields, (
             f"{cls.__name__} declares no int fields. If that is deliberate, drop it "
