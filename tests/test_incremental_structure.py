@@ -283,13 +283,19 @@ async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
     tmp_path: Path,
 ) -> None:
     """SC-5: empty state → pre_existing_role_ids is empty → every role created AND
-    api_edit_role (attributes) fires for roles with position != 0 or hoist set.
+    api_edit_role (attributes) fires for every role carrying an attribute.
 
     Guards against the trap where a guard on the live role_map would wrongly
     skip attributes for roles created earlier in the same pass.
+
+    Both roles carry hoist metadata. Before #380 role_a carried none and leaned on
+    ``position != 0`` to trigger the pass through the ``rank`` field, which the Stoat
+    backend discarded. With that field gone role_a would have had no attribute at all,
+    and the ">= 2 edits" assertion would have passed vacuously at 1 while no longer
+    guarding the skip it was written for.
     """
-    # role_a: position=2 → attributes pass fires (rank)
-    # role_b: position=1, hoist=True via metadata → attributes pass fires (hoist)
+    # role_a: hoist=True via metadata → attributes pass fires
+    # role_b: hoist=True via metadata → attributes pass fires
     role_a = DCERole(id="r1", name="Admin", position=2)
     role_b = DCERole(id="r2", name="Mod", position=1)
 
@@ -300,6 +306,7 @@ async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
         role_permissions={},
         channel_metadata={},
         role_metadata={
+            "r1": RoleMeta(hoist=True, position=2),
             "r2": RoleMeta(hoist=True, position=1),
         },
     )
@@ -341,10 +348,12 @@ async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
         await run_roles(config, state, exports, lambda e: None)
 
     assert len(create_calls) == 2, f"Expected 2 creates on fresh run, got {len(create_calls)}"
-    # Both roles should have had attributes applied (r1: rank, r2: hoist).
-    assert len(edit_calls) >= 2, (
-        f"Expected >= 2 attribute edits on fresh run, got {len(edit_calls)}"
-    )
+    # Both roles carry hoist, so both must be edited. Asserting on the set of URLs
+    # rather than a count means a pass that edited one role twice cannot satisfy it.
+    assert {str(u) for u in edit_calls} == {
+        f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+        f"{STOAT_URL}/servers/srv1/roles/stoat-r2",
+    }, f"Expected an attribute edit for each role on a fresh run, got {edit_calls}"
 
 
 # ===========================================================================

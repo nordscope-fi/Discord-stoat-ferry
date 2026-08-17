@@ -670,13 +670,17 @@ async def run_roles(
                 )
             )
 
-    # Second pass: set role attributes (rank from DCE position; hoist from Discord
-    # metadata). Both fold into a single api_edit_role call per role when present.
+    # Second pass: set role attributes (hoist and icon from Discord metadata), folded
+    # into a single api_edit_role call per role. Rank is NOT set here: the upstream
+    # roles_edit handler drops DataEditRole.rank through a rest pattern, so it was
+    # accepted with a 200 and never persisted. Ordering lives in _apply_role_ordering.
     discord_metadata = load_discord_metadata(config.output_dir)
     role_meta = discord_metadata.role_metadata if discord_metadata else {}
-    ranked_roles = sorted(roles_to_create, key=lambda r: (r.position, r.id))
+    # The sort no longer decides anything the server sees, but deterministic iteration
+    # keeps this pass's request order stable across runs.
+    attribute_roles = sorted(roles_to_create, key=lambda r: (r.position, r.id))
     async with get_session(config) as session:
-        for role in ranked_roles:
+        for role in attribute_roles:
             # S3: gate on roles_finalized (not pre_existing) so resume finalizes created-but-
             # unfinished roles; --incremental skips prior-completed (finalized) roles.
             if role.id in state.roles_finalized:
@@ -685,8 +689,6 @@ async def run_roles(
             if not rank_role_id:
                 continue
             edit_kwargs: dict[str, Any] = {}
-            if role.position != 0:
-                edit_kwargs["rank"] = role.position
             rm = role_meta.get(role.id)
             if rm is not None:
                 edit_kwargs["hoist"] = rm.hoist
