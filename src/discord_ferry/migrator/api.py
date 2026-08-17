@@ -636,6 +636,38 @@ async def api_edit_role(
     return await _api_request(session, "PATCH", url, token, kwargs)
 
 
+async def api_edit_role_ranks(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+    ranks: list[str],
+) -> dict[str, Any]:
+    """Set the server's role hierarchy in one call.
+
+    ``PATCH /servers/{id}/roles/{role_id}`` accepts a ``rank`` field and throws it
+    away: the upstream ``roles_edit`` handler destructures ``DataEditRole`` with a
+    rest pattern that does not bind ``rank``. This route is the only one that sets
+    ordering.
+
+    ``edit_role_ranks`` assigns each role a rank equal to its INDEX in *ranks*, so
+    **index 0 is the top of the hierarchy**. It rejects any list that does not name
+    every role on the server, answering ``InvalidOperation``.
+
+    Args:
+        session: An active aiohttp ClientSession.
+        stoat_url: Stoat API base URL.
+        token: Stoat session token.
+        server_id: Target server ID.
+        ranks: Every role id on the server, highest authority first.
+
+    Returns:
+        Updated server object dict.
+    """
+    url = f"{stoat_url.rstrip('/')}/servers/{server_id}/roles/ranks"
+    return await _api_request(session, "PATCH", url, token, {"ranks": ranks})
+
+
 async def api_edit_channel(
     session: aiohttp.ClientSession,
     stoat_url: str,
