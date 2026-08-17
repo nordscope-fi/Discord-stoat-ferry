@@ -1712,8 +1712,47 @@ def test_make_unique_channel_name_truncated_collision() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_run_roles_sets_rank_from_position(tmp_path: Path) -> None:
-    """ROLES phase sets rank on created roles from DCE position data."""
+async def test_run_roles_never_sends_rank(tmp_path: Path) -> None:
+    """No per-role PATCH body carries ``rank``; the Stoat backend discards it.
+
+    Replaces test_run_roles_sets_rank_from_position, which asserted that ``rank``
+    appeared in a mocked request body. That assertion was true and useless: the
+    upstream roles_edit handler destructures DataEditRole with a rest pattern that
+    does not bind ``rank``, so the field was accepted with a 200 and never stored.
+    Ordering now lives in _apply_role_ordering. See #380.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    role = DCERole(id="r1", name="Admin", position=3, color="#FF0000")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+
+    bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    # The colour PATCH proves the pass still runs, so "no rank" is not vacuous.
+    assert bodies, "expected the colour PATCH, otherwise this test checks nothing"
+    assert all("rank" not in b for b in bodies)
+
+
+async def test_run_roles_position_only_role_sends_no_patch(tmp_path: Path) -> None:
+    """A role whose only attribute was rank now triggers no PATCH at all.
+
+    With ``rank`` gone and no Discord metadata, edit_kwargs is empty and the
+    ``if not edit_kwargs: continue`` guard skips the call entirely.
+    """
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -1721,95 +1760,22 @@ async def test_run_roles_sets_rank_from_position(tmp_path: Path) -> None:
     role = DCERole(id="r1", name="Admin", position=3)
     exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
 
-    rank_bodies: list[dict[str, object]] = []
+    patched: list[str] = []
 
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
-        # Capture the rank PATCH call.
         m.patch(
             f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
             payload={},
-            callback=lambda url, **kwargs: rank_bodies.append(  # type: ignore[misc]
-                kwargs.get("json", {})
-            ),
-        )
-
-        await run_roles(config, state, exports, events.append)
-
-    assert any(b.get("rank") == 3 for b in rank_bodies)
-
-
-async def test_run_roles_rank_tie_break_is_deterministic(tmp_path: Path) -> None:
-    """On equal position, the rank pass processes roles in a deterministic id order.
-
-    Two roles share position 5 but have ids "30" and "20". The deterministic sort
-    key (position, id) must process role "20" before role "30" regardless of input
-    order. The functional goal is determinism — same-position roles emit a stable
-    processing order independent of export/union insertion order.
-    """
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    # Export order lists "30" first, then "20" — so a position-only (stable) sort
-    # would preserve that input order and process "30" before "20".
-    role_30 = DCERole(id="30", name="Thirty", position=5)
-    role_20 = DCERole(id="20", name="Twenty", position=5)
-    exports = [
-        _make_export(
-            messages=[
-                _make_message("m1", roles=[role_30]),
-                _make_message("m2", roles=[role_20]),
-            ]
-        )
-    ]
-
-    # FIFO POST registration mirrors first-pass insertion (export) order:
-    # "30" -> stoat-30, "20" -> stoat-20.
-    patched_role_ids: list[str] = []
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-30", "name": "Thirty"})
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-20", "name": "Twenty"})
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/stoat-30",
-            payload={},
             repeat=True,
-            callback=lambda url, **kwargs: patched_role_ids.append("30"),  # type: ignore[misc]
+            callback=lambda url, **kwargs: patched.append("hit"),  # type: ignore[misc]
         )
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/stoat-20",
-            payload={},
-            repeat=True,
-            callback=lambda url, **kwargs: patched_role_ids.append("20"),  # type: ignore[misc]
-        )
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}}, repeat=True)
 
         await run_roles(config, state, exports, events.append)
 
-    # Real processing order: the rank PATCH for the lexically-smaller id fires first.
-    assert patched_role_ids == ["20", "30"]
-
-
-async def test_run_roles_rank_failure_is_non_fatal(tmp_path: Path) -> None:
-    """ROLES phase logs a warning and continues if rank setting fails."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    role = DCERole(id="r1", name="Admin", position=2)
-    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
-        # Rank PATCH fails.
-        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", status=500)
-
-        # Should NOT raise.
-        await run_roles(config, state, exports, events.append)
-
-    assert state.role_map["r1"] == "stoat-r1"
-    attr_warnings = [w for w in state.warnings if w.get("type") == "role_attributes_failed"]
-    assert len(attr_warnings) > 0
+    assert state.role_map["r1"] == "stoat-r1", "the role must still be created"
+    assert patched == []
 
 
 async def test_run_roles_applies_permissions(tmp_path: Path) -> None:
