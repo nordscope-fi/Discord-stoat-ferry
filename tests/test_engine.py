@@ -1622,7 +1622,7 @@ async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) ->
             "https://api.test/channels/stoat-idx-news/messages",
             payload={"_id": "new-idx-msg"},
         )
-        mock.put(
+        mock.post(
             "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
             payload={},
         )
@@ -2222,7 +2222,7 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
             payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
         )
         # Registered so a stray pin is recorded rather than erroring out.
-        mock.put(
+        mock.post(
             "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
             payload={},
             callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]

@@ -2298,7 +2298,7 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
             ),
         )
         # Pin the index message.
-        m.put(
+        m.post(
             f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
             payload={},
         )
@@ -2389,7 +2389,7 @@ async def test_forum_index_empty_forum(tmp_path: Path) -> None:
             ),
         )
         # Pin.
-        m.put(
+        m.post(
             f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
             payload={},
         )
@@ -3309,7 +3309,7 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
             payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
         )
         # Registered so a stray pin is recorded rather than erroring out.
-        m.put(
+        m.post(
             f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
             payload={},
             callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
@@ -3512,7 +3512,7 @@ async def test_the_forum_index_channel_records_its_name(tmp_path: Path) -> None:
             payload={"_id": "01JSTOATIX00000000000AAA", "name": "my-forum-index"},
         )
         m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages", payload={"_id": "m1"})
-        m.put(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
+        m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
         m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
         await run_channels(config, state, exports, [].append)
 
@@ -3658,7 +3658,7 @@ async def test_a_fresh_structure_run_records_a_name_for_every_id(tmp_path: Path)
             payload={"_id": "01JSTOATIX00000000000AAA", "name": "my-forum-index"},
         )
         m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages", payload={"_id": "m1"})
-        m.put(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
+        m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
         m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
         await run_channels(config, state, exports, [].append)
 
