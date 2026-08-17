@@ -32,6 +32,7 @@ from discord_ferry.migrator.api import (
     api_delete_role,
     api_delete_webhook,
     api_edit_role,
+    api_edit_role_ranks,
     api_edit_server,
     api_execute_webhook,
     api_fetch_channel,
@@ -337,6 +338,79 @@ async def test_api_edit_role(mock_aiohttp: aioresponses) -> None:
             session, BASE_URL, TOKEN, "srv1", "role1", colour="#FF0000", hoist=True
         )
     assert result["colour"] == "#FF0000"
+
+
+# ---------------------------------------------------------------------------
+# api_edit_role_ranks
+# ---------------------------------------------------------------------------
+
+
+async def test_api_edit_role_ranks_sends_ordered_list(mock_aiohttp: aioresponses) -> None:
+    """PATCH /servers/srv1/roles/ranks sends the ordered id list and returns the Server."""
+    bodies: list[dict[str, object]] = []
+    mock_aiohttp.patch(
+        f"{BASE_URL}/servers/srv1/roles/ranks",
+        payload={"_id": "srv1", "roles": {}},
+        callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+    )
+    async with aiohttp.ClientSession() as session:
+        result = await api_edit_role_ranks(session, BASE_URL, TOKEN, "srv1", ["r3", "r1", "r2"])
+    assert bodies == [{"ranks": ["r3", "r1", "r2"]}]
+    assert result["_id"] == "srv1"
+
+
+async def test_api_edit_role_ranks_incomplete_list_raises(mock_aiohttp: aioresponses) -> None:
+    """A 400 InvalidOperation surfaces as MigrationError carrying status and type.
+
+    The attempt count is asserted, not assumed: 400 is absent from
+    ``_RETRYABLE_STATUSES``, and a silent retry here would burn the budget on a
+    request that can never succeed.
+    """
+    attempts: list[str] = []
+    mock_aiohttp.patch(
+        f"{BASE_URL}/servers/srv1/roles/ranks",
+        status=400,
+        payload={"type": "InvalidOperation"},
+        repeat=True,
+        callback=lambda url, **kwargs: attempts.append("hit"),  # type: ignore[misc]
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc_info:
+            await api_edit_role_ranks(session, BASE_URL, TOKEN, "srv1", ["r1"])
+    assert "400" in str(exc_info.value)
+    assert "InvalidOperation" in str(exc_info.value)
+    assert attempts == ["hit"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "NotElevated"},
+        {"type": "MissingPermission", "permission": "ManageRole"},
+    ],
+)
+async def test_api_edit_role_ranks_forbidden_is_identifiable(
+    mock_aiohttp: aioresponses, body: dict[str, str]
+) -> None:
+    """A 403 keeps its type in the message so the call site can classify it.
+
+    On the ``--server-id`` path this is the ordinary outcome rather than an exotic
+    one, so it must fail fast and stay identifiable.
+    """
+    attempts: list[str] = []
+    mock_aiohttp.patch(
+        f"{BASE_URL}/servers/srv1/roles/ranks",
+        status=403,
+        payload=body,
+        repeat=True,
+        callback=lambda url, **kwargs: attempts.append("hit"),  # type: ignore[misc]
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc_info:
+            await api_edit_role_ranks(session, BASE_URL, TOKEN, "srv1", ["r1", "r2"])
+    assert "403" in str(exc_info.value)
+    assert body["type"] in str(exc_info.value)
+    assert attempts == ["hit"]
 
 
 # ---------------------------------------------------------------------------
