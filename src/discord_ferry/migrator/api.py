@@ -889,7 +889,7 @@ async def api_pin_message(
         Empty dict (API returns 204).
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/messages/{message_id}/pin"
-    return await _api_request(session, "PUT", url, token, None)
+    return await _api_request(session, "POST", url, token, None)
 
 
 async def api_set_role_permissions(

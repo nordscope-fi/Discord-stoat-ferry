@@ -42,6 +42,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `scripts/check-deferral-fields.sh` is now part of the repository. It was previously untracked,
   which meant the deferral sweep could not reach it from CI.
 
+## [2.19.1] - 2026-08-17
+
+### Fixed
+
+- **Pinned messages were never restored because the pin API call used the wrong HTTP method.**
+  `api_pin_message` sent PUT, but the Stoat backend registers the route as POST. Rocket returned a
+  raw HTML 404 for every pin attempt. Changed to POST. Fixes #348.
+
 ## [2.19.0] - 2026-08-14
 
 ### Fixed
