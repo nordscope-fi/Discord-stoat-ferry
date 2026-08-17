@@ -582,8 +582,8 @@ async def test_api_add_reaction_custom_emoji(mock_aiohttp: aioresponses) -> None
 
 
 async def test_api_pin_message(mock_aiohttp: aioresponses) -> None:
-    """PUT /channels/ch1/messages/msg1/pin returns empty dict on 204."""
-    mock_aiohttp.put(
+    """POST /channels/ch1/messages/msg1/pin returns empty dict on 204."""
+    mock_aiohttp.post(
         f"{BASE_URL}/channels/ch1/messages/msg1/pin",
         status=204,
     )
