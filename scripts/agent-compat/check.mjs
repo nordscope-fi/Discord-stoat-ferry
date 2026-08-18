@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Discord Ferry — Cross-platform agent config drift verifier.
 // Validates: instructions exist, generated files match templates, skills are bridged,
-// hook parity holds, no secrets or unresolved placeholders in generated files.
+// hook parity holds, no unresolved placeholders in generated files.
 // Run: ./scripts/agent-check.sh [--strict] [--generated-only]
 
 import { execFileSync } from 'node:child_process';
@@ -173,6 +173,19 @@ function checkHookParity() {
     if (existsSync(settingsPath)) {
       const raw = JSON.parse(readFileSync(settingsPath, 'utf8'));
       projectSettings = raw.hooks ?? raw;
+    }
+    const localPath = join(projectRoot, '.claude', 'settings.local.json');
+    if (existsSync(localPath)) {
+      const localRaw = JSON.parse(readFileSync(localPath, 'utf8'));
+      const localHooks = localRaw.hooks ?? localRaw;
+      if (projectSettings) {
+        for (const [event, groups] of Object.entries(localHooks)) {
+          if (!Array.isArray(groups)) continue;
+          projectSettings[event] = [...(projectSettings[event] ?? []), ...groups];
+        }
+      } else {
+        projectSettings = localHooks;
+      }
     }
   } catch (err) {
     warn(`could not read project settings: ${err.message}`);
