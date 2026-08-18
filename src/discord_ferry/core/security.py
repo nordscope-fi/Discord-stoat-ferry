@@ -15,10 +15,12 @@ class SecureTokenStore:
     """
 
     _tokens: dict[str, str] = field(repr=False, default_factory=dict)
+    _fully_masked: set[str] = field(repr=False, default_factory=set)
 
     def __init__(self, tokens: dict[str, str]) -> None:
         # Store a copy so the caller cannot mutate our internal state.
         object.__setattr__(self, "_tokens", dict(tokens))
+        object.__setattr__(self, "_fully_masked", set())
 
     def get(self, name: str) -> str:
         """Return the raw token value for *name*.
@@ -27,24 +29,38 @@ class SecureTokenStore:
         """
         return self._tokens[name]
 
-    def register(self, name: str, value: str) -> None:
+    def register(self, name: str, value: str, *, fully_mask: bool = False) -> None:
         """Add or replace a token value.
 
         Used by the process-wide registry below, which is populated as tokens
         arrive rather than all at once in ``__init__``.
+
+        When *fully_mask* is True the key is rendered as bare ``****`` by
+        :meth:`masked`, with no trailing characters. That is the policy for
+        short, human-chosen secrets such as a proxy password, where the
+        default ``****{last4}`` shape exposes a large fraction of the value
+        (issue #149). Opaque API tokens keep the default tail shape.
         """
         self._tokens[name] = value
+        if fully_mask:
+            self._fully_masked.add(name)
+        else:
+            self._fully_masked.discard(name)
 
     def clear(self) -> None:
         """Drop every stored token."""
         self._tokens.clear()
+        self._fully_masked.clear()
 
     def masked(self, name: str) -> str:
         """Return a masked representation of the token for display.
 
-        Returns ``"****{last4}"`` when the token is 5+ characters, or
-        ``"****"`` for shorter tokens.
+        Returns ``"****"`` for a key registered as fully masked, or when the
+        token is shorter than five characters. Otherwise returns
+        ``"****{last4}"``.
         """
+        if name in self._fully_masked:
+            return "****"
         value = self._tokens[name]
         if len(value) >= 5:
             return f"****{value[-4:]}"
@@ -108,17 +124,21 @@ def safe_sanitize(token_store: SecureTokenStore | None, text: str) -> str:
 _secret_registry: SecureTokenStore = SecureTokenStore({})
 
 
-def register_secret(name: str, value: str) -> None:
+def register_secret(name: str, value: str, *, fully_mask: bool = False) -> None:
     """Record *value* so the logging redaction filter can mask it.
 
     Empty values are ignored -- ``SecureTokenStore.sanitize`` skips them anyway,
     but rejecting them here keeps the registry meaningful.
 
     Safe to call repeatedly with the same name; the last value wins.
+
+    Pass *fully_mask* True for a short, human-chosen secret (a proxy password)
+    so :meth:`SecureTokenStore.masked` renders bare ``****`` with no tail
+    (issue #149). Opaque API tokens keep the default ``****{last4}`` shape.
     """
     if not value:
         return
-    _secret_registry.register(name, value)
+    _secret_registry.register(name, value, fully_mask=fully_mask)
 
 
 def sanitize_secrets(text: str) -> str:

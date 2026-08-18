@@ -9,6 +9,7 @@ from discord_ferry.core.security import (
     register_secret,
     safe_sanitize,
     sanitize_for_display,
+    sanitize_secrets,
     scrub_document,
 )
 
@@ -50,6 +51,43 @@ def test_masked_missing_key_raises_key_error() -> None:
     store = make_store(tok="abcde12345")
     with pytest.raises(KeyError):
         store.masked("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# masked() per-key policy -- issue #149
+# ---------------------------------------------------------------------------
+
+
+def test_masked_fully_masked_key_returns_stars_only_for_long_value() -> None:
+    """A proxy password is human-chosen and often short.
+
+    The default ``****{last4}`` shape exposes a large fraction of it, so a key
+    registered as fully masked renders as bare ``****`` regardless of length.
+    """
+    store = SecureTokenStore({})
+    store.register("proxy_password", "hunter2horse", fully_mask=True)
+    assert store.masked("proxy_password") == "****"
+
+
+def test_masked_fully_masked_key_returns_stars_only_for_short_value() -> None:
+    store = SecureTokenStore({})
+    store.register("proxy_password", "x", fully_mask=True)
+    assert store.masked("proxy_password") == "****"
+
+
+def test_masked_default_register_keeps_last_four_tail() -> None:
+    """Opaque tokens (Stoat/Discord) keep the existing tail shape."""
+    store = SecureTokenStore({})
+    store.register("stoat", "abcde12345")
+    assert store.masked("stoat") == "****2345"
+
+
+def test_clear_drops_the_fully_masked_policy_too() -> None:
+    store = SecureTokenStore({})
+    store.register("proxy_password", "hunter2horse", fully_mask=True)
+    store.clear()
+    store.register("proxy_password", "hunter2horse")
+    assert store.masked("proxy_password") == "****orse"
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +147,13 @@ def test_sanitize_multiple_occurrences() -> None:
     result = store.sanitize(text)
     assert "secret99" not in result
     assert result.count("****") == 2
+
+
+def test_sanitize_fully_masked_key_replaces_with_stars_only() -> None:
+    """A fully masked key replaces with bare ``****``, leaving no tail (#149)."""
+    store = SecureTokenStore({})
+    store.register("proxy_password", "hunter2horse", fully_mask=True)
+    assert store.sanitize("failed: hunter2horse") == "failed: ****"
 
 
 # ---------------------------------------------------------------------------
@@ -422,3 +467,19 @@ def test_scrub_document_leaves_the_input_unmutated() -> None:
     scrub_document(doc)
 
     assert doc["warnings"][0]["message"] == "failed for hunter2horse"
+
+
+# ---------------------------------------------------------------------------
+# register_secret() fully_mask policy -- issue #149
+# ---------------------------------------------------------------------------
+
+
+def test_register_secret_fully_mask_propagates_to_sanitize_secrets() -> None:
+    """The process-wide registry must honour the per-key policy, not just a store."""
+    register_secret("proxy_password", "hunter2horse", fully_mask=True)
+    assert sanitize_secrets("failed: hunter2horse") == "failed: ****"
+
+
+def test_register_secret_default_keeps_last_four_tail() -> None:
+    register_secret("stoat", "abcde12345")
+    assert sanitize_secrets("token abcde12345") == "token ****2345"

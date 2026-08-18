@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.9] - 2026-08-18
+
+### Fixed
+
+- **Proxy password redaction no longer leaves the last four characters visible.**
+  `SecureTokenStore.masked` rendered any 5+ character secret as `****{last4}`, a shape
+  designed for opaque 40-character API tokens. For a short, human-chosen proxy password
+  that tail exposed a large fraction of the value, and the base64 `proxy_authorization`
+  header derived from it carried the same leak. `SecureTokenStore` now carries a per-key
+  full-mask policy: `register` and `register_secret` take a keyword-only `fully_mask`
+  flag, and `masked` returns bare `****` for those keys. `core/http.py`'s
+  `_strip_userinfo` registers both `proxy_password` and `proxy_authorization` as fully
+  masked. Stoat and Discord tokens keep the existing tail shape. Fixes #149.
+
 ## [2.19.8] - 2026-08-18
 
 ### Fixed

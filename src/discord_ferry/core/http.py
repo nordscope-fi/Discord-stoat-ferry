@@ -313,8 +313,8 @@ def _strip_userinfo(url: URL) -> tuple[URL, str | None]:
         return url, None
     password = url.password or ""
     header = encode_basic_auth(url.user or "", password)
-    register_secret("proxy_password", password)
-    register_secret("proxy_authorization", header)
+    register_secret("proxy_password", password, fully_mask=True)
+    register_secret("proxy_authorization", header, fully_mask=True)
     return url.with_user(None), header
 
 
