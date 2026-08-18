@@ -96,9 +96,9 @@ const RAW_ENTRIES = [
   projectCommand('local.destructive-git', 'PreToolUse', 'Bash',
     'inline-destructive-git', 'ported', ['Bash'], 'destructive-git',
     'blocks reset --hard, push --force, clean -fd, branch -D, checkout -- ., restore .'),
-  userPrompt('local.post-tool-verify', 'PostToolUse', 'Write|Edit',
+  projectPrompt('local.post-tool-verify', 'PostToolUse', 'Write|Edit',
     'verify suite reminder after edits'),
-  userPrompt('local.pre-compact', 'PreCompact', null,
+  projectPrompt('local.pre-compact', 'PreCompact', null,
     'memory persistence before compaction'),
   projectCommand('local.session-version', 'SessionStart', null,
     'inline-version-echo', 'ported', [], null,
@@ -176,6 +176,8 @@ export function sha256Sum(value) {
 export function stableCommandId(command) {
   const scriptMatch = command.match(/[\w.-]+\.(sh|mjs)(?:\s|"|$)/);
   if (scriptMatch) return scriptMatch[0].trim().replace(/"/g, '');
+  if (command.includes('TOOL_INPUT') && command.includes('case')) return 'inline-destructive-git';
+  if (/^echo\b/.test(command) && command.includes('version')) return 'inline-version-echo';
   return command.split(/\s+/)[0];
 }
 

@@ -109,8 +109,8 @@ const DESTRUCTIVE_PATTERNS = [
   /\bgit\s+push\s+-f\b/,
   /\bgit\s+clean\s+-f/,
   /\bgit\s+branch\s+-D\b/,
-  /\bgit\s+checkout\s+--\s+\.\s*$/,
-  /\bgit\s+restore\s+\.\s*$/,
+  /\bgit\s+checkout\s+--\s+\./,
+  /\bgit\s+restore\s+\./,
 ];
 
 function checkDestructiveGit(payload) {
