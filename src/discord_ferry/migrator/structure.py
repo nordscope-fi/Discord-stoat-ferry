@@ -771,10 +771,11 @@ async def run_roles(
                 )
             )
 
-    # Second pass: set role attributes (hoist and icon from Discord metadata), folded
-    # into a single api_edit_role call per role. Rank is NOT set here: the upstream
-    # roles_edit handler drops DataEditRole.rank through a rest pattern, so it was
-    # accepted with a 200 and never persisted. Ordering lives in _apply_role_ordering.
+    # Second pass: set role attributes (colour, hoist, icon). Colour is a separate
+    # api_edit_role call so a parse failure does not block hoist/icon. Rank is NOT
+    # set here: the upstream roles_edit handler drops DataEditRole.rank through a
+    # rest pattern, so it was accepted with a 200 and never persisted. Ordering
+    # lives in _apply_role_ordering.
     discord_metadata = load_discord_metadata(config.output_dir)
     role_meta = discord_metadata.role_metadata if discord_metadata else {}
     # The sort no longer decides anything the server sees, but deterministic iteration
