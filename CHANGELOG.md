@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.4] - 2026-08-18
+
+### Fixed
+
+- **`--validate-after` now runs the same verification as `ferry check` instead of comparing
+  channel and role counts.** The old Phase 12 cardinality check could not detect a swapped name, a
+  missing emoji, or a truncated message tail, and it swallowed all exceptions into a warning
+  indistinguishable from "not requested". The engine now calls `run_check`, which verifies every
+  entity by ID, checks names, and samples message tails. The `validation_results` dict in
+  `state.json` changes shape from `{passed, channels_expected, ...}` to `{results, counts,
+  has_failures}`. Dry runs are skipped explicitly. ADR-021 records the consequential default
+  change. Fixes #268.
+
+### Changed
+
+- **`CheckReport.to_dict()` is the single serializer for check results.** Both `ferry check --json`
+  and `--validate-after` use it. The duplicate `_check_report_as_dict` in `cli.py` is removed.
+
+- **`scrub_document` now masks the `detail` field in validation results.** The old cardinality
+  shape held no free text. The new shape's `results[].detail` can embed a stringified exception
+  carrying proxy credentials via `aiohttp.ClientHttpProxyError`. Both `validation_results` in
+  `state.json` and `validation` in `report.json` are covered.
+
 ## [2.19.3] - 2026-08-18
 
 ### Fixed
