@@ -3818,23 +3818,77 @@ async def test_apply_role_ordering_missing_roles_key_is_empty(tmp_path: Path) ->
             await _apply_role_ordering(session, config, state, roles, lambda e: None)
 
 
-async def test_apply_role_ordering_single_role_sends_read_back_only(tmp_path: Path) -> None:
-    """One role means nothing to order, so only the GET fires.
+async def test_apply_role_ordering_one_known_role_makes_no_request(tmp_path: Path) -> None:
+    """A single known role cannot permute, so neither request is worth making.
 
-    The role count is not knowable locally, so this guard can only be judged
-    after the read-back. No PATCH route is registered, so an ordering call would
-    raise rather than pass silently.
+    Measured during the chunk-2 review: with one Ferry role on a four-role server
+    the submitted list came back byte-identical to the current order. Both the
+    read-back and the ordering call land in the `servers` bucket, the tightest in
+    the run, so the guard sits before the read-back. No routes are registered, and
+    aioresponses raises on an unregistered request, so a guard placed after the
+    GET fails this loudly.
     """
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
     state.role_map = {"a": "stoat-a"}
     roles = [DCERole(id="a", name="A", position=1)]
 
+    with aioresponses():
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+
+async def test_apply_role_ordering_server_with_one_role_sends_read_back_only(
+    tmp_path: Path,
+) -> None:
+    """A server holding fewer than two roles is judged only after the read-back.
+
+    Ferry knows two roles here, so the local guard passes. The server's own count
+    is not knowable without asking, which is why this guard cannot move earlier.
+    No PATCH route is registered, so an ordering call would raise.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "stoat-a", "b": "stoat-b"}
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+
     gets: list[str] = []
     with aioresponses() as m:
         m.get(
             f"{STOAT_URL}/servers/srv1",
             payload=_server_payload({"stoat-a": 0}),
+            callback=lambda url, **kwargs: gets.append("hit"),  # type: ignore[misc]
+        )
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+    assert gets == ["hit"]
+
+
+async def test_apply_role_ordering_skips_a_no_op_submission(tmp_path: Path) -> None:
+    """When the server already holds the target order, no ordering call is sent.
+
+    This is the --incremental re-run case: the export has not changed, so the
+    permutation reproduces what the previous run applied. No PATCH route is
+    registered, so a redundant submission raises rather than passing quietly.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "stoat-a", "b": "stoat-b"}
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+
+    gets: list[str] = []
+    with aioresponses() as m:
+        # b outranks a and already sits first, which is exactly what the sort wants.
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-b": 0, "stoat-a": 1}),
             callback=lambda url, **kwargs: gets.append("hit"),  # type: ignore[misc]
         )
         async with aiohttp.ClientSession() as session:
@@ -4004,9 +4058,14 @@ async def test_run_roles_ordering_is_the_last_request(tmp_path: Path) -> None:
             repeat=True,
             callback=lambda url, **kwargs: seen.append("perms"),  # type: ignore[misc]
         )
+        # Ranks deliberately opposite to the target order, so ordering has real
+        # work to do. Note the union-path id flip described above: role "b" holds
+        # "stoat-a". Seeding this the other way makes the permutation an identity
+        # and the no-op guard correctly skips the call, which would leave this
+        # test asserting nothing about ordering being last.
         m.get(
             f"{STOAT_URL}/servers/srv1",
-            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            payload=_server_payload({"stoat-b": 0, "stoat-a": 1}),
             repeat=True,
             callback=lambda url, **kwargs: seen.append("read"),  # type: ignore[misc]
         )
@@ -4103,4 +4162,46 @@ async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> N
 
     assert creates == [], "the second run must not recreate roles already in role_map"
     assert first == [{"ranks": ["stoat-b", "stoat-a"]}]
-    assert second == first
+    # Sharper than "the same list again": the second run reads the server back,
+    # sees the order it wants is already there, and sends nothing. Convergence
+    # with one fewer request in the tightest bucket.
+    assert second == []
+
+
+async def test_apply_role_ordering_tolerates_a_stale_role_map(tmp_path: Path) -> None:
+    """A role_map entry naming a role the server no longer has must not crash.
+
+    role_map can lag the server in both directions. #389 records the create loop
+    persisting only every ten roles, and a role can also be deleted on the server
+    between runs. The `state.role_map[r.id] in on_server` filter is what keeps
+    such an entry out of the submitted list, which in turn keeps `slots` and
+    `ordered_known` the same length so `zip(..., strict=True)` cannot raise.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    # "ghost" maps to a Stoat role that is absent from the read-back.
+    state.role_map = {"a": "stoat-a", "b": "stoat-b", "ghost": "stoat-ghost"}
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+        DCERole(id="ghost", name="Ghost", position=5),
+    ]
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+    # No exception, and the ghost never reaches the payload. Submitting it would
+    # be rejected wholesale: the route requires the list to match the server's
+    # role set exactly.
+    assert bodies == [{"ranks": ["stoat-b", "stoat-a"]}]

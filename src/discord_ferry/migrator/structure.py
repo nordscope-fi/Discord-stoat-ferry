@@ -529,7 +529,11 @@ async def _apply_role_ordering(
         roles: The DCE roles this phase handled, carrying Discord ``position``.
         on_event: Event callback for progress reporting.
     """
-    if not state.role_map:
+    # Fewer than two known roles cannot produce a permutation: the single role
+    # would be written back into the slot it already occupies. Guarding here
+    # rather than after the read-back saves BOTH requests, and both land in the
+    # `servers` bucket, which is the tightest in the run at 5 per 10 seconds.
+    if len(state.role_map) < 2:
         return
 
     def _degrade(message: str, warning_type: str = "role_ordering_failed") -> None:
@@ -577,6 +581,13 @@ async def _apply_role_ordering(
     # the server rejects with an InvalidOperation naming nothing useful.
     for slot, stoat_id in zip(slots, ordered_known, strict=True):
         new_order[slot] = stoat_id
+
+    if new_order == current_order:
+        # The server already holds this order. Measured, not assumed: a single
+        # known role always permutes to itself, and an --incremental re-run over
+        # an unchanged export reproduces the order it applied last time. Sending
+        # it again spends a request in the tightest bucket to change nothing.
+        return
 
     try:
         await api_edit_role_ranks(
