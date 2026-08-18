@@ -1504,80 +1504,134 @@ async def _process_message(
     # Step 8: Send the message (all parts).
     stoat_msg_id: str = ""
     duplicate_unmapped = False
-    try:
-        for part_idx, part_content in enumerate(parts):
-            is_first = part_idx == 0
-            # The salt exists for ferry repair. Stoat's Idempotency-Key store is a
-            # 1000-entry in-memory LRU with no TTL, and this key is built from the
-            # DISCORD message id, which a recreated channel does not change. So a
-            # repair running while those keys are still cached would be answered
-            # 409 DuplicateNonce and treat the message as already delivered, when
-            # the channel holding it was deleted and it is not there at all.
-            # Repair passes the new Stoat channel id, which makes the key unique
-            # to that recreation. Empty for the migration, so its keys are
-            # unchanged.
-            _salt = f"-{idempotency_salt}" if idempotency_salt else ""
-            idem_key = (
-                f"ferry-{msg.id}{_salt}"
-                if len(parts) == 1
-                else f"ferry-{msg.id}{_salt}_p{part_idx + 1}"
+    _send_failed = False
+    _send_exc: Exception | None = None
+    _send_exc_str = ""
+    _parts_failed = 0
+    for part_idx, part_content in enumerate(parts):
+        is_first = part_idx == 0
+        # The salt exists for ferry repair. Stoat's Idempotency-Key store is a
+        # 1000-entry in-memory LRU with no TTL, and this key is built from the
+        # DISCORD message id, which a recreated channel does not change. So a
+        # repair running while those keys are still cached would be answered
+        # 409 DuplicateNonce and treat the message as already delivered, when
+        # the channel holding it was deleted and it is not there at all.
+        # Repair passes the new Stoat channel id, which makes the key unique
+        # to that recreation. Empty for the migration, so its keys are
+        # unchanged.
+        _salt = f"-{idempotency_salt}" if idempotency_salt else ""
+        idem_key = (
+            f"ferry-{msg.id}{_salt}"
+            if len(parts) == 1
+            else f"ferry-{msg.id}{_salt}_p{part_idx + 1}"
+        )
+        try:
+            result = await api_send_message(
+                session,
+                config.stoat_url,
+                config.token,
+                stoat_channel_id,
+                content=part_content,
+                # Attachments, embeds, and replies only on the first part.
+                attachments=(autumn_ids if autumn_ids and is_first else None),
+                embeds=(stoat_embeds if stoat_embeds and is_first else None),
+                masquerade=masquerade,
+                replies=(replies if replies and is_first else None),
+                idempotency_key=idem_key,
             )
-            try:
-                result = await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    stoat_channel_id,
-                    content=part_content,
-                    # Attachments, embeds, and replies only on the first part.
-                    attachments=(autumn_ids if autumn_ids and is_first else None),
-                    embeds=(stoat_embeds if stoat_embeds and is_first else None),
-                    masquerade=masquerade,
-                    replies=(replies if replies and is_first else None),
-                    idempotency_key=idem_key,
-                )
-            except DuplicateSendError:
-                # This part is already on the server. The catch is PER PART, not around
-                # the loop: every part carries its own Idempotency-Key, so the parts
-                # after a duplicate are NOT duplicates and must still be sent. Catching
-                # at the loop truncates the message and loses their content with no
-                # warning, which is worse than the bug this batch fixes.
-                #
-                # Only the first part's id reaches message_map, so only it is worth
-                # noting. Stoat returns no id with the 409, so that entry is lost.
-                if is_first:
-                    duplicate_unmapped = True
-                continue
-            part_stoat_id: str = result["_id"]
+        except DuplicateSendError:
+            # This part is already on the server. The catch is PER PART, not around
+            # the loop: every part carries its own Idempotency-Key, so the parts
+            # after a duplicate are NOT duplicates and must still be sent. Catching
+            # at the loop truncates the message and loses their content with no
+            # warning, which is worse than the bug this batch fixes.
+            #
+            # Only the first part's id reaches message_map, so only it is worth
+            # noting. Stoat returns no id with the 409, so that entry is lost.
             if is_first:
-                stoat_msg_id = part_stoat_id
-
-        # Only the statements that CONSUME the id are guarded. The counters and the
-        # reference-set updates run either way, because the message IS on the server.
-        #
-        # Do NOT fold `stoat_msg_id` into the branch condition above. `else` means "not
-        # the condition above", not "the retry path", so a parallel-path message with an
-        # empty id would fall into the retry branch and write state.message_map directly,
-        # bypassing ChannelResult and the save_lock discipline. Both branches leave the
-        # same channel_message_counts, so no state-level test can see that mistake.
-        # Pinned by test_duplicate_runs_the_parallel_branch_not_the_retry_branch.
-        if channel_result is not None:
-            # This guard is load-bearing twice over: it keeps an empty id out of the map,
-            # and it upholds the ChannelResult.message_map_updates invariant that the
-            # reply and pin lookups rely on. See the field's own comment.
-            if stoat_msg_id:
-                channel_result.message_map_updates[msg.id] = stoat_msg_id
-            channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
-            channel_result.messages_migrated += 1  # S15: track for forum index rebuild
-        else:
-            if stoat_msg_id:
-                state.message_map[msg.id] = stoat_msg_id
-            state.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
-            # S15: Track per-channel message count (direct-state path, e.g. retry).
-            if export_channel_id:
-                state.channel_message_counts[export_channel_id] = (
-                    state.channel_message_counts.get(export_channel_id, 0) + 1
+                duplicate_unmapped = True
+            continue
+        except Exception as exc:  # noqa: BLE001
+            _parts_failed += 1
+            if not _send_failed:
+                _send_failed = True
+                _send_exc = exc
+                _send_exc_str = safe_sanitize(config.token_store, str(exc))
+                acc_errors.append(
+                    {
+                        "phase": "messages",
+                        "type": "message_send_failed",
+                        "message": f"Failed to send msg {msg.id}: {_send_exc_str}",
+                    }
                 )
+                acc_failed.append(
+                    FailedMessage(
+                        discord_msg_id=msg.id,
+                        stoat_channel_id=stoat_channel_id,
+                        error=_send_exc_str,
+                        content_preview=content[:50] if content else "",
+                    )
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="messages",
+                        status="warning",
+                        message=f"Message {msg.id} failed: {_send_exc_str}",
+                    )
+                )
+            continue
+        part_stoat_id: str = result["_id"]
+        if is_first:
+            stoat_msg_id = part_stoat_id
+
+    # Step 8a: Commit delivered state and queue pins/reactions.
+    #
+    # Wrapped in its own try/except to preserve the exception safety net the old
+    # outer try provided for this region. An unexpected exception here is caught,
+    # recorded, and (on the retry path) re-raised rather than propagating unguarded.
+    try:
+        if stoat_msg_id or duplicate_unmapped:
+            # Only the statements that CONSUME the id are guarded. The counters and the
+            # reference-set updates run either way, because the message IS on the server.
+            #
+            # Do NOT fold `stoat_msg_id` into the branch condition above. `else` means
+            # "not the condition above", not "the retry path", so a parallel-path message
+            # with an empty id would fall into the retry branch and write
+            # state.message_map directly, bypassing ChannelResult and the save_lock
+            # discipline. Both branches leave the same channel_message_counts, so no
+            # state-level test can see that mistake.
+            # Pinned by test_duplicate_runs_the_parallel_branch_not_the_retry_branch.
+            if channel_result is not None:
+                # This guard is load-bearing twice over: it keeps an empty id out of the
+                # map, and it upholds the ChannelResult.message_map_updates invariant
+                # that the reply and pin lookups rely on. See the field's own comment.
+                if stoat_msg_id:
+                    channel_result.message_map_updates[msg.id] = stoat_msg_id
+                channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
+                channel_result.messages_migrated += 1  # S15: track for forum index rebuild
+            else:
+                if stoat_msg_id:
+                    state.message_map[msg.id] = stoat_msg_id
+                state.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
+                # S15: Track per-channel message count (direct-state path, e.g. retry).
+                if export_channel_id:
+                    state.channel_message_counts[export_channel_id] = (
+                        state.channel_message_counts.get(export_channel_id, 0) + 1
+                    )
+
+        if _send_failed and stoat_msg_id:
+            _parts_delivered = len(parts) - _parts_failed
+            acc_warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "message_partial_send",
+                    "message": (
+                        f"Message {msg.id} partially delivered: "
+                        f"{_parts_delivered} of {len(parts)} parts sent, "
+                        f"{_parts_failed} failed"
+                    ),
+                }
+            )
 
         if duplicate_unmapped:
             # The message is on the server but Stoat returned no id with the 409, so
@@ -1613,9 +1667,10 @@ async def _process_message(
                             }
                         )
                     else:
-                        # Batch 4 (S1): the emoji never entered emoji_map (no asset / beyond
-                        # the cap) — the reaction is dropped. Count it (acc-aware) + warn so the
-                        # fidelity report reflects the loss instead of silently claiming 100%.
+                        # Batch 4 (S1): the emoji never entered emoji_map (no asset /
+                        # beyond the cap). The reaction is dropped. Count it
+                        # (acc-aware) + warn so the fidelity report reflects the loss
+                        # instead of claiming 100%.
                         if channel_result is not None:
                             channel_result.reactions_dropped += 1
                         else:
@@ -1642,42 +1697,41 @@ async def _process_message(
 
     except Exception as exc:  # noqa: BLE001
         safe_exc = safe_sanitize(config.token_store, str(exc))
-        acc_errors.append(
-            {
-                "phase": "messages",
-                "type": "message_send_failed",
-                "message": f"Failed to send msg {msg.id}: {safe_exc}",
-            }
-        )
-        acc_failed.append(
-            FailedMessage(
-                discord_msg_id=msg.id,
-                stoat_channel_id=stoat_channel_id,
-                error=safe_exc,
-                content_preview=content[:50] if content else "",
+        if not _send_failed:
+            acc_errors.append(
+                {
+                    "phase": "messages",
+                    "type": "message_send_failed",
+                    "message": f"Failed to send msg {msg.id}: {safe_exc}",
+                }
             )
-        )
-        on_event(
-            MigrationEvent(
-                phase="messages",
-                status="warning",
-                message=f"Message {msg.id} failed: {safe_exc}",
+            acc_failed.append(
+                FailedMessage(
+                    discord_msg_id=msg.id,
+                    stoat_channel_id=stoat_channel_id,
+                    error=safe_exc,
+                    content_preview=content[:50] if content else "",
+                )
             )
-        )
-        # Batch 3 (S1): the retry path (engine.run_retry_failed) calls this with
-        # channel_result=None and relies on an exception to mark a re-failure. Re-raise so
-        # the retry loop accounts correctly and terminates. The parallel per-channel path
-        # (channel_result set) keeps degrade-in-loop. Guard is provably retry-path-only:
-        # only engine.py's retry loop passes channel_result=None.
-        #
-        # Batch 7: a DuplicateSendError never reaches here. It is caught per part inside
-        # the send loop above, because a duplicate means the message landed and there is
-        # no re-failure to mark. Re-raising it would leave the message in
-        # failed_messages, which is exactly the defect batch 7 removes. Pinned by
-        # test_retry_path_does_not_reraise_on_a_duplicate.
+            on_event(
+                MigrationEvent(
+                    phase="messages",
+                    status="warning",
+                    message=f"Message {msg.id} failed: {safe_exc}",
+                )
+            )
+            _send_failed = True
+            _send_exc = exc
         if channel_result is None:
             raise
-        return
+
+    # Batch 3 (S1): the retry path (engine.run_retry_failed) calls this with
+    # channel_result=None and relies on an exception to mark a re-failure. Re-raise
+    # so the retry loop accounts correctly and terminates. The commit has already
+    # run, so the delivered state is preserved before the retry loop sees the
+    # exception.
+    if _send_failed and channel_result is None and _send_exc is not None:
+        raise _send_exc
 
     # Step 9: Resume checkpoint handled in the caller's periodic save loop.
 
