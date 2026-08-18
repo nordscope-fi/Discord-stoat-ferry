@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.19.2] - 2026-08-18
+
+### Fixed
+
+- **A bool or NaN `retry_after` in a 429 body defeated backoff instead of falling back to the
+  default delay.** `float(True)` gave 0.001 s and `float(False)` gave 0.0 s, because `bool` is a
+  subclass of `int`. NaN survived the `max`/`min` clamp and resolved to 0.0 s. Both paths produced
+  near-instant retries with no real backoff. The guard now rejects booleans and non-finite values
+  explicitly, matching the pattern already proven in `uploader/autumn.py`. The same fix was applied
+  to `discord/client.py`, where the audit found an identical unguarded parser. Fixes #386.
+
 ### Added
 
 - **Counters and flags on the migration documents are now asserted to start from zero.** Every
