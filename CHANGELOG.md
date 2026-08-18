@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.19.2] - 2026-08-18
 
 ## [2.19.2] - 2026-08-18
 
@@ -60,7 +60,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   discarded it: the upstream `roles_edit` handler destructures `DataEditRole` with a rest pattern
   that does not bind `rank`. The request returned 200, `hoist` and `icon` in the same call still
   landed, and no warning fired, so every run reported ordering as applied while the server kept its
-  default ranks. Two shipped documents claimed the behaviour worked.
+  default ranks. **Three** shipped documents claimed the behaviour worked, and the third,
+  `docs/reference/architecture.md`, was found only by the whole-branch review after the first two
+  had been corrected. All three are fixed here.
 
   Ordering now goes through `PATCH /servers/{id}/roles/ranks`, which takes the complete ordered role
   list and assigns each role a rank equal to its index, making index 0 the top of the hierarchy.

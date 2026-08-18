@@ -4205,3 +4205,58 @@ async def test_apply_role_ordering_tolerates_a_stale_role_map(tmp_path: Path) ->
     # be rejected wholesale: the route requires the list to match the server's
     # role set exactly.
     assert bodies == [{"ranks": ["stoat-b", "stoat-a"]}]
+
+
+async def test_run_roles_retries_ordering_when_every_role_is_finalized(tmp_path: Path) -> None:
+    """An --incremental run still fixes ordering, even with every role finalized.
+
+    The ordering step is deliberately NOT gated by `roles_finalized`, unlike the
+    attributes and permissions passes beside it. Ordering is a property of the
+    whole server rather than of any one role, and gating it per-role would make a
+    degraded ordering permanent: a run whose ordering was refused with a 403 marks
+    its roles finalized anyway, so a gated step would never retry.
+
+    This drives exactly that recovery. Every role is finalized, the server is in
+    the wrong order, and the run must still correct it.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, incremental=True)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "stoat-a", "b": "stoat-b"}
+    state.roles_finalized = {"a", "b"}
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    bodies: list[dict[str, object]] = []
+    creates: list[str] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "unexpected", "name": "X"},
+            repeat=True,
+            callback=lambda url, **kwargs: creates.append("hit"),  # type: ignore[misc]
+        )
+        # The server is in the WRONG order: a outranks b, but b has the higher
+        # Discord position.
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    assert creates == [], "finalized roles must not be recreated"
+    assert bodies == [{"ranks": ["stoat-b", "stoat-a"]}], (
+        "ordering must still run for finalized roles, otherwise a degraded "
+        "ordering could never be repaired by a later run"
+    )
