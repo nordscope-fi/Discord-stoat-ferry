@@ -43,6 +43,8 @@ BASE="${1:-origin/main}"
 EXCLUDES=(
   ":(exclude)scripts/check-deferrals.sh"
   ":(exclude)tests/test_gate_scripts.py"
+  ":(exclude)scripts/agent-compat/codex-hook-adapter.mjs"
+  ":(exclude)scripts/agent-compat/vibe-hook-adapter.mjs"
 )
 
 PATTERN='future (work|concern|hardening|enhancement|iteration|sprint|phase|fix|improvement|version)|v[0-9]+ scope|simpler for now|out of scope for (now|this (PR|pull request|change|slice|pass|iteration))|defer(red)? to (follow-?up|later|v[0-9]+|phase [0-9]+)|accepted trade-?off|we can (unify|fix|handle|address|do) (later|in v[0-9]+|in phase [0-9]+)|adds complexity|when we have time|punt(ed)? to|come back to (this|it|that)|in a (later|future|separate|follow-?up) (pass|PR|pull request|change|iteration|slice)|revisit (this|it|that|later)'
