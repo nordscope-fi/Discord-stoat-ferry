@@ -690,7 +690,7 @@ def setup_page() -> None:
                         precision=0,
                     ).classes("w-48")
                     validate_after_cb = ui.checkbox(
-                        "Validate after migration (compare server counts)",
+                        "Validate after migration (verify entities by ID)",
                         value=adv_stored["validate_after"],
                     )
 
