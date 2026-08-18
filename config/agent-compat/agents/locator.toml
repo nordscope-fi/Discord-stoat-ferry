@@ -1,0 +1,8 @@
+# Locator — fast mechanical file and symbol search.
+# Maps to the "File-location sweeps" tier in AGENTS.md.
+
+name = "locator"
+description = "Finds files by pattern, greps for symbols and keywords, locates definitions and references. Returns paths and line numbers. No analysis, no design."
+model = "gpt-5.6-luna"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"

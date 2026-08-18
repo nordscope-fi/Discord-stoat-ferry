@@ -1,0 +1,8 @@
+# Coordinator — primary implementation role for approved multi-step Ferry work.
+# Maps to the "Planning, design, coordination" and "Build and implementation" tiers in AGENTS.md.
+
+name = "coordinator"
+description = "Coordinates approved work against AGENTS.md, the active plan, and its GitHub issues. Preserves task boundaries, verification gates, and user-owned changes. Delegates only when the governing instructions and user request allow it."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
