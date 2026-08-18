@@ -26,6 +26,7 @@ from discord_ferry.migrator.api import (
     api_create_server,
     api_edit_channel,
     api_edit_role,
+    api_edit_role_ranks,
     api_edit_server,
     api_fetch_root,
     api_fetch_server,
@@ -494,6 +495,88 @@ async def apply_role_permissions(
                 "message": f"Failed to set permissions for role '{label}': {exc}",
             }
         )
+
+
+async def _apply_role_ordering(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    roles: list[DCERole],
+    on_event: EventCallback,
+) -> None:
+    """Apply Discord role hierarchy to the Stoat server in one call.
+
+    Stoat's per-role PATCH accepts ``rank`` and discards it: the upstream
+    ``roles_edit`` handler destructures ``DataEditRole`` with a rest pattern that
+    does not bind the field. ``edit_role_ranks`` is the only route that sets
+    ordering, and it assigns each role a rank equal to its INDEX in the submitted
+    list, so index 0 is the top. Discord's ``position`` runs the other way, which
+    is why the sort is descending.
+
+    The route rejects any list that does not name every role on the server, so the
+    list comes from a read-back rather than from ``role_map``. That map can lag the
+    server: the create loop persists state every ten roles, so a hard kill strands
+    created roles outside it (#389).
+
+    Only roles Ferry knows about move. Every other role keeps its exact index,
+    which leaves a ``--server-id`` target's own hierarchy alone and keeps the
+    upstream elevation check quiet for roles the caller may not outrank.
+
+    Args:
+        session: An active aiohttp ClientSession.
+        config: Ferry configuration.
+        state: Migration state; ``role_map`` supplies the roles Ferry created.
+        roles: The DCE roles this phase handled, carrying Discord ``position``.
+        on_event: Event callback for progress reporting.
+    """
+    if not state.role_map:
+        return
+
+    server = await api_fetch_server(session, config.stoat_url, config.token, state.stoat_server_id)
+    # Upstream omits `roles` entirely when the map is empty, so this cannot be a
+    # plain subscript.
+    server_roles: dict[str, Any] = server.get("roles") or {}
+    if len(server_roles) < 2:
+        return
+
+    # The server's present arrangement. The id breaks a rank tie so the base order
+    # is deterministic even if the server holds duplicate ranks.
+    current_order = sorted(server_roles, key=lambda rid: (server_roles[rid].get("rank", 0), rid))
+    on_server = set(current_order)
+
+    # Ferry-known roles that are actually present, highest Discord position first.
+    # Negate the position rather than reversing: `reverse=True` would flip the id
+    # tie-break to descending too, which is what structure.py's truncation sort does
+    # and what the attributes pass does not.
+    known = [
+        (r.position, r.id, state.role_map[r.id])
+        for r in roles
+        if r.id in state.role_map and state.role_map[r.id] in on_server
+    ]
+    known.sort(key=lambda item: (-item[0], item[1]))
+    ordered_known = [stoat_id for _, _, stoat_id in known]
+    if not ordered_known:
+        return
+
+    known_ids = set(ordered_known)
+    slots = [i for i, rid in enumerate(current_order) if rid in known_ids]
+    new_order = list(current_order)
+    # strict=True on purpose: both lists derive from `known_ids`, so a length
+    # mismatch is a logic error here. Raising beats sending a truncated list that
+    # the server rejects with an InvalidOperation naming nothing useful.
+    for slot, stoat_id in zip(slots, ordered_known, strict=True):
+        new_order[slot] = stoat_id
+
+    await api_edit_role_ranks(
+        session, config.stoat_url, config.token, state.stoat_server_id, new_order
+    )
+    on_event(
+        MigrationEvent(
+            phase="roles",
+            status="progress",
+            message=f"Applied role ordering to {len(new_order)} roles",
+        )
+    )
 
 
 async def run_roles(

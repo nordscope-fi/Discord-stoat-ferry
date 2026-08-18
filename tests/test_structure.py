@@ -21,6 +21,7 @@ from discord_ferry.discord.metadata import (
 from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
+    _apply_role_ordering,
     make_unique_channel_name,
     run_categories,
     run_channels,
@@ -3664,3 +3665,178 @@ async def test_a_dry_run_records_no_names_and_still_passes_the_guard(tmp_path: P
     assert state.created_channel_names == {}
     assert state.created_role_names == {}
     assert_names_complete(state)
+
+
+# ---------------------------------------------------------------------------
+# _apply_role_ordering (#380)
+# ---------------------------------------------------------------------------
+
+
+def _server_payload(ranks: dict[str, int]) -> dict[str, object]:
+    """Build a GET /servers/{id} payload whose roles carry the given ranks."""
+    return {
+        "_id": "srv1",
+        "roles": {rid: {"name": rid, "rank": rank} for rid, rank in ranks.items()},
+    }
+
+
+async def test_apply_role_ordering_sorts_position_descending(tmp_path: Path) -> None:
+    """Index 0 is the top of the hierarchy, so the highest Discord position leads.
+
+    Upstream ``set_role_ordering`` assigns rank by enumeration index and
+    ``ordered_roles()`` sorts ascending by rank, while Discord's ``position`` is
+    higher-is-higher. An ascending sort here would produce the exact reverse and
+    would still look like deliberate ordering on the server.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"low": "stoat-low", "mid": "stoat-mid", "high": "stoat-high"}
+    roles = [
+        DCERole(id="low", name="Low", position=1),
+        DCERole(id="mid", name="Mid", position=5),
+        DCERole(id="high", name="High", position=9),
+    ]
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-low": 0, "stoat-mid": 1, "stoat-high": 2}),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+    assert bodies == [{"ranks": ["stoat-high", "stoat-mid", "stoat-low"]}]
+
+
+async def test_apply_role_ordering_tie_breaks_on_ascending_id(tmp_path: Path) -> None:
+    """Equal positions order by ascending Discord id.
+
+    This is the only case that distinguishes ``key=(-position, id)`` from
+    ``key=(position, id)`` with ``reverse=True``, which would flip the id tie-break
+    and yield "30" before "20". Replaces the coverage of the retired
+    test_run_roles_rank_tie_break_is_deterministic, which asserted on PATCH-call
+    order rather than on what the server was told.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"30": "stoat-30", "20": "stoat-20"}
+    roles = [
+        DCERole(id="30", name="Thirty", position=5),
+        DCERole(id="20", name="Twenty", position=5),
+    ]
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-30": 0, "stoat-20": 1}),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+    assert bodies == [{"ranks": ["stoat-20", "stoat-30"]}]
+
+
+async def test_apply_role_ordering_keeps_unknown_roles_at_their_index(tmp_path: Path) -> None:
+    """A role Ferry did not create stays exactly where it was.
+
+    This is the whole point of the in-place permutation. It keeps a --server-id
+    target's own hierarchy intact, and it is what keeps the upstream elevation
+    check quiet for roles the caller may not outrank.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "stoat-a", "b": "stoat-b"}
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload(
+                {"stoat-a": 0, "stoat-manual": 1, "stoat-b": 2, "stoat-other": 3}
+            ),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+    # stoat-manual stays at index 1, stoat-other at index 3. The two Ferry roles
+    # swap into the slots they already held, indices 0 and 2. The list also names
+    # every role on the server, which the route requires.
+    assert bodies == [{"ranks": ["stoat-b", "stoat-manual", "stoat-a", "stoat-other"]}]
+
+
+async def test_apply_role_ordering_empty_role_map_makes_no_request(tmp_path: Path) -> None:
+    """The role_map guard runs before the read-back, so no route is touched.
+
+    No routes are registered at all. aioresponses raises on an unregistered
+    request, so this fails loudly if the guard is placed after the GET rather
+    than before it.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    with aioresponses():
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, [], lambda e: None)
+
+
+async def test_apply_role_ordering_missing_roles_key_is_empty(tmp_path: Path) -> None:
+    """Upstream omits `roles` when the map is empty; that must not raise.
+
+    The v0 Server model declares roles with
+    skip_serializing_if = "HashMap::<String, Role>::is_empty".
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "stoat-a"}
+    roles = [DCERole(id="a", name="A", position=1)]
+
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+
+async def test_apply_role_ordering_single_role_sends_read_back_only(tmp_path: Path) -> None:
+    """One role means nothing to order, so only the GET fires.
+
+    The role count is not knowable locally, so this guard can only be judged
+    after the read-back. No PATCH route is registered, so an ordering call would
+    raise rather than pass silently.
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "stoat-a"}
+    roles = [DCERole(id="a", name="A", position=1)]
+
+    gets: list[str] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0}),
+            callback=lambda url, **kwargs: gets.append("hit"),  # type: ignore[misc]
+        )
+        async with aiohttp.ClientSession() as session:
+            await _apply_role_ordering(session, config, state, roles, lambda e: None)
+
+    assert gets == ["hit"]
