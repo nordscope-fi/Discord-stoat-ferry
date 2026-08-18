@@ -21,8 +21,9 @@ check is a recorded result, not the absence of one.
 from __future__ import annotations
 
 import asyncio
+import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session
@@ -66,6 +67,11 @@ CheckStatus = Literal["ok", "warn", "fail", "unverifiable"]
 #: The tail check emits no ``warn`` at all, which
 #: ``test_the_tail_check_never_emits_warn`` pins across every tail scenario.
 STATUSES: tuple[CheckStatus, ...] = get_args(CheckStatus)
+
+
+def _strip_control(text: str) -> str:
+    """Remove C0 and C1 control characters except horizontal tab."""
+    return "".join(ch for ch in text if ch == "\t" or unicodedata.category(ch) != "Cc")
 
 
 @dataclass
@@ -174,6 +180,35 @@ class CheckReport:
         category, which is the fastest way to teach people to ignore the tool.
         """
         return any(r.status == "fail" for r in self.results)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Sanitized, JSON-ready dict matching the ``ferry check --json`` contract."""
+        return {
+            "results": [
+                {
+                    "name": _strip_control(r.name),
+                    "status": r.status,
+                    "kind": r.kind,
+                    "detail": _strip_control(r.detail),
+                    "discord_id": (
+                        _strip_control(r.discord_id) if r.discord_id else r.discord_id
+                    ),
+                    "stoat_id": (
+                        _strip_control(r.stoat_id) if r.stoat_id else r.stoat_id
+                    ),
+                    "expected": (
+                        _strip_control(r.expected)
+                        if r.expected is not None
+                        else None
+                    ),
+                    "found": (
+                        _strip_control(r.found) if r.found is not None else None
+                    ),
+                }
+                for r in self.results
+            ],
+            "counts": self.counts(),
+        }
 
 
 async def run_check(
