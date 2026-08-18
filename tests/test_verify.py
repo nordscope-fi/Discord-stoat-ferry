@@ -1879,3 +1879,82 @@ def test_every_emitted_kind_is_documented_and_a_literal() -> None:
         "a kind is being built by interpolation. The --json serialiser does not "
         "strip `kind`, on the argument that it is always an internal literal."
     )
+
+
+# ---------------------------------------------------------------------------
+# CheckReport.to_dict() (#268)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckReportToDict:
+    """CheckReport.to_dict() serialization and sanitization."""
+
+    def test_to_dict_shape_matches_existing_contract(self) -> None:
+        """Output shape is {"results": [...], "counts": {...}}."""
+        report = CheckReport()
+        report.add(
+            name="general",
+            status="ok",
+            kind="channel_present",
+            detail="found",
+        )
+        d = report.to_dict()
+        assert set(d.keys()) == {"results", "counts"}
+        assert len(d["results"]) == 1
+        assert d["counts"]["ok"] == 1
+
+    def test_to_dict_strips_control_characters(self) -> None:
+        """Free-text fields have C0/C1 control characters removed."""
+        report = CheckReport()
+        report.add(
+            name="chan\x1b[31m-evil",
+            status="ok",
+            kind="channel_present",
+            detail="detail\x9b-csi",
+            discord_id="id\x00null",
+            stoat_id="stoat\x07bell",
+            expected="exp\nnewline",
+            found="found\ttab-kept",
+        )
+        result = report.to_dict()["results"][0]
+        assert result["name"] == "chan[31m-evil"
+        assert result["detail"] == "detail-csi"
+        assert result["discord_id"] == "idnull"
+        assert result["stoat_id"] == "stoatbell"
+        assert result["expected"] == "expnewline"
+        assert result["found"] == "found\ttab-kept"
+
+    def test_to_dict_preserves_none_optionals(self) -> None:
+        """None fields stay None, not stripped."""
+        report = CheckReport()
+        report.add(
+            name="test",
+            status="ok",
+            kind="channel_present",
+            detail="ok",
+        )
+        result = report.to_dict()["results"][0]
+        assert result["discord_id"] is None
+        assert result["stoat_id"] is None
+        assert result["expected"] is None
+        assert result["found"] is None
+
+    def test_to_dict_status_and_kind_not_stripped(self) -> None:
+        """Internal literals are not processed by _strip_control."""
+        report = CheckReport()
+        report.add(
+            name="test",
+            status="ok",
+            kind="channel_present",
+            detail="ok",
+        )
+        result = report.to_dict()["results"][0]
+        assert result["status"] == "ok"
+        assert result["kind"] == "channel_present"
+
+    def test_to_dict_empty_report(self) -> None:
+        """Empty report produces empty results and zeroed counts."""
+        report = CheckReport()
+        d = report.to_dict()
+        assert d["results"] == []
+        assert all(v == 0 for v in d["counts"].values())
