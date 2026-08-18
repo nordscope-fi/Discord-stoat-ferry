@@ -2,7 +2,10 @@
 # Maps to the "Planning, design, coordination" and "Build and implementation" tiers in AGENTS.md.
 
 name = "coordinator"
-description = "Coordinates approved work against AGENTS.md, the active plan, and its GitHub issues. Preserves task boundaries, verification gates, and user-owned changes. Delegates only when the governing instructions and user request allow it."
+description = "Primary implementation coordinator for approved multi-step Ferry work."
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
+developer_instructions = """
+Coordinate approved work against AGENTS.md, the active plan, and its GitHub issues. Preserve task boundaries, verification gates, and user-owned changes. Delegate only when the governing instructions and user request allow it.
+"""

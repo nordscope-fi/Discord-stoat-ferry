@@ -2,7 +2,10 @@
 # Maps to the "Exploration subagents" tier in AGENTS.md.
 
 name = "explorer"
-description = "Traces execution paths, maps component dependencies, and returns evidence. Never proposes fixes unless explicitly asked."
+description = "Traces execution paths and maps architecture for Ferry."
 model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
+developer_instructions = """
+Trace execution paths, map component dependencies, and return evidence. Never propose fixes unless explicitly asked.
+"""
