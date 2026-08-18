@@ -1,0 +1,8 @@
+# Reviewer — correctness, security, and regression review.
+# Maps to the "Build and implementation" tier in AGENTS.md (review requires depth, not speed).
+
+name = "reviewer"
+description = "Reviews code for correctness, security, and regressions. Reports findings with verification commands. Never proposes edits unless explicitly asked."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"

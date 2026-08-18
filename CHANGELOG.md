@@ -14,6 +14,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   else branch now resets the flag, and a dedicated `except StateError` handler clears it and names
   the cause. Fixes #383.
 
+### Added
+
+- **Cross-platform agent support for Codex (OpenAI CLI) and Vibe (Mistral CLI).** A
+  generator-driven architecture renders config templates from `config/agent-compat/` into
+  gitignored `.codex/` and `.vibe/` directories. Hook adapters route Codex/Vibe lifecycle events
+  to the same `~/.claude/hooks/` guard scripts Claude Code uses. A parity ledger maps all 24
+  hooks. A skill topology bridger symlinks all 14 `df-*` skills. A drift verifier checks
+  generated state. Run `./scripts/agent-install.sh` to generate, `./scripts/agent-check.sh` to
+  verify. See ADR-022.
+
 ## [2.19.6] - 2026-08-18
 
 ### Fixed
