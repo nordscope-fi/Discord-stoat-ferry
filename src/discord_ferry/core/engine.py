@@ -664,9 +664,7 @@ async def run_migration(
             try:
                 from discord_ferry.migrator.verify import run_check
 
-                report = await run_check(
-                    config.stoat_url, config.token, state, on_event
-                )
+                report = await run_check(config.stoat_url, config.token, state, on_event)
                 validation_dict = report.to_dict()
                 validation_dict["has_failures"] = report.has_failures
                 state.validation_results = validation_dict
@@ -679,8 +677,7 @@ async def run_migration(
                     )
                 else:
                     msg = (
-                        f"Validation passed: {counts['ok']} ok, "
-                        f"{counts['warn']} warned, 0 failing."
+                        f"Validation passed: {counts['ok']} ok, {counts['warn']} warned, 0 failing."
                     )
                 on_event(
                     MigrationEvent(

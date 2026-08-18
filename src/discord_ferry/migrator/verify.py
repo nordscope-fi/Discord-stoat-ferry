@@ -190,20 +190,10 @@ class CheckReport:
                     "status": r.status,
                     "kind": r.kind,
                     "detail": _strip_control(r.detail),
-                    "discord_id": (
-                        _strip_control(r.discord_id) if r.discord_id else r.discord_id
-                    ),
-                    "stoat_id": (
-                        _strip_control(r.stoat_id) if r.stoat_id else r.stoat_id
-                    ),
-                    "expected": (
-                        _strip_control(r.expected)
-                        if r.expected is not None
-                        else None
-                    ),
-                    "found": (
-                        _strip_control(r.found) if r.found is not None else None
-                    ),
+                    "discord_id": (_strip_control(r.discord_id) if r.discord_id else r.discord_id),
+                    "stoat_id": (_strip_control(r.stoat_id) if r.stoat_id else r.stoat_id),
+                    "expected": (_strip_control(r.expected) if r.expected is not None else None),
+                    "found": (_strip_control(r.found) if r.found is not None else None),
                 }
                 for r in self.results
             ],
