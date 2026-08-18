@@ -3880,3 +3880,97 @@ async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> N
             )
 
     assert sent[0]["replies"] == [{"id": "SHARED", "mention": False}]
+
+
+# ---------------------------------------------------------------------------
+# S5: Embed description budget enforcement (Step 7b)
+# ---------------------------------------------------------------------------
+
+
+async def test_embed_budget_drops_excess_embeds(tmp_path: Path) -> None:
+    """When total embed description length exceeds the budget, excess embeds are dropped."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    # Content is short, so budget = max(0, 2000 - len(timestamp_prefix + content) - 40).
+    # Two embeds: first fits, second pushes over.
+    embeds = [
+        {"title": "A", "description": "x" * 1000},
+        {"title": "B", "description": "y" * 1000},
+    ]
+    msg = _make_message(id="bd1", content="hi", embeds=embeds)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    sent_embeds = sent[0].get("embeds")
+    assert sent_embeds is not None
+    assert len(sent_embeds) == 1
+    assert "embed(s) could not be migrated" in sent[0]["content"]
+    assert state.embeds_dropped >= 1
+
+
+async def test_embed_budget_all_fit_when_short(tmp_path: Path) -> None:
+    """Short content with small embeds: all embeds survive the budget check."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    embeds = [
+        {"title": "A", "description": "short"},
+        {"title": "B", "description": "also short"},
+    ]
+    msg = _make_message(id="bf1", content="hi", embeds=embeds)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    sent_embeds = sent[0].get("embeds")
+    assert sent_embeds is not None
+    assert len(sent_embeds) == 2
+    assert "could not be migrated" not in sent[0]["content"]
+
+
+async def test_embed_budget_note_omitted_when_content_near_limit(tmp_path: Path) -> None:
+    """When parts[0] + note would exceed 2000, the note is omitted but embeds still drop."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    # Build content that, after the timestamp prefix, fills parts[0] close to 2000.
+    # The timestamp prefix "*[2024-01-15 12:00 UTC]* " is 25 chars.
+    filler = "a" * 1970
+    embeds = [{"title": "Big", "description": "d" * 1500}]
+    msg = _make_message(id="bn1", content=filler, embeds=embeds)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) >= 1
+    # The embed was dropped (budget is 0 or near 0 with long content).
+    assert state.embeds_dropped >= 1
+    # The note should NOT appear because parts[0] is too long for it.
+    assert "could not be migrated" not in sent[0]["content"]
+
+
+async def test_embed_budget_all_dropped_ships_note_not_empty_label(tmp_path: Path) -> None:
+    """An embed-only message where all embeds are budget-dropped ships with the drop
+    note, not [empty message]."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    # A message with no text content, only a large embed.
+    embeds = [{"title": "X", "description": "z" * 1990}]
+    msg = _make_message(id="ba1", content="", embeds=embeds)
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(sent) == 1
+    content = sent[0]["content"]
+    assert "embed(s) could not be migrated" in content
+    assert "[empty message]" not in content
