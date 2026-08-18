@@ -4,7 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2.19.2] - 2026-08-18
+## [2.19.3] - 2026-08-18
+
+### Fixed
+
+- **`ferry probe` rendered server-controlled strings through Rich unescaped, so a stray closing
+  tag in a Stoat response killed all output.** A `[/bold]` or `[/red]` anywhere in the instance's
+  feature limits, version string, rate-limit headers or an exception message raised `MarkupError`
+  and gave exit 1 with no table at all. Now wraps `c.name` and `c.detail` in `escape()`, matching
+  `_render_check_report` which already did this. `--json` was never affected. Fixes #384.
 
 ## [2.19.2] - 2026-08-18
 
