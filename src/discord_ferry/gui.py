@@ -25,7 +25,7 @@ from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
-from discord_ferry.errors import MigrationError
+from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.parser.dce_parser import (
     _ACKNOWLEDGEABLE_TYPES,
     acknowledgement_required,
@@ -1241,6 +1241,7 @@ async def migrate_page() -> None:
                     "bg-gray-400 text-white"
                 )
     else:
+        storage["resume"] = False
         resume_choice_made.set()  # No previous state — start immediately.
 
     # Build FerryConfig from stored values
@@ -1699,6 +1700,17 @@ async def migrate_page() -> None:
 
             try:
                 await run_migration(config, on_event=on_event)
+            except StateError as exc:
+                storage["resume"] = False
+                log_display.push(
+                    f"[ERROR] Could not load previous state: {exc}. "
+                    "The resume flag has been cleared. "
+                    "Re-run to start a fresh migration."
+                )
+                ui.notify(
+                    f"State error: {exc}. Re-run to start fresh.",
+                    type="negative",
+                )
             except MigrationError as exc:
                 log_display.push(f"[ERROR] Migration failed: {exc}")
                 errors_label.set_text(f"Errors: {error_count} (FAILED)")

@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   so a failure on part N>1 skipped the commit entirely, losing the id, autumn references and message
   counter. The exception handler now runs inside the loop (flag-and-continue), and the commit block
   runs after it regardless. Fixes #381.
+- **GUI resume flag no longer persists across runs when no previous state exists.** The
+  `storage["resume"]` key was written only by the Resume button and never cleared, so a later run
+  with no `state.json` raised `StateError` through the generic handler with no useful message. The
+  else branch now resets the flag, and a dedicated `except StateError` handler clears it and names
+  the cause. Fixes #383.
 
 ## [2.19.6] - 2026-08-18
 
