@@ -256,6 +256,53 @@ def test_release_workflow_asserts_the_union_branch() -> None:
     )
 
 
+def test_dependency_floors_cover_the_symbols_the_code_imports() -> None:
+    """Each declared dependency floor must be high enough for the symbol our code imports.
+
+    Regression #382: pyproject declared `nicegui>=2.0` but gui.py imports
+    `ClientConnectionTimeout`, which first exists in nicegui 3.0.0. uv.lock pins 3.12.0
+    and CI installs from the lock, so the declared floor was never exercised and an
+    environment resolving nicegui 2.x failed with ImportError at import time.
+
+    The inline comments on the floored dependencies already name the symbol and the
+    version it landed in. This test parses those comments and asserts the floor is at
+    least that version, so lowering a floor below the import's need, or adding an
+    import that needs a higher version without raising the floor, fails here rather
+    than at a user's import time.
+
+    A dynamic variant (install the floor version and import the symbol) would be
+    stronger but needs network in CI; this static guard matches the style of the rest
+    of this file and closes the gap the lock was hiding.
+    """
+    pyproject = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    deps_block = pyproject.split("dependencies = [", 1)[1].split("]", 1)[0]
+
+    # Each entry: (package, symbol, version_it_landed_in). Sourced from the inline
+    # comment on the dependency line. Add a row when a new floor gets a symbol reason.
+    constraints = [
+        ("aiohttp", "encode_basic_auth", "3.14.0"),
+        ("nicegui", "ClientConnectionTimeout", "3.0.0"),
+    ]
+
+    for package, _symbol, landed in constraints:
+        pattern = re.compile(rf'"{re.escape(package)}>=(\d+(?:\.\d+)*(?:\.\d+)*)"')
+        match = pattern.search(deps_block)
+        assert match is not None, (
+            f"{package} has a declared floor with a symbol reason but no '>=' floor "
+            f"was found in [project.dependencies]"
+        )
+        declared = tuple(int(p) for p in match.group(1).split("."))
+        required = tuple(int(p) for p in landed.split("."))
+        # Pad to equal length for the tuple comparison.
+        width = max(len(declared), len(required))
+        declared = declared + (0,) * (width - len(declared))
+        required = required + (0,) * (width - len(required))
+        assert declared >= required, (
+            f"{package} floor {match.group(1)} is below {landed}, the version "
+            f"{_symbol} landed in and the code imports"
+        )
+
+
 def test_release_workflow_asserts_the_proxy_keys() -> None:
     """SC-135-45. Killing: a workflow test that checks the key is MENTIONED
     rather than ASSERTED. That exact defect shipped in v2.13.0's plan, where

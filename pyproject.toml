@@ -29,7 +29,7 @@ dependencies = [
     "click>=8.0",
     "ijson>=3.0",
     "multidict>=4.5",
-    "nicegui>=2.0",
+    "nicegui>=3.0",  # ClientConnectionTimeout landed in 3.0.0; gui.py imports it at module load
     "python-dotenv",
     "rich>=13.0",
     "yarl>=1.17",

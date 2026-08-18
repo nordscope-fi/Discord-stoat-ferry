@@ -543,7 +543,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0" },
     { name = "multidict", specifier = ">=4.5" },
     { name = "mypy", marker = "extra == 'dev'" },
-    { name = "nicegui", specifier = ">=2.0" },
+    { name = "nicegui", specifier = ">=3.0" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21" },
