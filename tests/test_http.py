@@ -332,6 +332,10 @@ def test_strip_userinfo_registers_both_credential_forms() -> None:
     masked = sanitize_secrets(f"plaintext=SUPERSECRET encoded={header}")
     assert "SUPERSECRET" not in masked
     assert header.split()[-1] not in masked
+    # Issue #149: proxy credentials are fully masked, leaving no last-four tail
+    # that would expose a large fraction of a short human-chosen password.
+    assert "****SUPER" not in masked
+    assert masked == "plaintext=**** encoded=****"
 
 
 def test_redact_url_strips_userinfo() -> None:
