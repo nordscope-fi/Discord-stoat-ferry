@@ -237,8 +237,11 @@ def flatten_embed(
 
     # Simple scalar fields
     title = embed.get("title")
-    if title is not None:
-        result["title"] = title
+    if title is not None and str(title).strip():
+        title_str = str(title)
+        if len(title_str) > 100:
+            title_str = title_str[:97] + "..."
+        result["title"] = title_str
 
     url = embed.get("url")
     if url is not None:
@@ -257,7 +260,10 @@ def flatten_embed(
 
     # Flattened description
     if parts:
-        result["description"] = "\n\n".join(parts)
+        desc = "\n\n".join(parts)
+        if len(desc) > 2000:
+            desc = desc[:1994] + " [...]"
+        result["description"] = desc
 
     # Extract media path from thumbnail or image (local files from --media export).
     media_path: Path | None = None

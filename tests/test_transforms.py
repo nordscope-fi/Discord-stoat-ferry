@@ -303,6 +303,89 @@ def test_flatten_embed_with_remote_thumbnail() -> None:
     assert media_path is None
 
 
+# ---------------------------------------------------------------------------
+# flatten_embed — title and description validation (S1, S2, S4)
+# ---------------------------------------------------------------------------
+
+
+def test_flatten_embed_empty_title_stripped() -> None:
+    """An embed with an empty-string title produces no 'title' key (S1)."""
+    embed: dict[str, object] = {"title": "", "description": "text"}
+    result, _ = flatten_embed(embed)
+    assert "title" not in result
+    assert result["description"] == "text"
+
+
+def test_flatten_embed_whitespace_title_stripped() -> None:
+    """An embed with whitespace-only title produces no 'title' key (S1)."""
+    embed: dict[str, object] = {"title": "   ", "description": "text"}
+    result, _ = flatten_embed(embed)
+    assert "title" not in result
+
+
+def test_flatten_embed_valid_title_kept() -> None:
+    """A non-empty title is kept unchanged (S1 regression guard)."""
+    embed: dict[str, object] = {"title": "Valid Title"}
+    result, _ = flatten_embed(embed)
+    assert result["title"] == "Valid Title"
+
+
+def test_flatten_embed_long_description_truncated() -> None:
+    """A description over 2000 chars is truncated to 1994 + ' [...]' (S2)."""
+    long_text = "A" * 3000
+    embed: dict[str, object] = {"description": long_text}
+    result, _ = flatten_embed(embed)
+    desc = result["description"]
+    assert isinstance(desc, str)
+    assert len(desc) == 2000
+    assert desc.endswith(" [...]")
+    assert desc[:1994] == "A" * 1994
+
+
+def test_flatten_embed_exact_2000_description_unchanged() -> None:
+    """A description of exactly 2000 chars is not truncated (S2)."""
+    text = "B" * 2000
+    embed: dict[str, object] = {"description": text}
+    result, _ = flatten_embed(embed)
+    assert result["description"] == text
+
+
+def test_flatten_embed_short_description_unchanged() -> None:
+    """A description under 2000 chars is unchanged (S2)."""
+    text = "C" * 500
+    embed: dict[str, object] = {"description": text}
+    result, _ = flatten_embed(embed)
+    assert result["description"] == text
+
+
+def test_flatten_embed_long_title_truncated() -> None:
+    """A title over 100 chars is truncated to 97 + '...' (S4)."""
+    long_title = "T" * 150
+    embed: dict[str, object] = {"title": long_title}
+    result, _ = flatten_embed(embed)
+    title = result["title"]
+    assert isinstance(title, str)
+    assert len(title) == 100
+    assert title.endswith("...")
+    assert title[:97] == "T" * 97
+
+
+def test_flatten_embed_exact_100_title_unchanged() -> None:
+    """A title of exactly 100 chars is not truncated (S4)."""
+    title = "U" * 100
+    embed: dict[str, object] = {"title": title}
+    result, _ = flatten_embed(embed)
+    assert result["title"] == title
+
+
+def test_flatten_embed_short_title_unchanged() -> None:
+    """A title under 100 chars is unchanged (S4)."""
+    title = "V" * 50
+    embed: dict[str, object] = {"title": title}
+    result, _ = flatten_embed(embed)
+    assert result["title"] == title
+
+
 def test_all_inline_fields_in_rows() -> None:
     """3 inline fields render as a pipe-separated row."""
     embed: dict[str, object] = {
