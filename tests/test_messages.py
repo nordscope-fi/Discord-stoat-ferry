@@ -10,7 +10,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.errors import DuplicateSendError
+from discord_ferry.errors import DuplicateSendError, MigrationError
 from discord_ferry.migrator.messages import (
     ChannelResult,
     _build_content,
@@ -3775,6 +3775,138 @@ async def test_duplicate_runs_the_parallel_branch_not_the_retry_branch(tmp_path:
         "the retry branch wrote directly to state.message_map, bypassing ChannelResult "
         "and the save_lock discipline the parallel merge design depends on"
     )
+
+
+# ---------------------------------------------------------------------------
+# Partial send on split messages (#381)
+# ---------------------------------------------------------------------------
+
+
+async def test_partial_send_commits_delivered_parts(tmp_path: Path) -> None:
+    """SC-1.1/2.1/3.1: part 1 succeeds, part 2 raises, commit and warning."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
+    seen: list[str] = []
+
+    async def fail_on_second(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        seen.append(key)
+        if key.endswith("_p2"):
+            raise MigrationError("network timeout")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", fail_on_second):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    assert any(k.endswith("_p3") for k in seen), (
+        f"parts after the failure were not attempted. keys={seen}"
+    )
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].discord_msg_id == "msg1"
+    assert any(e.get("type") == "message_send_failed" for e in state.errors)
+    partial_warns = [w for w in state.warnings if w.get("type") == "message_partial_send"]
+    assert len(partial_warns) == 1
+
+
+async def test_partial_send_retry_path_commits_then_reraises(tmp_path: Path) -> None:
+    """SC-1.2/2.2: retry path commits delivered state then re-raises."""
+    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    config = _make_config(tmp_path)
+    msg = _make_message(id="msg1", content="B" * 5000, timestamp="2024-06-01T08:30:00+00:00")
+
+    async def fail_on_second(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        if key.endswith("_p2"):
+            raise MigrationError("network timeout")
+        return {"_id": f"stoat-{key}"}
+
+    async with aiohttp.ClientSession() as session:
+        with patch("discord_ferry.migrator.messages.api_send_message", fail_on_second):
+            with pytest.raises(MigrationError):
+                await _process_message(
+                    msg=msg,
+                    stoat_channel_id="stoat_ch1",
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda e: None,
+                    channel_result=None,
+                )
+
+    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    assert len(state.failed_messages) == 1
+
+
+async def test_all_parts_fail_no_partial_commit(tmp_path: Path) -> None:
+    """SC-1.3/3.2: every part fails, nothing to commit, no partial warning."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
+    seen: list[str] = []
+
+    async def always_fail(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        seen.append(key)
+        raise MigrationError("total failure")
+
+    with patch("discord_ferry.migrator.messages.api_send_message", always_fail):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert "msg1" not in state.message_map
+    assert len(state.failed_messages) == 1
+    assert any(k.endswith("_p3") for k in seen), (
+        f"not all parts were attempted after first failure. keys={seen}"
+    )
+    assert not any(w.get("type") == "message_partial_send" for w in state.warnings)
+    assert any(e.get("type") == "message_send_failed" for e in state.errors)
+
+
+async def test_duplicate_part1_error_part2_commits_autumn_refs(tmp_path: Path) -> None:
+    """SC-1.4: part 1 duplicate + part 2 error still commits autumn refs."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
+
+    async def dup_then_fail(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        if key.endswith("_p1"):
+            raise DuplicateSendError("already on the server")
+        if key.endswith("_p2"):
+            raise MigrationError("network timeout")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", dup_then_fail):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert "msg1" not in state.message_map
+    assert any(w.get("type") == "duplicate_send_unmapped" for w in state.warnings)
+    assert len(state.failed_messages) == 1
+
+
+async def test_multi_failure_warning_counts_are_correct(tmp_path: Path) -> None:
+    """SC-3.4: parts 2 and 4 fail, parts 1 and 3 succeed, counts add up."""
+    state = _make_state()
+    config = _make_config(tmp_path)
+    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 8000)])
+
+    async def fail_even_parts(*a: Any, **k: Any) -> dict[str, Any]:
+        key = str(k.get("idempotency_key", ""))
+        for suffix in ("_p2", "_p4"):
+            if key.endswith(suffix):
+                raise MigrationError(f"fail on {suffix}")
+        return {"_id": f"stoat-{key}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", fail_even_parts):
+        await run_messages(config, state, [exp], lambda e: None)
+
+    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    assert len(state.failed_messages) == 1
+    partial_warns = [w for w in state.warnings if w.get("type") == "message_partial_send"]
+    assert len(partial_warns) == 1
+    warn_msg = partial_warns[0]["message"]
+    assert "2 failed" in warn_msg
 
 
 # ---------------------------------------------------------------------------
