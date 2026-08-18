@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.5] - 2026-08-18
+
+### Fixed
+
+- **Empty or whitespace-only embed titles no longer cause 400 FailedValidation.** Stoat enforces a
+  1-character minimum on embed titles. `flatten_embed` now strips these before they reach the API.
+  Fixes part of #349.
+
+- **Embed titles longer than 100 characters no longer cause 400 FailedValidation.** Stoat caps
+  embed titles at 100 characters. `flatten_embed` now truncates to 97 + "..." when the title
+  exceeds the limit. Fixes part of #349.
+
+- **Embed descriptions longer than 2000 characters no longer cause 400 FailedValidation.** Stoat
+  caps embed descriptions at 2000 characters. `flatten_embed` now truncates to 1994 + " [...]".
+  Fixes part of #349.
+
+- **Attachment-tagged uploads no longer reuse cached Autumn file ids.** Autumn file ids are
+  single-use: `find_and_use_attachment` filters by `used_for.id` not existing, so reusing a cached
+  id for a second message returns 404 NotFound. `upload_with_cache` now accepts `skip_cache` and
+  all three attachment call sites in `messages.py` pass it. Fixes part of #349.
+
+- **Embed descriptions that would exceed Stoat's `validate_sum` ceiling are now budgeted.** The
+  server sums `content.len()` plus all embed description lengths against a 2000-character ceiling.
+  Step 7b now computes a per-message budget, drops excess embeds with a user-visible note, and
+  tracks the count in `embeds_dropped`. Closes #349.
+
 ## [2.19.4] - 2026-08-18
 
 ### Fixed
