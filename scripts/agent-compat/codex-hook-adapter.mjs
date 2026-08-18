@@ -100,8 +100,8 @@ const DESTRUCTIVE_PATTERNS = [
   /\bgit\s+push\s+-f\b/,
   /\bgit\s+clean\s+-f/,
   /\bgit\s+branch\s+-D\b/,
-  /\bgit\s+checkout\s+--\s+\.\s*$/,
-  /\bgit\s+restore\s+\.\s*$/,
+  /\bgit\s+checkout\s+--\s+\./,
+  /\bgit\s+restore\s+\./,
 ];
 
 function checkDestructiveGit(payload) {
@@ -179,9 +179,17 @@ function preTool() {
     const paths = editPaths(input.tool_input ?? {});
     for (const p of paths) {
       const editPayload = { ...payload, tool_input: { ...payload.tool_input, file_path: p } };
-      runRoutes('PreToolUse', 'apply_patch', editPayload);
-      runRoutes('PreToolUse', 'Edit', editPayload);
-      runRoutes('PreToolUse', 'Write', editPayload);
+      const routes = [
+        ...routesFor('PreToolUse', 'apply_patch'),
+        ...routesFor('PreToolUse', 'Edit'),
+        ...routesFor('PreToolUse', 'Write'),
+      ];
+      const seen = new Set();
+      for (const route of routes) {
+        if (seen.has(route)) continue;
+        seen.add(route);
+        runRoute(route, editPayload);
+      }
     }
     return;
   }
