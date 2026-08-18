@@ -288,6 +288,53 @@ async def test_api_create_server_empty_id(mock_aiohttp: aioresponses) -> None:
 
 
 # ---------------------------------------------------------------------------
+# api_create_server / api_fetch_messages: URL redaction in error messages (#276)
+# ---------------------------------------------------------------------------
+
+_STOAT_URL_WITH_AUTH = "https://ferryuser:hunter2@api.test"
+
+
+async def test_api_create_server_error_redacts_url_userinfo(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Issue #276. A credential embedded in stoat_url as userinfo must not reach
+    the error message. ``ferry build`` registers no secret, so redaction has to
+    happen before the URL is interpolated. The redacted URL still names the route.
+    """
+    mock_aiohttp.post(
+        f"{_STOAT_URL_WITH_AUTH}/servers/create",
+        payload=[{"_id": "srv123"}],
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_create_server(session, _STOAT_URL_WITH_AUTH, TOKEN, "Test")
+    message = str(exc.value)
+    assert "hunter2" not in message
+    assert "ferryuser" not in message
+    assert "api.test/servers/create" in message
+
+
+async def test_message_fetch_error_redacts_url_userinfo(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """Issue #276, the array-shape path. Same redaction must hold on the
+    api_fetch_messages route, which builds its URL the same way."""
+    mock_aiohttp.get(
+        f"{_STOAT_URL_WITH_AUTH}/channels/ch1/messages?limit=5&sort=Oldest",
+        payload={"messages": [], "users": []},
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as exc:
+            await api_fetch_messages(
+                session, _STOAT_URL_WITH_AUTH, TOKEN, "ch1", limit=5, sort="Oldest"
+            )
+    message = str(exc.value)
+    assert "hunter2" not in message
+    assert "ferryuser" not in message
+    assert "api.test/channels/ch1/messages" in message
+
+
+# ---------------------------------------------------------------------------
 # api_fetch_server
 # ---------------------------------------------------------------------------
 
