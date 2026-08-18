@@ -1692,12 +1692,22 @@ def test_version_is_read_from_module_attribute_not_package_metadata(
     import importlib
 
     import discord_ferry
-    import discord_ferry.cli
+
+    # Hold the submodule by reference, not via the `discord_ferry.cli` package
+    # attribute. A NiceGUI page-test module collected earlier leaves
+    # `discord_ferry` re-imported as a fresh package whose `cli` attribute is
+    # never re-set: the submodule is still in sys.modules (from this file's
+    # module-level `from discord_ferry.cli import main`), so a later
+    # `import discord_ferry.cli` finds it there and skips the parent-attribute
+    # assignment, making `discord_ferry.cli` raise AttributeError. sys.modules
+    # always holds the submodule regardless of collection order, so it is the
+    # order-independent handle for reload. (Issue #156.)
+    cli_module = importlib.import_module("discord_ferry.cli")
 
     sentinel = "9.9.9-not-a-real-version"
     monkeypatch.setattr(discord_ferry, "__version__", sentinel)
     try:
-        reloaded = importlib.reload(discord_ferry.cli)
+        reloaded = importlib.reload(cli_module)
         result = CliRunner().invoke(reloaded.main, ["--version"])
 
         assert result.exit_code == 0
@@ -1707,7 +1717,7 @@ def test_version_is_read_from_module_attribute_not_package_metadata(
         # import __version__` at cli.py:24 and would otherwise bake the
         # sentinel into the module every later test imports.
         monkeypatch.undo()
-        importlib.reload(discord_ferry.cli)
+        importlib.reload(cli_module)
 
 
 # ---------------------------------------------------------------------------

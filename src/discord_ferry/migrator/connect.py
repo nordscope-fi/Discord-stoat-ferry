@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import proxy_hint, tls_hint
+from discord_ferry.core.http import proxy_hint, redact_url, tls_hint
 from discord_ferry.errors import StoatConnectionError
 from discord_ferry.migrator.api import api_fetch_server, get_session
 
@@ -90,7 +90,9 @@ async def _discover_autumn_url(session: aiohttp.ClientSession, stoat_url: str) -
     try:
         async with session.get(url) as response:
             if response.status != 200:
-                raise StoatConnectionError(f"Stoat API returned status {response.status} at {url}")
+                raise StoatConnectionError(
+                    f"Stoat API returned status {response.status} at {redact_url(url)}"
+                )
             data = await response.json()
     except aiohttp.ClientError as e:
         # Proxy first, and NEVER both. With an https:// proxy a certificate
@@ -101,7 +103,7 @@ async def _discover_autumn_url(session: aiohttp.ClientSession, stoat_url: str) -
         # No permanence gate here: this handler has no retry to short-circuit,
         # so the message is the only decision it makes.
         hint = proxy_hint(e, target=url) or tls_hint(e) or ""
-        raise StoatConnectionError(f"Cannot reach Stoat API at {url}: {e}{hint}") from e
+        raise StoatConnectionError(f"Cannot reach Stoat API at {redact_url(url)}: {e}{hint}") from e
 
     try:
         autumn_url: str = data["features"]["autumn"]["url"]

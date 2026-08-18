@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
-from discord_ferry.core.http import new_session, proxy_error_is_permanent, proxy_hint, tls_hint
+from discord_ferry.core.http import (
+    new_session,
+    proxy_error_is_permanent,
+    proxy_hint,
+    redact_url,
+    tls_hint,
+)
 from discord_ferry.errors import DuplicateSendError, MigrationError
 
 if TYPE_CHECKING:
@@ -397,16 +403,18 @@ async def api_create_server(
     if not isinstance(raw, dict):
         # Never sorted(raw) here: on a list that sorts the elements into the message.
         raise MigrationError(
-            f"Stoat returned {type(raw).__name__} from {url}, expected an object. {version_hint}"
+            f"Stoat returned {type(raw).__name__} from {redact_url(url)}, "
+            f"expected an object. {version_hint}"
         )
     server = raw.get("server")
     if server is None:
         raise MigrationError(
-            f"Stoat returned no 'server' member from {url}; keys were {sorted(raw)}. {version_hint}"
+            f"Stoat returned no 'server' member from {redact_url(url)}; "
+            f"keys were {sorted(raw)}. {version_hint}"
         )
     if not isinstance(server, dict):
         raise MigrationError(
-            f"Stoat returned a {type(server).__name__} as 'server' from {url}, "
+            f"Stoat returned a {type(server).__name__} as 'server' from {redact_url(url)}, "
             f"expected an object. {version_hint}"
         )
     server_id = server.get("_id")
@@ -414,7 +422,7 @@ async def api_create_server(
         # Nested keys, not top-level: an upstream rename of _id leaves the top level
         # looking exactly as Ferry expects, so naming it would read like success.
         raise MigrationError(
-            f"Stoat returned no server id from {url}; 'server' keys were "
+            f"Stoat returned no server id from {redact_url(url)}; 'server' keys were "
             f"{sorted(server)}. {version_hint}"
         )
     return server_id
@@ -1099,7 +1107,7 @@ async def api_fetch_messages(
     raw: object = await _api_request(session, "GET", url, token)
     if not isinstance(raw, list):
         raise MigrationError(
-            f"Expected a JSON array of messages from {url}, got {type(raw).__name__}"
+            f"Expected a JSON array of messages from {redact_url(url)}, got {type(raw).__name__}"
         )
     return raw
 
@@ -1153,5 +1161,7 @@ async def api_fetch_emoji_list(
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/emojis"
     raw: object = await _api_request(session, "GET", url, token)
     if not isinstance(raw, list):
-        raise MigrationError(f"Expected a JSON array of emoji from {url}, got {type(raw).__name__}")
+        raise MigrationError(
+            f"Expected a JSON array of emoji from {redact_url(url)}, got {type(raw).__name__}"
+        )
     return raw

@@ -318,6 +318,29 @@ def _strip_userinfo(url: URL) -> tuple[URL, str | None]:
     return url.with_user(None), header
 
 
+def redact_url(url: str | URL) -> str:
+    """Return ``url`` as a string with any ``user:password@`` userinfo removed.
+
+    A Stoat URL may carry HTTP basic-auth credentials as userinfo
+    (``https://user:pass@host``). On the ``ferry build`` path such a URL reaches
+    MigrationError messages verbatim, and that command registers no secret, so
+    nothing downstream can scrub it. Interpolating ``redact_url(url)`` instead
+    of ``url`` into an error message keeps the credential out of user-facing
+    output and the log. (Issue #276.)
+
+    A URL with no userinfo round-trips to its string form unchanged. A value
+    yarl cannot parse is returned as-is rather than raised, so a malformed
+    ``stoat_url`` never replaces a credential leak with a crash.
+    """
+    try:
+        parsed = URL(url) if isinstance(url, str) else url
+    except ValueError:
+        return str(url)
+    if parsed.user is None and parsed.password is None:
+        return str(url)
+    return str(parsed.with_user(None).with_password(None))
+
+
 def _suppressed_schemes() -> set[str]:
     """Schemes turned off by an empty `<scheme>_proxy`.
 

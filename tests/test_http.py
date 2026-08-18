@@ -334,6 +334,51 @@ def test_strip_userinfo_registers_both_credential_forms() -> None:
     assert header.split()[-1] not in masked
 
 
+def test_redact_url_strips_userinfo() -> None:
+    """Issue #276. Killing: interpolating the raw URL into an error message.
+
+    A stoat_url may carry basic-auth userinfo. ``ferry build`` registers no
+    secret, so nothing downstream scrubs it; the only defence is stripping the
+    userinfo before the URL reaches the message. Both the user and the
+    password must be gone, and the host and path must remain so the message
+    still identifies the route.
+    """
+    out = http.redact_url("https://ferryuser:hunter2@api.stoat.chat/servers/create")
+    assert "ferryuser" not in out
+    assert "hunter2" not in out
+    assert out == "https://api.stoat.chat/servers/create"
+
+
+def test_redact_url_leaves_a_clean_url_unchanged() -> None:
+    """A URL with no userinfo round-trips to its string form, so the helper is
+    a no-op on the common case and never mutates a clean URL by accident."""
+    assert http.redact_url("https://api.stoat.chat/servers/create") == (
+        "https://api.stoat.chat/servers/create"
+    )
+
+
+def test_redact_url_handles_a_user_only_userinfo() -> None:
+    """Killing: an `and` guard that skips when the password is None.
+
+    yarl reports password as None for ``https://user@host``; a guard that
+    requires both would leave a user-only URL unstripped and the username still
+    reaches the message.
+    """
+    out = http.redact_url("https://ferryuser@api.stoat.chat/")
+    assert "ferryuser" not in out
+    assert out == "https://api.stoat.chat/"
+
+
+def test_redact_url_returns_unparseable_input_unchanged() -> None:
+    """A malformed stoat_url must not turn a credential leak into a crash.
+
+    yarl raises ValueError on some inputs; the helper returns them as-is so the
+    error path keeps producing a message rather than raising a second time.
+    """
+    bad = "not a url with spaces://"
+    assert http.redact_url(bad) == bad
+
+
 def test_proxy_choice_requires_a_source() -> None:
     """Killing: a default on `source`. Task 2's bypass union branches on
     source == "os", so a ProxyChoice built without one silently takes the
