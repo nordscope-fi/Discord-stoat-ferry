@@ -761,28 +761,6 @@ async def run_roles(
                     state.native_fidelity_counts.get("structural_roles", 0) + 1
                 )
 
-            # Apply colour if present (British spelling required by Stoat API).
-            if role.color:
-                color_str = role.color.lstrip("#")
-                try:
-                    colour_int = int(color_str, 16)
-                    await api_edit_role(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        state.stoat_server_id,
-                        stoat_role_id,
-                        colour=colour_int,
-                    )
-                except (ValueError, MigrationError) as exc:
-                    state.warnings.append(
-                        {
-                            "phase": "roles",
-                            "type": "role_colour_failed",
-                            "message": f"Failed to set colour for role '{role.name}': {exc}",
-                        }
-                    )
-
             on_event(
                 MigrationEvent(
                     phase="roles",
@@ -811,6 +789,26 @@ async def run_roles(
             attribute_role_id = state.role_map.get(role.id)
             if not attribute_role_id:
                 continue
+            if role.color:
+                color_str = role.color.lstrip("#")
+                try:
+                    colour_int = int(color_str, 16)
+                    await api_edit_role(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        state.stoat_server_id,
+                        attribute_role_id,
+                        colour=colour_int,
+                    )
+                except (ValueError, MigrationError) as exc:
+                    state.warnings.append(
+                        {
+                            "phase": "roles",
+                            "type": "role_colour_failed",
+                            "message": f"Failed to set colour for role '{role.name}': {exc}",
+                        }
+                    )
             edit_kwargs: dict[str, Any] = {}
             rm = role_meta.get(role.id)
             if rm is not None:
