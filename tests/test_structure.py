@@ -4391,10 +4391,15 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
 async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Path) -> None:
     """SC-I2. An interrupted run, resumed, submits the same order as an uninterrupted one.
 
-    The first attempt fails partway through the attributes pass, after both roles
-    are created, so role_map is populated and roles_finalized is not. The resume
-    then completes the phase. Its submitted ordering list must match what a single
-    clean run produces from the same export.
+    The first attempt fails in the colour step of the CREATE loop, after both roles
+    are created, so role_map is populated and roles_finalized is not. Note the
+    phase name: colour is applied inside the create loop (structure.py:764), while
+    the pass the source calls the "attributes pass" (:796) handles hoist and icon.
+    An earlier version of this docstring said the failure was in the attributes
+    pass, which is the wrong loop.
+
+    The resume then completes the phase, and its submitted ordering list must match
+    what a single clean run produces from the same export.
 
     This is the case a guard flag on the ordering step would have broken: gating on
     roles_finalized, as one review suggested, would skip ordering on the resume and
