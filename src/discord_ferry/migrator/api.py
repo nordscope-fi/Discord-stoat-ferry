@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 import time
 from collections import deque
@@ -201,9 +202,9 @@ async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
     except (json.JSONDecodeError, ValueError):
         body = None
     raw = body.get("retry_after") if isinstance(body, dict) else None
-    try:
-        retry_ms = float(raw)  # type: ignore[arg-type]  # None/non-numeric → fallback below
-    except (TypeError, ValueError):
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
+        retry_ms = float(raw)
+    else:
         retry_ms = 1000.0
     return max(0.0, min(retry_ms / 1000, _MAX_RETRY_DELAY_SECONDS))
 

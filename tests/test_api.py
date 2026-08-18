@@ -1419,6 +1419,47 @@ async def test_429_null_retry_after_falls_back(
     assert calls[0] == pytest.approx(1.0, abs=0.05)
 
 
+@pytest.mark.asyncio
+async def test_429_boolean_body_retry_after_falls_back(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """A JSON `true` is not a delay of 1 ms (#386).
+
+    bool is a subclass of int, so float(True) gives 1.0 ms and float(False)
+    gives 0.0 ms.  Both must fall back to the 1 s default.
+    """
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", status=429, payload={"retry_after": True})
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert calls[0] == pytest.approx(1.0, abs=0.05)
+
+
+@pytest.mark.asyncio
+async def test_429_nan_body_retry_after_falls_back(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """A NaN retry_after must not produce a 0 s delay (#386).
+
+    max/min propagate NaN in a way that resolves to 0.0 under the old clamp,
+    defeating backoff entirely.  The guard rejects non-finite values.
+    """
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/srv1",
+        status=429,
+        body='{"retry_after": NaN}',
+        content_type="application/json",
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"})
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with aiohttp.ClientSession() as session:
+            await api_fetch_server(session, BASE_URL, TOKEN, "srv1")
+    assert calls[0] == pytest.approx(1.0, abs=0.05)
+
+
 # ---------------------------------------------------------------------------
 # Rate-limit header units (batch 1)
 #
