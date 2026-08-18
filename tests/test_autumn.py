@@ -334,6 +334,56 @@ async def test_upload_with_cache_self_cleans_inflight(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# skip_cache — S3 attachment reuse prevention
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_with_cache_skip_cache_gets_fresh_id(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """With skip_cache=True, a cached key is ignored and a fresh upload runs."""
+    f = tmp_path / "shared.png"
+    f.write_bytes(b"x" * 50)
+    cache: dict[str, str] = {str(f): "cached-id-111"}
+
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "fresh-id-222"})
+    async with aiohttp.ClientSession() as session:
+        result = await upload_with_cache(
+            session,
+            AUTUMN_URL,
+            "attachments",
+            f,
+            TOKEN,
+            cache,
+            delay=0,
+            skip_cache=True,
+        )
+    assert result == "fresh-id-222"
+    assert cache[str(f)] == "fresh-id-222"
+
+
+async def test_upload_with_cache_skip_cache_false_still_hits(
+    tmp_path: Path,
+) -> None:
+    """With skip_cache=False (default), the cache is consulted as before."""
+    f = tmp_path / "shared.png"
+    f.write_bytes(b"x" * 50)
+    cache: dict[str, str] = {str(f): "cached-id-111"}
+
+    async with aiohttp.ClientSession() as session:
+        result = await upload_with_cache(
+            session,
+            AUTUMN_URL,
+            "attachments",
+            f,
+            TOKEN,
+            cache,
+            delay=0,
+        )
+    assert result == "cached-id-111"
+
+
+# ---------------------------------------------------------------------------
 # S1 — malformed 200 -> AutumnUploadError
 # ---------------------------------------------------------------------------
 
