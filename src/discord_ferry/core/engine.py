@@ -2083,9 +2083,14 @@ async def run_repair(
                     role_created = await _recreate_role(sess, config, state, result, on_event)
                     if role_created:
                         # DECLINED, and said so rather than left silent. The
-                        # migration sets a role's colour, rank, hoist and icon in
-                        # two further api_edit_role passes, and the icon one
-                        # uploads a file to Autumn. Restoring those is a second
+                        # migration sets a role's colour, hoist and icon through
+                        # api_edit_role, and the icon path uploads a file to
+                        # Autumn. Rank is NOT among them since #380: the per-role
+                        # PATCH discards that field, and ordering now goes through
+                        # _apply_role_ordering, which recomputes the whole server
+                        # from a read-back. So an --incremental re-run does now
+                        # restore this role's position, which is why that advice
+                        # stays in the message below. Restoring the rest is a second
                         # content path in a batch already carrying two commands,
                         # and the reasoning that keeps emoji out of repair (#307)
                         # applies to the icon. Recorded whether or not metadata

@@ -361,8 +361,17 @@ Uploads the guild icon to Autumn and applies it. Sets server default permissions
 
 **ROLES** (Phase 4): Iterates all exports to collect unique role IDs (skipping @everyone where
 `role_id == guild_id`). Creates each role with name and British-spelled `colour`. If Discord
-metadata is available, applies translated permission bits via `api_set_role_permissions()`.
-Attempts rank ordering in a second pass using DCE position data. Populates `state.role_map`.
+metadata is available, applies hoist and icon in an attributes pass, and translated permission bits
+via `api_set_role_permissions()`. Populates `state.role_map`.
+
+Hierarchy is applied last, once for the whole server, by reading the server back and sending the
+complete ordered role list to `PATCH /servers/:id/roles/ranks`. Index 0 of that list is the top of
+the hierarchy, so Ferry sorts by Discord `position` descending. Only roles Ferry created are moved:
+every other role keeps its position, so migrating into an existing server with `--server-id` leaves
+that server's own hierarchy alone. The step is skipped when it cannot change anything, and a failure
+degrades to a `role_ordering_failed` warning, or `role_ordering_not_permitted` when Ferry lacks the
+rank or permission to reorder that server. The per-role `PATCH` does **not** carry a rank: the Stoat
+backend accepts that field and discards it.
 
 **CATEGORIES** (Phase 5): Collects unique category names from exports. Creates each category
 via the two-step process: create a channel-like object, then PATCH the server's `categories`
@@ -494,7 +503,8 @@ writing a new callback — no engine changes needed.
 | `api_fetch_server` | `GET /servers/:id` | Verify server exists |
 | `api_edit_server` | `PATCH /servers/:id` | Update server settings |
 | `api_create_role` | `POST /servers/:id/roles` | Create role |
-| `api_edit_role` | `PATCH /servers/:id/roles/:id` | Update role (colour, rank) |
+| `api_edit_role` | `PATCH /servers/:id/roles/:id` | Update role (colour, hoist, icon) |
+| `api_edit_role_ranks` | `PATCH /servers/:id/roles/ranks` | Set the whole role hierarchy, index 0 highest |
 | `api_set_role_permissions` | `PUT /servers/:id/permissions/:id` | Set role permission bits |
 | `api_set_server_default_permissions` | `PUT /servers/:id/permissions/default` | Set @everyone server permissions |
 | `api_create_channel` | `POST /servers/:id/channels` | Create channel |
