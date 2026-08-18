@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.7] - 2026-08-18
+
+### Fixed
+
+- **A send failure on a later part of a split message no longer discards the delivered first
+  part's Stoat id.** The outer try/except wrapped both the per-part send loop and the commit block,
+  so a failure on part N>1 skipped the commit entirely, losing the id, autumn references and message
+  counter. The exception handler now runs inside the loop (flag-and-continue), and the commit block
+  runs after it regardless. Fixes #381.
+
 ## [2.19.6] - 2026-08-18
 
 ### Fixed
