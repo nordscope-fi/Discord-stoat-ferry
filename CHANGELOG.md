@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.7] - 2026-08-18
+
+### Fixed
+
+- **GUI resume flag no longer persists across runs when no previous state exists.** The
+  `storage["resume"]` key was written only by the Resume button and never cleared, so a later run
+  with no `state.json` raised `StateError` through the generic handler with no useful message. The
+  else branch now resets the flag, and a dedicated `except StateError` handler clears it and names
+  the cause. Fixes #383.
+
 ## [2.19.6] - 2026-08-18
 
 ### Fixed
