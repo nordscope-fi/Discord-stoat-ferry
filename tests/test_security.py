@@ -358,6 +358,62 @@ def test_scrub_document_masks_nothing_when_no_secret_registered() -> None:
     assert scrub_document(doc) == doc
 
 
+def test_scrub_document_masks_validation_results_detail() -> None:
+    """validation_results.results[].detail can embed a proxy credential (#268)."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {
+        "validation_results": {
+            "results": [
+                {
+                    "name": "tail:123",
+                    "status": "unverifiable",
+                    "kind": "check_error",
+                    "detail": "could not read: Network error: hunter2horse",
+                    "discord_id": "123",
+                    "stoat_id": "456",
+                    "expected": None,
+                    "found": None,
+                }
+            ],
+            "counts": {"ok": 0, "warn": 0, "fail": 0, "unverifiable": 1},
+            "has_failures": False,
+        }
+    }
+
+    out = scrub_document(doc)
+
+    assert "hunter2horse" not in out["validation_results"]["results"][0]["detail"]
+    assert out["validation_results"]["results"][0]["discord_id"] == "123"
+    assert out["validation_results"]["counts"]["unverifiable"] == 1
+
+
+def test_scrub_document_masks_report_validation_key() -> None:
+    """reporter.py copies validation_results as 'validation' in report.json."""
+    register_secret("proxy_password", "hunter2horse")
+    doc = {
+        "validation": {
+            "results": [
+                {
+                    "name": "test",
+                    "status": "unverifiable",
+                    "kind": "check_error",
+                    "detail": "proxy auth hunter2horse failed",
+                    "discord_id": None,
+                    "stoat_id": None,
+                    "expected": None,
+                    "found": None,
+                }
+            ],
+            "counts": {"ok": 0},
+            "has_failures": False,
+        }
+    }
+
+    out = scrub_document(doc)
+
+    assert "hunter2horse" not in out["validation"]["results"][0]["detail"]
+
+
 def test_scrub_document_leaves_the_input_unmutated() -> None:
     """The caller's document must survive: state.warnings stays raw in memory."""
     register_secret("proxy_password", "hunter2horse")

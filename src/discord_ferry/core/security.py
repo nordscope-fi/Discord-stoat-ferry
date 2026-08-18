@@ -163,6 +163,14 @@ _TEXT_MEMBERS: dict[str, frozenset[str]] = {
 # separately. Its ``failures`` entries come from the RollbackFailure dataclass.
 _ROLLBACK_TEXT_MEMBERS: frozenset[str] = frozenset({"error"})
 
+# ``validation_results`` (state.json) / ``validation`` (report.json) holds the
+# output of ``CheckReport.to_dict()``.  Its ``results`` list contains dicts
+# whose ``detail`` can embed a stringified ``FerryError`` carrying proxy
+# credentials via ``aiohttp.ClientHttpProxyError``.  Only ``detail`` is
+# classified: the id fields are snowflakes or synthetic identifiers where
+# unbounded substring replacement would corrupt the value.
+_VALIDATION_TEXT_MEMBERS: frozenset[str] = frozenset({"detail"})
+
 
 def scrub_document(
     doc: dict[str, Any], token_store: SecureTokenStore | None = None
@@ -222,6 +230,14 @@ def scrub_document(
             **rollback,
             "failures": _mask_entries(rollback.get("failures"), _ROLLBACK_TEXT_MEMBERS),
         }
+
+    for vkey in ("validation_results", "validation"):
+        validation = out.get(vkey)
+        if isinstance(validation, dict):
+            out[vkey] = {
+                **validation,
+                "results": _mask_entries(validation.get("results"), _VALIDATION_TEXT_MEMBERS),
+            }
 
     guild = out.get("source_guild")
     if isinstance(guild, dict) and isinstance(guild.get("name"), str):
