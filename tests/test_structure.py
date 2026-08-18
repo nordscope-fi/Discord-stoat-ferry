@@ -4391,12 +4391,9 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
 async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Path) -> None:
     """SC-I2. An interrupted run, resumed, submits the same order as an uninterrupted one.
 
-    The first attempt fails in the colour step of the CREATE loop, after both roles
-    are created, so role_map is populated and roles_finalized is not. Note the
-    phase name: colour is applied inside the create loop (structure.py:764), while
-    the pass the source calls the "attributes pass" (:796) handles hoist and icon.
-    An earlier version of this docstring said the failure was in the attributes
-    pass, which is the wrong loop.
+    The first attempt fails in the colour step of the ATTRIBUTES pass, after both
+    roles are created, so role_map is populated and roles_finalized is not. Colour,
+    hoist and icon all live in the attributes pass, gated on roles_finalized.
 
     The resume then completes the phase, and its submitted ordering list must match
     what a single clean run produces from the same export.
@@ -4433,7 +4430,7 @@ async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Pat
         )
         await run_roles(_make_config(clean_dir), clean_state, exports, events.append)
 
-    # --- the interrupted attempt: roles created, then the colour PATCH kills it ---
+    # --- the interrupted attempt: roles created, then the attributes-pass colour PATCH kills it ---
     crash_dir = tmp_path / "crash"
     crash_dir.mkdir()
     crash_state = MigrationState(stoat_server_id="srv1")
@@ -4445,12 +4442,12 @@ async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Pat
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
-        # The create loop runs create-then-colour per role, so the kill has to land
-        # on the SECOND role's colour PATCH for both roles to exist first, which is
-        # the state SC-I2 describes. Killing on the first leaves role "b" uncreated
-        # and tests a different scenario. RuntimeError is used deliberately: the
-        # colour handler catches ValueError and MigrationError, so neither would
-        # interrupt anything.
+        # The attributes pass runs colour per role after the create loop finishes,
+        # so both roles exist before any colour PATCH fires. The kill lands on
+        # the SECOND role's colour PATCH so both are mapped but neither is
+        # finalized, which is the state SC-I2 describes. RuntimeError is used
+        # deliberately: the colour handler catches ValueError and MigrationError,
+        # so neither would interrupt anything.
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-a", payload={}, repeat=True)
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-b", exception=RuntimeError("killed"))
         with contextlib.suppress(RuntimeError):
