@@ -1301,6 +1301,7 @@ async def _process_message(
                 state.upload_cache,
                 config.upload_delay,
                 verify_size=config.verify_uploads,
+                skip_cache=True,
             )
             autumn_ids.append(sticker_id)
             state.autumn_uploads[sticker_id] = f"{msg.id}:sticker:{sticker_path.name}"
@@ -1345,6 +1346,7 @@ async def _process_message(
                         state.upload_cache,
                         config.upload_delay,
                         verify_size=config.verify_uploads,
+                        skip_cache=True,
                     )
                     flat["media"] = media_id
                     state.autumn_uploads[media_id] = f"{msg.id}:embed"
@@ -1465,6 +1467,39 @@ async def _process_message(
                 ),
             }
         )
+
+    # Step 7b: Budget total embed description length against first-part content.
+    if stoat_embeds:
+        budget = max(0, 2000 - len(parts[0]) - 40)
+        used = 0
+        kept: list[dict[str, Any]] = []
+        budget_dropped = 0
+        for emb in stoat_embeds:
+            emb_desc_len = len(emb.get("description", "") or "")
+            if used + emb_desc_len <= budget:
+                used += emb_desc_len
+                kept.append(emb)
+            else:
+                budget_dropped += 1
+        if budget_dropped > 0:
+            stoat_embeds = kept
+            note = f"\n[{budget_dropped} embed(s) could not be migrated]"
+            if len(parts[0]) + len(note) <= 2000:
+                parts[0] = parts[0] + note
+            if channel_result is not None:
+                channel_result.embeds_dropped += budget_dropped
+            else:
+                state.embeds_dropped += budget_dropped
+            acc_warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "embed_budget_exceeded",
+                    "message": (
+                        f"Message {msg.id}: dropped {budget_dropped} embed(s) "
+                        f"exceeding description budget ({budget} chars)"
+                    ),
+                }
+            )
 
     # Step 8: Send the message (all parts).
     stoat_msg_id: str = ""
@@ -1894,6 +1929,7 @@ async def _upload_attachments(
                 state.upload_cache,
                 config.upload_delay,
                 verify_size=config.verify_uploads,
+                skip_cache=True,
             )
             autumn_ids.append(autumn_id)
             if channel_result is not None:

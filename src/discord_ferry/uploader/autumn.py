@@ -286,6 +286,7 @@ async def upload_with_cache(
     delay: float = 0.5,
     *,
     verify_size: bool = False,
+    skip_cache: bool = False,
 ) -> str:
     """Upload a file to Autumn, returning a cached ID if the file was already uploaded.
 
@@ -305,14 +306,13 @@ async def upload_with_cache(
         Autumn file ID string.
     """
     key = str(file_path)
-    if key in cache:
-        return cache[key]
+    if not skip_cache:
+        if key in cache:
+            return cache[key]
 
-    # Coalesce concurrent first-uploads of the same key (check-then-act race): a
-    # second caller awaits the first uploader's result instead of re-uploading.
-    inflight = _inflight_uploads.get(key)
-    if inflight is not None:
-        return await inflight
+        inflight = _inflight_uploads.get(key)
+        if inflight is not None:
+            return await inflight
 
     future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
     _inflight_uploads[key] = future
