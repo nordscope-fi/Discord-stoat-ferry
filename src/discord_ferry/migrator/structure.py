@@ -532,7 +532,18 @@ async def _apply_role_ordering(
     if not state.role_map:
         return
 
-    server = await api_fetch_server(session, config.stoat_url, config.token, state.stoat_server_id)
+    def _degrade(message: str, warning_type: str = "role_ordering_failed") -> None:
+        """Record an ordering failure without failing the phase."""
+        state.warnings.append({"phase": "roles", "type": warning_type, "message": message})
+        on_event(MigrationEvent(phase="roles", status="warning", message=message))
+
+    try:
+        server = await api_fetch_server(
+            session, config.stoat_url, config.token, state.stoat_server_id
+        )
+    except MigrationError as exc:
+        _degrade(f"Failed to apply role ordering: {exc}")
+        return
     # Upstream omits `roles` entirely when the map is empty, so this cannot be a
     # plain subscript.
     server_roles: dict[str, Any] = server.get("roles") or {}
@@ -567,9 +578,27 @@ async def _apply_role_ordering(
     for slot, stoat_id in zip(slots, ordered_known, strict=True):
         new_order[slot] = stoat_id
 
-    await api_edit_role_ranks(
-        session, config.stoat_url, config.token, state.stoat_server_id, new_order
-    )
+    try:
+        await api_edit_role_ranks(
+            session, config.stoat_url, config.token, state.stoat_server_id, new_order
+        )
+    except MigrationError as exc:
+        # Classify on the message, matching the TooManyRoles branch in the create
+        # loop. _api_request folds the status and the raw body into the message,
+        # and neither 403 nor 400 is retryable, so this has already failed fast.
+        text = str(exc)
+        if "NotElevated" in text or "MissingPermission" in text:
+            _degrade(
+                "Role ordering was refused: Ferry lacks the ManageRole permission, "
+                "or holds no role ranked above the roles it tried to reorder. The "
+                "roles were created, but their hierarchy was left at the server "
+                f"default ({exc}).",
+                "role_ordering_not_permitted",
+            )
+        else:
+            _degrade(f"Failed to apply role ordering: {exc}")
+        return
+
     on_event(
         MigrationEvent(
             phase="roles",
@@ -873,6 +902,15 @@ async def run_roles(
                             "message": f"Failed to set server default permissions: {exc}",
                         }
                     )
+
+    # Ordering is the last thing the phase does: the ranks route rejects any list
+    # that does not name every role on the server, so it cannot run until every
+    # create has landed. It opens its own session on purpose. The permissions pass
+    # above is nested inside `if discord_metadata and not config.dry_run`, so
+    # reusing that block would skip ordering on every run without a discord_token.
+    # Dry run never reaches here: run_roles returns right after the create loop.
+    async with get_session(config) as session:
+        await _apply_role_ordering(session, config, state, roles_to_create, on_event)
 
     # S3: mark every mapped role finalized (regardless of whether the metadata-gated perms pass
     # ran) so --incremental skips re-editing; a crash before here leaves them un-finalized and
