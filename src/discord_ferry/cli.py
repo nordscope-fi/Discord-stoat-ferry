@@ -1366,7 +1366,7 @@ def probe_cmd(
     table.add_column("Detail")
     for c in report.checks:
         colour = {"ok": "green", "warn": "yellow", "fail": "red"}.get(c.status, "white")
-        table.add_row(c.name, f"[{colour}]{c.status}[/]", c.detail)
+        table.add_row(escape(c.name), f"[{colour}]{c.status}[/]", escape(c.detail))
     console.print(table)
 
 

@@ -903,6 +903,45 @@ def test_probe_json_stdout_survives_a_realistic_payload(runner: CliRunner) -> No
     assert payload["autumn_limits"]["detail"].startswith("attachments 20000000")
 
 
+def test_probe_table_escapes_server_controlled_markup(runner: CliRunner) -> None:
+    """Issue #384. A closing Rich tag in a server-supplied detail string raises
+    MarkupError and kills all probe output. Killing: a code path that passes
+    c.name or c.detail to Rich without escape()."""
+    from discord_ferry.migrator.probe import ProbeCheck, ProbeReport
+
+    report = ProbeReport(
+        checks=[
+            ProbeCheck(
+                name="rate_limits[/bold]",
+                status="ok",
+                detail="bucket [/red] reset_after 10000ms",
+            ),
+        ]
+    )
+
+    with patch(
+        "discord_ferry.migrator.probe.run_probe",
+        AsyncMock(return_value=report),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "probe",
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                "t",
+                "--test-server-id",
+                "srv1",
+            ],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert "rate_limits[/bold]" in result.output
+    assert "[/red]" in result.output
+
+
 def test_no_create_invite_flag_threads_to_config(runner: CliRunner) -> None:
     mock_engine = _make_mock_engine()
     with patch("discord_ferry.cli.run_migration", mock_engine):
