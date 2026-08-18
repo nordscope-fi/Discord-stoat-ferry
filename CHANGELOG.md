@@ -42,6 +42,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `scripts/check-deferral-fields.sh` is now part of the repository. It was previously untracked,
   which meant the deferral sweep could not reach it from CI.
 
+### Fixed
+
+- **Role hierarchy is applied for the first time (#380).** Every migration since v1.x sent each
+  role's Discord position as `rank` on `PATCH /servers/{id}/roles/{role_id}`, and the Stoat backend
+  discarded it: the upstream `roles_edit` handler destructures `DataEditRole` with a rest pattern
+  that does not bind `rank`. The request returned 200, `hoist` and `icon` in the same call still
+  landed, and no warning fired, so every run reported ordering as applied while the server kept its
+  default ranks. Two shipped documents claimed the behaviour worked.
+
+  Ordering now goes through `PATCH /servers/{id}/roles/ranks`, which takes the complete ordered role
+  list and assigns each role a rank equal to its index, making index 0 the top of the hierarchy.
+  Discord's `position` runs the other way, so the sort is descending, negating the position rather
+  than reversing so the id tie-break stays ascending.
+
+  The list is built from a read-back of the server rather than from `role_map`. That map can lag the
+  server, because the create loop persists state every ten roles (#389), and the route rejects any
+  list that omits a role. Only roles Ferry created are moved: every other role keeps its exact
+  index, so migrating into an existing server with `--server-id` leaves that server's own hierarchy
+  alone. A refusal for lack of permission becomes a `role_ordering_not_permitted` warning naming the
+  cause, and any other failure a `role_ordering_failed` warning. Neither fails the phase.
+
+  Three tests that had asserted `rank` appeared in a mocked request body were replaced. They passed
+  for years against a field the server threw away, because an assertion about what Ferry sent can
+  never observe what the server kept.
+
+  **Not covered by this change:** `ferry build` replays blueprint and template role ranks through
+  the same discarded field (#387), and correcting ordering on a server migrated by an earlier
+  release needs its own path (#388).
+
+
 ## [2.19.1] - 2026-08-17
 
 ### Fixed

@@ -282,7 +282,7 @@ After a successful migration:
 - NSFW channels are correctly flagged
 - Channel permission overrides (@everyone and per-role) are applied
 - Forum posts are grouped into dedicated categories named after the parent forum
-- Roles are recreated with colours, rank ordering, and permissions preserved
+- Roles are recreated with colours, hierarchy order, and permissions preserved
 - Messages appear under the original author's name and avatar, so conversations look natural
 - Original timestamps appear at the start of each message: `*[2024-01-15 14:30 UTC]*`
 - Embeds are preserved with uploaded thumbnails and images
