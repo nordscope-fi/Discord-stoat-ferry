@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.8] - 2026-08-18
+
+### Fixed
+
+- **Credentials embedded in `--stoat-url` as HTTP basic-auth userinfo no longer reach API error
+  messages unredacted.** A `stoat_url` like `https://user:pass@host` was interpolated verbatim into
+  MigrationError and StoatConnectionError text at eight sites. The `ferry build` path registers no
+  secret, so nothing downstream could scrub it. A new `redact_url` helper in `core/http.py` strips
+  `user:password@` before the URL reaches any error message. Fixes #276.
+- **The nicegui dependency floor no longer sits two majors below a symbol `gui.py` imports at
+  module load.** `pyproject.toml` declared `nicegui>=2.0` but `gui.py` imports
+  `ClientConnectionTimeout`, which first exists in nicegui 3.0.0. `uv.lock` pins 3.12.0 and CI
+  installs from the lock, so the floor was never exercised; an environment resolving nicegui 2.x
+  failed with `ImportError` on import. The floor is now `nicegui>=3.0` with an inline comment
+  naming the symbol. Fixes #382.
+- **The `--version` test no longer fails when a NiceGUI page-test module is collected before
+  it.** `test_version_is_read_from_module_attribute_not_package_metadata` accessed the
+  `discord_ferry.cli` package attribute for `importlib.reload`, but a preceding NiceGUI
+  page-test re-imports `discord_ferry` as a fresh package whose `cli` attribute is never re-set.
+  The test now holds the submodule via `importlib.import_module` and reloads that reference,
+  which is order-independent. Fixes #156.
+
+### Added
+
+- **A packaging test that walks each declared dependency floor against the symbol the code
+  imports.** `test_dependency_floors_cover_the_symbols_the_code_imports` parses the floored
+  dependencies in `pyproject.toml` and asserts each floor is at least the version its symbol
+  landed in, catching the next floor/import mismatch the lock was hiding. Companion to #382.
+
 ## [2.19.7] - 2026-08-18
 
 ### Fixed
