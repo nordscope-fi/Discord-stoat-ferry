@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
+import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
@@ -3840,3 +3841,266 @@ async def test_apply_role_ordering_single_role_sends_read_back_only(tmp_path: Pa
             await _apply_role_ordering(session, config, state, roles, lambda e: None)
 
     assert gets == ["hit"]
+
+
+async def test_run_roles_ordering_failure_is_non_fatal(tmp_path: Path) -> None:
+    """A generic ordering failure warns, and the phase still completes.
+
+    Replaces the coverage of the retired test_run_roles_rank_failure_is_non_fatal,
+    which drove a failure of the discarded per-role rank PATCH.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", status=500, payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    failures = [w for w in state.warnings if w["type"] == "role_ordering_failed"]
+    assert len(failures) == 1
+    # The rest of the phase's work survives the degradation.
+    assert state.role_map == {"a": "stoat-a", "b": "stoat-b"}
+    assert "a" in state.roles_finalized and "b" in state.roles_finalized
+    assert any(e.status == "warning" for e in events)
+
+
+@pytest.mark.parametrize("err_type", ["NotElevated", "MissingPermission"])
+async def test_run_roles_ordering_forbidden_warns_about_permissions(
+    tmp_path: Path, err_type: str
+) -> None:
+    """A 403 gets its own warning type, naming permissions rather than a bug.
+
+    On the --server-id path this is the ordinary outcome when the account holds no
+    role on the target, because the upstream elevation check protects every role
+    when the caller's top rank is None.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            status=403,
+            payload={"type": err_type},
+            repeat=True,
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    warned = [w for w in state.warnings if w["type"] == "role_ordering_not_permitted"]
+    assert len(warned) == 1
+    assert "permission" in warned[0]["message"].lower()
+    # It must NOT be classified as a generic failure, or the user is told to file a bug.
+    assert not [w for w in state.warnings if w["type"] == "role_ordering_failed"]
+
+
+async def test_run_roles_read_back_failure_is_non_fatal(tmp_path: Path) -> None:
+    """A failed read-back degrades the same way the ordering call does."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(f"{STOAT_URL}/servers/srv1", status=500, payload={}, repeat=True)
+
+        await run_roles(config, state, exports, events.append)
+
+    assert [w["type"] for w in state.warnings if "ordering" in w["type"]] == [
+        "role_ordering_failed"
+    ]
+    assert state.role_map == {"a": "stoat-a", "b": "stoat-b"}
+
+
+async def test_run_roles_ordering_is_the_last_request(tmp_path: Path) -> None:
+    """Ordering runs after every create and after the permissions pass, exactly once.
+
+    The route rejects any list that does not name every role, so it cannot run
+    until the creates have landed.
+
+    FIXTURE NOTE, measured rather than assumed. Supplying Discord metadata takes
+    run_roles down the live-role union path, which sorts roles_to_create
+    position-descending (structure.py:676). So role "b" (position 9) is created
+    FIRST and receives "stoat-a", the reverse of the export-only path. The union
+    path also calls api_fetch_root, which returns {} on any client error instead
+    of raising (api.py:443-458), so an unregistered root route degrades quietly
+    and the limit falls back to 200. Both permission routes are registered here
+    because of that id flip; registering only one made this test fail while the
+    code was correct.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={"a": PermissionPair(allow=4_194_304, deny=0)},
+        channel_metadata={},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=roles)])]
+
+    seen: list[str] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-a", "name": "A"},
+            callback=lambda url, **kwargs: seen.append("create"),  # type: ignore[misc]
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-b", "name": "B"},
+            callback=lambda url, **kwargs: seen.append("create"),  # type: ignore[misc]
+        )
+        m.put(
+            f"{STOAT_URL}/servers/srv1/permissions/stoat-a",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: seen.append("perms"),  # type: ignore[misc]
+        )
+        m.put(
+            f"{STOAT_URL}/servers/srv1/permissions/stoat-b",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: seen.append("perms"),  # type: ignore[misc]
+        )
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+            callback=lambda url, **kwargs: seen.append("read"),  # type: ignore[misc]
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: seen.append("ranks"),  # type: ignore[misc]
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    assert "perms" in seen, (
+        f"the permissions pass must have run, or the ordering is not last. "
+        f"seen={seen} warnings={[w['type'] for w in state.warnings]}"
+    )
+    assert seen[-2:] == ["read", "ranks"]
+    assert seen.count("ranks") == 1
+
+
+async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
+    """Dry run needs no guard of its own: run_roles returns before the session block."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, dry_run=True)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    # No routes registered at all: aioresponses raises on any request.
+    with aioresponses():
+        await run_roles(config, state, exports, events.append)
+
+    assert state.role_map == {"a": "dry-role-a", "b": "dry-role-b"}
+
+
+async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> None:
+    """A second pass reaches the same order and creates no duplicate roles.
+
+    Idempotence comes from recomputing off a fresh read-back rather than from a
+    guard flag, so the second run is driven against a server that already reflects
+    the first run's ordering.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    first: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: first.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(config, state, exports, events.append)
+
+    creates: list[str] = []
+    second: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "unexpected", "name": "X"},
+            repeat=True,
+            callback=lambda url, **kwargs: creates.append("hit"),  # type: ignore[misc]
+        )
+        # The server now reflects the ordering the first run applied.
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-b": 0, "stoat-a": 1}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: second.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(config, state, exports, events.append)
+
+    assert creates == [], "the second run must not recreate roles already in role_map"
+    assert first == [{"ranks": ["stoat-b", "stoat-a"]}]
+    assert second == first

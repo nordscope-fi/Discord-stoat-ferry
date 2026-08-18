@@ -1272,3 +1272,48 @@ def test_every_integer_counter_starts_at_zero() -> None:
         "no bool field was checked on any of the cases above. The bool half of "
         "this test has stopped checking anything."
     )
+
+
+def test_role_ordering_warnings_are_classified_for_redaction() -> None:
+    """The two role-ordering warning types keep their structure and lose their secret.
+
+    #380 adds `role_ordering_failed` and `role_ordering_not_permitted`. Both use
+    the existing phase/type/message keys, so `_TEXT_MEMBERS["warnings"]` needs no
+    new member. This asserts that rather than reasoning about it: a new member key
+    on a warnings entry is invisible to the writer until it is classified, which is
+    the failure ADR-014 exists to prevent.
+
+    THE POSITIVE CONTROL MATTERS. The type/phase assertions pass just as well
+    against a registry that never received the secret, so the message assertion is
+    what distinguishes "structure preserved" from "nothing was scrubbed at all".
+    """
+    from discord_ferry.core.security import scrub_document
+    from discord_ferry.state import _state_to_dict
+
+    register_secret("proxy_password", "hunter2horse")
+    state = MigrationState()
+    state.warnings.append(
+        {
+            "phase": "roles",
+            "type": "role_ordering_not_permitted",
+            "message": "Role ordering was refused, proxy hunter2horse in the text",
+        }
+    )
+    state.warnings.append(
+        {
+            "phase": "roles",
+            "type": "role_ordering_failed",
+            "message": "Failed to apply role ordering: proxy hunter2horse",
+        }
+    )
+
+    doc = scrub_document(_state_to_dict(state))
+
+    # Structure survives: the machine-readable discriminators are untouched.
+    assert [w["type"] for w in doc["warnings"]] == [
+        "role_ordering_not_permitted",
+        "role_ordering_failed",
+    ]
+    assert all(w["phase"] == "roles" for w in doc["warnings"])
+    # The positive control: free text was actually scrubbed.
+    assert all("hunter2horse" not in w["message"] for w in doc["warnings"])
