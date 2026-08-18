@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.6] - 2026-08-18
+
+### Fixed
+
+- **A failed role colour is now retried on resume.** Colour was applied inside the create loop,
+  gated on `pre_existing_role_ids`, so a role already in `role_map` was skipped on resume. Moved
+  to the attributes pass alongside hoist and icon, gated on `roles_finalized`, so colour retries
+  the same way those do. Fixes #408.
+
 ## [2.19.5] - 2026-08-18
 
 ### Fixed
