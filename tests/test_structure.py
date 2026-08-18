@@ -3005,6 +3005,106 @@ async def test_incremental_finalized_role_skips_attrs_and_perms(tmp_path: Path) 
     assert state.roles_finalized == {"r1"}
 
 
+async def test_resume_retries_colour_for_unfinalized_role(tmp_path: Path) -> None:
+    """SC-1.2: a mapped-but-unfinalized role with colour gets its colour retried."""
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv1", role_map={"r1": "stoat-r1"}, roles_finalized=set()
+    )
+    role = DCERole(id="r1", name="Admin", color="#00FF00")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+    patch_body: dict[str, object] = {}
+    creates: list[object] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "should-not-happen"},
+            repeat=True,
+            callback=lambda url, **kw: creates.append(url),  # type: ignore[misc]
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            callback=lambda url, **kw: patch_body.update(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(config, state, exports, lambda e: None)
+    assert creates == []
+    assert patch_body.get("colour") == 0x00FF00
+    assert "r1" in state.roles_finalized
+
+
+async def test_colour_failure_produces_warning(tmp_path: Path) -> None:
+    """SC-1.4: a failed colour PATCH records role_colour_failed and still finalizes."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    role = DCERole(id="r1", name="Admin", color="#FF5733")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            status=400,
+            repeat=True,
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+        await run_roles(config, state, exports, lambda e: None)
+    colour_warnings = [w for w in state.warnings if w["type"] == "role_colour_failed"]
+    assert len(colour_warnings) == 1
+    assert "Admin" in colour_warnings[0]["message"]
+    assert "r1" in state.roles_finalized
+
+
+async def test_colour_applied_without_discord_metadata(tmp_path: Path) -> None:
+    """SC-1.6: a role with colour but no discord metadata gets colour applied."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    role = DCERole(id="r1", name="Admin", color="#0000FF")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+    patch_body: dict[str, object] = {}
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            callback=lambda url, **kw: patch_body.update(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(config, state, exports, lambda e: None)
+    assert patch_body.get("colour") == 0x0000FF
+    assert "r1" in state.roles_finalized
+
+
+async def test_invalid_colour_does_not_block_hoist(tmp_path: Path) -> None:
+    """SC-1.7: a bad colour hex produces a warning but hoist still fires."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    role = DCERole(id="r1", name="Admin", color="not-hex")
+    exports = [_make_export(messages=[_make_message("m1", roles=[role])])]
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={"r1": PermissionPair(allow=1, deny=0)},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=2, color="not-hex")},
+    )
+    save_discord_metadata(meta, tmp_path)
+    hoist_body: dict[str, object] = {}
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kw: hoist_body.update(kw.get("json", {})),  # type: ignore[misc]
+        )
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+        await run_roles(config, state, exports, lambda e: None)
+    colour_warnings = [w for w in state.warnings if w["type"] == "role_colour_failed"]
+    assert len(colour_warnings) == 1
+    assert hoist_body.get("hoist") is True
+    assert "r1" in state.roles_finalized
+
+
 async def test_mark_at_end_finalizes_without_metadata(tmp_path: Path) -> None:
     """S3 SC-12: a completed run finalizes created roles even with no Discord metadata."""
     config = _make_config(tmp_path)
