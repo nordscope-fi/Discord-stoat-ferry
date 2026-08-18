@@ -652,52 +652,51 @@ async def run_migration(
                 message="Validating migration results...",
             )
         )
-        try:
-            async with new_session() as validation_session:
-                server = await api_fetch_server(
-                    validation_session, config.stoat_url, config.token, state.stoat_server_id
-                )
-            actual_channels = len(server.get("channels", []))
-            actual_roles = len(server.get("roles", {}))
-            expected_channels = len(state.channel_map)
-            expected_roles = len(state.role_map)
-            failed_count = len(state.failed_messages)
-
-            state.validation_results = {
-                "channels_expected": expected_channels,
-                "channels_found": actual_channels,
-                "roles_expected": expected_roles,
-                "roles_found": actual_roles,
-                "failed_messages": failed_count,
-                "passed": actual_channels == expected_channels and actual_roles == expected_roles,
-            }
-
-            if state.validation_results["passed"]:
-                msg = f"Validation passed: {actual_channels} channels, {actual_roles} roles match."
-            else:
-                msg = (
-                    f"Validation warning: expected {expected_channels} channels "
-                    f"(found {actual_channels}), expected {expected_roles} roles "
-                    f"(found {actual_roles})."
-                )
-            if failed_count:
-                msg += f" {failed_count} messages failed (see failed_message_ids in report)."
-
-            on_event(
-                MigrationEvent(
-                    phase="validate_migration",
-                    status="completed" if state.validation_results["passed"] else "warning",
-                    message=msg,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
+        if state.is_dry_run:
             on_event(
                 MigrationEvent(
                     phase="validate_migration",
                     status="warning",
-                    message=_safe(config, f"Validation skipped: {exc}"),
+                    message="Validation skipped: dry-run state has no real server to verify.",
                 )
             )
+        else:
+            try:
+                from discord_ferry.migrator.verify import run_check
+
+                report = await run_check(
+                    config.stoat_url, config.token, state, on_event
+                )
+                validation_dict = report.to_dict()
+                validation_dict["has_failures"] = report.has_failures
+                state.validation_results = validation_dict
+
+                counts = report.counts()
+                if report.has_failures:
+                    msg = (
+                        f"Validation found issues: {counts['fail']} failing, "
+                        f"{counts['warn']} warned, {counts['ok']} ok."
+                    )
+                else:
+                    msg = (
+                        f"Validation passed: {counts['ok']} ok, "
+                        f"{counts['warn']} warned, 0 failing."
+                    )
+                on_event(
+                    MigrationEvent(
+                        phase="validate_migration",
+                        status="completed" if not report.has_failures else "warning",
+                        message=msg,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                on_event(
+                    MigrationEvent(
+                        phase="validate_migration",
+                        status="warning",
+                        message=_safe(config, f"Validation failed: {exc}"),
+                    )
+                )
         save_state(state, config.output_dir)
 
     return state

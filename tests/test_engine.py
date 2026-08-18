@@ -7,7 +7,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -1149,15 +1149,15 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------------------
-# Post-migration validation (S7)
+# Post-migration validation (#268: redirected to run_check)
 # ---------------------------------------------------------------------------
 
 STOAT_URL = "https://api.test"
 STOAT_SERVER_ID = "stoat_server_123"
 
 
-async def test_validation_passes_when_counts_match(tmp_path: Path) -> None:
-    """Validation emits 'completed' when channel and role counts match."""
+async def test_validation_calls_run_check(tmp_path: Path) -> None:
+    """validate_after=True calls run_check and stores results."""
     events: list[MigrationEvent] = []
 
     async def set_server_id(
@@ -1167,34 +1167,38 @@ async def test_validation_passes_when_counts_match(tmp_path: Path) -> None:
         emit: EventCallback,
     ) -> None:
         state.stoat_server_id = STOAT_SERVER_ID
-        state.channel_map = {"d1": "s1", "d2": "s2"}
+        state.channel_map = {"d1": "s1"}
         state.role_map = {"r1": "sr1"}
 
     config = _make_config(tmp_path, validate_after=True)
     overrides = {**_NOOP_OVERRIDES, "connect": set_server_id}
 
-    with aioresponses() as m:
-        m.get(
-            f"{STOAT_URL}/servers/{STOAT_SERVER_ID}",
-            payload={
-                "channels": ["s1", "s2"],
-                "roles": {"sr1": {"name": "role1"}},
-            },
-        )
+    mock_report = CheckReport()
+    mock_report.add(
+        name="general",
+        status="ok",
+        kind="channel_present",
+        detail="found",
+    )
+
+    with patch(
+        "discord_ferry.migrator.verify.run_check",
+        new_callable=AsyncMock,
+        return_value=mock_report,
+    ) as mock_check:
         state = await run_migration(config, events.append, phase_overrides=overrides)
+        mock_check.assert_called_once()
 
     val_events = [e for e in events if e.phase == "validate_migration"]
     assert any(e.status == "started" for e in val_events)
-    assert any(e.status == "completed" and "passed" in e.message.lower() for e in val_events)
-    assert state.validation_results["passed"] is True
-    assert state.validation_results["channels_expected"] == 2
-    assert state.validation_results["channels_found"] == 2
-    assert state.validation_results["roles_expected"] == 1
-    assert state.validation_results["roles_found"] == 1
+    assert any(e.status == "completed" for e in val_events)
+    assert state.validation_results["has_failures"] is False
+    assert len(state.validation_results["results"]) == 1
+    assert state.validation_results["counts"]["ok"] == 1
 
 
-async def test_validation_warns_on_mismatch(tmp_path: Path) -> None:
-    """Validation emits 'warning' when channel or role counts don't match."""
+async def test_validation_reports_failures(tmp_path: Path) -> None:
+    """run_check failures produce a warning event and has_failures=True."""
     events: list[MigrationEvent] = []
 
     async def set_server_id(
@@ -1204,27 +1208,28 @@ async def test_validation_warns_on_mismatch(tmp_path: Path) -> None:
         emit: EventCallback,
     ) -> None:
         state.stoat_server_id = STOAT_SERVER_ID
-        state.channel_map = {"d1": "s1", "d2": "s2", "d3": "s3"}
-        state.role_map = {"r1": "sr1"}
 
     config = _make_config(tmp_path, validate_after=True)
     overrides = {**_NOOP_OVERRIDES, "connect": set_server_id}
 
-    with aioresponses() as m:
-        m.get(
-            f"{STOAT_URL}/servers/{STOAT_SERVER_ID}",
-            payload={
-                "channels": ["s1", "s2"],  # expected 3, found 2
-                "roles": {"sr1": {"name": "role1"}},
-            },
-        )
+    mock_report = CheckReport()
+    mock_report.add(
+        name="missing-ch",
+        status="fail",
+        kind="channel_missing",
+        detail="not found on server",
+    )
+
+    with patch(
+        "discord_ferry.migrator.verify.run_check",
+        new_callable=AsyncMock,
+        return_value=mock_report,
+    ):
         state = await run_migration(config, events.append, phase_overrides=overrides)
 
     val_events = [e for e in events if e.phase == "validate_migration"]
     assert any(e.status == "warning" for e in val_events)
-    assert state.validation_results["passed"] is False
-    assert state.validation_results["channels_expected"] == 3
-    assert state.validation_results["channels_found"] == 2
+    assert state.validation_results["has_failures"] is True
 
 
 async def test_validation_skipped_when_disabled(tmp_path: Path) -> None:
@@ -1248,8 +1253,32 @@ async def test_validation_skipped_when_disabled(tmp_path: Path) -> None:
     assert len(val_events) == 0
 
 
-async def test_validation_skips_on_api_failure(tmp_path: Path) -> None:
-    """API failure during validation emits a warning, doesn't crash."""
+async def test_validation_skips_dry_run(tmp_path: Path) -> None:
+    """Dry-run state skips validation with a warning."""
+    events: list[MigrationEvent] = []
+
+    async def set_dry_run(
+        config: FerryConfig,
+        state: MigrationState,
+        exports: list,
+        emit: EventCallback,
+    ) -> None:
+        state.stoat_server_id = "dry-server-abc"
+        state.is_dry_run = True
+
+    config = _make_config(tmp_path, validate_after=True)
+    overrides = {**_NOOP_OVERRIDES, "connect": set_dry_run}
+
+    await run_migration(config, events.append, phase_overrides=overrides)
+
+    val_events = [e for e in events if e.phase == "validate_migration"]
+    assert any(
+        e.status == "warning" and "dry-run" in e.message.lower() for e in val_events
+    )
+
+
+async def test_validation_handles_api_failure(tmp_path: Path) -> None:
+    """API failure during run_check emits a warning, doesn't crash."""
     events: list[MigrationEvent] = []
 
     async def set_server_id(
@@ -1263,55 +1292,18 @@ async def test_validation_skips_on_api_failure(tmp_path: Path) -> None:
     config = _make_config(tmp_path, validate_after=True)
     overrides = {**_NOOP_OVERRIDES, "connect": set_server_id}
 
-    with aioresponses() as m:
-        m.get(
-            f"{STOAT_URL}/servers/{STOAT_SERVER_ID}",
-            status=500,
-        )
+    with patch(
+        "discord_ferry.migrator.verify.run_check",
+        new_callable=AsyncMock,
+        side_effect=Exception("API timeout"),
+    ):
         state = await run_migration(config, events.append, phase_overrides=overrides)
 
     val_events = [e for e in events if e.phase == "validate_migration"]
-    assert any(e.status == "warning" and "skipped" in e.message.lower() for e in val_events)
-    # Migration should still complete
+    assert any(
+        e.status == "warning" and "failed" in e.message.lower() for e in val_events
+    )
     assert state.completed_at != ""
-
-
-async def test_validation_results_stored_in_state(tmp_path: Path) -> None:
-    """Validation results are persisted in state.validation_results and state.json."""
-    events: list[MigrationEvent] = []
-
-    async def set_server_id(
-        config: FerryConfig,
-        state: MigrationState,
-        exports: list,
-        emit: EventCallback,
-    ) -> None:
-        state.stoat_server_id = STOAT_SERVER_ID
-        state.channel_map = {"d1": "s1"}
-        state.role_map = {"r1": "sr1"}
-
-    config = _make_config(tmp_path, validate_after=True)
-    overrides = {**_NOOP_OVERRIDES, "connect": set_server_id}
-
-    with aioresponses() as m:
-        m.get(
-            f"{STOAT_URL}/servers/{STOAT_SERVER_ID}",
-            payload={
-                "channels": ["s1"],
-                "roles": {"sr1": {"name": "role1"}},
-            },
-        )
-        state = await run_migration(config, events.append, phase_overrides=overrides)
-
-    assert state.validation_results != {}
-    assert state.validation_results["passed"] is True
-    assert state.validation_results["failed_messages"] == 0
-
-    # Verify it's persisted to state.json
-    state_path = tmp_path / "state.json"
-    assert state_path.exists()
-    saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert saved["validation_results"]["passed"] is True
 
 
 # ---------------------------------------------------------------------------
