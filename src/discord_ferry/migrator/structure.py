@@ -685,8 +685,8 @@ async def run_roles(
             # unfinished roles; --incremental skips prior-completed (finalized) roles.
             if role.id in state.roles_finalized:
                 continue
-            rank_role_id = state.role_map.get(role.id)
-            if not rank_role_id:
+            attribute_role_id = state.role_map.get(role.id)
+            if not attribute_role_id:
                 continue
             edit_kwargs: dict[str, Any] = {}
             rm = role_meta.get(role.id)
@@ -716,7 +716,7 @@ async def run_roles(
                     config.stoat_url,
                     config.token,
                     state.stoat_server_id,
-                    rank_role_id,
+                    attribute_role_id,
                     **edit_kwargs,
                 )
             except Exception as exc:  # noqa: BLE001
