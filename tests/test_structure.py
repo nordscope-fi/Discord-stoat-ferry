@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import ssl
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -1715,7 +1716,7 @@ def test_make_unique_channel_name_truncated_collision() -> None:
 
 
 async def test_run_roles_never_sends_rank(tmp_path: Path) -> None:
-    """No per-role PATCH body carries ``rank``; the Stoat backend discards it.
+    """SC-2.1. No per-role PATCH body carries ``rank``; the Stoat backend discards it.
 
     Replaces test_run_roles_sets_rank_from_position, which asserted that ``rank``
     appeared in a mocked request body. That assertion was true and useless: the
@@ -1750,7 +1751,7 @@ async def test_run_roles_never_sends_rank(tmp_path: Path) -> None:
 
 
 async def test_run_roles_position_only_role_sends_no_patch(tmp_path: Path) -> None:
-    """A role whose only attribute was rank now triggers no PATCH at all.
+    """SC-2.3. A role whose only attribute was rank now triggers no PATCH at all.
 
     With ``rank`` gone and no Discord metadata, edit_kwargs is empty and the
     ``if not edit_kwargs: continue`` guard skips the call entirely.
@@ -3682,7 +3683,7 @@ def _server_payload(ranks: dict[str, int]) -> dict[str, object]:
 
 
 async def test_apply_role_ordering_sorts_position_descending(tmp_path: Path) -> None:
-    """Index 0 is the top of the hierarchy, so the highest Discord position leads.
+    """SC-3.4. Index 0 is the top of the hierarchy, so the highest Discord position leads.
 
     Upstream ``set_role_ordering`` assigns rank by enumeration index and
     ``ordered_roles()`` sorts ascending by rank, while Discord's ``position`` is
@@ -3716,7 +3717,7 @@ async def test_apply_role_ordering_sorts_position_descending(tmp_path: Path) -> 
 
 
 async def test_apply_role_ordering_tie_breaks_on_ascending_id(tmp_path: Path) -> None:
-    """Equal positions order by ascending Discord id.
+    """SC-3.5. Equal positions order by ascending Discord id.
 
     This is the only case that distinguishes ``key=(-position, id)`` from
     ``key=(position, id)`` with ``reverse=True``, which would flip the id tie-break
@@ -3750,7 +3751,7 @@ async def test_apply_role_ordering_tie_breaks_on_ascending_id(tmp_path: Path) ->
 
 
 async def test_apply_role_ordering_keeps_unknown_roles_at_their_index(tmp_path: Path) -> None:
-    """A role Ferry did not create stays exactly where it was.
+    """SC-3.2 and SC-3.6. A role Ferry did not create stays exactly where it was.
 
     This is the whole point of the in-place permutation. It keeps a --server-id
     target's own hierarchy intact, and it is what keeps the upstream elevation
@@ -3787,7 +3788,7 @@ async def test_apply_role_ordering_keeps_unknown_roles_at_their_index(tmp_path: 
 
 
 async def test_apply_role_ordering_empty_role_map_makes_no_request(tmp_path: Path) -> None:
-    """The role_map guard runs before the read-back, so no route is touched.
+    """SC-3.8. The role_map guard runs before the read-back, so no route is touched.
 
     No routes are registered at all. aioresponses raises on an unregistered
     request, so this fails loudly if the guard is placed after the GET rather
@@ -3802,7 +3803,7 @@ async def test_apply_role_ordering_empty_role_map_makes_no_request(tmp_path: Pat
 
 
 async def test_apply_role_ordering_missing_roles_key_is_empty(tmp_path: Path) -> None:
-    """Upstream omits `roles` when the map is empty; that must not raise.
+    """SC-3.3. Upstream omits `roles` when the map is empty; that must not raise.
 
     The v0 Server model declares roles with
     skip_serializing_if = "HashMap::<String, Role>::is_empty".
@@ -3819,7 +3820,7 @@ async def test_apply_role_ordering_missing_roles_key_is_empty(tmp_path: Path) ->
 
 
 async def test_apply_role_ordering_one_known_role_makes_no_request(tmp_path: Path) -> None:
-    """A single known role cannot permute, so neither request is worth making.
+    """SC-3.8. A single known role cannot permute, so neither request is worth making.
 
     Measured during the chunk-2 review: with one Ferry role on a four-role server
     the submitted list came back byte-identical to the current order. Both the
@@ -3841,7 +3842,7 @@ async def test_apply_role_ordering_one_known_role_makes_no_request(tmp_path: Pat
 async def test_apply_role_ordering_server_with_one_role_sends_read_back_only(
     tmp_path: Path,
 ) -> None:
-    """A server holding fewer than two roles is judged only after the read-back.
+    """SC-3.9. A server holding fewer than two roles is judged only after the read-back.
 
     Ferry knows two roles here, so the local guard passes. The server's own count
     is not knowable without asking, which is why this guard cannot move earlier.
@@ -3869,7 +3870,7 @@ async def test_apply_role_ordering_server_with_one_role_sends_read_back_only(
 
 
 async def test_apply_role_ordering_skips_a_no_op_submission(tmp_path: Path) -> None:
-    """When the server already holds the target order, no ordering call is sent.
+    """SC-3.9. When the server already holds the target order, no ordering call is sent.
 
     This is the --incremental re-run case: the export has not changed, so the
     permutation reproduces what the previous run applied. No PATCH route is
@@ -3898,7 +3899,7 @@ async def test_apply_role_ordering_skips_a_no_op_submission(tmp_path: Path) -> N
 
 
 async def test_run_roles_ordering_failure_is_non_fatal(tmp_path: Path) -> None:
-    """A generic ordering failure warns, and the phase still completes.
+    """SC-3.10. A generic ordering failure warns, and the phase still completes.
 
     Replaces the coverage of the retired test_run_roles_rank_failure_is_non_fatal,
     which drove a failure of the discarded per-role rank PATCH.
@@ -3936,7 +3937,7 @@ async def test_run_roles_ordering_failure_is_non_fatal(tmp_path: Path) -> None:
 async def test_run_roles_ordering_forbidden_warns_about_permissions(
     tmp_path: Path, err_type: str
 ) -> None:
-    """A 403 gets its own warning type, naming permissions rather than a bug.
+    """SC-3.11. A 403 gets its own warning type, naming permissions rather than a bug.
 
     On the --server-id path this is the ordinary outcome when the account holds no
     role on the target, because the upstream elevation check protects every role
@@ -3976,7 +3977,7 @@ async def test_run_roles_ordering_forbidden_warns_about_permissions(
 
 
 async def test_run_roles_read_back_failure_is_non_fatal(tmp_path: Path) -> None:
-    """A failed read-back degrades the same way the ordering call does."""
+    """SC-3.10. A failed read-back degrades the same way the ordering call does."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -4000,7 +4001,8 @@ async def test_run_roles_read_back_failure_is_non_fatal(tmp_path: Path) -> None:
 
 
 async def test_run_roles_ordering_is_the_last_request(tmp_path: Path) -> None:
-    """Ordering runs after every create and after the permissions pass, exactly once.
+    """SC-3.1 and SC-I1. Ordering runs last, after every create and after the
+    permissions pass, and exactly once.
 
     The route rejects any list that does not name every role, so it cannot run
     until the creates have landed.
@@ -4087,7 +4089,7 @@ async def test_run_roles_ordering_is_the_last_request(tmp_path: Path) -> None:
 
 
 async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
-    """Dry run needs no guard of its own: run_roles returns before the session block."""
+    """SC-3.13. Dry run needs no guard of its own: run_roles returns before the session block."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, dry_run=True)
     state = MigrationState(stoat_server_id="srv1")
@@ -4105,7 +4107,7 @@ async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
 
 
 async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> None:
-    """A second pass reaches the same order and creates no duplicate roles.
+    """SC-3.12. A second pass reaches the same order and creates no duplicate roles.
 
     Idempotence comes from recomputing off a fresh read-back rather than from a
     guard flag, so the second run is driven against a server that already reflects
@@ -4259,4 +4261,230 @@ async def test_run_roles_retries_ordering_when_every_role_is_finalized(tmp_path:
     assert bodies == [{"ranks": ["stoat-b", "stoat-a"]}], (
         "ordering must still run for finalized roles, otherwise a degraded "
         "ordering could never be repaired by a later run"
+    )
+
+
+async def test_run_roles_ordering_request_budget_is_one_read_and_one_write(
+    tmp_path: Path,
+) -> None:
+    """SC-3.7. The ordering step costs one GET and one PATCH, and no more.
+
+    Both land in the `servers` bucket, 5 requests per 10 seconds, which is the
+    tightest in a migration and is shared with role creation. The earlier version
+    of this coverage counted the PATCH and left the GET unasserted, so the half of
+    the rate-limit claim that could regress was the half nobody watched. A step
+    called once per role rather than once per phase fails here.
+    """
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    reads: list[str] = []
+    writes: list[str] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        # Seeded opposite to the target order so the no-op guard does not fire and
+        # the PATCH genuinely has work to do.
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+            callback=lambda url, **kwargs: reads.append("read"),  # type: ignore[misc]
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: writes.append("write"),  # type: ignore[misc]
+        )
+
+        await run_roles(config, state, exports, events.append)
+
+    assert reads == ["read"], f"expected exactly one read-back, got {len(reads)}"
+    assert writes == ["write"], f"expected exactly one ordering call, got {len(writes)}"
+
+
+async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
+    tmp_path: Path,
+) -> None:
+    """SC-I3. A role added on an --incremental run is ordered against the WHOLE server.
+
+    First run creates two roles. The second sees an export carrying a third at the
+    highest Discord position, with role_map and roles_finalized carried forward.
+    Only the new role is created, and the submitted list names all three with the
+    newcomer at index 0.
+
+    This is what proves the step orders the whole server rather than only the roles
+    this run happened to add, and that the `len(role_map) < 2` guard does not fire
+    when the map is non-empty from a prior run.
+    """
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+
+    first_roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=5),
+    ]
+    first_exports = [_make_export(messages=[_make_message("m1", roles=first_roles)])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={"_id": "srv1"}, repeat=True)
+        await run_roles(_make_config(tmp_path), state, first_exports, events.append)
+
+    assert state.role_map == {"a": "stoat-a", "b": "stoat-b"}
+    carried_finalized = set(state.roles_finalized)
+    assert carried_finalized == {"a", "b"}
+
+    # Second pass: the export now also carries "c" at the highest position.
+    second_roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=5),
+        DCERole(id="c", name="C", position=9),
+    ]
+    second_exports = [_make_export(messages=[_make_message("m2", roles=second_roles)])]
+
+    created: list[str] = []
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "stoat-c", "name": "C"},
+            repeat=True,
+            callback=lambda url, **kwargs: created.append("create"),  # type: ignore[misc]
+        )
+        # The server reflects the order the first run applied, plus the new role at
+        # the bottom, which is where Stoat puts a freshly created role.
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-b": 0, "stoat-a": 1, "stoat-c": 2}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(
+            _make_config(tmp_path, incremental=True), state, second_exports, events.append
+        )
+
+    assert created == ["create"], "only the new role may be created on the second pass"
+    assert state.role_map == {"a": "stoat-a", "b": "stoat-b", "c": "stoat-c"}
+    # All three named, and the newcomer at position 9 leads.
+    assert bodies == [{"ranks": ["stoat-c", "stoat-b", "stoat-a"]}]
+
+
+async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Path) -> None:
+    """SC-I2. An interrupted run, resumed, submits the same order as an uninterrupted one.
+
+    The first attempt fails in the colour step of the CREATE loop, after both roles
+    are created, so role_map is populated and roles_finalized is not. Note the
+    phase name: colour is applied inside the create loop (structure.py:764), while
+    the pass the source calls the "attributes pass" (:796) handles hoist and icon.
+    An earlier version of this docstring said the failure was in the attributes
+    pass, which is the wrong loop.
+
+    The resume then completes the phase, and its submitted ordering list must match
+    what a single clean run produces from the same export.
+
+    This is the case a guard flag on the ordering step would have broken: gating on
+    roles_finalized, as one review suggested, would skip ordering on the resume and
+    leave the hierarchy at whatever the interrupted run left behind.
+    """
+    events: list[MigrationEvent] = []
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    # --- the uninterrupted baseline, in its own output dir ---
+    clean_dir = tmp_path / "clean"
+    clean_dir.mkdir()
+    clean_state = MigrationState(stoat_server_id="srv1")
+    clean_bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: clean_bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(_make_config(clean_dir), clean_state, exports, events.append)
+
+    # --- the interrupted attempt: roles created, then the colour PATCH kills it ---
+    crash_dir = tmp_path / "crash"
+    crash_dir.mkdir()
+    crash_state = MigrationState(stoat_server_id="srv1")
+    coloured = [
+        DCERole(id="a", name="A", position=1, color="#FF0000"),
+        DCERole(id="b", name="B", position=9, color="#00FF00"),
+    ]
+    crash_exports = [_make_export(messages=[_make_message("m1", roles=coloured)])]
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        # The create loop runs create-then-colour per role, so the kill has to land
+        # on the SECOND role's colour PATCH for both roles to exist first, which is
+        # the state SC-I2 describes. Killing on the first leaves role "b" uncreated
+        # and tests a different scenario. RuntimeError is used deliberately: the
+        # colour handler catches ValueError and MigrationError, so neither would
+        # interrupt anything.
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-a", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-b", exception=RuntimeError("killed"))
+        with contextlib.suppress(RuntimeError):
+            await run_roles(_make_config(crash_dir), crash_state, crash_exports, events.append)
+
+    # The interrupt left the roles mapped but NOT finalized, which is the state the
+    # resume has to recover from.
+    assert crash_state.role_map == {"a": "stoat-a", "b": "stoat-b"}
+    assert crash_state.roles_finalized == set()
+
+    # --- the resume ---
+    resume_bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/roles",
+            payload={"id": "unexpected", "name": "X"},
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-a", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-b", payload={}, repeat=True)
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: resume_bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        await run_roles(_make_config(crash_dir), crash_state, crash_exports, events.append)
+
+    assert clean_bodies == [{"ranks": ["stoat-b", "stoat-a"]}]
+    assert resume_bodies == clean_bodies, (
+        "a resumed run must reach the same hierarchy as an uninterrupted one"
     )

@@ -346,7 +346,7 @@ async def test_api_edit_role(mock_aiohttp: aioresponses) -> None:
 
 
 async def test_api_edit_role_ranks_sends_ordered_list(mock_aiohttp: aioresponses) -> None:
-    """PATCH /servers/srv1/roles/ranks sends the ordered id list and returns the Server."""
+    """SC-1.1. PATCH /servers/srv1/roles/ranks sends the ordered id list and returns the Server."""
     bodies: list[dict[str, object]] = []
     mock_aiohttp.patch(
         f"{BASE_URL}/servers/srv1/roles/ranks",
@@ -360,7 +360,7 @@ async def test_api_edit_role_ranks_sends_ordered_list(mock_aiohttp: aioresponses
 
 
 async def test_api_edit_role_ranks_incomplete_list_raises(mock_aiohttp: aioresponses) -> None:
-    """A 400 InvalidOperation surfaces as MigrationError carrying status and type.
+    """SC-1.2. A 400 InvalidOperation surfaces as MigrationError carrying status and type.
 
     The attempt count is asserted, not assumed: 400 is absent from
     ``_RETRYABLE_STATUSES``, and a silent retry here would burn the budget on a
@@ -392,7 +392,7 @@ async def test_api_edit_role_ranks_incomplete_list_raises(mock_aiohttp: aiorespo
 async def test_api_edit_role_ranks_forbidden_is_identifiable(
     mock_aiohttp: aioresponses, body: dict[str, str]
 ) -> None:
-    """A 403 keeps its type in the message so the call site can classify it.
+    """SC-1.3. A 403 keeps its type in the message so the call site can classify it.
 
     On the ``--server-id`` path this is the ordinary outcome rather than an exotic
     one, so it must fail fast and stay identifiable.

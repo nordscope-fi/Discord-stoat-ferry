@@ -1275,7 +1275,7 @@ def test_every_integer_counter_starts_at_zero() -> None:
 
 
 def test_role_ordering_warnings_are_classified_for_redaction() -> None:
-    """The two role-ordering warning types keep their structure and lose their secret.
+    """SC-I4. The two role-ordering warning types keep their structure and lose their secret.
 
     #380 adds `role_ordering_failed` and `role_ordering_not_permitted`. Both use
     the existing phase/type/message keys, so `_TEXT_MEMBERS["warnings"]` needs no
