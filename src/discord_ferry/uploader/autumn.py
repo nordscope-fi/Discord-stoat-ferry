@@ -301,6 +301,9 @@ async def upload_with_cache(
         verify_size: When True, pass size verification to the upload call. On a
             present-and-mismatched size the upload raises ``AutumnUploadError`` and is never
             cached. Best-effort — not all Autumn responses include ``size``.
+        skip_cache: When True, bypass the cache lookup and in-flight coalescing so a fresh
+            upload always runs. Required for attachment-tagged uploads because Autumn file
+            ids are single-use.
 
     Returns:
         Autumn file ID string.

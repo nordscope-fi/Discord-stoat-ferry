@@ -3974,3 +3974,39 @@ async def test_embed_budget_all_dropped_ships_note_not_empty_label(tmp_path: Pat
     content = sent[0]["content"]
     assert "embed(s) could not be migrated" in content
     assert "[empty message]" not in content
+
+
+# ---------------------------------------------------------------------------
+# S3: upload_with_cache skip_cache wiring at call sites
+# ---------------------------------------------------------------------------
+
+
+async def test_attachment_upload_passes_skip_cache(tmp_path: Path) -> None:
+    """All three attachment-tagged upload_with_cache call sites pass skip_cache=True."""
+    calls: list[dict[str, Any]] = []
+
+    async def _recording_upload(*args: Any, **kwargs: Any) -> str:
+        calls.append({"args": args, "kwargs": kwargs})
+        return "fresh-id"
+
+    att_file = tmp_path / "pic.png"
+    att_file.write_bytes(b"x" * 10)
+
+    state = _make_state()
+    config = _make_config(tmp_path)
+    att = DCEAttachment(id="att1", url="pic.png", file_name="pic.png")
+    msg = _make_message(id="sc1", content="attachment test", attachments=[att])
+    export = _make_export(messages=[msg])
+
+    sent: list[dict[str, Any]] = []
+    with (
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_upload),
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert len(calls) >= 1
+    for call in calls:
+        assert call["kwargs"].get("skip_cache") is True, (
+            f"upload_with_cache called without skip_cache=True: {call['kwargs']}"
+        )
