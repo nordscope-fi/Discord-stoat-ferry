@@ -1315,6 +1315,65 @@ async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
     assert len(state.channel_map) == 1
 
 
+async def test_channel_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
+    """A hard kill after channel 2 of 3 persists both mappings; resume creates only channel 3."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [
+        _make_export(channel_id="ch1", channel_name="one", category_id=""),
+        _make_export(channel_id="ch2", channel_name="two", category_id=""),
+        _make_export(channel_id="ch3", channel_name="three", category_id=""),
+    ]
+
+    call_count = 0
+
+    def kill_after_two(s: MigrationState, d: Path) -> None:
+        nonlocal call_count
+        save_state_real(s, d)
+        call_count += 1
+        if call_count == 2:
+            raise KeyboardInterrupt
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.save_state",
+            side_effect=kill_after_two,
+        ),
+    ):
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "one"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch2", "name": "two"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch3", "name": "three"},
+        )
+        with contextlib.suppress(KeyboardInterrupt):
+            await run_channels(config, state, exports, lambda e: None)
+
+    loaded = load_state(tmp_path)
+    assert len(loaded.channel_map) == 2
+    assert loaded.channel_map == {"ch1": "stoat-ch1", "ch2": "stoat-ch2"}
+    assert set(loaded.created_channel_names) == {"ch1", "ch2"}
+
+    # Resume: only channel 3 should be created.
+    resumed_state = loaded
+    with aioresponses() as m2:
+        m2.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch3", "name": "three"},
+        )
+        await run_channels(config, resumed_state, exports, lambda e: None)
+
+    assert len(resumed_state.channel_map) == 3
+    assert resumed_state.channel_map["ch3"] == "stoat-ch3"
+
+
 async def test_run_channels_voice_fallback_to_text(tmp_path: Path) -> None:
     """CHANNELS phase retries a failed voice channel creation as text and warns."""
     events: list[MigrationEvent] = []
