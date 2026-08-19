@@ -1278,7 +1278,7 @@ async def run_channels(
             channels_to_create, start=1
         ):
             ch: DCEChannel = channel
-            description = ch.topic if ch.topic else None
+            description = ch.topic[:1024] if ch.topic else None
 
             ch_meta = discord_metadata.channel_metadata.get(ch.id) if discord_metadata else None
             nsfw = ch_meta.nsfw if ch_meta else False

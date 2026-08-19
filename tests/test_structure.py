@@ -1380,6 +1380,33 @@ async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
     assert created_bodies[0].get("nsfw") is True
 
 
+async def test_run_channels_truncates_long_topic(tmp_path: Path) -> None:
+    """A channel topic longer than 1024 chars is truncated before reaching Stoat."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    export = _make_export(channel_id="ch1", channel_name="chatty", category_id="")
+    export.channel.topic = "x" * 2000
+
+    created_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-ch1", "name": "chatty"},
+            callback=lambda url, **kwargs: created_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(config, state, [export], events.append)
+
+    assert len(created_bodies) == 1
+    desc = created_bodies[0].get("description")
+    assert desc is not None
+    assert len(desc) == 1024  # type: ignore[arg-type]
+
+
 async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
     """CHANNELS phase PATCHes slowmode (text) and voice.max_users (voice)."""
     events: list[MigrationEvent] = []

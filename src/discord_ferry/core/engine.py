@@ -1719,7 +1719,7 @@ async def _recreate_channel(
         state.stoat_server_id,
         name=unique_name,
         channel_type=_stoat_channel_type(export.channel.type),
-        description=export.channel.topic or None,
+        description=export.channel.topic[:1024] or None,
     )
     # `_id` here, `id` for roles. Upstream's spelling, not ours.
     new_id: str = created["_id"]

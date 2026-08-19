@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.11] - 2026-08-19
+
+### Fixed
+
+- **Channel topics are capped at 1024 characters before reaching the Stoat API.**
+  Discord and Stoat both enforce a 1024-character limit on channel descriptions, so a
+  valid export never exceeds it. The cap is defense-in-depth for corrupt or hand-edited
+  exports, applied at both the migration and repair create paths. Fixes #343.
+
 ## [2.19.10] - 2026-08-19
 
 ### Fixed
