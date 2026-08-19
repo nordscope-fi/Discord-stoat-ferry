@@ -13,13 +13,22 @@ Thank you for your interest in contributing!
 
 1. Clone the repo: `git clone https://github.com/nordscope-fi/Discord-stoat-ferry.git`
 2. Install uv: `pip install uv`
-3. Install dependencies: `uv sync --all-extras`
-4. Run tests: `uv run pytest`
+3. Install dependencies: `uv sync --locked --extra dev --extra native`. This installs the test, lint, type-check, and desktop-window toolchains against the pinned `uv.lock`. The `mutation` extra (cosmic-ray) and the `docs` extra (mkdocs-material) are opt-in — add `--extra mutation` or `--extra docs` only when you need them.
+4. Run the full local suite (lint, format, types, tests): `uv run ruff check . && uv run ruff format --check . && uv run mypy src/ && uv run pytest`
 5. Run the GUI in dev mode: `uv run ferry-gui`
+
+### Cross-platform agent support (optional)
+
+The repo ships with a generator that produces gitignored `.codex/` and `.vibe/` directories from `config/agent-compat/`, so Codex (OpenAI CLI) and Vibe (Mistral CLI) share the same lifecycle hooks and skills Claude Code uses. If you use either, run:
+
+- `./scripts/agent-install.sh` — generate the per-agent configuration
+- `./scripts/agent-check.sh` — verify the generated state has not drifted from the source templates
+
+Contributors using Claude Code do not need to run either script; the `.claude/` directory is tracked directly.
 
 ## Code style
 
-- We use `ruff` for linting and formatting, and `mypy` for type checking:
+- We use `ruff` for linting and formatting, and `mypy` for type checking. `ruff check .` targets the whole repo (source, tests, scripts, docs snippets), which is deliberate — a `src/`-only sweep misses regressions in the tests and CI helpers:
   `uv run ruff check . && uv run ruff format --check . && uv run mypy src/`
 - Type hints on all public functions
 - Docstrings on all public functions (Google style)

@@ -111,7 +111,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   to the same `~/.claude/hooks/` guard scripts Claude Code uses. A parity ledger maps all 24
   hooks. A skill topology bridger symlinks all 14 `df-*` skills. A drift verifier checks
   generated state. Run `./scripts/agent-install.sh` to generate, `./scripts/agent-check.sh` to
-  verify. See ADR-022.
+  verify.
 
 ## [2.19.6] - 2026-08-18
 
@@ -158,8 +158,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   indistinguishable from "not requested". The engine now calls `run_check`, which verifies every
   entity by ID, checks names, and samples message tails. The `validation_results` dict in
   `state.json` changes shape from `{passed, channels_expected, ...}` to `{results, counts,
-  has_failures}`. Dry runs are skipped explicitly. ADR-021 records the consequential default
-  change. Fixes #268.
+  has_failures}`. Dry runs are skipped explicitly. Fixes #268.
 
 ### Changed
 
@@ -594,7 +593,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   new member key appears at any site that appends a warning or an error, or a field is
   added to the failed-message or rollback-failure records, until it is classified as
   text or structural. The member-key check reads the actual append sites rather than a
-  list, so a new one cannot slip past it. See ADR-014.
+  list, so a new one cannot slip past it.
 
   The wording of error messages is unchanged, and warnings keep their original text in
   memory, so what a message says while troubleshooting is unaffected. A secret inside

@@ -222,6 +222,14 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 | **Cause** | A prior Ferry run set an advisory lock marker in the Stoat server description. This prevents two Ferry instances from running against the same server simultaneously. The lock expires after 24 hours, but may persist if the prior migration crashed before it could clean up. |
 | **Solution** | If the prior migration is genuinely still running, wait for it to finish. If it crashed, add `--force-unlock` to your command to clear the stale lock and proceed. |
 
+### Stale resume flag on relaunch
+
+| | |
+|---|---|
+| **Symptom** | The GUI opens on the Migrate screen with a resume prompt, but Ferry immediately reports it cannot load the previous state — for example after you deleted or moved the output folder between runs |
+| **Cause** | The GUI persists a "resume available" flag alongside the state file. If the state file goes away and the flag does not, an older Ferry version raised a bare `StateError` that read like a bug in Ferry rather than an obviously stale flag |
+| **Solution** | From v2.19.7, Ferry clears the stale flag on the spot and surfaces a specific error naming the missing state file — the wizard then reopens fresh with your credentials filled in. No action is required beyond acknowledging the error. Nothing on the Stoat server is touched. On the CLI the equivalent is simply omitting `--resume` on the retry |
+
 ---
 
 ## DCE Verification Errors

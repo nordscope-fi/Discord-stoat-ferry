@@ -132,6 +132,14 @@ Before you start, confirm you have these ready:
     | `--cleanup-orphans` | Report unreferenced Autumn uploads |
     | `--force-unlock` | Clear stale migration lock from server |
     | `--skip-dce-verify` | Skip DCE binary SHA-256 verification |
+    | `--reaction-mode text\|native\|skip` | How reactions migrate (default `text` — appended as a summary; `native` calls the reaction API; `skip` drops them) |
+    | `--min-thread-messages N` | Skip threads with fewer than N messages (default 0 = all threads) |
+    | `--checkpoint-interval N` | Save state every N messages (default 50; raise for very large runs) |
+    | `--max-concurrent-channels N` | Channels processed in parallel (default 3; self-hosted only) |
+    | `--max-concurrent-requests N` | Concurrent API calls across all channel workers (default 5) |
+    | `--skip-avatars` | Skip the avatar pre-flight phase (avatars still upload on demand) |
+    | `--validate-after` | After migration, compare live server counts with what was migrated |
+    | `--yes` / `-y` | Skip the terms-of-service confirmation prompt (for scripted runs) |
 
 ---
 
@@ -217,7 +225,7 @@ Before creating anything on Stoat, Ferry shows a review summary.
 
     1. Click **Proceed** on the review dialog (or **Start Migration** if review was skipped).
     2. The Progress screen appears and shows:
-        - Phase indicator — 12 phases, each with a checkmark when complete
+        - Phase indicator — 13 phases, each with a checkmark when complete
         - Progress bar during the message import phase
         - Running totals: messages sent, attachments uploaded, errors
         - Live log stream at the bottom

@@ -85,7 +85,7 @@ Pick your operating system below to get started.
 
 === "Linux"
 
-    Ferry is distributed as a Python package on Linux. You will need a terminal (the text command window — search "Terminal" in your applications) and **Python 3.10 or newer**.
+    Ferry is distributed as a Python package on Linux. You will need a terminal (the text command window — search "Terminal" in your applications) and **Python 3.11 or newer**.
 
     1.  Install **pipx** (a tool for safely installing Python programs) if you do not have it already:
 
@@ -147,13 +147,13 @@ This is the normal first-launch prompt, not a fault. Follow the **Approving Ferr
 
 **"Python not found" or "python3: command not found" (Linux)**
 
-Ferry requires Python 3.10 or newer. Check your version:
+Ferry requires Python 3.11 or newer. Check your version:
 
 ```bash
 python3 --version
 ```
 
-If the version shown is below 3.10, or the command is not found, install a newer Python using your distribution's package manager. For example, on Ubuntu:
+If the version shown is below 3.11, or the command is not found, install a newer Python using your distribution's package manager. For example, on Ubuntu:
 
 ```bash
 sudo apt install python3.11

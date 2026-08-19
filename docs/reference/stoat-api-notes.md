@@ -363,6 +363,7 @@ The Stoat API enforces maximum lengths on several fields. Ferry must truncate be
 | Masquerade name | 32 | — | `messages.py` |
 | Emoji name | 32 | `^[a-z0-9_]+$` | `emoji.py` |
 | Message content | 2,000 | — | `messages.py` |
+| Channel topic / description | 1,024 | — | `structure.py`, `core/engine.py` (defence-in-depth against hand-edited exports) |
 
 Emoji names must be lowercase alphanumeric with underscores only. Names that don't match the regex
 are sanitised (lowercased, invalid characters replaced with underscores) during the EMOJI phase.

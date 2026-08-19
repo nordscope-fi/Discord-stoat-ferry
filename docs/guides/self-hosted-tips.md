@@ -117,13 +117,12 @@ Stoat may apply stricter rate limits to accounts that were created less than 72 
 
 Stoat does not have an "Administrator" permission that grants everything at once. Permissions must be granted individually. There is no shortcut.
 
-If you are running Ferry with an account that is not the server owner, that account's role must have the following permissions on the server and on each channel:
+If you are running Ferry with an account that is not the server owner, that account's role must have the following permissions on the server and on each channel.
+
+**Core set** — always required, and the same 10 bits Ferry sets as the server default (`FERRY_MIN_PERMISSIONS = 1,022,361,624`, see the [pre-flight checklist](pre-flight-checklist.md#4-grant-the-required-permissions) for the authoritative bitmap):
 
 | Permission | Required for |
 |------------|-------------|
-| ManageChannel | Creating and editing channels |
-| ManageServer | Editing server settings and categories |
-| ManagePermissions | Setting channel permission overrides |
 | ManageRole | Displaying original author names with colours |
 | ManageCustomisation | Uploading custom emoji |
 | ViewChannel | Reading channels |
@@ -135,7 +134,15 @@ If you are running Ferry with an account that is not the server owner, that acco
 | Masquerade | Showing each message under its original Discord author's name and avatar |
 | React | Adding reactions |
 
-The simplest approach is to use the server owner's token and avoid this list entirely.
+**Existing-server extras** — needed when Ferry migrates into a server it did not create (`--server-id`), so the Ferry account has to construct the structure the server owner would otherwise already own:
+
+| Permission | Required for |
+|------------|-------------|
+| ManageChannel | Creating and editing channels on a server Ferry does not own |
+| ManageServer | Editing server settings and categories on a server Ferry does not own |
+| ManagePermissions | Setting channel permission overrides on a server Ferry does not own |
+
+The simplest approach is to use the server owner's token and avoid this list entirely — the owner has every permission automatically, in both cases.
 
 ---
 
