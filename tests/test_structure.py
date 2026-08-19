@@ -3157,11 +3157,11 @@ async def test_completed_run_finalizes_all_created_roles(tmp_path: Path) -> None
     assert state.roles_finalized == {"r1", "r2"}
 
 
-async def test_create_loop_saves_state_periodically(tmp_path: Path) -> None:
-    """S3 SC-14: the create loop persists mid-phase (hard-kill durability)."""
+async def test_run_roles_mid_phase_save(tmp_path: Path) -> None:
+    """S3 SC-14: the create loop persists after every role (hard-kill durability)."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
-    roles = [DCERole(id=f"r{i}", name=f"R{i}") for i in range(1, 11)]  # 10 roles -> idx%10 fires
+    roles = [DCERole(id=f"r{i}", name=f"R{i}") for i in range(1, 3)]
     exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
     with (
         aioresponses() as m,
@@ -3169,8 +3169,8 @@ async def test_create_loop_saves_state_periodically(tmp_path: Path) -> None:
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-x"}, repeat=True)
         await run_roles(config, state, exports, lambda e: None)
-    # One intra-loop save (at idx==10) + one finalize-at-end save.
-    assert spy.call_count >= 2
+    # One save per role (2) + one finalize-at-end save (1) = 3.
+    assert spy.call_count == 3
 
 
 async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) -> None:
