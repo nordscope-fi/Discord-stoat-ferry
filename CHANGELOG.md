@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2.19.15] - 2026-08-19
 
+### Changed
+
+- **`--incremental` help text now describes channel reuse and the re-export use case.** The old
+  text said "only migrate new messages since last completed run", which did not surface the
+  main reason users reach for it: continuing a migration after a partial or failed DCE export.
+  Addresses #440.
+
 ### Fixed
 
 - **GUI now shows the completion card after a cancelled migration.** When a user cancelled
