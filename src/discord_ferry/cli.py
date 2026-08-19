@@ -511,7 +511,11 @@ _common_options = [
         "--incremental",
         is_flag=True,
         default=False,
-        help="Only migrate new messages since last completed run",
+        help=(
+            "Reuse channels and roles from a prior run in the same output dir,"
+            " sending only new messages. Use after a partial export or re-export"
+            " of the same server"
+        ),
     ),
     click.option("--verbose", "-v", is_flag=True, help="Debug output"),
     click.option(
