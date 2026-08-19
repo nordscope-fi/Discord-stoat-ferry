@@ -422,3 +422,84 @@ async def test_avatars_time_throttle_no_premature_save(tmp_path: Path) -> None:
 
     assert save_mock.call_count == 0
     assert set(state.avatar_cache.values()) == {"a0", "a1", "a2"}
+
+
+# ---------------------------------------------------------------------------
+# Dry-run guard (#438)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_avatars_dry_run_maps_without_upload(tmp_path: Path) -> None:
+    """Dry-run populates avatar_cache with synthetic IDs, no network calls."""
+    author1 = _make_author("user1", "Alice", avatar_url="avatar_user1.webp")
+    author2 = _make_author("user2", "Bob", avatar_url="avatar_user2.webp")
+    export = _make_export([_make_message("m1", author1), _make_message("m2", author2)])
+    config = _make_config(tmp_path, dry_run=True)
+    state = _make_state()
+    events: list[MigrationEvent] = []
+
+    with patch(
+        "discord_ferry.migrator.avatars.upload_with_cache",
+        new=AsyncMock(return_value="should-not-be-called"),
+    ) as mock_upload:
+        await run_avatars(config, state, [export], events.append)
+
+    mock_upload.assert_not_called()
+    assert state.avatar_cache == {
+        "user1": "dry-avatar-user1",
+        "user2": "dry-avatar-user2",
+    }
+    assert state.autumn_uploads == {}
+    assert state.referenced_autumn_ids == set()
+    completed = [e for e in events if e.status == "completed"]
+    assert completed
+    assert "[DRY RUN]" in completed[-1].message
+    assert "2" in completed[-1].message
+
+
+async def test_run_avatars_dry_run_skips_cached(tmp_path: Path) -> None:
+    """Dry-run does not re-map authors already in avatar_cache."""
+    author1 = _make_author("user1", "Alice", avatar_url="avatar_user1.webp")
+    author2 = _make_author("user2", "Bob", avatar_url="avatar_user2.webp")
+    export = _make_export([_make_message("m1", author1), _make_message("m2", author2)])
+    config = _make_config(tmp_path, dry_run=True)
+    state = _make_state()
+    state.avatar_cache["user1"] = "already-cached"
+    events: list[MigrationEvent] = []
+
+    await run_avatars(config, state, [export], events.append)
+
+    assert state.avatar_cache["user1"] == "already-cached"
+    assert state.avatar_cache["user2"] == "dry-avatar-user2"
+    completed = [e for e in events if e.status == "completed"]
+    assert completed
+    assert "1" in completed[-1].message
+
+
+# ---------------------------------------------------------------------------
+# Download failure diagnostics (#438)
+# ---------------------------------------------------------------------------
+
+
+async def test_download_failure_includes_specific_reason(tmp_path: Path) -> None:
+    """Download failure warning includes specific reason, not generic text."""
+    author = _make_author("user1", "Alice", avatar_url="https://cdn.example.com/gone.webp")
+    export = _make_export([_make_message("m1", author)])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    events: list[MigrationEvent] = []
+
+    async with aiohttp.ClientSession() as session:
+        config.session = session
+        with aioresponses() as mocked:
+            mocked.get("https://cdn.example.com/gone.webp", status=404)
+            with patch(
+                "discord_ferry.migrator.avatars.upload_with_cache",
+                new=AsyncMock(return_value="autumn_av1"),
+            ) as mock_upload:
+                await run_avatars(config, state, [export], events.append)
+
+    mock_upload.assert_not_called()
+    assert len(state.warnings) >= 1
+    warning_msg = state.warnings[0]["message"]
+    assert "HTTP 404" in warning_msg

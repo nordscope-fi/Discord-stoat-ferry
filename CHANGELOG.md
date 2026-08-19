@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.14] - 2026-08-19
+
+### Fixed
+
+- **Dry-run mode no longer crashes in the avatars phase.** The avatars phase was the only
+  mutating phase missing a `config.dry_run` early-return guard. During a dry run it attempted
+  to upload avatars to the placeholder Autumn URL (`dry-run.invalid`), producing a connection
+  error. The phase now populates `state.avatar_cache` with synthetic IDs and returns early,
+  matching the pattern used by every other phase. Fixes #438.
+
+- **Avatar download failure warnings now include the specific failure reason** (e.g.
+  "HTTP 404" or "non-image Content-Type 'text/html'") instead of the generic
+  "non-image content type or HTTP error" message.
+
 ## [2.19.13] - 2026-08-19
 
 ### Fixed

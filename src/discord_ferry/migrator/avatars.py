@@ -51,7 +51,7 @@ async def _download_remote_avatar(
     url: str,
     output_dir: Path,
     author_id: str,
-) -> Path | None:
+) -> tuple[Path | None, str]:
     """Download a remote avatar image and save it locally.
 
     Args:
@@ -61,13 +61,14 @@ async def _download_remote_avatar(
         author_id: Discord author ID, used as the filename stem.
 
     Returns:
-        Path to the downloaded file, or ``None`` if the download failed.
+        Tuple of (path to downloaded file or ``None``, failure reason or empty
+        string on success).
     """
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
                 logger.warning("Avatar download returned status %d for %s", resp.status, url)
-                return None
+                return None, f"HTTP {resp.status}"
 
             content_type = resp.headers.get("Content-Type", "")
             if not content_type.startswith("image/"):
@@ -76,7 +77,7 @@ async def _download_remote_avatar(
                     content_type,
                     url,
                 )
-                return None
+                return None, f"non-image Content-Type '{content_type}'"
 
             # Derive extension from URL path, falling back to .webp.
             url_path = PurePosixPath(url.split("?")[0])
@@ -88,10 +89,10 @@ async def _download_remote_avatar(
 
             data = await resp.read()
             dest.write_bytes(data)
-            return dest
+            return dest, ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to download avatar from %s: %s", url, exc)
-        return None
+        return None, str(exc)
 
 
 async def run_avatars(
@@ -135,6 +136,18 @@ async def run_avatars(
         return
 
     total = len(to_upload)
+
+    if config.dry_run:
+        for author_id in to_upload:
+            state.avatar_cache[author_id] = f"dry-avatar-{author_id}"
+        on_event(
+            MigrationEvent(
+                phase="avatars",
+                status="completed",
+                message=f"[DRY RUN] Mapped {total} avatars",
+            )
+        )
+        return
     uploaded = 0
     failed = 0
     _last_save_time = time.monotonic()
@@ -170,7 +183,7 @@ async def run_avatars(
             try:
                 if avatar_url.startswith("http://") or avatar_url.startswith("https://"):
                     # Remote URL — download first.
-                    file_path = await _download_remote_avatar(
+                    file_path, fail_reason = await _download_remote_avatar(
                         session, avatar_url, config.output_dir, author_id
                     )
                     if file_path is None:
@@ -179,8 +192,7 @@ async def run_avatars(
                                 "phase": "avatars",
                                 "type": "avatar_download_failed",
                                 "message": (
-                                    f"Failed to download avatar for {author.name} "
-                                    f"(non-image content type or HTTP error)"
+                                    f"Failed to download avatar for {author.name} ({fail_reason})"
                                 ),
                             }
                         )
