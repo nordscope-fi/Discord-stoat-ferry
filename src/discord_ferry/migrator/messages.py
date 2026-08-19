@@ -35,7 +35,13 @@ if TYPE_CHECKING:
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
-    from discord_ferry.parser.models import DCEAuthor, DCEExport, DCEMessage, DCEReaction
+    from discord_ferry.parser.models import (
+        DCEAuthor,
+        DCEEmoji,
+        DCEExport,
+        DCEMessage,
+        DCEReaction,
+    )
     from discord_ferry.state import MigrationState
 
 _THREAD_STRATEGIES = frozenset({"flatten", "merge", "archive"})
@@ -228,12 +234,31 @@ def _skip_attachment_to_result(
     return f"[{reason}]"
 
 
-def _build_reaction_text(reactions: list[DCEReaction], max_chars: int) -> str:
+def _reaction_emoji_display(emoji: DCEEmoji, emoji_map: dict[str, str]) -> str:
+    """Return the display string for a reaction emoji.
+
+    Mapped custom emoji render as ``:stoat_id:``, unmapped as ``[:name:]``,
+    and Unicode emoji pass through unchanged.
+    """
+    if emoji.id:
+        stoat_id = emoji_map.get(emoji.id)
+        if stoat_id:
+            return f":{stoat_id}:"
+        return f"[:{emoji.name}:]"
+    return emoji.name
+
+
+def _build_reaction_text(
+    reactions: list[DCEReaction],
+    max_chars: int,
+    emoji_map: dict[str, str] | None = None,
+) -> str:
     """Build a text summary of reactions within a character budget.
 
     Args:
         reactions: Parsed reactions with emoji name and count.
         max_chars: Maximum characters available.
+        emoji_map: Discord emoji ID to Stoat emoji ID mapping.
 
     Returns:
         Formatted string like ``\\n[Reactions: thumbsup 12 · tada 5]``
@@ -241,7 +266,8 @@ def _build_reaction_text(reactions: list[DCEReaction], max_chars: int) -> str:
     """
     if not reactions or max_chars <= 0:
         return ""
-    valid = [(r.emoji.name, r.count) for r in reactions if r.count > 0]
+    emap = emoji_map or {}
+    valid = [(_reaction_emoji_display(r.emoji, emap), r.count) for r in reactions if r.count > 0]
     if not valid:
         return ""
     parts = [f"{name} {count}" for name, count in valid]
@@ -1445,13 +1471,15 @@ async def _process_message(
         # Budget is best-effort — overflow text may be appended after this.
         # Step 7 truncation (2000 chars) is the true safety net.
         remaining = 2000 - len(content)
-        reaction_text = _build_reaction_text(msg.reactions, remaining)
+        reaction_text = _build_reaction_text(msg.reactions, remaining, state.emoji_map)
         content += reaction_text
 
     # Step 6b2: Append reaction count annotations in native mode (counts > 1 only).
     if _effective_mode == "native" and msg.reactions:
         count_annotations = [
-            f"{r.emoji.name} \u00d7{r.count}" for r in msg.reactions if r.count > 1
+            f"{_reaction_emoji_display(r.emoji, state.emoji_map)} \u00d7{r.count}"
+            for r in msg.reactions
+            if r.count > 1
         ]
         if count_annotations:
             annotation = f"\n[Original counts: {', '.join(count_annotations)}]"

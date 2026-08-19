@@ -44,6 +44,27 @@ def test_all_included_with_large_budget() -> None:
         assert f"e{i}" in result
 
 
-def test_custom_emoji_uses_name() -> None:
-    result = _build_reaction_text([_r("pepe", 5, eid="12345")], 500)
-    assert "pepe" in result and "12345" not in result
+def test_custom_emoji_mapped_uses_stoat_id() -> None:
+    emoji_map = {"12345": "stoat_abc"}
+    result = _build_reaction_text([_r("pepe", 5, eid="12345")], 500, emoji_map)
+    assert ":stoat_abc:" in result
+    assert "pepe" not in result
+
+
+def test_custom_emoji_unmapped_uses_bracketed_name() -> None:
+    result = _build_reaction_text([_r("pepe", 5, eid="12345")], 500, {})
+    assert "[:pepe:]" in result
+    assert "12345" not in result
+
+
+def test_mixed_unicode_and_custom_emoji() -> None:
+    emoji_map = {"111": "stoat_fire"}
+    reactions = [
+        _r("\U0001f44d", 3),
+        _r("fire", 2, eid="111"),
+        _r("catjam", 1, eid="999"),
+    ]
+    result = _build_reaction_text(reactions, 500, emoji_map)
+    assert "\U0001f44d 3" in result
+    assert ":stoat_fire: 2" in result
+    assert "[:catjam:] 1" in result
