@@ -1328,7 +1328,9 @@ async def migrate_page() -> None:
 
             # Completion card (hidden initially)
             with ui.card().classes("w-full mt-4 hidden") as completion_card:
-                ui.label("Migration Complete").classes("text-xl font-bold text-green-600")
+                completion_title = ui.label("Migration Complete").classes(
+                    "text-xl font-bold text-green-600"
+                )
                 ui.label("").classes("text-sm text-gray-500").bind_text_from(errors_label, "text")
                 native_fidelity_label = ui.label("").classes("text-sm text-gray-500")
                 native_fidelity_label.set_visibility(False)
@@ -1644,6 +1646,14 @@ async def migrate_page() -> None:
         progress_bar.set_value(1.0)
         ui.notify("Migration complete!", type="positive")
 
+    def _on_migration_cancelled() -> None:
+        controls_row.classes(add="hidden")
+        completion_card.classes(remove="hidden")
+        completion_title.set_text("Migration Cancelled")
+        completion_title.classes(remove="text-green-600", add="text-yellow-600")
+        open_report_btn.disable()
+        ui.notify("Migration cancelled. You can roll back the partial migration.", type="warning")
+
     def _start_rollback() -> None:
         """Launch a rollback in a background task.
 
@@ -1700,6 +1710,8 @@ async def migrate_page() -> None:
 
             try:
                 await run_migration(config, on_event=on_event)
+                if config.cancel_event and config.cancel_event.is_set():
+                    _on_migration_cancelled()
             except StateError as exc:
                 storage["resume"] = False
                 log_display.push(
