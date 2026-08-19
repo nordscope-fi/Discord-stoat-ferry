@@ -748,10 +748,7 @@ async def run_roles(
             # actually sent: recording role.name would report a rename for every
             # role whose Discord name exceeds the cap.
             state.created_role_names[role.id] = result.get("name") or truncate_name(role.name)
-            # S3: persist periodically so a hard-kill mid-create leaves role_map durable
-            # (resume then skips already-created roles instead of duplicating them).
-            if idx % 10 == 0:
-                save_state(state, config.output_dir)
+            save_state(state, config.output_dir)
 
             # Credit recovered structural roles: created THIS run (the
             # pre_existing_role_ids guard above already excludes prior-run roles)
