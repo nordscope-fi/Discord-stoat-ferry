@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.10] - 2026-08-19
+
+### Fixed
+
+- **`ferry check` summary assertion no longer fails at narrow terminal widths.**
+  Rich wraps text inside its panel at the panel's own width, not the terminal's, so
+  the substring match on the summary phrase broke when a newline landed mid-phrase.
+  The test now normalises whitespace before the check. Fixes #437.
+
 ## [2.19.9] - 2026-08-18
 
 ### Fixed

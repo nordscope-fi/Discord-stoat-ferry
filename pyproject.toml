@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "discord-ferry"
-version = "2.19.9"
+version = "2.19.10"
 description = "Migrate Discord servers to Stoat (formerly Revolt)"
 readme = "README.md"
 license = "MIT"
