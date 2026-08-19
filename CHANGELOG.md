@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.13] - 2026-08-19
+
+### Fixed
+
+- **Custom emoji in text-mode reactions now render as actual emoji instead of plain names.**
+  When `reaction_mode` is `text`, reaction summaries appended to messages used the Discord
+  emoji name (e.g. `pepe`) for custom emoji. They now use the Stoat emoji syntax
+  (`:stoat_id:`) for migrated emoji, which Stoat renders as the image, or a `[:name:]`
+  fallback for emoji that were not migrated. Unicode emoji are unchanged. The same fix
+  applies to the `[Original counts: ...]` annotation in native mode. Fixes #439.
+
 ## [2.19.12] - 2026-08-19
 
 ### Fixed
