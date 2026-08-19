@@ -1,6 +1,6 @@
 """Tests for string sanitization helpers."""
 
-from discord_ferry.migrator.sanitize import sanitize_emoji_name, truncate_name
+from discord_ferry.migrator.sanitize import sanitize_emoji_name, sanitize_filename, truncate_name
 
 # ---------------------------------------------------------------------------
 # truncate_name
@@ -188,3 +188,65 @@ def test_sanitize_emoji_non_colliding_unchanged() -> None:
     """SC-26: a non-colliding name is unchanged."""
     used: dict[str, int] = {}
     assert sanitize_emoji_name("unique", used) == "unique"
+
+
+# ---------------------------------------------------------------------------
+# sanitize_filename
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_filename_safe_name_unchanged() -> None:
+    """A name with no illegal characters passes through."""
+    assert sanitize_filename("my-thread") == "my-thread"
+
+
+def test_sanitize_filename_replaces_windows_illegal_chars() -> None:
+    """Characters illegal on Windows are replaced with underscores."""
+    assert sanitize_filename('bug: crash? "yes"') == "bug_ crash_ _yes_"
+
+
+def test_sanitize_filename_replaces_slash() -> None:
+    """Forward slash would create a subdirectory on POSIX."""
+    assert sanitize_filename("a/b") == "a_b"
+
+
+def test_sanitize_filename_replaces_backslash() -> None:
+    """Backslash is illegal on Windows."""
+    assert sanitize_filename("a\\b") == "a_b"
+
+
+def test_sanitize_filename_strips_dots_and_spaces() -> None:
+    """Leading/trailing dots and spaces are invalid on Windows."""
+    assert sanitize_filename("...hidden...") == "hidden"
+    assert sanitize_filename("  spaced  ") == "spaced"
+
+
+def test_sanitize_filename_empty_fallback() -> None:
+    """Empty or whitespace-only input returns underscore."""
+    assert sanitize_filename("") == "_"
+    assert sanitize_filename("   ") == "_"
+
+
+def test_sanitize_filename_reserved_device_name() -> None:
+    """Win32 reserved names are prefixed with underscore."""
+    assert sanitize_filename("CON") == "_CON"
+    assert sanitize_filename("com1") == "_com1"
+    assert sanitize_filename("NUL.txt") == "_NUL.txt"
+
+
+def test_sanitize_filename_truncates() -> None:
+    """Long names are truncated to max_length."""
+    name = "a" * 300
+    assert len(sanitize_filename(name)) == 200
+    assert len(sanitize_filename(name, max_length=50)) == 50
+
+
+def test_sanitize_filename_control_characters() -> None:
+    """Control characters (0x00-0x1f) are replaced."""
+    assert sanitize_filename("hello\x00world\x1f") == "hello_world_"
+
+
+def test_sanitize_filename_preserves_unicode() -> None:
+    """Emoji, CJK, and other Unicode characters pass through unchanged."""
+    assert sanitize_filename("thread-\U0001f680-launch") == "thread-\U0001f680-launch"
+    assert sanitize_filename("测试线程") == "测试线程"

@@ -1,4 +1,4 @@
-"""String sanitization helpers for Stoat API field limits."""
+"""String sanitization helpers for Stoat API field limits and filesystem safety."""
 
 from __future__ import annotations
 
@@ -9,6 +9,35 @@ _DEFAULT_MAX_LENGTH = 32
 
 # Emoji names must match ^[a-z0-9_]+$ per OpenAPI spec.
 _EMOJI_NAME_RE = re.compile(r"[^a-z0-9_]")
+
+# Characters illegal in filenames on Windows (and / on all platforms).
+_FS_ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Win32 reserved device names (case-insensitive, with or without extension).
+_WIN32_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def sanitize_filename(name: str, *, max_length: int = 200) -> str:
+    """Make a string safe for use as a filename on all platforms.
+
+    Replaces Windows-illegal characters and forward slash with underscores,
+    strips leading/trailing dots and spaces (invalid on Windows), avoids
+    reserved device names, and truncates to *max_length*.
+
+    Returns ``"_"`` for an empty or all-whitespace input.
+    """
+    sanitized = _FS_ILLEGAL_RE.sub("_", name)
+    sanitized = sanitized.strip(". ")
+    if not sanitized:
+        return "_"
+    stem = sanitized.rsplit(".", 1)[0] if "." in sanitized else sanitized
+    if stem.upper() in _WIN32_RESERVED:
+        sanitized = f"_{sanitized}"
+    return sanitized[:max_length]
 
 
 def truncate_name(name: str, max_length: int = _DEFAULT_MAX_LENGTH, *, author_id: str = "") -> str:

@@ -322,6 +322,86 @@ async def test_archive_mode_no_api_calls(tmp_path: Path) -> None:
     assert md_path.exists()
 
 
+async def test_archive_mode_sanitizes_hostile_thread_name(tmp_path: Path) -> None:
+    """A thread named with filesystem-illegal characters writes without error."""
+    config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        autumn_url=AUTUMN_URL,
+    )
+    state.channel_map["100"] = "stoat-ch-100"
+    events: list[MigrationEvent] = []
+
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[],
+        message_count=0,
+    )
+    thread = _make_export(
+        channel_id="200",
+        channel_name='bug: crash? "yes"',
+        is_thread=True,
+        parent_channel_name="genera/l",
+        messages=[_make_message("m2", "hostile name msg")],
+        message_count=1,
+    )
+
+    with aioresponses():
+        await run_messages(config, state, [parent, thread], events.append)
+
+    threads_dir = tmp_path / "threads"
+    assert threads_dir.exists(), "threads directory was not created"
+    parent_dirs = list(threads_dir.iterdir())
+    assert len(parent_dirs) == 1
+    md_files = list(parent_dirs[0].iterdir())
+    assert len(md_files) == 1
+    content = md_files[0].read_text(encoding="utf-8")
+    assert "hostile name msg" in content
+
+
+async def test_archive_mode_collision_produces_distinct_files(tmp_path: Path) -> None:
+    """Two threads that sanitize to the same filename get distinct archive files."""
+    config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        autumn_url=AUTUMN_URL,
+    )
+    state.channel_map["100"] = "stoat-ch-100"
+
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[],
+        message_count=0,
+    )
+    thread_a = _make_export(
+        channel_id="200",
+        channel_name="Q&A?",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m1", "first thread")],
+        message_count=1,
+    )
+    thread_b = _make_export(
+        channel_id="300",
+        channel_name="Q&A/",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "second thread")],
+        message_count=1,
+    )
+
+    with aioresponses():
+        await run_messages(config, state, [parent, thread_a, thread_b], lambda e: None)
+
+    md_files = sorted((tmp_path / "threads" / "general").iterdir())
+    assert len(md_files) == 2, f"expected 2 archive files, got {[f.name for f in md_files]}"
+    contents = [f.read_text(encoding="utf-8") for f in md_files]
+    assert any("first thread" in c for c in contents)
+    assert any("second thread" in c for c in contents)
+
+
 # ---------------------------------------------------------------------------
 # Thread sorting tests
 # ---------------------------------------------------------------------------
