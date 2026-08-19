@@ -38,7 +38,8 @@ from discord_ferry.parser.models import (
     DCEMessage,
     DCERole,
 )
-from discord_ferry.state import MigrationState
+from discord_ferry.state import MigrationState, load_state
+from discord_ferry.state import save_state as save_state_real
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -3171,6 +3172,50 @@ async def test_run_roles_mid_phase_save(tmp_path: Path) -> None:
         await run_roles(config, state, exports, lambda e: None)
     # One save per role (2) + one finalize-at-end save (1) = 3.
     assert spy.call_count == 3
+
+
+async def test_role_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
+    """A hard kill after role 2 of 3 persists both mappings; resume creates only role 3."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [DCERole(id="r1", name="A"), DCERole(id="r2", name="B"), DCERole(id="r3", name="C")]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    call_count = 0
+
+    def kill_after_two(s: MigrationState, d: Path) -> None:
+        nonlocal call_count
+        save_state_real(s, d)
+        call_count += 1
+        if call_count == 2:
+            raise KeyboardInterrupt
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.save_state",
+            side_effect=kill_after_two,
+        ),
+    ):
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2", "name": "B"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r3", "name": "C"})
+        with contextlib.suppress(KeyboardInterrupt):
+            await run_roles(config, state, exports, lambda e: None)
+
+    loaded = load_state(tmp_path)
+    assert len(loaded.role_map) == 2
+    assert loaded.role_map == {"r1": "stoat-r1", "r2": "stoat-r2"}
+    assert set(loaded.created_role_names) == {"r1", "r2"}
+
+    # Resume: only role 3 should be created.
+    resumed_state = loaded
+    with aioresponses() as m2:
+        m2.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r3", "name": "C"})
+        await run_roles(config, resumed_state, exports, lambda e: None)
+
+    assert len(resumed_state.role_map) == 3
+    assert resumed_state.role_map["r3"] == "stoat-r3"
 
 
 async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) -> None:
