@@ -3312,6 +3312,18 @@ async def test_a_recreated_voice_channel_is_recreated_as_voice(tmp_path: Path) -
     assert sent.get("type") == "Voice", f"a voice channel was recreated as {sent.get('type')}"
 
 
+async def test_repair_truncates_a_long_channel_topic(tmp_path: Path) -> None:
+    """A topic longer than 1024 chars is truncated before reaching the Stoat API."""
+    long_topic = "t" * 2000
+    _, sent, _ = await _repair_recreating_channel(
+        tmp_path, exports=[_export_for(R_D_CHANNEL, topic=long_topic)]
+    )
+    assert sent is not None, "no channel was created"
+    desc = sent.get("description")
+    assert desc is not None, "description was not sent"
+    assert len(desc) == 1024
+
+
 async def test_repair_declines_a_channel_missing_from_the_export(tmp_path: Path) -> None:
     """A KNOWN LIMIT, not a missing feature.
 
