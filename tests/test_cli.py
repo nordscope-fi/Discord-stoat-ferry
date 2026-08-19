@@ -2521,7 +2521,8 @@ def test_the_summary_does_not_claim_an_exclusive_cause(runner: CliRunner, tmp_pa
             result = runner.invoke(
                 main, ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"]
             )
-        assert "Each result above says which cause applies" in result.output, (
+        normalised = " ".join(result.output.split())
+        assert "Each result above says which cause applies" in normalised, (
             f"the {strategy} summary does not point at the per-result detail"
         )
 
