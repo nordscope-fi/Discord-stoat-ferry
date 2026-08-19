@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.15] - 2026-08-19
+
+### Fixed
+
+- **GUI now shows the completion card after a cancelled migration.** When a user cancelled
+  a migration mid-run, the Pause and Cancel buttons stayed on screen indefinitely and the
+  completion card (which carries the Rollback button) never appeared. The GUI now detects
+  that `cancel_event` was set after `run_migration` returns and transitions to a
+  "Migration Cancelled" view with the Rollback button enabled and Open Report disabled
+  (no report exists for a cancelled run). Fixes #385.
+
 ## [2.19.14] - 2026-08-19
 
 ### Fixed
