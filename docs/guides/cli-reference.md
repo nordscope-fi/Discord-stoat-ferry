@@ -14,7 +14,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has eight top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `probe`, and `tls-check`.
+Ferry has eleven top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `retry`, `probe`, and `tls-check`.
 
 ---
 
@@ -107,6 +107,7 @@ ferry migrate [OPTIONS]
 | `--force-unlock` | | false | Override a stale migration lock on the target Stoat server |
 | `--skip-dce-verify` | | false | Skip SHA-256 verification of DCE binary downloads (for self-built binaries) |
 | `--verbose` / `-v` | | false | Enable debug output (per-message logging) |
+| `--yes` / `-y` | | false | Skip the terms-of-service confirmation prompt (for scripted runs) |
 
 !!! warning "Token security"
     Avoid passing `--token` or `--discord-token` directly on the command line — they may appear in shell history. Use environment variables or a `.env` file instead.
@@ -125,6 +126,15 @@ STOAT_TOKEN=your_stoat_token_here
 
 !!! tip
     Add `.env` to your `.gitignore` if you keep your project under version control.
+
+Ferry also reads a handful of environment variables outside the `.env` file:
+
+| Variable | Effect |
+|----------|--------|
+| `FERRY_NO_NATIVE` | Set to any value to force the browser-based GUI even when the desktop window toolkit is available |
+| `FERRY_DISABLE_PROXY` | Set to any value to ignore system proxy settings entirely |
+| `FERRY_STORAGE_SECRET` | Overrides the local key Ferry uses to encrypt saved tokens (useful for headless deployments) |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Honoured through the standard library; embedded credentials are stripped before any error message is rendered |
 
 ---
 
@@ -635,7 +645,7 @@ No options or flags.
 
 ### What it prints
 
-Four fixed lines:
+A block of `key: value` lines. The trust keys are always present; the proxy keys reflect whatever Ferry resolved from the environment on this run.
 
 | Key | Meaning |
 |------|-------------|
@@ -643,6 +653,10 @@ Four fixed lines:
 | `ca-bundle-readable` | `true` if that bundle exists on disk and could be read, `false` otherwise |
 | `trust-source` | `union` if Ferry loaded the bundle successfully on top of the operating system's trust store, `fallback` if it could not and is relying on the OS store alone |
 | `ca-visible` | Number of CA certificates the resulting SSL context reports |
+| `proxy-http` | The `HTTP_PROXY` value Ferry resolved for plain-HTTP requests (credentials redacted), or `none` |
+| `proxy-https` | The `HTTPS_PROXY` value Ferry resolved for HTTPS requests (credentials redacted), or `none` |
+| `proxy-source` | Where the proxy came from: `env`, `system`, or `none` |
+| `proxy-disabled` | `true` when `FERRY_DISABLE_PROXY` is set and Ferry is ignoring any configured proxy |
 
 **Example output:**
 
@@ -651,6 +665,10 @@ ca-bundle: /path/to/certifi/cacert.pem
 ca-bundle-readable: true
 trust-source: union
 ca-visible: 179
+proxy-http: none
+proxy-https: none
+proxy-source: none
+proxy-disabled: false
 ```
 
 !!! info "A low ca-visible count is not necessarily a problem"

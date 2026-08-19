@@ -121,12 +121,16 @@ Ferry is built to handle large migrations safely:
 
 ## Beyond migration
 
-Ferry ships a few extra commands alongside `migrate`:
+Ferry ships several extra commands alongside `migrate`:
 
 - **`ferry validate`** — check an export before migrating: counts, warnings, and a time estimate. No network calls.
+- **`ferry check`** — after a migration, ask the live Stoat server whether every channel, role, category, emoji and message tail Ferry recorded is still there. Read-only.
+- **`ferry repair`** — re-send messages and re-create channels or roles that `ferry check` found missing. Refuses to touch renames or a rolled-back migration.
+- **`ferry retry`** — re-send the messages Ferry parked in the dead-letter queue after a failed send.
 - **`ferry probe`** — diagnose a live Stoat instance (upload size limits, rate limits, voice support, webhooks). Useful for self-hosters.
 - **`ferry build`** — create a fresh Stoat server from a preset template (`gaming`, `community`, or `education`) or a blueprint file.
 - **`ferry export-blueprint`** — turn a Discord export into a reusable server blueprint (structure only, no messages).
+- **`ferry tls-check`** — report which certificate authorities Ferry currently trusts, so you can diagnose an `unable to get local issuer certificate` error before touching proxy or antivirus settings.
 
 See the [CLI reference](docs/guides/cli-reference.md) for all commands and options.
 

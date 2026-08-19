@@ -24,8 +24,6 @@ theme:
     - content.code.copy
 exclude_docs: |
   plans/
-  superpowers/
-  discord-ferry-claude-code-brief.md
 # `toc` and `tables` are on by default and are listed anyway, so the full set
 # the docs depend on is visible in one place. Verified by building with
 # `tables` removed: the tables still rendered, so this key extends the

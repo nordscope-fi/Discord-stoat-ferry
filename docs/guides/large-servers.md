@@ -33,7 +33,7 @@ Ferry saves its progress after finishing each channel. If the migration is inter
 
 === "CLI"
     ```bash
-    ferry migrate ~/exports/my-discord-server/ \
+    ferry migrate --export-dir ~/exports/my-discord-server/ \
       --stoat-url https://api.stoat.chat \
       --token your_token_here \
       --resume
@@ -152,7 +152,7 @@ If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted insta
     The CLI shows a live Rich dashboard with a phase progress bar, a per-channel message progress bar with ETA, and running stats (messages sent, errors, warnings, current channel). Add `--verbose` for a line per message — useful for debugging but very noisy on large servers. For truly unattended runs, redirect output to a log file:
 
     ```bash
-    ferry migrate ~/exports/my-discord-server/ \
+    ferry migrate --export-dir ~/exports/my-discord-server/ \
       --stoat-url https://api.stoat.chat \
       --token your_token_here \
       > ferry.log 2>&1 &

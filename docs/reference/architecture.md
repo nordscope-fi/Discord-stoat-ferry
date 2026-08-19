@@ -11,7 +11,7 @@ For a quick introduction to what Ferry does and how to use it, see the
 
 ## Overview
 
-Discord Ferry is a Python 3.10+ migration tool that moves a Discord server to
+Discord Ferry is a Python 3.11+ migration tool that moves a Discord server to
 [Stoat](https://stoat.chat) (formerly Revolt). It reads DiscordChatExporter (DCE) JSON
 exports, transforms them into Stoat API calls, and sends everything — messages, channels,
 roles, emoji, attachments, permissions — to the target Stoat instance.
@@ -46,10 +46,10 @@ src/discord_ferry/
 ├── review.py                # Pre-creation review summary builder
 ├── blueprint.py             # Server blueprint export/import
 ├── gui.py                   # NiceGUI web interface (4-screen workflow)
-├── cli.py                   # Click CLI (migrate, validate, build, export-blueprint)
+├── cli.py                   # Click CLI (migrate, validate, build, export-blueprint, rollback, stats, check, repair, retry, probe, tls-check)
 │
 ├── core/
-│   ├── engine.py            # Migration orchestrator — runs all 12 phases
+│   ├── engine.py            # Migration orchestrator — runs all 13 phases
 │   ├── events.py            # MigrationEvent dataclass and EventCallback type
 │   └── security.py          # SecureTokenStore — token masking and sanitization at output boundaries
 │
@@ -154,6 +154,17 @@ class FerryConfig:
     min_thread_messages: int         # Filter threads below this count (0 = include all)
     validate_after: bool             # Run post-migration validation phase (default False)
     max_concurrent_requests: int     # asyncio.Semaphore bound for API requests (default 5, min 1)
+    max_concurrent_channels: int     # Parallel channel workers in MESSAGES (default 3)
+    thread_strategy: str             # "flatten" (default), "merge", or "archive"
+    incremental: bool                # Delta migration (default False; mutually exclusive with resume)
+    force: bool                      # Override DCE freshness warning (>30 days old) and soft errors
+    create_invite: bool              # Create an invite to the migrated server on completion (default True)
+    invite_channel_id: str | None    # Discord channel ID to base the invite on (default: first eligible text channel)
+    verify_uploads: bool             # Post-upload file size verification for Autumn uploads (default False)
+    cleanup_orphans: bool            # Report unreferenced Autumn uploads after migration (report-only)
+    force_unlock: bool               # Override a stale [FERRY_LOCK:...] marker on the target server
+    skip_dce_verify: bool            # Skip SHA-256 verification of DCE binary downloads
+    token_store: SecureTokenStore | None  # Injected credential store for masking at output boundaries
 
     # Discord API (orchestrated mode only)
     discord_token: str | None        # Discord user token (repr=False)
@@ -188,9 +199,15 @@ class MigrationState:
     # Author context (for mention remapping in transforms)
     author_names: dict[str, str]        # Discord user ID → display name
 
+    # Name mirrors (used by ferry check to detect renames on the server)
+    category_names: dict[str, str]        # Discord category ID → name Ferry created it under
+    created_channel_names: dict[str, str] # Stoat channel ID → name Ferry created it under
+    created_role_names: dict[str, str]    # Stoat role ID → name Ferry created it under
+    channel_categories: dict[str, str]    # Stoat channel ID → Stoat category ID it belongs to
+
     # Deferred operations (collected during MESSAGES, applied in later phases)
     pending_pins: list[tuple[str, str]]         # (stoat_channel_id, stoat_message_id)
-    pending_reactions: list[dict[str, str]]      # {channel_id, message_id, emoji}
+    pending_reactions: list[dict[str, object]]   # {channel_id, message_id, emoji, and optional count}
 
     # Dead-letter queue (messages that failed after retries)
     failed_messages: list[FailedMessage]  # discord_msg_id, stoat_channel_id, error, retry_count, content_preview
@@ -209,36 +226,52 @@ class MigrationState:
     # Server discovery
     stoat_server_id: str
     autumn_url: str                     # Discovered during CONNECT phase
+    invite_code: str                    # Server invite code created after migration (empty when disabled)
+    invite_url: str                     # Full https://rvlt.gg/... URL matching invite_code
 
-    # Forum/thread tracking
-    forum_index_message_ids: dict[str, str]   # forum channel ID → index message Stoat ID
-    forum_channel_members: dict[str, list[str]]  # forum channel ID → list of thread channel IDs
-    forum_category_names: dict[str, str]      # forum channel ID → category name on Stoat
+    # Forum/thread tracking (keyed by forum-category key, not by forum channel ID)
+    forum_index_message_ids: dict[str, str]      # forum_cat_key → index message Stoat ID
+    forum_channel_members: dict[str, list[str]]  # forum_cat_key → Discord channel IDs of the forum's members
+    forum_category_names: dict[str, str]         # forum_cat_key → category name on Stoat
 
     # Resume tracking
     current_phase: str                  # Phase name for resume skip logic
     completed_channel_ids: set[str]     # Discord channel IDs fully processed in MESSAGES phase
-    channel_message_offsets: dict[str, str]  # Partial channel → last processed Discord message ID
+    channel_message_offsets: dict[str, str]  # Discord channel ID → last checkpointed Discord message ID
+    channel_high_water: dict[str, str]  # Discord channel ID → highest Discord message ID successfully sent (durable for merge/incremental)
+    thread_strategy: str                # The strategy the migration ran under (recorded from 2.17.0 for ferry check)
 
     # Counters
     attachments_uploaded: int
     attachments_skipped: int
     reactions_applied: int
+    reactions_capped: int               # Reactions dropped because Stoat's 20-per-message cap was hit
+    reactions_dropped: int              # Reactions dropped for any other reason (invalid emoji, unreachable message)
+    reaction_message_counts: dict[str, int]  # Stoat channel ID → messages that carried a text-mode reaction summary
     pins_applied: int
-    channel_message_counts: dict[str, int]   # Stoat channel ID → messages sent count
-    prior_messages_total: int                # Total messages in prior (resumed) state
+    channel_message_counts: dict[str, int]   # Discord channel ID → messages sent count
+    source_messages_total: int              # Total messages seen in the source export (denominator for fidelity)
+    prior_messages_total: int               # Total messages in prior (resumed) state
     embeds_total: int
-    embeds_dropped: int
+    embeds_dropped: int                    # Embeds dropped when validate_sum would exceed the 2000-char body ceiling
+    native_fidelity_counts: dict[str, int]  # Per-strategy native reaction sends, for fidelity scoring
     replies_linked: int
     replies_total: int
+
+    # Roles finalization
+    roles_finalized: bool               # ROLES phase completed the attributes/rank pass (guards resume)
 
     # Timing
     started_at: str                     # ISO 8601
     completed_at: str                   # ISO 8601
 
+    # Rollback tracking (populated by ferry rollback)
+    rollback_progress: dict[str, object]  # rolled_back_ids, failures, per-category counters
+
     # Flags
     is_dry_run: bool                    # Reject resume from dry-run state
     export_completed: bool              # Smart export phase skipping
+    migration_lock_marker: str          # The [FERRY_LOCK:ts:host] marker Ferry wrote (for force-unlock diagnostics)
 ```
 
 **Persistence**: `save_state()` writes atomically (temp file + rename). `load_state()` reads
@@ -297,8 +330,8 @@ Blueprints use **names, not IDs** — making them portable across Stoat instance
 
 ### Phase Execution
 
-The engine runs 12 phases in strict order. Each phase depends on ID mappings and state
-produced by earlier phases.
+The engine runs 13 phases in strict order (0 through 12, with an additional 7.5 for AVATARS).
+Each phase depends on ID mappings and state produced by earlier phases.
 
 ```
 EXPORT → VALIDATE → CONNECT → SERVER → ROLES → CATEGORIES → CHANNELS
@@ -360,9 +393,11 @@ Uploads the guild icon to Autumn and applies it. Sets server default permissions
 `FERRY_MIN_PERMISSIONS` (1,022,361,624) to ensure the Ferry account can operate.
 
 **ROLES** (Phase 4): Iterates all exports to collect unique role IDs (skipping @everyone where
-`role_id == guild_id`). Creates each role with name and British-spelled `colour`. If Discord
-metadata is available, applies hoist and icon in an attributes pass, and translated permission bits
-via `api_set_role_permissions()`. Populates `state.role_map`.
+`role_id == guild_id`). The create call carries **name only**. `colour`, `hoist` and `icon` are
+applied in a second attributes pass keyed by the created role's ID, so a resume that already has
+`role_map` populated retries those fields without recreating the role. `state.roles_finalized`
+gates the resume so the attributes pass is not skipped when its own last write failed. Permission
+bits are translated and written via `api_set_role_permissions()`.
 
 Hierarchy is applied last, once for the whole server, by reading the server back and sending the
 complete ordered role list to `PATCH /servers/:id/roles/ranks`. Index 0 of that list is the top of
@@ -424,9 +459,18 @@ Collects `pending_reactions` for Phase 9. Saves state every `checkpoint_interval
 (default 50, time-throttled to at most once per 5 seconds via `save_lock`). Completed channel
 IDs are recorded in `state.completed_channel_ids`.
 
-**REACTIONS** (Phase 9): Iterates `state.pending_reactions`. Calls `api_add_reaction` for each.
-Enforces the 20-reactions-per-message Stoat limit. Fire-and-forget error handling (failures
-logged as warnings, do not stop migration).
+**REACTIONS** (Phase 9): The behaviour depends on `config.reaction_mode`.
+
+- `native` (Phase 9 as historically described): iterates `state.pending_reactions` and calls
+  `api_add_reaction` for each. Enforces the 20-reactions-per-message Stoat limit. Fire-and-forget
+  error handling (failures logged as warnings, do not stop migration).
+- `text` (default from v2.7.0): no API calls in Phase 9. Instead, the MESSAGES phase calls
+  `_build_reaction_text()` per message to append a reaction summary to the message body — e.g.
+  `Reactions: :thumbsup: 3, :heart: 1`. Custom emoji migrated in Phase 7 render as
+  `<:stoat_id:>` (the Stoat inline-emoji syntax); custom emoji that were not migrated fall back
+  to `[:name:]`; unicode emoji pass through unchanged. Native-mode also appends an
+  `[Original counts: ...]` annotation to preserve fidelity when Stoat's 20-cap truncates.
+- `skip`: no reaction handling of any kind.
 
 **PINS** (Phase 10): Iterates `state.pending_pins` tuples. Calls `api_pin_message` for each.
 Fire-and-forget error handling.
@@ -436,9 +480,13 @@ Fire-and-forget error handling.
 dynamic post-migration checklist.
 
 **VALIDATE MIGRATION** (Phase 12, optional): Runs inline in `engine.py` only when
-`validate_after=True`. Queries the Stoat server via `api_fetch_server()` and compares
-channel/role counts against state maps. Reports discrepancies (missing channels, extra roles,
-etc.) in `state.validation_results`. Does not modify any data on the server. Added in v1.6.0.
+`validate_after=True`. Calls `run_check()` from `migrator/verify.py`, which is the same engine
+`ferry check` uses on its own — every recorded channel, role, category and emoji is fetched by
+ID, and each channel's most recent messages are compared against the tail Ferry recorded. The
+result is a `CheckReport` with per-entity `ok` / `warn` / `fail` / `unverifiable` verdicts,
+serialised into `state.validation_results` and echoed to the run log. Does not modify anything
+on the server. Added in v1.6.0; switched from a bare count comparison to the shared
+`run_check()` engine in v2.16 (the standalone `ferry check` release).
 
 ---
 
@@ -675,6 +723,15 @@ Discord embeds have a richer structure than Stoat embeds. `flatten_embed()` conv
 - `embed.thumbnail.url` or `embed.image.url` → returns local media path for Autumn upload
 
 The result is a Stoat-compatible embed dict plus an optional local file path for the media.
+
+**Description budget (from v2.19.5, PR #349).** Stoat rejects a message whose combined content
++ embed body exceeds a 2000-character `validate_sum` ceiling. The messages pipeline enforces
+that ceiling **before** sending: at step 7b it walks the embed list in order, tracks the running
+sum, and drops any embed whose description would push the total past 2000. Each dropped embed
+appends a compact note to the message content (`[Embed dropped: <title or 'untitled'>]`) and is
+counted in `state.embeds_dropped`, which the fidelity score reads. Trailing embeds are the ones
+lost — earlier embeds always fit — so an embed-heavy message that arrives with the first two
+present and the tail replaced by drop notes is expected, not a bug.
 
 ---
 
@@ -1023,6 +1080,13 @@ Uses `ui.timer` for async event loop integration.
 | `ferry validate` | Pre-check exports without migrating |
 | `ferry build` | Create server from template or blueprint |
 | `ferry export-blueprint` | Convert DCE export to reusable blueprint JSON |
+| `ferry rollback` | Reverse a recorded migration, preserving the audit trail in state.json |
+| `ferry stats` | Print a Rich-table summary of a completed run (read-only, zero network calls) |
+| `ferry check` | Ask the live Stoat server whether every entity Ferry recorded is still there |
+| `ferry repair` | Re-send messages and re-create structural entities that `ferry check` reported as failed |
+| `ferry retry` | Re-send the messages parked in the dead-letter queue after a failed send |
+| `ferry probe` | Diagnose a live Stoat instance (upload limits, voice, webhooks, rate-limit shape) |
+| `ferry tls-check` | Report the CA bundle and proxy resolution Ferry is using for outbound HTTPS |
 
 **Event subscription**: `_ProgressTracker` class wraps Rich's `Live` display with a progress
 bar, status table, and warning/error output. Subscribes to the same `on_event` callback as
@@ -1188,6 +1252,11 @@ Messages that exceed the 2,000-character Stoat limit are split into multiple sen
   marker length is subtracted from the available character budget before generation)
 - All parts share the same masquerade and are sent in order with a small inter-part delay
 - The Stoat message ID of the first part is recorded in `message_map` for reply linking
+- **Delivered parts commit to state before a later part's failure** (PR #381, from v2.19.6). If
+  parts 1 and 2 send and part 3 fails, part 3 enters `state.failed_messages` and the run keeps
+  going; parts 1 and 2 are not re-sent on the next retry or incremental run. Earlier versions
+  treated the whole split as one transaction and rolled the delivered parts back on failure,
+  which produced silent duplicates on retry.
 
 ---
 
@@ -1199,10 +1268,18 @@ The `thread_strategy` config option controls how forum and thread channels are h
 |----------|-----------|
 | `flatten` | Each thread becomes its own standalone text channel (default pre-v2) |
 | `merge` | Thread messages are appended into the parent channel after it is processed; threads are NOT created as separate channels. Processed after all parent channels complete. |
-| `archive` | Threads are created as separate channels placed in a dedicated archive category |
+| `archive` | Threads are converted to a markdown attachment on a header message in the parent channel — no new channel is created |
 
 `min_thread_messages` (default 0 = include all) filters out threads with fewer messages than
 the threshold — useful for suppressing near-empty auto-created threads.
+
+**Filename sanitisation (from v2.19.12, PR #443).** The `archive` and `merge` strategies write
+attachment filenames derived from Discord parent-channel and thread names, both of which are
+free-form. `sanitize_filename()` in `migrator/messages.py` strips characters that are illegal on
+Windows (`< > : " \ | ? *`), collapses forward slashes so a thread called `wip/2026` does not
+create a subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). Two
+threads whose sanitised names collide are suffixed with the thread ID so neither file overwrites
+the other.
 
 ---
 
@@ -1260,11 +1337,25 @@ The score is written to `migration_report.json` under `fidelity_score`.
 - Used by the engine, CLI, and GUI before emitting any `MigrationEvent.message` that could
   contain a request URL or header value
 
+**Per-key full-mask policy (from v2.19.9, PR #436).** `register()` and `register_secret()` take
+a keyword-only `fully_mask` flag. For opaque high-entropy tokens (Stoat, Discord) the default
+`****{last4}` tail is fine — leaking the last four characters of a 40-character random string
+tells an attacker nothing. For short, human-chosen secrets that tail exposes a large fraction of
+the value, so `_strip_userinfo()` in `core/http.py` registers both `proxy_password` and the
+derived base64 `proxy_authorization` header value with `fully_mask=True`, and `masked()` returns
+bare `****` for those keys. A new `redact_url()` helper strips `user:pass@` userinfo from a URL
+before it reaches any `MigrationError` or `StoatConnectionError` text, closing the eight sites
+where a `--stoat-url https://user:pass@host` was previously interpolated verbatim into error
+messages.
+
 ---
 
 ## Testing
 
-701 tests across 31 files. Key patterns:
+The test suite is exercised in CI on every push. For a current count run
+`find tests -name 'test_*.py' | wc -l` for the file count and
+`uv run pytest --collect-only -q | tail -1` for the test count — a hard-coded number here rots
+after the first PR that adds a test. Key patterns:
 
 - **Phase tests**: Mock `aiohttp.ClientSession` with `aioresponses`, inject via `config.session`
 - **Parser tests**: Use fixture JSON files in `tests/fixtures/`

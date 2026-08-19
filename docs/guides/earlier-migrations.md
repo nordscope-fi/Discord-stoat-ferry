@@ -5,8 +5,10 @@ silently.** No error, no red text, nothing in the failed-message list. A migrati
 complete success and still be missing content.
 
 If you migrated with an earlier version, this page tells you what to look for and what your options
-are. It does not sugar-coat them: **for the content that was lost, there is currently no way to
-repair a migrated server in place.** Permissions are the one thing you can fix where it stands.
+are. Since v2.16 Ferry ships two commands that cover most of the follow-up: `ferry check` reports
+what is missing on the live server, and `ferry repair` re-sends the messages and re-creates the
+channels or roles it dropped. See the [CLI reference](cli-reference.md#ferry-repair) for what each
+one can and cannot touch.
 
 !!! info "Nothing here requires a re-export"
     Everything below is a Ferry bug, not an export bug. Your existing
@@ -146,10 +148,12 @@ Be aware of what does **not** work, because both look like they should:
   stopped; it does not revisit messages it has already passed.
 - **`--incremental` will not backfill it either.** It skips everything below the high-water mark it
   recorded for each channel, and all of the content above sits below that mark.
-- **The retry machinery cannot find it either.** These were recorded as *warnings*, not as failed
-  messages, so nothing ever entered the retry queue. (There is also no `ferry retry` command today —
-  the retry code exists inside the engine but has no command-line surface yet. Exposing it is part of
-  the same planned work as the repair tool.)
+- **`ferry retry` cannot find it either.** These were recorded as *warnings*, not as failed
+  messages, so nothing ever entered the retry queue that `ferry retry` reads.
+- **`ferry repair` cannot find most of it.** Repair acts only on what `ferry check` returns as a
+  failure. Silent drops recorded as warnings are invisible to Check, so Repair has nothing to act
+  on for them. It does still cover the recreated-channel and lost-last-message cases described in
+  the CLI reference.
 
 That leaves:
 
@@ -159,17 +163,14 @@ That leaves:
 | Missing attachments | The same. The message text is already in your server; only the file is missing, and there is no supported way to attach it after the fact. |
 | Voice and role permissions | Fixable in place, by hand — no content is involved. Grant the permissions on the affected roles in Stoat, or re-run the ROLES and CHANNELS phases into a fresh server. |
 
-## What we are building
+## What Repair covers now
 
-A repair tool is planned. It will re-verify an already-migrated server against its original export
-and fix what it safely can — including permissions and messages that were dropped rather than
-failed. It is tracked as part of the ongoing upstream-drift work in
-[issue #107](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/107).
-
-It will not be able to do everything. Ferry only keeps a record of what it sent for some
-combinations of settings, and where that record is absent the tool will decline to touch messages
-rather than risk duplicating a server's entire history. Permissions repair is the part that will
-work everywhere.
+`ferry repair` recreates a missing channel, role or category, re-sends the messages a recreated
+channel held, and re-sends a channel's lost last message. It refuses to touch renames, anything
+Check could not verify, a rolled-back migration, a missing forum index, or missing custom emoji.
+The [CLI reference](cli-reference.md#ferry-repair) lists every case; the short version is that
+Repair covers structural loss and message tails, and cannot recover the silent drops fixed in
+2.8.3–2.10.0 because they were never recorded as failures for it to act on.
 
 If you think you were affected and the checks above do not settle it, please
 [open an issue](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/new) with your

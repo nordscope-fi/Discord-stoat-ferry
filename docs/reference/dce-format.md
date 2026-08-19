@@ -12,6 +12,7 @@ DiscordChatExporter export \
   --format Json \
   --markdown false \
   --media \
+  --reuse-media \
   --include-threads All \
   --output /path/to/export/
 ```
@@ -21,6 +22,7 @@ DiscordChatExporter export \
 | `--format Json` | Ferry's parser reads JSON only |
 | `--markdown false` | Without this flag DCE renders mention syntax (`<@123>`) as display names (`@Username`), destroying the IDs needed for remapping |
 | `--media` | Downloads all attachments, avatars, and emoji locally. Discord CDN URLs expire within ~24 hours |
+| `--reuse-media` | Skips redownloading media that already exists locally. Ferry's own DCE runner passes this so a re-export or resume-after-crash finishes in minutes rather than re-fetching every attachment |
 | `--include-threads All` | Exports threads and forum posts as separate files alongside their parent channels |
 
 !!! warning "--markdown false is critical"
@@ -51,6 +53,16 @@ is always the thread's own ID, not the parent channel's ID.
 
 The ID in brackets is always at the end of the stem before the `.json` extension. Ferry extracts it
 with a regex on the filename.
+
+!!! info "Sanitisation for downstream file writes"
+    The names above come straight from Discord and can contain any Unicode. When Ferry writes a
+    file **it** owns — a thread archive under `--thread-strategy archive`, or a merged-thread
+    attachment under `--thread-strategy merge` — `sanitize_filename()` in
+    `migrator/messages.py` strips characters that are illegal on Windows (`< > : " \ | ? *`),
+    replaces `/` with `-` so a name like `wip/2026` never creates a subdirectory, and rewrites
+    Win32 reserved device names (`CON`, `NUL`, etc.). Two threads whose sanitised names collide
+    are suffixed with the thread ID so neither file overwrites the other. This does not affect
+    DCE's own output filenames — DCE writes those before Ferry sees them.
 
 ---
 

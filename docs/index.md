@@ -91,7 +91,7 @@ Ferry is built to handle large migrations safely:
 - [Troubleshooting](guides/troubleshooting.md) — common issues and solutions
 - [Pre-Flight Checklist](guides/pre-flight-checklist.md) — verify your setup before migrating
 - [Known Limitations](guides/known-limitations.md) — platform constraints and unsupported features
-- [Was My Earlier Migration Affected?](guides/earlier-migrations.md) — five bugs fixed in v2.8.2–v2.10.0 that lost content **silently**; how to check a migration you already ran
+- [Was My Earlier Migration Affected?](guides/earlier-migrations.md) — five bugs fixed in v2.8.2–v2.10.0 that lost content with **no error and no warning**; how to check a migration you already ran
 
 ## Reference
 

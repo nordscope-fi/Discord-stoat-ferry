@@ -215,13 +215,13 @@ If potential issues are detected, they appear below the summary:
 
 ## Migrate Screen
 
-The main migration screen. Ferry works through 12 sequential phases.
+The main migration screen. Ferry works through 13 sequential phases.
 
 <!-- screenshot: migrate screen mid-migration showing phase indicators and progress bar -->
 
 ### Phase Indicator
 
-The 12 phases are shown in order, with a checkmark as each completes:
+The 13 phases are shown in order, with a checkmark as each completes:
 
 1. **Export** — run DiscordChatExporter (skipped in offline mode)
 2. **Validate** — confirm export is readable
@@ -231,10 +231,11 @@ The 12 phases are shown in order, with a checkmark as each completes:
 6. **Categories** — create channel categories
 7. **Channels** — create all channels with NSFW flags, then apply per-channel permission overrides
 8. **Emoji** — upload custom emoji
-9. **Messages** — send all messages
-10. **Reactions** — add message reactions
-11. **Pins** — pin messages
-12. **Report** — write summary report with post-migration checklist
+9. **Avatars** — pre-fetch every author's avatar and upload it to Stoat once, so message sends never wait on avatar I/O (skip with **Skip avatar pre-flight** under Advanced Options, or `--skip-avatars` on the CLI)
+10. **Messages** — send all messages
+11. **Reactions** — add message reactions (or, in the default `text` mode, no-op because reaction summaries were appended during Messages)
+12. **Pins** — pin messages
+13. **Report** — write summary report with post-migration checklist
 
 ### Progress Bar
 
@@ -264,6 +265,12 @@ Click **Pause** to temporarily stop the migration after the current message fini
 ### Cancel
 
 Click **Cancel** to stop the migration entirely. Ferry saves its state to disk before stopping. To continue later, re-launch Ferry with the same export folder. On the Migrate screen, Ferry will detect the previous migration state and offer a **Resume** or **Start Fresh** choice (or use `--resume` on the CLI).
+
+!!! info "Stale resume flag"
+    A resume flag written by a previous run can outlive its state file — for example if the
+    output folder was deleted or moved. From v2.19.7 the GUI clears that flag on the spot and
+    surfaces a specific error naming the missing state file, so the migration wizard opens
+    fresh instead of failing with a generic `StateError`. Nothing on the server changes.
 
 !!! warning "Do not close the browser tab during migration"
     Closing the tab while migration is running does not stop Ferry — it continues in the background. However, you will lose visibility into progress. Leave the tab open, or use the CLI if you need a more robust background process.
