@@ -514,9 +514,7 @@ async def _apply_role_ordering(
     is why the sort is descending.
 
     The route rejects any list that does not name every role on the server, so the
-    list comes from a read-back rather than from ``role_map``. That map can lag the
-    server: the create loop persists state every ten roles, so a hard kill strands
-    created roles outside it (#389).
+    list comes from a read-back rather than from ``role_map``.
 
     Only roles Ferry knows about move. Every other role keeps its exact index,
     which leaves a ``--server-id`` target's own hierarchy alone and keeps the
