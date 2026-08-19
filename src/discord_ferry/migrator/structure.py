@@ -1440,6 +1440,8 @@ async def run_channels(
                 stoat_cat_id = state.category_map[discord_cat_id]
                 category_channels.setdefault(stoat_cat_id, []).append(stoat_channel_id)
 
+            save_state(state, config.output_dir)
+
             on_event(
                 MigrationEvent(
                     phase="channels",
@@ -1535,6 +1537,8 @@ async def run_channels(
                 state.created_channel_names[f"forum-index-{forum_key}"] = (
                     idx_result.get("name") or index_name
                 )
+
+                save_state(state, config.output_dir)
 
                 on_event(
                     MigrationEvent(
