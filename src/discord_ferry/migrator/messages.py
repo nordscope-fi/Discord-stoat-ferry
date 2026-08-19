@@ -12,7 +12,7 @@ from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
 from discord_ferry.errors import DuplicateSendError
 from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
-from discord_ferry.migrator.sanitize import truncate_name
+from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
 from discord_ferry.parser.transforms import (
     convert_spoilers,
@@ -851,12 +851,21 @@ def _archive_threads(
     Creates ``{output_dir}/threads/{parent_channel_name}/{thread_name}.md``
     with each message formatted as a markdown heading with author and timestamp.
     """
+    used_names: dict[str, dict[str, int]] = {}
     for export in thread_exports:
-        parent_name = export.parent_channel_name or "uncategorized"
+        parent_name = sanitize_filename(export.parent_channel_name or "uncategorized")
         thread_dir = config.output_dir / "threads" / parent_name
         thread_dir.mkdir(parents=True, exist_ok=True)
 
-        md_path = thread_dir / f"{export.channel.name}.md"
+        base_name = sanitize_filename(export.channel.name)
+        dir_used = used_names.setdefault(parent_name, {})
+        if base_name in dir_used:
+            dir_used[base_name] += 1
+            final_name = f"{base_name}_{dir_used[base_name]}"
+        else:
+            dir_used[base_name] = 1
+            final_name = base_name
+        md_path = thread_dir / f"{final_name}.md"
 
         if export.json_path is not None:
             message_source = stream_messages(export.json_path)

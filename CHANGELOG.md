@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.12] - 2026-08-19
+
+### Fixed
+
+- **Thread archive no longer crashes on thread names with filesystem-illegal characters.**
+  Discord thread names are free-form and can contain characters that are illegal in
+  filenames on Windows (`< > : " \ | ? *`) or that create subdirectories on POSIX (`/`).
+  Both the parent channel name and thread name are now sanitized before constructing the
+  archive path. Win32 reserved device names (`CON`, `NUL`, etc.) are also handled.
+  Two threads whose names sanitize to the same string now produce distinct files instead
+  of silently overwriting each other. Fixes #173.
+
 ## [2.19.11] - 2026-08-19
 
 ### Fixed
