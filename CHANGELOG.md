@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.19.16] - 2026-08-19
+
+### Fixed
+
+- **Hard-kill mid-creation no longer duplicates roles or channels on resume.** `run_roles`
+  previously saved state every 10th role, and `run_channels` had no mid-loop saves at all. A
+  SIGKILL, OOM or power loss lost the in-memory ID maps, so resume recreated everything from
+  scratch as duplicates. Both functions now persist `state.json` after every structural create
+  call, matching the existing server-create pattern. During structural phases `message_map` is
+  empty, so each write is cheap. Fixes #389.
+
 ## [2.19.15] - 2026-08-19
 
 ### Changed
