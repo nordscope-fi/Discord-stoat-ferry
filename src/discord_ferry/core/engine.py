@@ -2015,6 +2015,30 @@ async def _run_emoji_repair_pass(
     never leave the map pointing at the new emoji without a record to finish the
     rewrite from, nor the record without the new id.
     """
+    # Resume first: finish any rewrite a previous run left unfinished. The record
+    # exists because that run recreated the emoji (emoji_map already points at the
+    # new id) but crashed before every reference was rewritten. A fresh check
+    # reports the emoji present and would never revisit these, so this must run
+    # from the record, not the check. Disjoint from emoji_work by construction: a
+    # recorded emoji reads as present, so it is never in this run's emoji_work.
+    for pending_id, pending in list(state.pending_emoji_rewrites.items()):
+        rewritten, declined, failed = await _rewrite_emoji_references(
+            session, config, state, pending_id, pending["new"], exports, on_event
+        )
+        if failed == 0:
+            state.pending_emoji_rewrites.pop(pending_id, None)
+            save_state(state, config.output_dir)
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="progress",
+                message=(
+                    f"Resumed emoji rewrite for {pending_id}: {rewritten} rewritten, "
+                    f"{declined} declined, {failed} failed."
+                ),
+            )
+        )
+
     used_names: dict[str, int] = {}
     for result in emoji_work:
         discord_id = result.discord_id or ""
@@ -2114,8 +2138,14 @@ async def run_repair(
 
     A sibling of :func:`run_retry_failed` and :func:`run_rollback`, not a phase.
     ``PHASE_ORDER``, the phase list and the resume-by-name comparison are
-    untouched, and repair is not resumable by design: it re-derives its work
-    from a fresh check on every run, so there is nothing to checkpoint.
+    untouched. Most of repair re-derives its work from a fresh check on every
+    run and checkpoints nothing. The one exception is the emoji pass (#307):
+    recreating a missing emoji mints a NEW id, and a fresh check cannot re-derive
+    which already-sent messages still point at the OLD one. So that pass keeps a
+    scoped resume record, ``state.pending_emoji_rewrites``, written in the same
+    save that switches ``emoji_map`` to the new id, and finishes any leftover
+    record at the start of the next run before the fresh check re-derives new
+    work.
 
     Raises:
         CheckError: the state is from a dry run, or records no server. Both come
@@ -2267,7 +2297,7 @@ async def run_repair(
     # the emoji rather than sweeping in a reference a structure repair just
     # changed in the same run. See
     # docs/plans/designs/2026-08-20-repair-emoji-missing.md.
-    if emoji_work:
+    if emoji_work or state.pending_emoji_rewrites:
         own_emoji_session = session is None
         emoji_sess = session or new_session()
         try:

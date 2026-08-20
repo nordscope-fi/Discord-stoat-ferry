@@ -289,3 +289,63 @@ async def test_rewrite_counts_all_referencing_messages(tmp_path: Path) -> None:
     assert edit.await_count == 3
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 3
     assert EMOJI_ID not in state.pending_emoji_rewrites  # cleared on full success
+
+
+# ---------------------------------------------------------------------------
+# Task 3.3: resume step and docstring
+# ---------------------------------------------------------------------------
+
+
+async def test_resume_finishes_a_crashed_rewrite(tmp_path: Path) -> None:
+    """SC-3.2: a pending record from a prior crash is finished before the check."""
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    # A prior run recreated the emoji (map already points at new) and crashed
+    # mid-rewrite, leaving the resume record. The server already has the new id,
+    # so this run's check reports it present (no recreation to do).
+    state.emoji_map[EMOJI_ID] = NEW_ID
+    state.pending_emoji_rewrites[EMOJI_ID] = {"old": OLD_ID, "new": NEW_ID}
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_present_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value="second")) as up,
+        patch(_EDIT, new=AsyncMock()) as edit,
+    ):
+        await run_repair(config, state, [_export([_message()])], [].append)
+    up.assert_not_awaited()  # no second emoji
+    edit.assert_awaited_once()  # the stranded message is finished
+    assert EMOJI_ID not in state.pending_emoji_rewrites
+
+
+async def test_edit_failure_keeps_the_record(tmp_path: Path) -> None:
+    """SC-3.3: a failed edit keeps the resume record and counts the failure."""
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    state.message_map = {"m1": "s1", "m2": "s2"}
+    msgs = [
+        _message(),  # id m1, carries the reaction/image
+        DCEMessage(
+            id="m2",
+            type="Default",
+            timestamp="2024-01-01T00:00:00Z",
+            content="more <:smile:123>",
+            author=DCEAuthor(id="u", name="U"),
+            reactions=[],
+        ),
+    ]
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_EDIT, new=AsyncMock(side_effect=[None, RuntimeError("boom")])),
+    ):
+        outcome = await run_repair(config, state, [_export(msgs)], [].append)
+    row = outcome.recreated_emoji[0]
+    assert row["messages_rewritten"] == 1
+    assert row["messages_failed"] == 1
+    assert state.pending_emoji_rewrites[EMOJI_ID] == {"old": OLD_ID, "new": NEW_ID}
+
+
+def test_run_repair_docstring_admits_the_checkpoint() -> None:
+    """SC-3.4: the docstring no longer claims nothing is checkpointed."""
+    doc = run_repair.__doc__ or ""
+    assert "nothing to checkpoint" not in doc
+    assert "pending_emoji_rewrites" in doc
