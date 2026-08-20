@@ -559,6 +559,75 @@ def test_an_uppercase_empty_variable_does_not_suppress_a_lowercase_one(proxy_env
     assert str(choice.url) == "http://mine:3128"
 
 
+def test_all_proxy_is_the_fallback_for_a_scheme_target(proxy_env, os_proxy) -> None:
+    """SC-1.1. Killing: consulting only env[scheme]/os_side[scheme] and never
+    the 'all' key, which is the pre-#141 behaviour (returns None here)."""
+    with os_proxy({}), proxy_env(ALL_PROXY="http://p:8080"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert str(choice.url) == "http://p:8080"
+    assert choice.source == "env"
+
+
+def test_a_scheme_proxy_wins_over_all_proxy(proxy_env, os_proxy) -> None:
+    """SC-1.2. Killing: a fallback placed before the scheme lookups, or one that
+    overwrites a resolved scheme proxy with the 'all' value."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", ALL_PROXY="http://p:8080"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert str(choice.url) == "http://env:3128"
+    assert choice.source == "env"
+
+
+def test_a_socks_all_proxy_resolves_to_none(proxy_env, os_proxy) -> None:
+    """SC-1.3. Killing: a fallback that returns the 'all' value without passing
+    it through the socks guard."""
+    with os_proxy({}), proxy_env(ALL_PROXY="socks5://s:1080"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_no_proxy_exempts_a_host_reached_via_all_proxy(proxy_env, os_proxy) -> None:
+    """SC-1.4. Killing: a fallback that returns before reaching _is_bypassed."""
+    with os_proxy({}), proxy_env(ALL_PROXY="http://p:8080", NO_PROXY="api.stoat.chat"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_the_kill_switch_wins_over_all_proxy(proxy_env, os_proxy) -> None:
+    """SC-1.5. Killing: a fallback added above the FERRY_DISABLE_PROXY guard."""
+    with os_proxy({}), proxy_env(ALL_PROXY="http://p:8080", FERRY_DISABLE_PROXY="1"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_an_emptied_scheme_is_not_rescued_by_all_proxy(proxy_env, os_proxy) -> None:
+    """SC-1.6, the design's central correctness point. Killing: a fallback that
+    branches on `"all" in env` alone. stdlib pops an empty HTTPS_PROXY="" from
+    the proxy dict, leaving {'all': ...}, so only _suppressed_schemes()'s raw
+    re-scan sees that https was turned off."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="", ALL_PROXY="http://p:8080"):
+        assert http.resolve_proxy(TARGET) is None
+
+
+def test_an_unrelated_emptied_scheme_does_not_block_the_fallback(proxy_env, os_proxy) -> None:
+    """SC-1.7. Killing: `if _suppressed_schemes()` (any suppression) instead of
+    `scheme not in _suppressed_schemes()` (the target scheme only)."""
+    with os_proxy({}), proxy_env(HTTP_PROXY="", ALL_PROXY="http://p:8080"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert str(choice.url) == "http://p:8080"
+
+
+def test_all_proxy_userinfo_is_stripped_and_registered(proxy_env, os_proxy) -> None:
+    """SC-1.8. Killing: a fallback that assigns raw = env["all"] but bypasses the
+    shared _strip_userinfo path, leaking the credential into the URL or the log."""
+    reset_secret_registry()
+    with os_proxy({}), proxy_env(ALL_PROXY="http://user:SUPERSECRET@p:8080"):
+        choice = http.resolve_proxy(TARGET)
+    assert choice is not None
+    assert "SUPERSECRET" not in str(choice.url)
+    assert choice.authorization is not None
+    assert "SUPERSECRET" not in sanitize_secrets("token SUPERSECRET")
+
+
 @pytest.mark.parametrize("bad", ["http://host:notaport", "http://[::1"])
 def test_a_malformed_proxy_never_raises(proxy_env, os_proxy, bad: str) -> None:
     """SC-135-22. Killing: an unguarded parse. Resolution runs inside
