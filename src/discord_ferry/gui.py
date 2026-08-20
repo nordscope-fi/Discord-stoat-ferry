@@ -230,7 +230,18 @@ def _coerce_advanced_settings(storage: Mapping[str, Any]) -> dict[str, Any]:
         "max_concurrent_requests": _as_int("max_concurrent_requests", 5, 1),
         "skip_avatars": bool(storage.get("skip_avatars", False)),
         "validate_after": bool(storage.get("validate_after", False)),
+        "incremental": bool(storage.get("incremental", False)),
     }
+
+
+def _resume_incremental_conflict(storage: Mapping[str, Any]) -> bool:
+    """True when both resume and incremental are set, which the engine rejects.
+
+    ``run_migration`` raises ``--resume and --incremental are mutually exclusive``
+    (engine.py). The GUI catches it here so a stale-session user gets a clear
+    message before any phase runs.
+    """
+    return bool(storage.get("resume")) and bool(storage.get("incremental"))
 
 
 def _store_session_tokens(store: MutableMapping[str, Any], *, stoat: str, discord: str) -> None:
@@ -694,6 +705,10 @@ def setup_page() -> None:
                         "Validate after migration (verify entities by ID)",
                         value=adv_stored["validate_after"],
                     )
+                    incremental_cb = ui.checkbox(
+                        "Incremental (reuse channels and roles, send only new messages)",
+                        value=adv_stored["incremental"],
+                    )
 
                 error_label = ui.label("").classes("text-red-500 text-sm")
 
@@ -766,6 +781,7 @@ def setup_page() -> None:
                     storage["max_concurrent_requests"] = max_requests_num.value
                     storage["skip_avatars"] = skip_avatars_cb.value
                     storage["validate_after"] = validate_after_cb.value
+                    storage["incremental"] = incremental_cb.value
                     storage["skip_export"] = mode == "offline"
 
                     adv_chosen = _coerce_advanced_settings(storage)
@@ -1708,6 +1724,13 @@ async def migrate_page() -> None:
             # unreachable from a bare background task (issue #123).
             # Rebuild config with the final resume choice.
             config.resume = bool(storage.get("resume", False))
+
+            if _resume_incremental_conflict(storage):
+                log_display.push(
+                    "[ERROR] Resume and incremental cannot both be set. Uncheck one and re-run."
+                )
+                ui.notify("Resume and incremental cannot both be set.", type="negative")
+                return
 
             try:
                 await run_migration(config, on_event=on_event)
