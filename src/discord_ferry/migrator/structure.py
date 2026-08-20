@@ -15,6 +15,7 @@ from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import (
     ChannelMeta,
+    DiscordMetadata,
     PermissionPair,
     RoleMeta,
     load_discord_metadata,
@@ -617,22 +618,20 @@ async def _apply_role_ordering(
     )
 
 
-async def run_roles(
+def _collect_roles_to_order(
     config: FerryConfig,
-    state: MigrationState,
     exports: list[DCEExport],
-    on_event: EventCallback,
-) -> None:
-    """Phase 4 — Create server roles and map Discord role IDs to Stoat role IDs.
+) -> tuple[list[DCERole], set[str], DiscordMetadata | None]:
+    """Collect the roles to create and order, unioned with live discord_metadata.
 
-    Args:
-        config: Ferry configuration.
-        state: Migration state; ``role_map`` will be populated.
-        exports: Parsed DCE exports; roles are extracted from message authors.
-        on_event: Event callback for progress reporting.
+    A pure extraction of the collection-and-union block of ``run_roles``: it makes
+    no API call and mutates no state. The cap-truncation that used to follow this
+    block stays in ``run_roles`` (create-path bookkeeping), re-guarded by the
+    returned ``discord_metadata``. ``run_role_backfill`` shares this exact list so
+    it orders by what the migration built. #388.
 
-    Raises:
-        MigrationError: If any API call fails unrecoverably.
+    Returns ``(roles, export_role_ids, discord_metadata)``. ``export_role_ids`` is
+    the provenance set ``run_roles`` uses to credit recovered structural roles.
     """
     # Determine the @everyone role ID (same as guild ID) to skip it.
     guild_id = exports[0].guild.id if exports else ""
@@ -670,6 +669,35 @@ async def run_roles(
             merged_roles[role_id] = _role_from_metadata(role_id, live_rm)
         roles_to_create = list(merged_roles.values())
 
+    return roles_to_create, export_role_ids, discord_metadata
+
+
+async def run_roles(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> None:
+    """Phase 4 — Create server roles and map Discord role IDs to Stoat role IDs.
+
+    Args:
+        config: Ferry configuration.
+        state: Migration state; ``role_map`` will be populated.
+        exports: Parsed DCE exports; roles are extracted from message authors.
+        on_event: Event callback for progress reporting.
+
+    Raises:
+        MigrationError: If any API call fails unrecoverably.
+    """
+    # Collect the roles to create and order. The helper is a pure collection and
+    # union: it makes no API call and mutates no state. See _collect_roles_to_order.
+    roles_to_create, export_role_ids, discord_metadata = _collect_roles_to_order(
+        config, exports
+    )
+
+    # Role cap, scoped to the union path exactly as before. The guard must stay:
+    # api_fetch_root is a request the export-only path never makes.
+    if discord_metadata is not None:
         # Role cap: read the live server_roles limit (best-effort; 200 fallback).
         # The union can exceed Stoat's cap, so pre-flight truncate by lowest
         # (position, id) and keep the top-N. Scoped to the union path only.
