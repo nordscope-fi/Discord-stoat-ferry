@@ -34,16 +34,20 @@ from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_invite,
     api_create_role,
+    api_create_server,
     api_delete_channel,
     api_delete_emoji,
     api_delete_role,
     api_edit_channel,
     api_edit_message,
+    api_edit_role,
+    api_edit_role_ranks,
     api_edit_server,
     api_fetch_server,
     api_fetch_server_with_channels,
     api_pin_message,
     api_send_message,
+    api_set_role_permissions,
     api_upsert_categories,
     get_session,
     init_request_semaphore,
@@ -85,6 +89,7 @@ from discord_ferry.state import (
 )
 
 if TYPE_CHECKING:
+    from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
     from discord_ferry.discord.metadata import ChannelMeta
 
     # Type-only: run_check itself is imported inside run_repair, matching how
@@ -2874,3 +2879,149 @@ async def run_rollback(
         config.session = None
 
     return state
+
+
+async def _build_blueprint_channel(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+    ch: BlueprintChannel,
+    on_event: EventCallback,
+) -> str:
+    """Create a blueprint channel, retrying a failed Voice channel as Text (Stoat Bug #194).
+
+    Mirrors the migration path's voice fallback (``structure.py``). Only a ``"Voice"``-type
+    create failure is retried as ``"Text"``; any other ``MigrationError`` propagates. Returns
+    the created channel's Stoat ``_id``.
+    """
+    try:
+        result = await api_create_channel(
+            session, stoat_url, token, server_id, name=ch.name, channel_type=ch.type, nsfw=ch.nsfw
+        )
+    except MigrationError:
+        if ch.type == "Voice":
+            on_event(
+                MigrationEvent(
+                    phase="build",
+                    status="warning",
+                    message=f"Voice channel '{ch.name}' failed, retrying as text",
+                )
+            )
+            result = await api_create_channel(
+                session,
+                stoat_url,
+                token,
+                server_id,
+                name=ch.name,
+                channel_type="Text",
+                nsfw=ch.nsfw,
+            )
+        else:
+            raise
+    return str(result["_id"])
+
+
+async def run_build(
+    stoat_url: str,
+    token: str,
+    blueprint: ServerBlueprint,
+    on_event: EventCallback,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> str:
+    """Build a Stoat server from a blueprint, shared by the CLI and the GUI build page.
+
+    Emits progress events and returns the created server id. A role-ordering
+    failure is a warning event, not a raise: the server is already usable, so
+    matching the CLI, the build does not abort on it. Any other ``MigrationError``
+    propagates to the caller.
+
+    Writes no ``state.json``, so a server built this way cannot be rolled back by
+    ``run_rollback`` -- there is no recorded id map to undo.
+    """
+    import uuid
+
+    own_session = session is None
+    sess = session or new_session()
+    try:
+        server_id = await api_create_server(sess, stoat_url, token, blueprint.name)
+        on_event(
+            MigrationEvent(
+                phase="build",
+                status="started",
+                message=f"Created server '{blueprint.name}' ({server_id})",
+            )
+        )
+
+        created_roles: list[tuple[int, str]] = []
+        for role in blueprint.roles:
+            role_result = await api_create_role(sess, stoat_url, token, server_id, role.name)
+            role_id = role_result["id"]
+            created_roles.append((role.rank, role_id))
+            if role.colour:
+                await api_edit_role(sess, stoat_url, token, server_id, role_id, colour=role.colour)
+            if role.permissions:
+                await api_set_role_permissions(
+                    sess, stoat_url, token, server_id, role_id, allow=role.permissions, deny=0
+                )
+            on_event(
+                MigrationEvent(
+                    phase="build", status="progress", message=f"Created role '{role.name}'"
+                )
+            )
+
+        if any(rank > 0 for rank, _ in created_roles):
+            ranked = [(r, rid) for r, rid in created_roles if r > 0]
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            unranked = [rid for r, rid in created_roles if r == 0]
+            ordered = [rid for _, rid in ranked] + unranked
+            try:
+                await api_edit_role_ranks(sess, stoat_url, token, server_id, ordered)
+                on_event(
+                    MigrationEvent(
+                        phase="build", status="progress", message="Applied role ordering"
+                    )
+                )
+            except MigrationError as exc:
+                on_event(
+                    MigrationEvent(
+                        phase="build",
+                        status="warning",
+                        message=f"Role ordering failed: {exc}",
+                    )
+                )
+
+        all_categories: list[dict[str, Any]] = []
+        for category in blueprint.categories:
+            cat_id = uuid.uuid4().hex[:26]
+            channel_ids: list[str] = []
+            for ch in category.channels:
+                channel_ids.append(
+                    await _build_blueprint_channel(sess, stoat_url, token, server_id, ch, on_event)
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="build",
+                        status="progress",
+                        message=f"Created channel '{ch.name}' in '{category.name}'",
+                    )
+                )
+            all_categories.append(
+                {"id": cat_id, "title": category.name[:32], "channels": channel_ids}
+            )
+        if all_categories:
+            await api_upsert_categories(sess, stoat_url, token, server_id, all_categories)
+
+        for ch in blueprint.uncategorized_channels:
+            await _build_blueprint_channel(sess, stoat_url, token, server_id, ch, on_event)
+            on_event(
+                MigrationEvent(
+                    phase="build", status="progress", message=f"Created channel '{ch.name}'"
+                )
+            )
+
+        return server_id
+    finally:
+        if own_session:
+            await sess.close()
