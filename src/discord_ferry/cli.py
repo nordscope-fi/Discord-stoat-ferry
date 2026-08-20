@@ -965,51 +965,20 @@ def build(
 @click.option("--name", default=None, help="Override server name in blueprint")
 def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
     """Export a DCE export directory as a reusable blueprint."""
-    from discord_ferry.blueprint import (
-        BlueprintCategory,
-        BlueprintChannel,
-        ServerBlueprint,
-        export_blueprint,
-    )
+    from discord_ferry.blueprint import blueprint_from_exports, export_blueprint
 
     exports = parse_export_directory(Path(from_dir))
     if not exports:
         console.print("[bold red]Error:[/] No valid DCE JSON files found.")
         sys.exit(1)
 
-    guild_name = name or exports[0].guild.name
-
-    # Collect categories and channels
-    categories: dict[str, list[BlueprintChannel]] = {}
-    uncategorized: list[BlueprintChannel] = []
-
-    for export in exports:
-        ch = export.channel
-        if ch.type == 4:  # Skip category-type channels
-            continue
-        stoat_type = "Voice" if ch.type == 2 else "Text"
-        bp_channel = BlueprintChannel(name=ch.name, type=stoat_type)
-
-        if ch.category:
-            categories.setdefault(ch.category, []).append(bp_channel)
-        else:
-            uncategorized.append(bp_channel)
-
-    bp = ServerBlueprint(
-        name=guild_name,
-        description=f"Exported from Discord server '{guild_name}'",
-        categories=[
-            BlueprintCategory(name=cat_name, channels=channels)
-            for cat_name, channels in categories.items()
-        ],
-        uncategorized_channels=uncategorized,
-    )
+    bp = blueprint_from_exports(exports, name)
 
     export_blueprint(bp, Path(output))
     console.print(
         f"[bold green]Blueprint exported[/] to {_safe(output)} "
         f"({len(bp.categories)} categories, "
-        f"{sum(len(c.channels) for c in bp.categories) + len(uncategorized)} channels)"
+        f"{sum(len(c.channels) for c in bp.categories) + len(bp.uncategorized_channels)} channels)"
     )
 
 
