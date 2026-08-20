@@ -1359,14 +1359,18 @@ def test_build_applies_distinct_ranks(runner: CliRunner, tmp_path: Path) -> None
         roles=[
             BlueprintRole(name="Admin", colour=0xFF0000, rank=3),
             BlueprintRole(name="Mod", rank=2),
+            BlueprintRole(name="Plain", rank=0),
         ],
     )
     p = _write_bp(tmp_path, bp)
+    create_role = AsyncMock(side_effect=[{"id": "r-admin"}, {"id": "r-mod"}, {"id": "r-plain"}])
+    ranks_mock = AsyncMock(return_value={})
     edit = AsyncMock(return_value={})
     with (
         patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r"})),
+        patch("discord_ferry.cli.api_create_role", create_role),
         patch("discord_ferry.cli.api_edit_role", edit),
+        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
         patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         result = runner.invoke(
@@ -1375,8 +1379,9 @@ def test_build_applies_distinct_ranks(runner: CliRunner, tmp_path: Path) -> None
             catch_exceptions=False,
         )
     assert result.exit_code == 0
-    ranks = {c.kwargs.get("rank") for c in edit.await_args_list}
-    assert {2, 3} <= ranks
+    ranks_mock.assert_awaited_once()
+    ordered = ranks_mock.await_args.args[4]
+    assert ordered == ["r-admin", "r-mod", "r-plain"]
 
 
 def test_build_skips_rank_zero(runner: CliRunner, tmp_path: Path) -> None:  # SC-16
@@ -1384,11 +1389,12 @@ def test_build_skips_rank_zero(runner: CliRunner, tmp_path: Path) -> None:  # SC
 
     bp = ServerBlueprint(name="S", roles=[BlueprintRole(name="Plain", rank=0)])
     p = _write_bp(tmp_path, bp)
-    edit = AsyncMock(return_value={})
+    ranks_mock = AsyncMock(return_value={})
     with (
         patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
         patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r"})),
-        patch("discord_ferry.cli.api_edit_role", edit),
+        patch("discord_ferry.cli.api_edit_role", AsyncMock(return_value={})),
+        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
         patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         runner.invoke(
@@ -1396,19 +1402,21 @@ def test_build_skips_rank_zero(runner: CliRunner, tmp_path: Path) -> None:  # SC
             ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
             catch_exceptions=False,
         )
-    assert edit.await_count == 0  # no colour, no rank -> no edit call
+    ranks_mock.assert_not_awaited()
 
 
-def test_build_folds_colour_and_rank_one_patch(runner: CliRunner, tmp_path: Path) -> None:  # SC-17
+def test_build_separates_colour_and_rank(runner: CliRunner, tmp_path: Path) -> None:  # SC-17
     from discord_ferry.blueprint import BlueprintRole, ServerBlueprint
 
     bp = ServerBlueprint(name="S", roles=[BlueprintRole(name="A", colour=0x00FF00, rank=5)])
     p = _write_bp(tmp_path, bp)
     edit = AsyncMock(return_value={})
+    ranks_mock = AsyncMock(return_value={})
     with (
         patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r"})),
+        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r-a"})),
         patch("discord_ferry.cli.api_edit_role", edit),
+        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
         patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         runner.invoke(
@@ -1419,7 +1427,32 @@ def test_build_folds_colour_and_rank_one_patch(runner: CliRunner, tmp_path: Path
     assert edit.await_count == 1
     kw = edit.await_args.kwargs
     assert kw.get("colour") == 0x00FF00
-    assert kw.get("rank") == 5
+    assert "rank" not in kw
+    ranks_mock.assert_awaited_once()
+    assert ranks_mock.await_args.args[4] == ["r-a"]
+
+
+def test_build_ordering_failure_degrades(runner: CliRunner, tmp_path: Path) -> None:
+    from discord_ferry.blueprint import BlueprintRole, ServerBlueprint
+
+    bp = ServerBlueprint(name="S", roles=[BlueprintRole(name="A", rank=2)])
+    p = _write_bp(tmp_path, bp)
+    ranks_mock = AsyncMock(side_effect=MigrationError("test ordering failure"))
+    with (
+        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r-a"})),
+        patch("discord_ferry.cli.api_edit_role", AsyncMock(return_value={})),
+        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
+        patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
+    ):
+        result = runner.invoke(
+            main,
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    assert "Warning" in result.output
+    assert "Done!" in result.output
 
 
 def test_build_preserves_permissions(runner: CliRunner, tmp_path: Path) -> None:  # SC-18
@@ -1432,6 +1465,7 @@ def test_build_preserves_permissions(runner: CliRunner, tmp_path: Path) -> None:
         patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
         patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r"})),
         patch("discord_ferry.cli.api_edit_role", AsyncMock(return_value={})),
+        patch("discord_ferry.cli.api_edit_role_ranks", AsyncMock(return_value={})),
         patch("discord_ferry.cli.api_set_role_permissions", perms),
     ):
         runner.invoke(

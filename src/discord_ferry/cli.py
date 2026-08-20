@@ -39,6 +39,7 @@ from discord_ferry.migrator.api import (
     api_create_role,
     api_create_server,
     api_edit_role,
+    api_edit_role_ranks,
     api_set_role_permissions,
     api_upsert_categories,
     init_request_semaphore,
@@ -874,19 +875,14 @@ def build(
             console.print(f"  Created server '{_safe(bp.name)}' ({server_id})")
 
             # Create roles
+            created_roles: list[tuple[int, str]] = []
             for role in bp.roles:
                 role_result = await api_create_role(session, stoat_url, token, server_id, role.name)
                 role_id = role_result["id"]
-                # Replay colour + rank in a single PATCH. Skip rank 0 (the default) so an
-                # unranked blueprint role keeps Stoat's default ordering rather than being pinned.
-                edit_kwargs: dict[str, Any] = {}
+                created_roles.append((role.rank, role_id))
                 if role.colour:
-                    edit_kwargs["colour"] = role.colour
-                if role.rank:
-                    edit_kwargs["rank"] = role.rank
-                if edit_kwargs:
                     await api_edit_role(
-                        session, stoat_url, token, server_id, role_id, **edit_kwargs
+                        session, stoat_url, token, server_id, role_id, colour=role.colour
                     )
                 if role.permissions:
                     await api_set_role_permissions(
@@ -899,6 +895,18 @@ def build(
                         deny=0,
                     )
                 console.print(f"  Created role '{_safe(role.name)}'")
+
+            # Apply role ordering
+            if any(rank > 0 for rank, _ in created_roles):
+                ranked = [(r, rid) for r, rid in created_roles if r > 0]
+                ranked.sort(key=lambda item: item[0], reverse=True)
+                unranked = [rid for r, rid in created_roles if r == 0]
+                ordered = [rid for _, rid in ranked] + unranked
+                try:
+                    await api_edit_role_ranks(session, stoat_url, token, server_id, ordered)
+                    console.print("  Applied role ordering")
+                except MigrationError as exc:
+                    console.print(f"  [yellow]Warning:[/] Role ordering failed: {_safe(exc)}")
 
             # Create categories and channels
             import uuid
