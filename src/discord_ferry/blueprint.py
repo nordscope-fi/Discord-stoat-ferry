@@ -1,11 +1,17 @@
 """Server blueprint export, import, and build — portable server structure definitions."""
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from discord_ferry.parser.models import DCEExport
 
 
 @dataclass
@@ -44,6 +50,42 @@ class ServerBlueprint:
     roles: list[BlueprintRole] = field(default_factory=list)
     categories: list[BlueprintCategory] = field(default_factory=list)
     uncategorized_channels: list[BlueprintChannel] = field(default_factory=list)
+
+
+def blueprint_from_exports(exports: list[DCEExport], name: str | None = None) -> ServerBlueprint:
+    """Build a ServerBlueprint from parsed DCE exports.
+
+    The single home for the channel-mapping rule both shells depend on: a
+    category-type channel (DCE ``type == 4``) is skipped, a voice channel
+    (``type == 2``) maps to a Stoat ``"Voice"`` channel and everything else to
+    ``"Text"``, and a channel with no category lands in
+    ``uncategorized_channels``. Keeping it here, rather than a copy in each
+    shell, is why the CLI and GUI cannot diverge on the mapping.
+    """
+    guild_name = name or exports[0].guild.name
+    categories: dict[str, list[BlueprintChannel]] = {}
+    uncategorized: list[BlueprintChannel] = []
+
+    for export in exports:
+        ch = export.channel
+        if ch.type == 4:  # category-type channel, not a real channel
+            continue
+        stoat_type = "Voice" if ch.type == 2 else "Text"
+        bp_channel = BlueprintChannel(name=ch.name, type=stoat_type)
+        if ch.category:
+            categories.setdefault(ch.category, []).append(bp_channel)
+        else:
+            uncategorized.append(bp_channel)
+
+    return ServerBlueprint(
+        name=guild_name,
+        description=f"Exported from Discord server '{guild_name}'",
+        categories=[
+            BlueprintCategory(name=cat_name, channels=channels)
+            for cat_name, channels in categories.items()
+        ],
+        uncategorized_channels=uncategorized,
+    )
 
 
 def export_blueprint(blueprint: ServerBlueprint, output_path: Path) -> None:

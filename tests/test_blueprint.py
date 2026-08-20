@@ -10,9 +10,47 @@ from discord_ferry.blueprint import (
     BlueprintChannel,
     BlueprintRole,
     ServerBlueprint,
+    blueprint_from_exports,
     export_blueprint,
     import_blueprint,
 )
+from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
+
+
+def _export(name: str, ch_type: int, category: str = "") -> DCEExport:
+    """A minimal DCEExport carrying one channel, for the mapping test."""
+    return DCEExport(
+        guild=DCEGuild(id="g1", name="My Guild"),
+        channel=DCEChannel(id=name, type=ch_type, name=name, category=category),
+    )
+
+
+def test_blueprint_from_exports_maps_channels_and_categories() -> None:
+    """The shared mapping: type 4 skipped, type 2 -> Voice, empty category -> uncategorized."""
+    exports = [
+        _export("general", 0, category="Text Channels"),
+        _export("lounge", 2, category="Voice Channels"),
+        _export("rules", 0),  # no category -> uncategorized
+        _export("a-category", 4, category=""),  # category-type channel, skipped
+    ]
+
+    bp = blueprint_from_exports(exports)
+
+    assert bp.name == "My Guild"  # from the first export's guild
+    assert {c.name for c in bp.categories} == {"Text Channels", "Voice Channels"}
+    voice_cat = next(c for c in bp.categories if c.name == "Voice Channels")
+    assert voice_cat.channels[0].type == "Voice"
+    assert [c.name for c in bp.uncategorized_channels] == ["rules"]
+    all_names = [ch.name for cat in bp.categories for ch in cat.channels] + [
+        c.name for c in bp.uncategorized_channels
+    ]
+    assert "a-category" not in all_names  # the type-4 channel was skipped
+
+
+def test_blueprint_from_exports_name_override() -> None:
+    """An explicit name overrides the guild name."""
+    bp = blueprint_from_exports([_export("general", 0)], name="Renamed")
+    assert bp.name == "Renamed"
 
 
 def _make_blueprint() -> ServerBlueprint:
