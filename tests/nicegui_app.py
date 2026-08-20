@@ -18,9 +18,12 @@ import importlib
 from nicegui import ui
 
 import discord_ferry.gui
+import discord_ferry.gui_tools
 
-# Re-import for its side effect: the @ui.page decorators re-register the routes
-# that nicegui_reset_globals() just cleared.
+# Re-import for their side effect: the @ui.page decorators re-register the routes
+# that nicegui_reset_globals() just cleared. gui_tools holds the /tools routes,
+# which reloading gui alone would not re-run.
+importlib.reload(discord_ferry.gui_tools)
 importlib.reload(discord_ferry.gui)
 
 # A no-op under simulation (nicegui/ui_run.py short-circuits on
