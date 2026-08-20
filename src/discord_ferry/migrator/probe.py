@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import struct
+import zlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -21,10 +23,49 @@ from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 # Tiers on the Stoat root that may carry upload limits. `global` carries none today; it
 # is listed so that it would be compared rather than missed if it ever gained them.
 _LIMIT_TIERS = ("global", "new_user", "default")
+
+
+def _make_test_file(directory: Path, tag: str, size: int) -> Path:
+    """Generate a test file of exactly *size* bytes for an Autumn upload probe.
+
+    Non-``attachments`` tags reject non-images, so those get a minimal valid PNG
+    padded with a ``tEXt`` chunk. ``attachments`` gets raw zero bytes.
+    """
+    path = directory / f"probe_{tag}_{size}.{'png' if tag != 'attachments' else 'bin'}"
+    if tag == "attachments":
+        path.write_bytes(b"\x00" * size)
+        return path
+
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def _chunk(name: bytes, data: bytes) -> bytes:
+        raw = name + data
+        return struct.pack(">I", len(data)) + raw + struct.pack(">I", zlib.crc32(raw) & 0xFFFFFFFF)
+
+    ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    ihdr = _chunk(b"IHDR", ihdr_data)
+    raw_pixel = zlib.compress(b"\x00\x00\x00\x00")
+    idat = _chunk(b"IDAT", raw_pixel)
+    iend = _chunk(b"IEND", b"")
+    core = sig + ihdr + idat + iend
+    core_size = len(core)
+
+    if size <= core_size:
+        path.write_bytes(core)
+        return path
+
+    keyword = b"probe"
+    text_overhead = 4 + 4 + len(keyword) + 1 + 4  # length + "tEXt" + keyword + null + CRC
+    pad_data_len = size - core_size - text_overhead
+    text_chunk = _chunk(b"tEXt", keyword + b"\x00" + b"x" * pad_data_len)
+    content = sig + ihdr + idat + text_chunk + iend
+    path.write_bytes(content)
+    return path
 
 
 def _sub_dict(obj: Any, key: str) -> dict[str, Any]:
