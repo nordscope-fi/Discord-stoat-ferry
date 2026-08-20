@@ -2104,6 +2104,13 @@ async def run_repair(
                         # exists, because the attributes are lost either way.
                         # Deferred as #344.
                         role_label = state.created_role_names.get(discord_id, discord_id)
+                        outcome.recreated_roles.append(
+                            {
+                                "discord_id": discord_id,
+                                "stoat_id": state.role_map.get(discord_id),
+                                "name": role_label,
+                            }
+                        )
                         state.warnings.append(
                             {
                                 "phase": "repair",
@@ -2132,7 +2139,17 @@ async def run_repair(
                             phase="repair",
                         )
                 elif result.kind == "category_missing":
-                    await _recreate_category(sess, config, state, result, live_categories, on_event)
+                    cat_created = await _recreate_category(
+                        sess, config, state, result, live_categories, on_event
+                    )
+                    if cat_created:
+                        outcome.recreated_categories.append(
+                            {
+                                "discord_id": discord_id,
+                                "stoat_id": state.category_map.get(discord_id),
+                                "title": state.category_names.get(discord_id),
+                            }
+                        )
                 elif result.kind == "channel_missing":
                     created = await _recreate_channel(
                         sess, config, state, result, exports, existing_names, on_event
@@ -2140,6 +2157,7 @@ async def run_repair(
                     if created:
                         matching = next((e for e in exports if e.channel.id == discord_id), None)
                         label = state.created_channel_names.get(discord_id, discord_id)
+                        count = 0
                         if matching is not None:
                             if state.thread_strategy == "merge":
                                 _warn_unrestored_merge_threads(state, matching, exports, on_event)
@@ -2151,6 +2169,14 @@ async def run_repair(
                                     message=f"Re-sent {count} message(s) into {label}.",
                                 )
                             )
+                        outcome.recreated_channels.append(
+                            {
+                                "discord_id": discord_id,
+                                "stoat_id": state.channel_map.get(discord_id),
+                                "name": label,
+                                "resent_count": count,
+                            }
+                        )
                     if created:
                         await _reattach_to_category(
                             sess,
@@ -2193,6 +2219,15 @@ async def run_repair(
             for result in tail_work:
                 if await _repair_tail(tail_sess, config, state, result, exports, on_event):
                     restored += 1
+                    outcome.restored_tails.append(
+                        {
+                            "discord_id": result.discord_id,
+                            "stoat_id": result.stoat_id,
+                            "name": state.created_channel_names.get(
+                                result.discord_id or "", result.discord_id or ""
+                            ),
+                        }
+                    )
                     save_state(state, config.output_dir)
             on_event(
                 MigrationEvent(
@@ -2211,7 +2246,12 @@ async def run_repair(
     # rebuilds the queue from what still fails, and saves. It returns early on an
     # empty queue, so this costs nothing when there is nothing to drain.
     if state.failed_messages:
+        before = len(state.failed_messages)
         await run_retry_failed(config, state, exports, on_event)
+        outcome.dead_letter = {
+            "drained": before - len(state.failed_messages),
+            "remaining": len(state.failed_messages),
+        }
 
     # One save, at the end. Never under --dry-run, and not merely a save that
     # happens to change nothing: run_check REFUSES a dry-run state outright,
