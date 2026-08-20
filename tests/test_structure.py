@@ -4337,6 +4337,47 @@ async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
     assert state.role_map == {"a": "dry-role-a", "b": "dry-role-b"}
 
 
+async def test_run_roles_export_only_path_never_fetches_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SC-I2. With no discord_metadata, run_roles must not call api_fetch_root.
+
+    The cap-truncation lives inside ``if discord_metadata is not None:``. After
+    ``_collect_roles_to_order`` is extracted, ``run_roles`` re-guards it. If the
+    guard is lost, ``api_fetch_root`` fires on the export-only path, where today
+    it never runs. #388.
+    """
+    from discord_ferry.migrator import structure as _structure
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("api_fetch_root must not run on the export-only path")
+
+    monkeypatch.setattr(_structure, "api_fetch_root", _boom)
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)  # no discord_metadata saved
+    state = MigrationState(stoat_server_id="srv1")
+    roles = [
+        DCERole(id="a", name="A", position=1),
+        DCERole(id="b", name="B", position=9),
+    ]
+    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={"_id": "srv1"}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-a", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-b", payload={}, repeat=True)
+        await run_roles(config, state, exports, events.append)
+    # Reaching here without the AssertionError means the guard held.
+
+
 async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> None:
     """SC-3.12. A second pass reaches the same order and creates no duplicate roles.
 
