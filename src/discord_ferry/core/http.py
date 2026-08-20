@@ -452,6 +452,17 @@ def resolve_proxy_or_raise(url: str | URL) -> ProxyChoice | None:
         raw, source = env[scheme], "env"
     elif scheme in os_side:
         raw, source = os_side[scheme], "os"
+    elif "all" in env and scheme not in _suppressed_schemes():
+        # ALL_PROXY is the fallback curl and DCE (via .NET) both honour: used
+        # only when no scheme-specific proxy resolves. Issue #141. The
+        # suppression clause is load-bearing, not decorative. stdlib pops an
+        # empty `HTTPS_PROXY=""` from the proxy dict in getproxies_environment's
+        # second pass, so `"all" in env` alone cannot tell "https unset" from
+        # "https explicitly turned off". _suppressed_schemes() re-reads the raw
+        # environment, the only place that off switch survives. Everything below
+        # (socks guard, _strip_userinfo, _is_bypassed) then applies unchanged, so
+        # a socks ALL_PROXY connects direct and a NO_PROXY host is still exempt.
+        raw, source = env["all"], "env"
     else:
         return None
 
