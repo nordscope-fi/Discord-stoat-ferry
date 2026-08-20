@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.23.0] - 2026-08-20
+
+### Added
+
+- **`ALL_PROXY` is now honoured as a fallback for HTTP and HTTPS.** DiscordChatExporter,
+  which Ferry runs as a subprocess, reads `ALL_PROXY`; Ferry did not, so a user whose only
+  proxy setting was `ALL_PROXY` got a successful export followed by every later phase
+  connecting direct and failing. Ferry now uses the `ALL_PROXY` proxy for http and https
+  when no scheme-specific `HTTP_PROXY`/`HTTPS_PROXY` is set, so a single
+  `ALL_PROXY=http://host:port` reaches every phase. A scheme-specific proxy still wins, an
+  explicitly-emptied scheme (`HTTPS_PROXY=""`) is not rescued by the fallback, `NO_PROXY`
+  and `FERRY_DISABLE_PROXY` still apply, and the proxy credential is stripped from logs and
+  the connection URL as before. SOCKS proxies remain unsupported, including a SOCKS value in
+  `ALL_PROXY`, which is reported in the startup notice and in `ferry tls-check`. Closes #141.
+
 ## [2.22.0] - 2026-08-20
 
 ### Added
