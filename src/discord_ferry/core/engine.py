@@ -2019,8 +2019,13 @@ async def _run_emoji_repair_pass(
     # exists because that run recreated the emoji (emoji_map already points at the
     # new id) but crashed before every reference was rewritten. A fresh check
     # reports the emoji present and would never revisit these, so this must run
-    # from the record, not the check. Disjoint from emoji_work by construction: a
-    # recorded emoji reads as present, so it is never in this run's emoji_work.
+    # from the record, not the check. Usually disjoint from emoji_work: a recorded
+    # emoji reads as present, so it is normally not in this run's emoji_work. The
+    # one overlap is a recreated emoji deleted AGAIN between runs, which reads as
+    # missing and enters both. That is self-correcting, not a conflict: the resume
+    # rewrites to the (now dead) recorded id and clears the record, then the
+    # emoji_work loop recreates a fresh id and rewrites again. Extra edits, correct
+    # final state. So this loop must not assume disjointness.
     for pending_id, pending in list(state.pending_emoji_rewrites.items()):
         rewritten, declined, failed = await _rewrite_emoji_references(
             session, config, state, pending_id, pending["new"], exports, on_event

@@ -237,6 +237,21 @@ async def test_rewrite_split_first_edits_first_part(tmp_path: Path) -> None:
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
 
 
+async def test_rewrite_split_first_edits_even_when_emoji_also_in_tail(tmp_path: Path) -> None:
+    """Chunk-3 review guard: emoji in the first part AND a later part still edits.
+
+    The addressable first send is fixed; a second, unaddressable send is left as
+    is. Declining the whole message (as a naive 'token in any later part' check
+    would) refuses a fixable rewrite.
+    """
+    long_mid = " ".join(["word"] * 600)
+    m = _message(content=f"<:smile:123> {long_mid} <:smile:123>")
+    outcome, edit, _ = await _run_with_messages(tmp_path, [m])
+    assert edit.await_count == 1
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
+    assert outcome.recreated_emoji[0]["messages_declined"] == 0
+
+
 async def test_rewrite_split_tail_declines(tmp_path: Path) -> None:
     """SC-2.4: emoji in a later split part is declined, not edited."""
     long_head = " ".join(["word"] * 600)
