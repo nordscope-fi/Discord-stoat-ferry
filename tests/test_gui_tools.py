@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -170,3 +171,53 @@ def test_check_rows_one_per_result_with_status_and_detail() -> None:
     assert rows[0]["detail"] == "present"
     assert rows[1]["colour"] == gui_tools._status_colour("fail")
     assert report.counts()["fail"] == 1
+
+
+async def test_check_page_bounces_without_token(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-1.6: the session-expired guard fires from the page builder."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store.pop("token", None)
+
+    await user.open("/tools/check")
+    await user.should_see("Session expired")
+    await user.should_not_see("Run check")
+
+
+async def test_check_page_streams_banners_and_renders_table(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-2.2: the two banners reach the log, then the table renders."""
+    from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.migrator.verify import CheckReport
+
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    report = CheckReport()
+    report.add(name="general", status="ok", kind="channel_present", detail="present")
+
+    async def fake_check(stoat_url, token, state, on_event, *, session=None):  # type: ignore[no-untyped-def]
+        on_event(
+            MigrationEvent(phase="check", status="started", message="Checking server structure...")
+        )
+        on_event(
+            MigrationEvent(phase="check", status="started", message="Checking each channel...")
+        )
+        return report
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.run_check", new=fake_check),
+    ):
+        await user.open("/tools/check")
+        user.find("Run check").click()
+        await user.should_see("Checking server structure")  # first banner streamed
+        await user.should_see("1 ok")  # the report's counts line rendered after the run
