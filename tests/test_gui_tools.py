@@ -346,6 +346,79 @@ def test_probe_report_summary_counts_by_status() -> None:
     assert gui_tools._probe_counts(report) == {"ok": 1, "warn": 1, "fail": 1}
 
 
+async def test_probe_page_requires_test_server_id(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Chunk 6 Task 14: probe refuses to run with no test server id; run_probe not called."""
+    from unittest.mock import AsyncMock
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    with patch("discord_ferry.gui_tools.run_probe", new=AsyncMock()) as probe_mock:
+        await user.open("/tools/probe")
+        # URL and token defaulted from storage; test-server-id left blank.
+        user.find("Run probe").click()
+        await user.should_see("throwaway test server ID")
+        assert probe_mock.await_count == 0
+
+
+async def test_probe_page_deep_requires_confirmation(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Chunk 6 Task 14: deep shows the orphan warning and blocks the call until confirmed."""
+    from unittest.mock import AsyncMock
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    with patch("discord_ferry.gui_tools.run_probe", new=AsyncMock()) as probe_mock:
+        await user.open("/tools/probe")
+        user.find("Throwaway test server ID").elements.pop().set_value("srv-throwaway")
+        user.find("Deep probe").elements.pop().set_value(True)
+        await user.should_see("leaves orphaned files")  # warning shown before any call
+        user.find("Run probe").click()
+        await user.should_see("Confirm the deep-probe warning")
+        assert probe_mock.await_count == 0  # blocked until confirmed
+
+
+async def test_probe_page_registers_token_and_renders(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """Chunk 6 Task 14: a valid run registers the token via the runner and renders the table."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.probe import ProbeReport
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    registered: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        gui_tools, "register_secret", lambda name, value: registered.append((name, value))
+    )
+
+    report = ProbeReport()
+    report.add("autumn_reachable", "ok", "https://autumn (version 1)")
+
+    async def fake_probe(stoat_url, token, server_id, on_event, *, deep=False, session=None):  # type: ignore[no-untyped-def]
+        return report
+
+    with patch("discord_ferry.gui_tools.run_probe", new=fake_probe):
+        await user.open("/tools/probe")
+        user.find("Throwaway test server ID").elements.pop().set_value("srv-throwaway")
+        user.find("Run probe").click()
+        await user.should_see("1 ok, 0 warn, 0 fail")  # the table's summary rendered
+
+    assert ("stoat", _TOKEN) in registered  # the runner registered the token before the call
+
+
 class _StubState:
     """Minimal stand-in for MigrationState for the repair verdict and page."""
 
