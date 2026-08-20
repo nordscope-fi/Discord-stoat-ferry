@@ -295,3 +295,36 @@ def test_check_rows_sanitizes_server_controlled_text() -> None:
     # control: the token really was in the source fields
     assert _TOKEN in report.results[0].detail
     reset_secret_registry()
+
+
+class _StubState:
+    """Minimal stand-in for MigrationState: the repair verdict reads only this."""
+
+    def __init__(self, failed_messages: list) -> None:  # type: ignore[type-arg]
+        self.failed_messages = failed_messages
+
+
+def test_repair_verdict_matches_cli_failure_set() -> None:
+    """SC-3.4 / SC-I2: verdict uses state.failed_messages + declined in the shared set."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.verify import RepairOutcome
+
+    # An unrepaired type -> fail.
+    failed, _, _ = gui_tools._repair_verdict(
+        RepairOutcome(declined=[{"type": "no_recorded_name"}]), _StubState([])
+    )
+    assert failed is True
+
+    # An excluded type (partial merge restore) -> pass, matching the CLI.
+    ok, _, _ = gui_tools._repair_verdict(
+        RepairOutcome(declined=[{"type": "merge_thread_content_not_restored"}]), _StubState([])
+    )
+    assert ok is False
+
+    # Leftover failed messages -> fail.
+    failed2, _, _ = gui_tools._repair_verdict(RepairOutcome(), _StubState([{"id": "1"}]))
+    assert failed2 is True
+
+    # Nothing wrong -> pass.
+    clean, _, _ = gui_tools._repair_verdict(RepairOutcome(), _StubState([]))
+    assert clean is False
