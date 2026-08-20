@@ -266,3 +266,32 @@ async def test_check_page_shows_cannot_check_on_checkerror(
         await user.open("/tools/check")
         user.find("Run check").click()
         await user.should_see("Cannot check this migration")
+
+
+def test_check_rows_sanitizes_server_controlled_text() -> None:
+    """Chunk-2 review: the table is a rendered sink, so name/detail are sanitized.
+
+    A token in a server-controlled field would otherwise reach the table, which
+    the logging formatter does not cover (same class as the log-widget sink).
+    """
+    from discord_ferry import gui_tools
+    from discord_ferry.core.security import register_secret, reset_secret_registry
+    from discord_ferry.migrator.verify import CheckReport
+
+    reset_secret_registry()
+    register_secret("stoat", _TOKEN)
+    report = CheckReport()
+    report.add(
+        name=f"chan-{_TOKEN}",
+        status="fail",
+        kind="channel_missing",
+        detail=f"detail with {_TOKEN} in it",
+    )
+
+    rows = gui_tools._check_rows(report)
+
+    assert _TOKEN not in rows[0]["name"]
+    assert _TOKEN not in rows[0]["detail"]
+    # control: the token really was in the source fields
+    assert _TOKEN in report.results[0].detail
+    reset_secret_registry()
