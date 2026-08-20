@@ -8,7 +8,11 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.migrator.emoji import _extract_emoji_from_content, run_emoji
+from discord_ferry.migrator.emoji import (
+    _extract_emoji_from_content,
+    run_emoji,
+    upload_and_create_emoji,
+)
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
@@ -769,3 +773,27 @@ async def test_emoji_cap_prefers_uploadable_over_high_use_assetless(tmp_path: Pa
         await run_emoji(config, state, exports, [].append)
     assert "100" in state.emoji_map  # uploadable kept despite fewer uses
     assert "999" not in state.emoji_map  # asset-less high-use one dropped (would be unuploadable)
+
+
+async def test_upload_and_create_emoji_uploads_then_creates(tmp_path: Path) -> None:
+    """SC-1.2 (unit): the shared helper uploads to Autumn then registers the emoji."""
+    img = tmp_path / "emo.png"
+    img.write_bytes(b"x")
+    config = _make_config(tmp_path)
+    state = _make_state()
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="new_autumn"),
+        ) as up,
+        patch("discord_ferry.migrator.emoji.api_create_emoji", new=AsyncMock()) as cr,
+    ):
+        new_id = await upload_and_create_emoji(
+            None, config, state, file_path=img, name="smile", used_names={}
+        )
+    assert new_id == "new_autumn"
+    up.assert_awaited_once()
+    cr.assert_awaited_once()
+    # api_create_emoji(session, stoat_url, token, autumn_id, name, server_id)
+    assert cr.await_args.args[3] == "new_autumn"
+    assert cr.await_args.args[5] == "srv1"
