@@ -9,17 +9,21 @@ any request.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from nicegui import background_tasks, ui
+from nicegui import app, background_tasks, ui
 
 import discord_ferry.migrator.api as _api
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
+from discord_ferry.migrator.verify import run_check
+from discord_ferry.state import load_state
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from discord_ferry.core.events import MigrationEvent
     from discord_ferry.migrator.verify import CheckReport
 
 T = TypeVar("T")
@@ -155,3 +159,55 @@ def tools_page() -> None:
             with ui.card().classes("w-full max-w-xl"):
                 ui.link(name, route).classes("text-lg font-bold")
                 ui.label(desc).classes("text-sm text-gray-500")
+
+
+def _tab_token() -> str | None:
+    """The Stoat token from the memory-only tab store, or None when absent."""
+    token = app.storage.tab.get("token")
+    return token if isinstance(token, str) and token else None
+
+
+@ui.page("/tools/check")
+def check_page() -> None:
+    """Verify a finished migration by loading its state and running run_check."""
+    client = ui.context.client
+    stoat_url = str(app.storage.user.get("stoat_url", ""))
+    token = _tab_token()
+
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Verify a finished migration").classes("text-2xl font-bold mb-4")
+        if token is None:
+            ui.label("Session expired. Re-enter your token on the setup page.").classes(
+                "text-red-600"
+            )
+            return
+
+        default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
+        dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
+        log = ui.log(max_lines=200).classes("w-full max-w-2xl h-48 font-mono text-xs mt-2")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def on_event(event: MigrationEvent) -> None:
+            _safe_push(log.push, f"[{event.phase}] {event.message}")
+
+        def on_done(report: CheckReport | None) -> None:
+            results.clear()
+            with results:
+                if report is None:
+                    ui.label("Check failed. See the log above.").classes("text-red-600")
+                    return
+                render_check_report(report)
+
+        def _run() -> None:
+            results.clear()
+            output_dir = Path(dir_input.value)
+            for line in prepare_tool_call(token):
+                _safe_push(log.push, line)
+
+            async def _do_check() -> CheckReport:
+                state = load_state(output_dir)
+                return await run_check(stoat_url, token, state, on_event)
+
+            run_tool(client, log.push, _do_check, on_done)
+
+        ui.button("Run check", on_click=_run).classes("mt-2")
