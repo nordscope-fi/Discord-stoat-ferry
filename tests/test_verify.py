@@ -1998,3 +1998,22 @@ class TestRepairOutcome:
         assert doc["failed_messages"] == []
         assert doc["dry_run"] is False
         assert doc["actions"]["dead_letter"] == {"drained": 0, "remaining": 0}
+
+
+def test_repair_outcome_carries_recreated_emoji() -> None:
+    """SC-4.2: recreated_emoji appears under actions and is control-stripped."""
+    outcome = RepairOutcome()
+    outcome.recreated_emoji.append(
+        {
+            "discord_id": "d",
+            "name": "smile\x07",
+            "new_id": "n",
+            "messages_rewritten": 2,
+            "messages_declined": 0,
+            "messages_failed": 0,
+        }
+    )
+    row = outcome.to_dict()["actions"]["recreated_emoji"][0]
+    assert row["new_id"] == "n"
+    assert row["messages_rewritten"] == 2
+    assert row["name"] == "smile"

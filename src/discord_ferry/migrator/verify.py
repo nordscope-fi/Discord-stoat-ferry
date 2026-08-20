@@ -231,6 +231,7 @@ class RepairOutcome:
     recreated_roles: list[dict[str, Any]] = field(default_factory=list)
     recreated_categories: list[dict[str, Any]] = field(default_factory=list)
     restored_tails: list[dict[str, Any]] = field(default_factory=list)
+    recreated_emoji: list[dict[str, Any]] = field(default_factory=list)
     dead_letter: dict[str, int] = field(default_factory=lambda: {"drained": 0, "remaining": 0})
     declined: list[dict[str, Any]] = field(default_factory=list)
     failed_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -251,6 +252,7 @@ class RepairOutcome:
                 "recreated_roles": self._clean(self.recreated_roles),
                 "recreated_categories": self._clean(self.recreated_categories),
                 "restored_tails": self._clean(self.restored_tails),
+                "recreated_emoji": self._clean(self.recreated_emoji),
                 "dead_letter": dict(self.dead_letter),
             },
             "declined": self._clean(self.declined),
