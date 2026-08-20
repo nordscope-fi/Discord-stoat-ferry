@@ -90,7 +90,7 @@ if TYPE_CHECKING:
     # Type-only: run_check itself is imported inside run_repair, matching how
     # check_cmd reaches it, so the verify module stays off the engine's import
     # path at runtime.
-    from discord_ferry.migrator.verify import CheckResult
+    from discord_ferry.migrator.verify import CheckResult, RepairOutcome
 
 PhaseFunction = Callable[
     [FerryConfig, MigrationState, list[DCEExport], EventCallback],
@@ -1916,7 +1916,7 @@ async def run_repair(
     on_event: EventCallback,
     *,
     session: aiohttp.ClientSession | None = None,
-) -> None:
+) -> RepairOutcome:
     """Act on a CheckReport: restore missing structure and lost messages.
 
     A sibling of :func:`run_retry_failed` and :func:`run_rollback`, not a phase.
@@ -1929,6 +1929,16 @@ async def run_repair(
             from ``run_check`` and are deliberately not caught here, because the
             shell turns them into an exit code and a sentence.
     """
+    # #308: accumulate what this run does into a structured outcome and return
+    # it on every path. warnings_start is snapshotted before any work, so the
+    # declined set is scoped to THIS run's repair-phase warnings and never
+    # includes the migration's own historical warnings, which state.warnings
+    # keeps and never clears.
+    from discord_ferry.migrator.verify import RepairOutcome
+
+    outcome = RepairOutcome(dry_run=config.dry_run)
+    warnings_start = len(state.warnings)
+
     # Rollback preserves the id maps as an audit trail and NEVER clears them
     # (RollbackProgress' own docstring in state.py says so), which means a check
     # on a rolled-back state reports channel_missing for every channel it
@@ -1952,7 +1962,7 @@ async def run_repair(
                 ),
             )
         )
-        return
+        return outcome
 
     _ensure_token_store(config)
     init_request_semaphore(config.max_concurrent_requests)
@@ -2032,7 +2042,8 @@ async def run_repair(
                 message="[DRY RUN] Nothing was created, sent or written.",
             )
         )
-        return
+        outcome.declined = _repair_declined(state, warnings_start)
+        return outcome
 
     if structure_work:
         # Only when something is actually being recreated. A repair with nothing
@@ -2207,7 +2218,29 @@ async def run_repair(
     # because a dry run fills the id maps with `dry-` sentinels naming entities
     # nobody created. Writing those into a real state file would leave the user
     # with a migration that can never be checked again.
+    outcome.declined = _repair_declined(state, warnings_start)
+    outcome.failed_messages = [
+        {"discord_msg_id": fm.discord_msg_id, "stoat_channel_id": fm.stoat_channel_id}
+        for fm in state.failed_messages
+    ]
     save_state(state, config.output_dir)
+    return outcome
+
+
+def _repair_declined(state: MigrationState, warnings_start: int) -> list[dict[str, Any]]:
+    """This run's repair-phase warnings, scoped by a length snapshot (#308).
+
+    state.warnings accumulates across the whole migration and is never cleared,
+    so the raw list carries legacy entries (proxy_notice, thread_filtered and
+    the rest) that a repair outcome must not surface. Taking the tail from
+    warnings_start and filtering to phase == "repair" leaves exactly what this
+    run declined or degraded.
+    """
+    return [
+        {"type": w.get("type", ""), "message": w.get("message", "")}
+        for w in state.warnings[warnings_start:]
+        if w.get("phase") == "repair"
+    ]
 
 
 # ---------------------------------------------------------------------------

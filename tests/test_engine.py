@@ -25,7 +25,7 @@ from discord_ferry.core.engine import (
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import CheckError, DuplicateSendError, MigrationError
 from discord_ferry.migrator import messages as messages_module
-from discord_ferry.migrator.verify import CheckReport
+from discord_ferry.migrator.verify import CheckReport, RepairOutcome
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
@@ -2599,6 +2599,41 @@ async def test_repair_runs_the_check_when_the_state_was_never_rolled_back(
         await run_repair(config, state, [], events.append)
 
     assert seen.get("called"), "repair refused a state that was never rolled back"
+
+
+async def test_run_repair_returns_a_repair_outcome(tmp_path: Path) -> None:
+    """#308. A clean run returns a RepairOutcome, not None, on the normal path."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+
+    async def _fake_check(*_a: Any, **_k: Any) -> Any:
+        return CheckReport()
+
+    with patch("discord_ferry.migrator.verify.run_check", new=_fake_check):
+        outcome = await run_repair(config, state, [], lambda _e: None)
+
+    assert isinstance(outcome, RepairOutcome)
+    assert outcome.dry_run is False
+
+
+async def test_run_repair_rollback_refusal_returns_empty_outcome(tmp_path: Path) -> None:
+    """#308. The rollback-refusal early return still hands back a valid, empty outcome."""
+    from discord_ferry.state import RollbackProgress
+
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        rollback_progress=RollbackProgress(started_at="2026-08-13T00:00:00+00:00"),
+    )
+
+    with aioresponses() as m:
+        outcome = await run_repair(config, state, [], lambda _e: None)
+        assert not m.requests, "refusal path must make no request"
+
+    assert isinstance(outcome, RepairOutcome)
+    assert outcome.recreated_channels == []
+    assert outcome.declined == []
 
 
 async def test_repair_populates_the_token_store_and_the_semaphore(tmp_path: Path) -> None:
