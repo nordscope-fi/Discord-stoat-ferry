@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ferry build` now applies blueprint and template role ordering.** The build
+  path sent `rank` through `api_edit_role`, where Stoat's handler discards it.
+  Role hierarchy was lost on every built server. The build path now collects all
+  role ids during creation and calls `api_edit_role_ranks` once with the full
+  ordered list. A failure in the ordering call prints a warning and continues
+  rather than aborting the build. Fixes #387.
+
 ## [2.19.16] - 2026-08-19
 
 ### Fixed
@@ -297,9 +308,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   for years against a field the server threw away, because an assertion about what Ferry sent can
   never observe what the server kept.
 
-  **Not covered by this change:** `ferry build` replays blueprint and template role ranks through
-  the same discarded field (#387), and correcting ordering on a server migrated by an earlier
-  release needs its own path (#388).
 
 
 ## [2.19.1] - 2026-08-17
@@ -1610,7 +1618,7 @@ CLI display & blueprint round-trip robustness — the fifth batch from the 2026-
 
 - **A markup-hostile channel/server/guild name can no longer abort a migration** (`cli.py`, S1/F5a). `Console` renders with markup enabled, so a Discord name containing Rich metacharacters (`spam[/]`, `[bold]news`, an unbalanced `]`) interpolated into a progress line raised `rich.errors.MarkupError`. Because `_ProgressTracker.on_event` runs synchronously inside the engine's `emit`, that exception unwound into the engine and was re-raised as a `MigrationError`, aborting an otherwise-healthy migration over a cosmetic display string. Every user-controlled value (event message, channel name, server/guild name, warnings, exception text, rollback suspect names, failure errors, the `ferry stats` error/warning previews) is now escaped via a new `_safe()` helper before markup interpolation; static format tags and integer/ID values are left live. A narrow `except MarkupError` guard around each tracker's render body is a defense-in-depth net (it falls back to an unstyled print and never swallows control flow — the rollback confirm/pause path is deliberately kept outside it).
 - **`build` no longer aborts mid-build and orphans a server on a voice-channel failure** (`cli.py`, S2/F5b). The blueprint `build` command POSTed `channel_type="Voice"` with no error handling; a voice-create failure (Stoat "Bug #194") propagated and `sys.exit`ed after the server, roles, and earlier channels were already created — leaving an orphan server with no rollback. A new `_build_blueprint_channel()` helper mirrors the main migration path's voice→Text fallback (retry the channel as Text with a warning; non-voice errors still propagate); both build loops use it, and the categorized loop preserves the recovered channel's id into its category. This also un-breaks `ferry build --template gaming|community|education`, whose shipped templates contain Voice channels.
-- **`build` now replays a blueprint's role hierarchy** (`cli.py`, S4/F5d). `BlueprintRole.rank` survived the export→import JSON round-trip but the build role loop applied only colour and permissions, so every built role got Stoat's default rank and the hierarchy was silently lost. The role loop now folds colour + rank into a single `api_edit_role` PATCH. This also restores the shipped templates' role ranks (Admin/Moderator/Member ordering).
+- **`build` now replays a blueprint's role hierarchy** (`cli.py`, S4/F5d). `BlueprintRole.rank` survived the export→import JSON round-trip but the build role loop applied only colour and permissions, so every built role got Stoat's default rank and the hierarchy was silently lost. The role loop applied colour via `api_edit_role` but sent `rank` through the same endpoint, where Stoat discards it; role ordering on the build path remained broken until #387. This also restores the shipped templates' role ranks (Admin/Moderator/Member ordering).
 - **`export-blueprint` is unchanged** (S3/F5c, decision A1). A Discord voice channel is still exported as `type="Voice"`, consistent with the migration path and the shipped templates; S2's new `build` fallback makes that value build-safe.
 
 Internal: the build command's six Stoat API helpers were hoisted from a function-local import to module level (no import-cost change — the module already loads them via `run_migration`), giving the new module-level channel helper access to them and a single uniform mock-patch target for tests.
