@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.21.0] - 2026-08-20
+
+### Added
+
+- **`ferry repair --json` prints a machine-readable outcome document.** Alongside
+  repair's human output and its exit code, `--json` emits one JSON document to
+  stdout describing the run: the channels, roles and categories it recreated
+  (with per-channel re-sent message counts), the tails it restored, the
+  dead-letter drain, everything it declined, the residual failed messages, and a
+  post-repair `ferry check` of the live server. Under the flag all human output
+  goes to stderr, so stdout stays parseable, and the document is printed through
+  `click.echo` (never the Rich console, which wraps at 80 columns and can split a
+  string value). The exit-code contract is unchanged. A new `RepairOutcome`
+  dataclass carries the result out of `run_repair`; every free-text field is
+  stripped of control characters, and residual failures carry only identifiers,
+  never message content. Closes #308.
+
 ## [2.20.0] - 2026-08-20
 
 ### Added
