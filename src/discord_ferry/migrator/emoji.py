@@ -100,14 +100,19 @@ def _numeric_id_key(value: str) -> tuple[int, int | str]:
     return (0, int(value)) if value.isdigit() else (1, value)
 
 
-def messages_using_emoji(exports: list[DCEExport], discord_emoji_id: str) -> Iterator[DCEMessage]:
-    """Yield every message whose CONTENT uses the given custom emoji.
+def messages_using_emoji(
+    exports: list[DCEExport], discord_emoji_id: str
+) -> Iterator[tuple[str, DCEMessage]]:
+    """Yield ``(discord_channel_id, message)`` for messages whose CONTENT uses the emoji.
 
+    The channel id comes from the owning export, since a DCE export is per
+    channel; the rewrite needs it to map the message to its Stoat channel.
     Reaction-only uses are not yielded: there is nothing in the message text to
     rewrite. Streams the same way ``run_emoji`` does, so it works on both eager
     and ``json_path``-backed exports.
     """
     for export in exports:
+        channel_id = export.channel.id
         msg_iter = (
             stream_messages(export.json_path)
             if export.json_path is not None
@@ -120,12 +125,10 @@ def messages_using_emoji(exports: list[DCEExport], discord_emoji_id: str) -> Ite
                 eid == discord_emoji_id
                 for eid, _name, _animated in _extract_emoji_from_content(msg.content)
             ):
-                yield msg
+                yield channel_id, msg
 
 
-def find_emoji_in_exports(
-    exports: list[DCEExport], discord_emoji_id: str
-) -> _EmojiRecord | None:
+def find_emoji_in_exports(exports: list[DCEExport], discord_emoji_id: str) -> _EmojiRecord | None:
     """Return the discovered record (name, image, animated) for one emoji id.
 
     Runs the same reaction-then-content discovery as ``run_emoji``, so the image

@@ -60,7 +60,13 @@ from discord_ferry.migrator.emoji import (
     run_emoji,
     upload_and_create_emoji,
 )
-from discord_ferry.migrator.messages import _THREAD_STRATEGIES, _process_message, run_messages
+from discord_ferry.migrator.messages import (
+    _THREAD_STRATEGIES,
+    _build_content,
+    _process_message,
+    _split_message,
+    run_messages,
+)
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import (
@@ -1924,6 +1930,72 @@ async def _recreate_category(
     return True
 
 
+async def _rewrite_emoji_references(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    discord_id: str,
+    new_id: str,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> tuple[int, int, int]:
+    """Edit every Ferry-sent message that used the emoji so it points at ``new_id``.
+
+    Returns ``(rewritten, declined, failed)``. Each referencing message is
+    re-rendered with :func:`_build_content`, which reads the now-updated
+    ``emoji_map``, so the text matches what was sent except the emoji reference.
+    A message whose reference lands in a split tail is declined rather than
+    corrupted: ``message_map`` addresses only the first send.
+    """
+    rewritten = declined = failed = 0
+    token = f":{new_id}:"
+    for channel_discord_id, msg in messages_using_emoji(exports, discord_id):
+        stoat_channel = state.channel_map.get(channel_discord_id)
+        stoat_msg = state.message_map.get(msg.id)
+        if stoat_msg is None or stoat_channel is None:
+            # Not a message Ferry sent, or its channel is unmapped. Never edited.
+            continue
+
+        parts = _split_message(_build_content(msg, state))
+        part_index = next((i for i, part in enumerate(parts) if token in part), None)
+        if part_index is None:
+            # The emoji did not survive rendering (should not happen); skip safely.
+            continue
+        if part_index != 0:
+            declined += 1
+            message = (
+                f"Emoji reference in message {msg.id} falls in a later send of a split "
+                "message; only the first send is addressable, so it was left as is."
+            )
+            state.warnings.append(
+                {"phase": "repair", "type": "emoji_in_split_tail", "message": message}
+            )
+            on_event(MigrationEvent(phase="repair", status="warning", message=message))
+            continue
+
+        try:
+            await api_edit_message(
+                session,
+                config.stoat_url,
+                config.token,
+                stoat_channel,
+                stoat_msg,
+                content=parts[0],
+            )
+            rewritten += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            message = safe_sanitize(
+                config.token_store,
+                f"Failed to rewrite emoji reference in message {msg.id}: {exc}",
+            )
+            state.warnings.append(
+                {"phase": "repair", "type": "emoji_rewrite_failed", "message": message}
+            )
+            on_event(MigrationEvent(phase="repair", status="error", message=message))
+    return rewritten, declined, failed
+
+
 async def _run_emoji_repair_pass(
     session: aiohttp.ClientSession,
     config: FerryConfig,
@@ -1986,9 +2058,7 @@ async def _run_emoji_repair_pass(
 
         if record["is_animated"]:
             warning = f"Emoji :{name}: is animated — animation is lost on Stoat."
-            state.warnings.append(
-                {"phase": "repair", "type": "animated_emoji", "message": warning}
-            )
+            state.warnings.append({"phase": "repair", "type": "animated_emoji", "message": warning})
             on_event(MigrationEvent(phase="repair", status="warning", message=warning))
 
         row: dict[str, Any] = {
@@ -2007,8 +2077,29 @@ async def _run_emoji_repair_pass(
                 message=f"Recreated emoji :{name}: as {new_id}.",
             )
         )
-        # Task 3.2 adds the reference rewrite here: it updates row's counts and
-        # clears the resume record for this emoji once no message holds the old id.
+
+        rewritten, declined, failed = await _rewrite_emoji_references(
+            session, config, state, discord_id, new_id, exports, on_event
+        )
+        row["messages_rewritten"] = rewritten
+        row["messages_declined"] = declined
+        row["messages_failed"] = failed
+        # Clear the resume record only when nothing FAILED. A failed edit is
+        # retried on the next run, so its record must stay. A split-tail decline
+        # is permanent, not a failure, and never holds the record open.
+        if failed == 0:
+            state.pending_emoji_rewrites.pop(discord_id, None)
+            save_state(state, config.output_dir)
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="progress",
+                message=(
+                    f"Rewrote {rewritten} reference(s) to :{name}: "
+                    f"({declined} declined, {failed} failed)."
+                ),
+            )
+        )
 
 
 async def run_repair(

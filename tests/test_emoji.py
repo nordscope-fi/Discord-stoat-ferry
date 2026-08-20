@@ -811,7 +811,7 @@ def test_messages_using_emoji_finds_content_not_reaction() -> None:
     )
     exp = _make_export([m1, m2, m3])
     hits = list(messages_using_emoji([exp], "123"))
-    assert [m.id for m in hits] == ["m1"]
+    assert [(chan, m.id) for chan, m in hits] == [("ch1", "m1")]
 
 
 def test_messages_using_emoji_ignores_other_emoji() -> None:
