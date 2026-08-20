@@ -54,7 +54,7 @@ from discord_ferry.stats import summarize_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
-    from discord_ferry.migrator.verify import CheckReport
+    from discord_ferry.migrator.verify import CheckReport, RepairOutcome
     from discord_ferry.parser.models import DCEExport
     from discord_ferry.review import RollbackSummary
     from discord_ferry.stats import StateSummary
@@ -1647,6 +1647,38 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     sys.exit(1 if state.failed_messages else 0)
 
 
+def _emit_repair_json(
+    outcome: RepairOutcome,
+    dry_run: bool,
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+) -> None:
+    """Assemble and print the repair --json outcome document (#308).
+
+    click.echo, never the module-level Console: the Console has soft_wrap=False
+    and falls back to 80 columns off a terminal, so it inserts a real newline
+    wherever the wrap lands, including inside a JSON string value, which makes
+    the output unparseable (issue #145).
+
+    The post-repair check runs only for a real run: run_check refuses a dry-run
+    state, so under --dry-run the check section stays null. A failure of that
+    follow-up check is recorded as check_error and the check section stays null,
+    rather than crashing after repair has already written.
+    """
+    from discord_ferry.migrator.verify import _strip_control, run_check
+
+    document = outcome.to_dict()
+    document["check"] = None
+    if not dry_run:
+        try:
+            post = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
+            document["check"] = post.to_dict()
+        except (CheckError, MigrationError) as exc:
+            document["check_error"] = _strip_control(str(exc))
+    click.echo(json.dumps(document))
+
+
 @main.command(name="repair")
 @click.argument("output_dir", type=click.Path(exists=True))
 @click.option(
@@ -1668,12 +1700,14 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     default=False,
     help="Report what would be repaired, and change nothing",
 )
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON")
 def repair_cmd(
     output_dir: str,
     export_dir: str,
     stoat_url: str | None,
     token: str | None,
     dry_run: bool,
+    as_json: bool,
 ) -> None:
     """Restore what `ferry check` found missing.
 
@@ -1693,7 +1727,7 @@ def repair_cmd(
         console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
         sys.exit(1)
 
-    _print_proxy_notices()
+    _print_proxy_notices(to_stderr=as_json)
     register_secret("stoat", token)
     init_request_semaphore(FerryConfig.max_concurrent_requests)
 
@@ -1726,28 +1760,29 @@ def repair_cmd(
         dry_run=dry_run,
     )
 
+    # Under --json, stdout must carry ONLY the JSON document, so every human
+    # line goes to a stderr console instead. _print_proxy_notices above already
+    # took to_stderr=as_json for the same reason.
+    human = Console(stderr=True) if as_json else console
+
     def _on_event(event: MigrationEvent) -> None:
         colour = {"error": "bold red", "warning": "yellow"}.get(event.status, "cyan")
-        console.print(f"[{colour}]{_safe(event.message)}[/]")
+        human.print(f"[{colour}]{_safe(event.message)}[/]")
 
-    console.print("[bold]Discord Ferry[/] — repairing\n")
+    human.print("[bold]Discord Ferry[/] — repairing\n")
     try:
-        asyncio.run(run_repair(config, state, exports, _on_event))
+        outcome = asyncio.run(run_repair(config, state, exports, _on_event))
     except (CheckError, MigrationError) as exc:
-        console.print(f"\n[bold red]Repair failed:[/] {_safe(exc)}")
+        human.print(f"\n[bold red]Repair failed:[/] {_safe(exc)}")
         sys.exit(1)
     except KeyboardInterrupt:
-        console.print(
-            "\n[yellow]Interrupted.[/] State saved after each repair — re-run to continue."
-        )
+        human.print("\n[yellow]Interrupted.[/] State saved after each repair — re-run to continue.")
         sys.exit(130)
 
     # A dry run changed nothing, so it reports on the plan rather than on an
     # outcome and always exits 0. Anything else would make --dry-run unusable in
     # a script that treats non-zero as "act now".
-    if dry_run:
-        sys.exit(0)
-
+    #
     # "Non-zero when any defect remains", and a defect repair DECLINED remains
     # just as surely as a message that would not send. A channel with no
     # recorded name, one missing from the export, and a forum index are all
@@ -1758,11 +1793,21 @@ def repair_cmd(
     # partial restore of something repair DID fix, and failing every merge
     # repair on it would make the code useless. no_discord_metadata is likewise
     # a degradation rather than an unrepaired defect.
-    unrepaired = {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
-    declined = [w for w in state.warnings if w.get("type") in unrepaired]
-    if state.failed_messages or declined:
-        sys.exit(1)
-    sys.exit(0)
+    if dry_run:
+        code = 0
+    else:
+        unrepaired = {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
+        declined = [w for w in state.warnings if w.get("type") in unrepaired]
+        code = 1 if (state.failed_messages or declined) else 0
+
+    # The JSON document is emitted for BOTH exit codes, and its exit code is the
+    # same one the human path produces. The post-repair check is a --json-only
+    # follow-up; a failure of it must not change the exit code or lose the
+    # outcome repair already produced.
+    if as_json:
+        _emit_repair_json(outcome, dry_run, stoat_url, token, state)
+
+    sys.exit(code)
 
 
 @main.command("tls-check")
