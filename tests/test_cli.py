@@ -3432,3 +3432,26 @@ def test_backfill_summary_reports_a_reorder(runner: CliRunner, tmp_path: Path) -
     assert result.exit_code == 0
     assert "Applied role ordering to 3 roles" in result.output
     assert "already correct" not in result.output
+
+
+def test_backfill_stale_warning_from_prior_run_does_not_cause_false_failure(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A role_ordering warning left in state.json by the ORIGINAL migration must
+    not make a successful backfill re-run exit 1. That is the exact scenario the
+    command exists for. #388 whole-branch review."""
+    from discord_ferry.state import load_state, save_state
+
+    out_dir, export_dir = _backfill_state(tmp_path)
+    state = load_state(out_dir)
+    state.warnings.append(
+        {"phase": "roles", "type": "role_ordering_not_permitted", "message": "stale"}
+    )
+    save_state(state, out_dir)
+
+    async def _noop(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        return None  # this run succeeds
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_noop):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 0, result.output

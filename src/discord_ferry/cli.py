@@ -1894,6 +1894,11 @@ def backfill_roles_cmd(
         dry_run=dry_run,
     )
 
+    # Snapshot the warning count BEFORE the run. state.warnings is cumulative and
+    # loaded from disk, so an ordering warning left by the original migration (the
+    # very situation this command fixes) would otherwise make a clean re-run exit 1
+    # forever. repair_cmd guards the same way (#308 whole-branch review).
+    warnings_before = len(state.warnings)
     reordered = False
 
     def _on_event(event: MigrationEvent) -> None:
@@ -1922,7 +1927,7 @@ def backfill_roles_cmd(
     # so both exit 1 (repair_cmd lumps warning types the same way).
     failed = [
         w
-        for w in state.warnings
+        for w in state.warnings[warnings_before:]
         if w.get("type") in {"role_ordering_not_permitted", "role_ordering_failed"}
     ]
     if failed:

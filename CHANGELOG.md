@@ -8,9 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- **`ferry backfill-roles` corrects role ordering on a server migrated before
-  v2.21.0.** Migrations run before the ordering fix left their roles at Stoat's
-  default order, and the only correction was a full re-run. The new command reads
+- **`ferry backfill-roles` corrects role ordering on a server migrated before the
+  #380 ordering fix (v2.19.2).** Migrations run before that fix left their roles at
+  Stoat's default order, and the only correction was a full re-run. The new command reads
   the same roles the migration built (the export unioned with
   `discord_metadata.json`) and sets the server's role hierarchy to Discord order
   in one call. It creates nothing, touches no role colour or icon, and is safe to

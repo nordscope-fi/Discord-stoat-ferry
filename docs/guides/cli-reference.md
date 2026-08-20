@@ -558,9 +558,9 @@ ferry check ./ferry-output --json > result.json
 
 ## `ferry backfill-roles`
 
-Set role ordering on a server that was migrated before the ordering fix shipped in v2.21.0. Those
-servers have their roles at Stoat's default order. This command reads the same roles the migration
-built and puts them back in Discord order, in one call.
+Set role ordering on a server that was migrated before the ordering fix (#380, shipped in v2.19.2).
+Those servers have their roles at Stoat's default order. This command reads the same roles the
+migration built and puts them back in Discord order, in one call.
 
 ```bash
 ferry backfill-roles <output-dir> --export-dir <export-dir> [OPTIONS]
@@ -583,7 +583,7 @@ by hand after the migration keep their place; only the roles Ferry created are m
 
 - **A role's colour, rank-independent hoist setting or icon.** This command sets ordering only. Those
   attributes are tracked separately in issue #344.
-- **The forward migration.** Migrations run on v2.21.0 or later already order roles correctly and do
+- **The forward migration.** Migrations run on v2.19.2 or later already order roles correctly and do
   not need this.
 
 ### Exit codes
