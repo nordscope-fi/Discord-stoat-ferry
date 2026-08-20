@@ -86,6 +86,12 @@ class MigrationState:
     message_map: dict[str, str] = field(default_factory=dict)
     emoji_map: dict[str, str] = field(default_factory=dict)
 
+    # discord_emoji_id -> {"old": <old stoat id>, "new": <new stoat id>}.
+    # A repair resume record: written the moment a missing emoji is recreated,
+    # cleared once every referencing message has been rewritten. Identifiers
+    # only, never free text, so it is structural and NOT in _TEXT_MEMBERS.
+    pending_emoji_rewrites: dict[str, dict[str, str]] = field(default_factory=dict)
+
     # Author ID -> uploaded Autumn avatar ID
     avatar_cache: dict[str, str] = field(default_factory=dict)
 
@@ -290,6 +296,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "channel_categories": state.channel_categories,
         "message_map": state.message_map,
         "emoji_map": state.emoji_map,
+        "pending_emoji_rewrites": state.pending_emoji_rewrites,
         "avatar_cache": state.avatar_cache,
         "upload_cache": state.upload_cache,
         "author_names": state.author_names,
@@ -367,6 +374,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             channel_categories=data.get("channel_categories", {}),
             message_map=data.get("message_map", {}),
             emoji_map=data.get("emoji_map", {}),
+            pending_emoji_rewrites=data.get("pending_emoji_rewrites", {}),
             avatar_cache=data.get("avatar_cache", {}),
             upload_cache=data.get("upload_cache", {}),
             author_names=data.get("author_names", {}),

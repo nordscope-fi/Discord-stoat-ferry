@@ -873,6 +873,9 @@ _KNOWN_STATE_FIELDS = frozenset(
         "channel_categories",
         "message_map",
         "emoji_map",
+        # Structural: identifiers only (discord id -> {old,new} stoat ids),
+        # never a Ferry secret, so it stays out of _TEXT_MEMBERS.
+        "pending_emoji_rewrites",
         "avatar_cache",
         "upload_cache",
         "author_names",
@@ -933,6 +936,23 @@ def test_state_document_has_no_unclassified_fields() -> None:
     assert _KNOWN_STATE_FIELDS - emitted == set(), (
         "a state.json field was removed; update this list"
     )
+
+
+def test_pending_emoji_rewrites_round_trips(tmp_path: Path) -> None:
+    """SC-ST.1: the resume record survives save then load."""
+    state = MigrationState(pending_emoji_rewrites={"d_emo": {"old": "a", "new": "b"}})
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.pending_emoji_rewrites == {"d_emo": {"old": "a", "new": "b"}}
+
+
+def test_pending_emoji_rewrites_defaults_empty(tmp_path: Path) -> None:
+    """SC-ST.1: a state file written before the field existed loads it as {}."""
+    save_state(MigrationState(), tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    del raw["pending_emoji_rewrites"]
+    (tmp_path / "state.json").write_text(json.dumps(raw))
+    assert load_state(tmp_path).pending_emoji_rewrites == {}
 
 
 def test_failed_message_fields_are_classified() -> None:
