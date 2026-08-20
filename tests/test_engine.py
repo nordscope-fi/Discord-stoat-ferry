@@ -4869,3 +4869,71 @@ async def test_re_attaching_removes_the_dead_channel_id(tmp_path: Path) -> None:
     )
     assert "01JSTOATCHN000000000NEW" in mine["channels"]
     assert "01JSTOATCHN0000000OTHER" in mine["channels"], "an unrelated channel was evicted"
+
+
+# ---------------------------------------------------------------------------
+# run_build — the shared build sequence (#491)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_build_returns_server_id_and_emits_progress() -> None:
+    """The happy path returns the created server id and emits a started event."""
+    from discord_ferry.blueprint import BlueprintRole, ServerBlueprint
+    from discord_ferry.core.engine import run_build
+
+    bp = ServerBlueprint(name="S", roles=[BlueprintRole(name="A", rank=1)])
+    events: list[MigrationEvent] = []
+    with (
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", AsyncMock(return_value={"id": "r-a"})),
+        patch("discord_ferry.core.engine.api_edit_role_ranks", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.new_session", lambda: AsyncMock()),
+    ):
+        server_id = await run_build("http://x", "t", bp, events.append)
+
+    assert server_id == "srv"
+    assert any(e.status == "started" for e in events)
+    assert any("Created role 'A'" in e.message for e in events)
+
+
+async def test_run_build_role_ordering_failure_is_a_warning_not_a_raise() -> None:
+    """A role-ordering MigrationError surfaces as a warning event; the build still returns."""
+    from discord_ferry.blueprint import BlueprintRole, ServerBlueprint
+    from discord_ferry.core.engine import run_build
+
+    bp = ServerBlueprint(name="S", roles=[BlueprintRole(name="A", rank=2)])
+    events: list[MigrationEvent] = []
+    with (
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", AsyncMock(return_value={"id": "r-a"})),
+        patch(
+            "discord_ferry.core.engine.api_edit_role_ranks",
+            AsyncMock(side_effect=MigrationError("ordering failed")),
+        ),
+        patch("discord_ferry.core.engine.new_session", lambda: AsyncMock()),
+    ):
+        server_id = await run_build("http://x", "t", bp, events.append)
+
+    assert server_id == "srv"  # did not abort
+    warnings = [e for e in events if e.status == "warning"]
+    assert warnings and "ordering failed" in warnings[0].message
+
+
+async def test_run_build_non_voice_channel_failure_propagates() -> None:
+    """A non-voice channel create failure aborts the build with the MigrationError."""
+    from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
+    from discord_ferry.core.engine import run_build
+
+    bp = ServerBlueprint(
+        name="S", uncategorized_channels=[BlueprintChannel(name="TC", type="Text")]
+    )
+    with (
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch(
+            "discord_ferry.core.engine.api_create_channel",
+            AsyncMock(side_effect=MigrationError("boom")),
+        ),
+        patch("discord_ferry.core.engine.new_session", lambda: AsyncMock()),
+        pytest.raises(MigrationError),
+    ):
+        await run_build("http://x", "t", bp, lambda _e: None)

@@ -466,7 +466,7 @@ def test_build_prints_proxy_notice(runner: CliRunner, tmp_path: Path, proxy_env,
     with (
         os_proxy({}),
         proxy_env(ALL_PROXY="socks5://sock:1080"),
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
     ):
         result = runner.invoke(
             main,
@@ -1192,8 +1192,11 @@ def test_progress_tracker_only_markup_name() -> None:  # SC-22
     assert "[/]" in buf.getvalue()
 
 
-def test_cli_exposes_api_helpers_module_level() -> None:  # SC-20 (C1)
-    from discord_ferry.cli import api_create_channel, api_edit_role
+def test_engine_exposes_build_api_helpers_module_level() -> None:  # SC-20 (C1)
+    # The build sequence moved from cli to engine.run_build (#491), so the api
+    # helpers it patches are now module-level in engine, not cli. This guards
+    # that patchability at its new home.
+    from discord_ferry.core.engine import api_create_channel, api_edit_role
 
     assert callable(api_create_channel)
     assert callable(api_edit_role)
@@ -1216,12 +1219,12 @@ def test_build_channel_voice_retries_as_text() -> None:  # SC-9
     import asyncio
 
     from discord_ferry.blueprint import BlueprintChannel
-    from discord_ferry.cli import _build_blueprint_channel
+    from discord_ferry.core.engine import _build_blueprint_channel
 
     ch = BlueprintChannel(name="VC", type="Voice")
     mock = AsyncMock(side_effect=[MigrationError("voice fail"), {"_id": "ch_text"}])
-    with patch("discord_ferry.cli.api_create_channel", mock):
-        rid = asyncio.run(_build_blueprint_channel(None, "u", "t", "srv", ch))
+    with patch("discord_ferry.core.engine.api_create_channel", mock):
+        rid = asyncio.run(_build_blueprint_channel(None, "u", "t", "srv", ch, lambda _e: None))
     assert rid == "ch_text"
     assert mock.await_count == 2
     assert mock.await_args_list[0].kwargs["channel_type"] == "Voice"
@@ -1232,15 +1235,15 @@ def test_build_channel_non_voice_propagates() -> None:  # SC-10
     import asyncio
 
     from discord_ferry.blueprint import BlueprintChannel
-    from discord_ferry.cli import _build_blueprint_channel
+    from discord_ferry.core.engine import _build_blueprint_channel
 
     ch = BlueprintChannel(name="TC", type="Text")
     mock = AsyncMock(side_effect=MigrationError("text fail"))
     with (
-        patch("discord_ferry.cli.api_create_channel", mock),
+        patch("discord_ferry.core.engine.api_create_channel", mock),
         pytest.raises(MigrationError),
     ):
-        asyncio.run(_build_blueprint_channel(None, "u", "t", "srv", ch))
+        asyncio.run(_build_blueprint_channel(None, "u", "t", "srv", ch, lambda _e: None))
     assert mock.await_count == 1
 
 
@@ -1248,12 +1251,12 @@ def test_build_channel_voice_happy_path() -> None:  # SC-11
     import asyncio
 
     from discord_ferry.blueprint import BlueprintChannel
-    from discord_ferry.cli import _build_blueprint_channel
+    from discord_ferry.core.engine import _build_blueprint_channel
 
     ch = BlueprintChannel(name="VC", type="Voice")
     mock = AsyncMock(return_value={"_id": "ch1"})
-    with patch("discord_ferry.cli.api_create_channel", mock):
-        rid = asyncio.run(_build_blueprint_channel(None, "u", "t", "srv", ch))
+    with patch("discord_ferry.core.engine.api_create_channel", mock):
+        rid = asyncio.run(_build_blueprint_channel(None, "u", "t", "srv", ch, lambda _e: None))
     assert rid == "ch1"
     assert mock.await_count == 1
 
@@ -1271,9 +1274,9 @@ def test_build_categorized_voice_preserves_id(runner: CliRunner, tmp_path: Path)
     create = AsyncMock(side_effect=[MigrationError("voice fail"), {"_id": "ch_text"}])
     upsert = AsyncMock(return_value={})
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_channel", create),
-        patch("discord_ferry.cli.api_upsert_categories", upsert),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_channel", create),
+        patch("discord_ferry.core.engine.api_upsert_categories", upsert),
     ):
         result = runner.invoke(
             main,
@@ -1294,8 +1297,8 @@ def test_build_uncategorized_voice_fallback(runner: CliRunner, tmp_path: Path) -
     p = _write_bp(tmp_path, bp)
     create = AsyncMock(side_effect=[MigrationError("voice fail"), {"_id": "ch_text"}])
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_channel", create),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_channel", create),
     ):
         result = runner.invoke(
             main,
@@ -1314,9 +1317,10 @@ def test_build_non_voice_failure_aborts(runner: CliRunner, tmp_path: Path) -> No
     )
     p = _write_bp(tmp_path, bp)
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
         patch(
-            "discord_ferry.cli.api_create_channel", AsyncMock(side_effect=MigrationError("boom"))
+            "discord_ferry.core.engine.api_create_channel",
+            AsyncMock(side_effect=MigrationError("boom")),
         ),
     ):
         result = runner.invoke(
@@ -1334,8 +1338,8 @@ def test_build_empty_blueprint(runner: CliRunner, tmp_path: Path) -> None:  # SC
     p = _write_bp(tmp_path, bp)
     create = AsyncMock(return_value={"_id": "ch"})
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_channel", create),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_channel", create),
     ):
         result = runner.invoke(
             main,
@@ -1367,11 +1371,11 @@ def test_build_applies_distinct_ranks(runner: CliRunner, tmp_path: Path) -> None
     ranks_mock = AsyncMock(return_value={})
     edit = AsyncMock(return_value={})
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", create_role),
-        patch("discord_ferry.cli.api_edit_role", edit),
-        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
-        patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", create_role),
+        patch("discord_ferry.core.engine.api_edit_role", edit),
+        patch("discord_ferry.core.engine.api_edit_role_ranks", ranks_mock),
+        patch("discord_ferry.core.engine.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         result = runner.invoke(
             main,
@@ -1391,11 +1395,11 @@ def test_build_skips_rank_zero(runner: CliRunner, tmp_path: Path) -> None:  # SC
     p = _write_bp(tmp_path, bp)
     ranks_mock = AsyncMock(return_value={})
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r"})),
-        patch("discord_ferry.cli.api_edit_role", AsyncMock(return_value={})),
-        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
-        patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", AsyncMock(return_value={"id": "r"})),
+        patch("discord_ferry.core.engine.api_edit_role", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_edit_role_ranks", ranks_mock),
+        patch("discord_ferry.core.engine.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         runner.invoke(
             main,
@@ -1413,11 +1417,11 @@ def test_build_separates_colour_and_rank(runner: CliRunner, tmp_path: Path) -> N
     edit = AsyncMock(return_value={})
     ranks_mock = AsyncMock(return_value={})
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r-a"})),
-        patch("discord_ferry.cli.api_edit_role", edit),
-        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
-        patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", AsyncMock(return_value={"id": "r-a"})),
+        patch("discord_ferry.core.engine.api_edit_role", edit),
+        patch("discord_ferry.core.engine.api_edit_role_ranks", ranks_mock),
+        patch("discord_ferry.core.engine.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         runner.invoke(
             main,
@@ -1439,11 +1443,11 @@ def test_build_ordering_failure_degrades(runner: CliRunner, tmp_path: Path) -> N
     p = _write_bp(tmp_path, bp)
     ranks_mock = AsyncMock(side_effect=MigrationError("test ordering failure"))
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r-a"})),
-        patch("discord_ferry.cli.api_edit_role", AsyncMock(return_value={})),
-        patch("discord_ferry.cli.api_edit_role_ranks", ranks_mock),
-        patch("discord_ferry.cli.api_set_role_permissions", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", AsyncMock(return_value={"id": "r-a"})),
+        patch("discord_ferry.core.engine.api_edit_role", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_edit_role_ranks", ranks_mock),
+        patch("discord_ferry.core.engine.api_set_role_permissions", AsyncMock(return_value={})),
     ):
         result = runner.invoke(
             main,
@@ -1462,11 +1466,11 @@ def test_build_preserves_permissions(runner: CliRunner, tmp_path: Path) -> None:
     p = _write_bp(tmp_path, bp)
     perms = AsyncMock(return_value={})
     with (
-        patch("discord_ferry.cli.api_create_server", AsyncMock(return_value="srv")),
-        patch("discord_ferry.cli.api_create_role", AsyncMock(return_value={"id": "r"})),
-        patch("discord_ferry.cli.api_edit_role", AsyncMock(return_value={})),
-        patch("discord_ferry.cli.api_edit_role_ranks", AsyncMock(return_value={})),
-        patch("discord_ferry.cli.api_set_role_permissions", perms),
+        patch("discord_ferry.core.engine.api_create_server", AsyncMock(return_value="srv")),
+        patch("discord_ferry.core.engine.api_create_role", AsyncMock(return_value={"id": "r"})),
+        patch("discord_ferry.core.engine.api_edit_role", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_edit_role_ranks", AsyncMock(return_value={})),
+        patch("discord_ferry.core.engine.api_set_role_permissions", perms),
     ):
         runner.invoke(
             main,

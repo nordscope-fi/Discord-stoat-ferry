@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
-import aiohttp  # noqa: TCH002
 import click
 from dotenv import load_dotenv
 from rich.console import Console
@@ -30,20 +29,11 @@ from discord_ferry.core.engine import (
     run_retry_failed,
     run_rollback,
 )
-from discord_ferry.core.http import format_proxy_notices, new_session
+from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import CheckError, MigrationError, StateError
-from discord_ferry.migrator.api import (
-    api_create_channel,
-    api_create_role,
-    api_create_server,
-    api_edit_role,
-    api_edit_role_ranks,
-    api_set_role_permissions,
-    api_upsert_categories,
-    init_request_semaphore,
-)
+from discord_ferry.migrator.api import init_request_semaphore
 from discord_ferry.migrator.structure import run_role_backfill
 from discord_ferry.parser.dce_parser import (
     acknowledgement_required,
@@ -267,40 +257,6 @@ def _safe(value: object) -> str:
     abort the whole migration. Escaping neutralises the metacharacters.
     """
     return escape(str(value))
-
-
-async def _build_blueprint_channel(
-    session: aiohttp.ClientSession,
-    stoat_url: str,
-    token: str,
-    server_id: str,
-    ch: Any,
-) -> str:
-    """Create a blueprint channel, retrying a failed Voice channel as Text (Stoat Bug #194).
-
-    Mirrors the migration path's voice fallback (``structure.py``). Only a ``"Voice"``-type
-    create failure is retried as ``"Text"``; any other ``MigrationError`` propagates. Returns
-    the created channel's Stoat ``_id``.
-    """
-    try:
-        result = await api_create_channel(
-            session, stoat_url, token, server_id, name=ch.name, channel_type=ch.type, nsfw=ch.nsfw
-        )
-    except MigrationError:
-        if ch.type == "Voice":
-            console.print(f"  [yellow]Voice channel '{_safe(ch.name)}' failed, retrying as text[/]")
-            result = await api_create_channel(
-                session,
-                stoat_url,
-                token,
-                server_id,
-                name=ch.name,
-                channel_type="Text",
-                nsfw=ch.nsfw,
-            )
-        else:
-            raise
-    return str(result["_id"])
 
 
 class _ProgressTracker:
@@ -848,6 +804,7 @@ def build(
     import importlib.resources
 
     from discord_ferry.blueprint import ServerBlueprint, import_blueprint
+    from discord_ferry.core.engine import run_build
 
     if not template and not blueprint:
         console.print("[bold red]Error:[/] Provide --template or --blueprint")
@@ -869,82 +826,24 @@ def build(
     _print_proxy_notices()
     console.print(f"[bold]Discord Ferry[/] — building server '{_safe(bp.name)}'\n")
 
-    async def _build() -> None:
-        async with new_session() as session:
-            # Create server
-            server_id = await api_create_server(session, stoat_url, token, bp.name)
-            console.print(f"  Created server '{_safe(bp.name)}' ({server_id})")
-
-            # Create roles
-            created_roles: list[tuple[int, str]] = []
-            for role in bp.roles:
-                role_result = await api_create_role(session, stoat_url, token, server_id, role.name)
-                role_id = role_result["id"]
-                created_roles.append((role.rank, role_id))
-                if role.colour:
-                    await api_edit_role(
-                        session, stoat_url, token, server_id, role_id, colour=role.colour
-                    )
-                if role.permissions:
-                    await api_set_role_permissions(
-                        session,
-                        stoat_url,
-                        token,
-                        server_id,
-                        role_id,
-                        allow=role.permissions,
-                        deny=0,
-                    )
-                console.print(f"  Created role '{_safe(role.name)}'")
-
-            # Apply role ordering
-            if any(rank > 0 for rank, _ in created_roles):
-                ranked = [(r, rid) for r, rid in created_roles if r > 0]
-                ranked.sort(key=lambda item: item[0], reverse=True)
-                unranked = [rid for r, rid in created_roles if r == 0]
-                ordered = [rid for _, rid in ranked] + unranked
-                try:
-                    await api_edit_role_ranks(session, stoat_url, token, server_id, ordered)
-                    console.print("  Applied role ordering")
-                except MigrationError as exc:
-                    console.print(f"  [yellow]Warning:[/] Role ordering failed: {_safe(exc)}")
-
-            # Create categories and channels
-            import uuid
-
-            all_categories: list[dict[str, Any]] = []
-            for category in bp.categories:
-                cat_id = uuid.uuid4().hex[:26]
-                channel_ids: list[str] = []
-                for ch in category.channels:
-                    channel_ids.append(
-                        await _build_blueprint_channel(session, stoat_url, token, server_id, ch)
-                    )
-                    console.print(
-                        f"  Created channel '{_safe(ch.name)}' in '{_safe(category.name)}'"
-                    )
-                all_categories.append(
-                    {
-                        "id": cat_id,
-                        "title": category.name[:32],
-                        "channels": channel_ids,
-                    }
-                )
-            if all_categories:
-                await api_upsert_categories(session, stoat_url, token, server_id, all_categories)
-
-            # Create uncategorized channels
-            for ch in bp.uncategorized_channels:
-                await _build_blueprint_channel(session, stoat_url, token, server_id, ch)
-                console.print(f"  Created channel '{_safe(ch.name)}'")
-
-            console.print(f"\n[bold green]Done![/] Server '{_safe(bp.name)}' created ({server_id})")
+    def _on_event(event: MigrationEvent) -> None:
+        line = _safe(event.message)
+        if event.status == "warning":
+            console.print(f"  [yellow]Warning:[/] {line}")
+        elif event.status == "error":
+            console.print(f"  [red]{line}[/]")
+        else:
+            console.print(f"  {line}")
 
     try:
-        asyncio.run(_build())
+        # The build sequence lives in engine.run_build so the CLI and the GUI build
+        # page cannot diverge on it; this shell only renders the events and the
+        # final line. A built server writes no state.json and cannot be rolled back.
+        server_id = asyncio.run(run_build(stoat_url, token, bp, _on_event))
     except MigrationError as exc:
         console.print(f"\n[bold red]Build failed:[/] {_safe(exc)}")
         sys.exit(1)
+    console.print(f"\n[bold green]Done![/] Server '{_safe(bp.name)}' created ({server_id})")
 
 
 @main.command(name="export-blueprint")
