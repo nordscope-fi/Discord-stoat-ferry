@@ -17,6 +17,7 @@ from nicegui import app, background_tasks, ui
 import discord_ferry.migrator.api as _api
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
+from discord_ferry.errors import CheckError, StateError
 from discord_ferry.migrator.verify import run_check
 from discord_ferry.state import load_state
 
@@ -57,6 +58,17 @@ def _check_rows(report: CheckReport) -> list[dict[str, str]]:
         }
         for r in report.results
     ]
+
+
+def _check_verdict(report: CheckReport) -> tuple[str, str]:
+    """The overall pass/fail line and its colour, from ``report.has_failures``.
+
+    Uses the same signal as the CLI check exit code (`1 if has_failures else 0`),
+    so the GUI verdict and the CLI verdict cannot diverge for the same report.
+    """
+    if report.has_failures:
+        return "Check found problems.", "text-red-600"
+    return "Check passed.", "text-green-600"
 
 
 def render_check_report(report: CheckReport) -> None:
@@ -190,13 +202,18 @@ def check_page() -> None:
         def on_event(event: MigrationEvent) -> None:
             _safe_push(log.push, f"[{event.phase}] {event.message}")
 
-        def on_done(report: CheckReport | None) -> None:
+        def on_done(result: CheckReport | str | None) -> None:
             results.clear()
             with results:
-                if report is None:
+                if result is None:
                     ui.label("Check failed. See the log above.").classes("text-red-600")
                     return
-                render_check_report(report)
+                if isinstance(result, str):
+                    ui.label(result).classes("text-amber-700")
+                    return
+                label, colour = _check_verdict(result)
+                ui.label(label).classes(f"text-lg font-bold {colour}")
+                render_check_report(result)
 
         def _run() -> None:
             results.clear()
@@ -204,9 +221,15 @@ def check_page() -> None:
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
 
-            async def _do_check() -> CheckReport:
-                state = load_state(output_dir)
-                return await run_check(stoat_url, token, state, on_event)
+            async def _do_check() -> CheckReport | str:
+                try:
+                    state = load_state(output_dir)
+                except StateError as exc:
+                    return f"Cannot load this migration: {sanitize_secrets(str(exc))}"
+                try:
+                    return await run_check(stoat_url, token, state, on_event)
+                except CheckError as exc:
+                    return f"Cannot check this migration: {sanitize_secrets(str(exc))}"
 
             run_tool(client, log.push, _do_check, on_done)
 

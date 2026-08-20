@@ -221,3 +221,48 @@ async def test_check_page_streams_banners_and_renders_table(
         user.find("Run check").click()
         await user.should_see("Checking server structure")  # first banner streamed
         await user.should_see("1 ok")  # the report's counts line rendered after the run
+
+
+def test_check_verdict_matches_has_failures() -> None:
+    """SC-2.4 / SC-I1: the GUI verdict tracks report.has_failures, same as the CLI."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.verify import CheckReport
+
+    clean = CheckReport()
+    clean.add(name="general", status="ok", kind="channel_present", detail="present")
+    failing = CheckReport()
+    failing.add(name="mods", status="fail", kind="channel_missing", detail="missing")
+
+    clean_label, _ = gui_tools._check_verdict(clean)
+    fail_label, _ = gui_tools._check_verdict(failing)
+
+    assert clean.has_failures is False
+    assert failing.has_failures is True
+    assert clean_label != fail_label
+    # parity: the verdict is a pure function of has_failures
+    assert ("problem" in fail_label.lower()) and ("passed" in clean_label.lower())
+
+
+async def test_check_page_shows_cannot_check_on_checkerror(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-2.3: a CheckError (dry-run or server-less state) shows a clear message."""
+    from discord_ferry.errors import CheckError
+
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    async def raises_check_error(*a, **k):  # type: ignore[no-untyped-def]
+        raise CheckError("state is a dry run, nothing was migrated")
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.run_check", new=raises_check_error),
+    ):
+        await user.open("/tools/check")
+        user.find("Run check").click()
+        await user.should_see("Cannot check this migration")
