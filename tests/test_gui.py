@@ -613,7 +613,7 @@ def test_proxy_notice_lines_formats_for_the_log_panel(proxy_env, os_proxy) -> No
         lines = _proxy_notice_lines()
     assert lines == [
         "[notice] Proxy configuration Ferry cannot use: socks5://sock:1080 (all). "
-        "Connected direct. ALL_PROXY is not supported (see issue #141)."
+        "Connected direct. SOCKS is not supported (see issue #141)."
     ]
 
 
