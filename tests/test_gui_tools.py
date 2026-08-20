@@ -137,3 +137,17 @@ async def test_tools_landing_lists_tools(user: User) -> None:
         "TLS check",
     ):
         await user.should_see(name)
+
+
+def test_status_colour_covers_every_check_status() -> None:
+    """SC-1.7: every CheckReport status maps to a colour, none falls through."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.verify import STATUSES
+
+    for status in STATUSES:
+        assert status in gui_tools._STATUS_COLOURS
+    # probe uses ok/warn/fail, a subset already covered above
+    for status in ("ok", "warn", "fail"):
+        assert gui_tools._status_colour(status)
+    # an unknown status resolves to a defined default, never a crash
+    assert gui_tools._status_colour("nonsense")
