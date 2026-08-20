@@ -397,7 +397,7 @@ async def test_repair_page_surfaces_rolled_back_refusal(
         user.find("Export directory").elements.pop().set_value(str(export_dir))
         user.find("Run repair").click()
         await user.should_see("Refusing")
-        await user.should_see("Repair did not complete")
+        await user.should_see("Repair refused")
         await user.should_not_see("Repair complete.")
 
 
@@ -523,3 +523,29 @@ async def test_no_tool_page_renders_a_raw_token(
             user.find(button).click()
             await user.should_see(label)  # positive control: the error path ran
             await user.should_not_see(_TOKEN)
+
+
+async def test_check_page_shows_cannot_check_on_migration_error(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Whole-branch review: a MigrationError (rate limit / breaker) is caught like the CLI."""
+    from discord_ferry.errors import MigrationError
+
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    async def raises_migration_error(*a, **k):  # type: ignore[no-untyped-def]
+        raise MigrationError("circuit breaker open")
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=_StubState([])),
+        patch("discord_ferry.gui_tools.run_check", new=raises_migration_error),
+    ):
+        await user.open("/tools/check")
+        user.find("Run check").click()
+        await user.should_see("Cannot check this migration")
+        await user.should_not_see("Check failed")  # not the generic error path

@@ -19,7 +19,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_repair, run_retry_failed
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
-from discord_ferry.errors import CheckError, StateError
+from discord_ferry.errors import CheckError, MigrationError, StateError
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
 from discord_ferry.parser.dce_parser import parse_export_directory
 from discord_ferry.state import load_state
@@ -284,7 +284,9 @@ def check_page() -> None:
                     return f"Cannot load this migration: {sanitize_secrets(str(exc))}"
                 try:
                     return await run_check(stoat_url, token, state, on_event)
-                except CheckError as exc:
+                except (CheckError, MigrationError) as exc:
+                    # MigrationError covers a rate-limit or circuit-breaker failure
+                    # from the API client; the CLI catches both here too.
                     return f"Cannot check this migration: {sanitize_secrets(str(exc))}"
 
             run_tool(client, log.push, _do_check, on_done)
@@ -329,9 +331,13 @@ def repair_page() -> None:
                     ui.label("Repair failed. See the log above.").classes("text-red-600")
                     return
                 if errors:
-                    ui.label(f"Repair did not complete: {sanitize_secrets(errors[-1])}").classes(
-                        "text-red-600"
-                    )
+                    # A refusal (a rolled-back state) is not a repair failure: the
+                    # engine correctly declined, and the CLI exits 0 for it. Show a
+                    # neutral refusal, neither a green success nor a red failure, so
+                    # neither shell claims the repair failed.
+                    ui.label(
+                        f"Repair refused, nothing changed: {sanitize_secrets(errors[-1])}"
+                    ).classes("text-amber-700")
                     return
                 _, label, colour = _repair_verdict(outcome, state_ref[0])
                 ui.label(label).classes(f"text-lg font-bold {colour}")
