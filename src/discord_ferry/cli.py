@@ -44,6 +44,7 @@ from discord_ferry.migrator.api import (
     api_upsert_categories,
     init_request_semaphore,
 )
+from discord_ferry.migrator.structure import run_role_backfill
 from discord_ferry.parser.dce_parser import (
     acknowledgement_required,
     parse_export_directory,
@@ -1814,6 +1815,122 @@ def repair_cmd(
         _emit_repair_json(outcome, dry_run, stoat_url, token, state)
 
     sys.exit(code)
+
+
+@main.command(name="backfill-roles")
+@click.argument("output_dir", type=click.Path(exists=True))
+@click.option(
+    "--export-dir",
+    type=click.Path(file_okay=False),
+    required=True,
+    help="The DCE export directory the original migration used",
+)
+@click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
+@click.option(
+    "--token",
+    envvar="STOAT_TOKEN",
+    default=None,
+    help="Stoat user token. Prefer the STOAT_TOKEN environment variable",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report what would be reordered, and change nothing",
+)
+def backfill_roles_cmd(
+    output_dir: str,
+    export_dir: str,
+    stoat_url: str | None,
+    token: str | None,
+    dry_run: bool,
+) -> None:
+    """Re-apply Discord role ordering to a server migrated before the #380 fix.
+
+    Reads state.json and the original export, then sets the server's role
+    hierarchy to Discord order. It creates nothing, touches no role colour or
+    icon, and is safe to re-run: an already-correct server gets no write. Exits 0
+    when ordering was applied or already correct, 1 when it was refused, and 2
+    when the state or export cannot be read.
+    """
+    load_dotenv()
+    if not stoat_url:
+        console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
+        sys.exit(1)
+    if not token:
+        console.print("[bold red]Error:[/] --token is required (or set STOAT_TOKEN)")
+        sys.exit(1)
+
+    _print_proxy_notices()
+    register_secret("stoat", token)
+    init_request_semaphore(FerryConfig.max_concurrent_requests)
+
+    out_path = Path(output_dir)
+    try:
+        state = load_state(out_path)
+    except StateError as exc:
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        sys.exit(2)
+
+    export_path = Path(export_dir)
+    # click.echo for anything carrying a path: the module Console wraps at 80
+    # columns off a terminal and would break the path across lines (#145).
+    if not export_path.exists():
+        click.echo(f"Error: export directory not found: {export_path}", err=True)
+        sys.exit(2)
+    try:
+        exports = parse_export_directory(export_path)
+    except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome
+        click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        sys.exit(2)
+
+    config = FerryConfig(
+        export_dir=export_path,
+        stoat_url=stoat_url,
+        token=token,
+        output_dir=out_path,
+        server_id=state.stoat_server_id or None,
+        skip_export=True,
+        dry_run=dry_run,
+    )
+
+    reordered = False
+
+    def _on_event(event: MigrationEvent) -> None:
+        nonlocal reordered
+        if event.status == "progress" and event.message.startswith("Applied role ordering"):
+            reordered = True
+        colour = {"error": "bold red", "warning": "yellow"}.get(event.status, "cyan")
+        console.print(f"[{colour}]{_safe(event.message)}[/]")
+
+    console.print("[bold]Discord Ferry[/] — backfilling role order\n")
+    try:
+        asyncio.run(run_role_backfill(config, state, exports, _on_event))
+    except (CheckError, MigrationError) as exc:
+        console.print(f"\n[bold red]Backfill failed:[/] {_safe(exc)}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/]")
+        sys.exit(1)
+
+    # A dry run changed nothing, so it reports on the plan and always exits 0.
+    if dry_run:
+        sys.exit(0)
+
+    # Ordering did not happen if _apply_role_ordering degraded. Both the
+    # permission refusal and the generic failure mean the hierarchy was not set,
+    # so both exit 1 (repair_cmd lumps warning types the same way).
+    failed = [
+        w
+        for w in state.warnings
+        if w.get("type") in {"role_ordering_not_permitted", "role_ordering_failed"}
+    ]
+    if failed:
+        sys.exit(1)
+
+    if not reordered:
+        click.echo("Role order was already correct; nothing changed.")
+    sys.exit(0)
 
 
 @main.command("tls-check")

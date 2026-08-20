@@ -3259,3 +3259,176 @@ def test_repair_json_mixed_run_is_consistent(runner: CliRunner, tmp_path: Path) 
     assert doc["declined"] and doc["failed_messages"]
     assert doc["check"]["counts"]["fail"] == 1
     assert js.exit_code == plain.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# ferry backfill-roles (#388, #482)
+# ---------------------------------------------------------------------------
+
+
+def _backfill_argv(out_dir: Path, export_dir: Path, *extra: str) -> list[str]:
+    return [
+        "backfill-roles",
+        str(out_dir),
+        "--export-dir",
+        str(export_dir),
+        "--stoat-url",
+        "https://api.test",
+        "--token",
+        "t",
+        *extra,
+    ]
+
+
+def _backfill_state(tmp_path: Path) -> tuple[Path, Path]:
+    """A completed state plus a minimal export, the inputs backfill reads."""
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    return out_dir, export_dir
+
+
+def test_backfill_help_lists_options(runner: CliRunner) -> None:
+    """SC-1.1."""
+    result = runner.invoke(main, ["backfill-roles", "--help"])
+    assert result.exit_code == 0
+    for opt in ("--export-dir", "--stoat-url", "--token", "--dry-run"):
+        assert opt in result.output
+
+
+def test_backfill_missing_url_errors(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.3, no URL."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+    result = runner.invoke(
+        main,
+        ["backfill-roles", str(out_dir), "--export-dir", str(export_dir), "--token", "t"],
+        env={"STOAT_URL": "", "STOAT_TOKEN": ""},
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    assert "--stoat-url is required" in result.output
+
+
+def test_backfill_missing_token_errors(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.3, no token."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+    result = runner.invoke(
+        main,
+        [
+            "backfill-roles",
+            str(out_dir),
+            "--export-dir",
+            str(export_dir),
+            "--stoat-url",
+            "https://api.test",
+        ],
+        env={"STOAT_URL": "", "STOAT_TOKEN": ""},
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    assert "--token is required" in result.output
+
+
+def test_backfill_exits_2_on_unreadable_state(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.2. No state.json in the output dir."""
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()  # exists, but holds no state.json
+    result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 2, result.output
+
+
+def test_backfill_exits_2_on_unreadable_export(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.4."""
+    out_dir, _ = _backfill_state(tmp_path)
+    missing = tmp_path / "nope"
+    result = runner.invoke(main, _backfill_argv(out_dir, missing))
+    assert result.exit_code == 2, result.output
+
+
+def test_backfill_dry_run_exits_0_and_passes_flag(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.4."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+    seen: dict[str, Any] = {}
+
+    async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        seen["dry_run"] = config.dry_run
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_capture):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir, "--dry-run"))
+    assert seen["dry_run"] is True
+    assert result.exit_code == 0, result.output
+
+
+def test_backfill_exits_0_when_clean(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.1."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+
+    async def _noop(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        return None
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_noop):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 0, result.output
+
+
+def test_backfill_exits_1_on_permission_refusal(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.2."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+
+    async def _refused(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        state.warnings.append(
+            {"phase": "roles", "type": "role_ordering_not_permitted", "message": "x"}
+        )
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_refused):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 1, result.output
+
+
+def test_backfill_exits_1_on_generic_failure(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.3. A failed read-back (role_ordering_failed) must not exit 0."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+
+    async def _failed(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        state.warnings.append({"phase": "roles", "type": "role_ordering_failed", "message": "x"})
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_failed):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 1, result.output
+
+
+def test_backfill_summary_reports_already_correct(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.2. A no-op run tells the operator the order was already correct."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+
+    async def _noop(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        return None
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_noop):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 0
+    assert "already correct" in result.output
+
+
+def test_backfill_summary_reports_a_reorder(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.1. A reorder surfaces the ordering event and not the no-op line."""
+    out_dir, export_dir = _backfill_state(tmp_path)
+
+    async def _reorder(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        from discord_ferry.core.events import MigrationEvent
+
+        on_event(
+            MigrationEvent(
+                phase="roles", status="progress", message="Applied role ordering to 3 roles"
+            )
+        )
+
+    with patch("discord_ferry.cli.run_role_backfill", new=_reorder):
+        result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
+    assert result.exit_code == 0
+    assert "Applied role ordering to 3 roles" in result.output
+    assert "already correct" not in result.output
