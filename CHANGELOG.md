@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.20.0] - 2026-08-20
+
+### Added
+
+- **`ferry probe --deep` now runs a boundary-upload probe against the Autumn file server.** For
+  each of the six upload tags (attachments, avatars, backgrounds, icons, banners, emojis), it
+  uploads a test file at the advertised size limit and one byte over, then reports whether the
+  server enforces the limit. Probe entities are torn down after each tag. Avatars and backgrounds
+  leave orphaned files because Autumn has no delete endpoint for them; the help text documents
+  this. Fixes #142.
+
 ## [2.19.17] - 2026-08-20
 
 ### Fixed
