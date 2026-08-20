@@ -504,6 +504,7 @@ _EXPOSED_DEFAULTS = {
     "max_concurrent_requests": 5,
     "skip_avatars": False,
     "validate_after": False,
+    "incremental": False,
 }
 
 
@@ -652,3 +653,34 @@ def test_validate_status_three_states() -> None:
     assert amber.reason is None
 
     assert _validate_status([]).colour == "green"
+
+
+def test_incremental_coerces_into_config() -> None:
+    """SC-5.1 / SC-I3: the incremental checkbox flows into FerryConfig.incremental."""
+    from pathlib import Path
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    coerced = _coerce_advanced_settings({"incremental": True})
+    assert coerced["incremental"] is True
+    config = FerryConfig(export_dir=Path("x"), stoat_url="https://s", token="t", **coerced)
+    assert config.incremental is True
+    assert config.resume is False  # SC-I3: incremental, not resume
+
+
+def test_incremental_defaults_off() -> None:
+    """SC-5.3: incremental defaults off."""
+    from discord_ferry.gui import _coerce_advanced_settings
+
+    assert _coerce_advanced_settings({})["incremental"] is False
+
+
+def test_resume_and_incremental_conflict_detected() -> None:
+    """SC-5.2: the guard catches both set, before the engine's mutual-exclusion raise."""
+    from discord_ferry.gui import _resume_incremental_conflict
+
+    assert _resume_incremental_conflict({"resume": True, "incremental": True}) is True
+    assert _resume_incremental_conflict({"resume": True, "incremental": False}) is False
+    assert _resume_incremental_conflict({"resume": False, "incremental": True}) is False
+    assert _resume_incremental_conflict({}) is False
