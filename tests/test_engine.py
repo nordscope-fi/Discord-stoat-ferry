@@ -2636,6 +2636,109 @@ async def test_run_repair_rollback_refusal_returns_empty_outcome(tmp_path: Path)
     assert outcome.declined == []
 
 
+async def test_run_repair_records_recreated_entities(tmp_path: Path) -> None:
+    """#308. Each recreation is recorded with its discord id, new stoat id and name."""
+    config = _make_repair_config(tmp_path)
+    d_ch, d_role, d_cat = "d-ch-1", "d-role-1", "d-cat-1"
+    state = MigrationState(stoat_server_id=R_SERVER)
+    state.channel_map[d_ch] = "01JSTOATCHNOLD"
+    state.role_map[d_role] = "01JSTOATROLEOLD"
+    state.category_map[d_cat] = "01JSTOATCATOLD"
+    state.created_channel_names[d_ch] = "general"
+    state.created_role_names[d_role] = "mods"
+    state.category_names[d_cat] = "Text Channels"
+
+    report = CheckReport()
+    report.add(name="general", status="fail", kind="channel_missing", detail="x", discord_id=d_ch)
+    report.add(name="mods", status="fail", kind="role_missing", detail="x", discord_id=d_role)
+    report.add(
+        name="Text Channels", status="fail", kind="category_missing", detail="x", discord_id=d_cat
+    )
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    async def _fake_view(*_a: Any, **_k: Any) -> tuple[set[str], dict[str, Any]]:
+        return set(), {}
+
+    async def _fake_ch(sess: Any, cfg: Any, st: Any, result: Any, *_a: Any, **_k: Any) -> bool:
+        st.channel_map[result.discord_id] = "01JSTOATCHNNEW"
+        return True
+
+    async def _fake_role(sess: Any, cfg: Any, st: Any, result: Any, *_a: Any, **_k: Any) -> bool:
+        st.role_map[result.discord_id] = "01JSTOATROLENEW"
+        return True
+
+    async def _fake_cat(sess: Any, cfg: Any, st: Any, result: Any, *_a: Any, **_k: Any) -> bool:
+        st.category_map[result.discord_id] = "01JSTOATCATNEW"
+        return True
+
+    async def _fake_resend(*_a: Any, **_k: Any) -> int:
+        return 3
+
+    async def _fake_reattach(*_a: Any, **_k: Any) -> None:
+        return None
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "_live_server_view", _fake_view),
+        patch.object(engine_module, "load_discord_metadata", lambda *a, **k: None),
+        patch.object(engine_module, "_recreate_channel", _fake_ch),
+        patch.object(engine_module, "_recreate_role", _fake_role),
+        patch.object(engine_module, "_recreate_category", _fake_cat),
+        patch.object(engine_module, "_resend_channel", _fake_resend),
+        patch.object(engine_module, "_reattach_to_category", _fake_reattach),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+    ):
+        outcome = await run_repair(config, state, [_export_for(d_ch)], lambda _e: None)
+
+    assert len(outcome.recreated_channels) == 1
+    ch = outcome.recreated_channels[0]
+    assert ch["discord_id"] == d_ch
+    assert ch["stoat_id"] == "01JSTOATCHNNEW"
+    assert ch["name"] == "general"
+    assert ch["resent_count"] == 3
+    assert len(outcome.recreated_roles) == 1
+    assert outcome.recreated_roles[0]["stoat_id"] == "01JSTOATROLENEW"
+    assert len(outcome.recreated_categories) == 1
+    assert outcome.recreated_categories[0]["stoat_id"] == "01JSTOATCATNEW"
+    assert outcome.recreated_categories[0]["title"] == "Text Channels"
+
+
+async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path) -> None:
+    """#308. dead_letter counts the drain; declined excludes legacy non-repair warnings."""
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    # A legacy warning from the original migration, present before this run starts.
+    state.warnings.append({"phase": "structure", "type": "proxy_notice", "message": "legacy"})
+    state.failed_messages = [
+        FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="boom"),
+        FailedMessage(discord_msg_id="m2", stoat_channel_id="c2", error="boom"),
+    ]
+    # A forum-index result: run_repair declines it (a repair-phase warning appended this run).
+    report = _report_with("channel_missing", "fail", discord_id="forum-index-800000000000000009")
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return report
+
+    async def _fake_retry(cfg: Any, st: Any, exports: Any, on_event: Any) -> None:
+        st.failed_messages = [st.failed_messages[0]]  # one now succeeds
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "run_retry_failed", _fake_retry),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+    ):
+        outcome = await run_repair(config, state, [], lambda _e: None)
+
+    assert outcome.dead_letter == {"drained": 1, "remaining": 1}
+    assert any(d["type"] == "forum_index_not_repairable" for d in outcome.declined)
+    assert all(d["type"] != "proxy_notice" for d in outcome.declined), (
+        "the legacy non-repair warning leaked into the repair outcome"
+    )
+    assert outcome.failed_messages == [{"discord_msg_id": "m1", "stoat_channel_id": "c1"}]
+
+
 async def test_repair_populates_the_token_store_and_the_semaphore(tmp_path: Path) -> None:
     """Both asserted as CALLS, for the reason recorded on the retry path.
 
