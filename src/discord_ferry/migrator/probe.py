@@ -68,6 +68,26 @@ def _make_test_file(directory: Path, tag: str, size: int) -> Path:
     return path
 
 
+async def _raw_autumn_upload(
+    session: aiohttp.ClientSession,
+    autumn_url: str,
+    tag: str,
+    file_path: Path,
+    token: str,
+) -> int:
+    """Upload a file to Autumn and return the HTTP status code.
+
+    No client-side size check, no retry. Used by the deep probe to test
+    whether the server enforces its advertised limit.
+    """
+    url = f"{autumn_url.rstrip('/')}/{tag}"
+    headers = {"x-session-token": token}
+    form = aiohttp.FormData()
+    form.add_field("file", file_path.open("rb"), filename=file_path.name)
+    async with session.post(url, data=form, headers=headers) as resp:
+        return resp.status
+
+
 def _sub_dict(obj: Any, key: str) -> dict[str, Any]:
     """``obj[key]`` when both it and ``obj`` are dicts, else ``{}``.
 
