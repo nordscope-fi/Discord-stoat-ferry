@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.migrator.probe import ProbeReport
     from discord_ferry.migrator.verify import CheckReport, RepairOutcome
     from discord_ferry.state import MigrationState
 
@@ -144,6 +145,57 @@ def render_repair_outcome(outcome: RepairOutcome) -> None:
             for w in outcome.declined
         ]
         ui.table(columns=columns, rows=rows).classes("w-full mt-1")
+
+
+def _probe_rows(report: ProbeReport) -> list[dict[str, str]]:
+    """One table row per probe check, carrying its badge colour.
+
+    ``ProbeCheck.detail`` is instance-controlled prose (limits, header dumps,
+    exception messages from a Stoat we do not run), and the table bypasses the
+    logging formatter, so the detail and name are sanitized here, the same reason
+    ``_check_rows`` sanitizes the check table. The status is an internal enum.
+    """
+    return [
+        {
+            "name": sanitize_secrets(c.name),
+            "status": c.status,
+            "detail": sanitize_secrets(c.detail),
+            "colour": _status_colour(c.status),
+        }
+        for c in report.checks
+    ]
+
+
+def _probe_counts(report: ProbeReport) -> dict[str, int]:
+    """Count the probe checks by status (ok/warn/fail).
+
+    ProbeReport carries no ``counts()`` of its own (unlike CheckReport), so the
+    summary line computes them here.
+    """
+    counts = {"ok": 0, "warn": 0, "fail": 0}
+    for c in report.checks:
+        if c.status in counts:
+            counts[c.status] += 1
+    return counts
+
+
+def render_probe_report(report: ProbeReport) -> None:
+    """Render a ProbeReport as a summary line and a per-check table.
+
+    Probe is a return value, not an event stream (``run_probe`` never calls
+    ``on_event``), so this renders from the object directly, like
+    ``render_check_report``.
+    """
+    counts = _probe_counts(report)
+    ui.label(f"{counts['ok']} ok, {counts['warn']} warn, {counts['fail']} fail").classes(
+        "text-sm text-gray-600"
+    )
+    columns = [
+        {"name": "name", "label": "Check", "field": "name", "align": "left"},
+        {"name": "status", "label": "Status", "field": "status", "align": "left"},
+        {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
+    ]
+    ui.table(columns=columns, rows=_probe_rows(report)).classes("w-full mt-2")
 
 
 def _semaphore_is_set() -> bool:
