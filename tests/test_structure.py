@@ -4972,3 +4972,44 @@ async def test_run_role_backfill_rerun_does_not_grow_warnings(tmp_path: Path) ->
         await run_role_backfill(config, state, [export], lambda e: None)
 
     assert [w for w in state.warnings if w["type"] == "role_limit_exceeded"] == []
+
+
+async def test_run_role_backfill_dry_run_sends_no_ranks_write(tmp_path: Path) -> None:
+    """SC-1.4 at the engine level. A dry run must send no ranks write.
+
+    The read-back is registered so it succeeds; the failure this guards against is
+    the PATCH landing anyway. A bare no-route test would pass for the wrong reason,
+    because a failed read is swallowed into a warning and looks identical to a
+    dry run that changed nothing.
+    """
+    config = _make_config(tmp_path, dry_run=True)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "s-a", "b": "s-b"}
+    export = _make_export(
+        messages=[
+            _make_message(
+                "m1",
+                roles=[
+                    DCERole(id="a", name="A", position=1),
+                    DCERole(id="b", name="B", position=9),
+                ],
+            )
+        ]
+    )
+
+    patches = 0
+
+    def _count(url: object, **kw: object) -> None:
+        nonlocal patches
+        patches += 1
+
+    with aioresponses() as m:
+        # The server is in the WRONG order, so a non-dry run would PATCH.
+        m.get(
+            f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}), repeat=True
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={"_id": "srv1"}, callback=_count)
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    assert patches == 0, "a dry run must not write the role hierarchy"
+    assert [w for w in state.warnings if w["type"].startswith("role_ordering")] == []

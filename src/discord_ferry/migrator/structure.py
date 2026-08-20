@@ -688,6 +688,18 @@ async def run_role_backfill(
     rather than raising, so this function does neither of those itself. #388.
     """
     roles, _export_role_ids, _discord_metadata = _collect_roles_to_order(config, exports)
+    if config.dry_run:
+        # `_apply_role_ordering` writes unconditionally; in `run_roles` it is
+        # reached only under `not config.dry_run`. A backfill must guard it the
+        # same way, or `--dry-run` would read the server and PATCH the ranks.
+        on_event(
+            MigrationEvent(
+                phase="roles",
+                status="progress",
+                message=f"[DRY RUN] Would re-apply role ordering to {len(roles)} roles",
+            )
+        )
+        return
     async with get_session(config) as session:
         await _apply_role_ordering(session, config, state, roles, on_event)
 
