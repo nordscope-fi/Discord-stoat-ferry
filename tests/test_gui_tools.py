@@ -419,6 +419,68 @@ async def test_probe_page_registers_token_and_renders(
     assert ("stoat", _TOKEN) in registered  # the runner registered the token before the call
 
 
+def _one_export():  # type: ignore[no-untyped-def]
+    """A single parsed export with one text channel, for the blueprint page."""
+    from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
+
+    return DCEExport(
+        guild=DCEGuild(id="g1", name="My Guild"),
+        channel=DCEChannel(id="general", type=0, name="general", category="Text"),
+    )
+
+
+async def test_blueprint_export_page_writes_file(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Chunk 7 Task 15b: a valid run writes the blueprint file and reports it."""
+    output = tmp_path / "bp.json"
+
+    with patch("discord_ferry.gui_tools.parse_export_directory", return_value=[_one_export()]):
+        await user.open("/tools/blueprint-export")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Output path").elements.pop().set_value(str(output))
+        user.find("Export blueprint").click()
+        await user.should_see("Blueprint written")
+
+    assert output.exists()
+
+
+async def test_blueprint_export_page_no_dce_json_error(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Chunk 7 Task 15b: an empty parse shows a clear error, not a crash."""
+    with patch("discord_ferry.gui_tools.parse_export_directory", return_value=[]):
+        await user.open("/tools/blueprint-export")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Export blueprint").click()
+        await user.should_see("No valid DCE JSON files found")
+
+
+async def test_blueprint_export_page_confirms_before_overwrite(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Chunk 7 Task 15b: an existing output is not overwritten until confirmed."""
+    output = tmp_path / "bp.json"
+    output.write_text("OLD", encoding="utf-8")
+
+    with patch("discord_ferry.gui_tools.parse_export_directory", return_value=[_one_export()]):
+        await user.open("/tools/blueprint-export")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Output path").elements.pop().set_value(str(output))
+        user.find("Export blueprint").click()
+        await user.should_see("already exists")
+        assert output.read_text(encoding="utf-8") == "OLD"  # not overwritten without confirmation
+
+        user.find("Overwrite the output file").elements.pop().set_value(True)
+        user.find("Export blueprint").click()
+        await user.should_see("Blueprint written")
+
+    assert output.read_text(encoding="utf-8") != "OLD"  # overwritten after ticking Overwrite
+
+
 class _StubState:
     """Minimal stand-in for MigrationState for the repair verdict and page."""
 
