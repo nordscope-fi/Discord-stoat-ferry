@@ -23,6 +23,23 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+#: One colour per report status. Covers the CheckReport vocabulary
+#: (ok/warn/fail/unverifiable) and the ProbeReport subset (ok/warn/fail). The
+#: GUI's own event colour map does not cover these, so the tool pages carry
+#: their own. Unknown statuses fall back to grey rather than raising.
+_STATUS_COLOURS: dict[str, str] = {
+    "ok": "green",
+    "warn": "amber",
+    "fail": "red",
+    "unverifiable": "grey",
+}
+
+
+def _status_colour(status: str) -> str:
+    """The badge colour for a report status, grey for anything unrecognised."""
+    return _STATUS_COLOURS.get(status, "grey")
+
+
 def _semaphore_is_set() -> bool:
     """True when the module-level rate limiter already exists."""
     return _api._request_semaphore is not None
