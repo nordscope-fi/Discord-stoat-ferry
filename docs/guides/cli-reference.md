@@ -601,13 +601,14 @@ Probe creates its test entities (channels, uploads) on the server you point it a
 | `--stoat-url TEXT` | `STOAT_URL` | Stoat API base URL *(required)* |
 | `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)* |
 | `--test-server-id TEXT` | | ID of a throwaway Stoat server to create test entities on *(required)* |
-| `--deep` | | Reserved for a deeper upload-boundary probe — currently reports "not yet implemented" |
+| `--deep` | | Upload test files at each Autumn size boundary and report where enforced limits disagree with advertised ones. Creates and tears down probe entities (channels, emoji, server icon/banner). Leaves a small number of orphaned files in Autumn storage. |
 | `--json` | | Print results as machine-readable JSON instead of a table |
 | `--verbose` / `-v` | | Verbose output |
 
 ### What it checks
 
 - **Upload size limits** — the limits the instance's file server (Autumn) advertises per upload category, compared against the values Ferry assumes. A mismatch is reported as a warning.
+- **Upload boundary enforcement** *(with `--deep`)* — uploads test files at the exact advertised limit and one byte over for each upload category. Reports whether the server accepts or rejects each. Non-attachment tags require valid image files, which the probe generates as padded PNGs. Probe entities are torn down afterwards, but uploaded bytes persist in Autumn.
 - **Voice channels** — creates a test voice channel and checks whether the instance actually supports voice (Stoat Bug #194). If not, Discord voice channels will become text channels.
 - **Webhooks** — creates a test channel and checks whether webhooks can be created on the instance.
 - **Rate limiting** — what rate-limit information the instance exposes in its responses.
