@@ -298,7 +298,9 @@ def test_check_rows_sanitizes_server_controlled_text() -> None:
 
 
 class _StubState:
-    """Minimal stand-in for MigrationState: the repair verdict reads only this."""
+    """Minimal stand-in for MigrationState for the repair verdict and page."""
+
+    stoat_server_id = "srv"
 
     def __init__(self, failed_messages: list) -> None:  # type: ignore[type-arg]
         self.failed_messages = failed_messages
@@ -328,3 +330,72 @@ def test_repair_verdict_matches_cli_failure_set() -> None:
     # Nothing wrong -> pass.
     clean, _, _ = gui_tools._repair_verdict(RepairOutcome(), _StubState([]))
     assert clean is False
+
+
+async def test_repair_page_dry_run_defaults_on(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-3.2: the dry-run toggle defaults on."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    await user.open("/tools/repair")
+    await user.should_see("Dry run")
+    checkbox = user.find("Dry run").elements.pop()
+    assert checkbox.value is True
+
+
+async def test_repair_page_refuses_without_export_dir(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-3.1: repair refuses to run with no export directory; run_repair not called."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    from unittest.mock import AsyncMock
+
+    with patch("discord_ferry.gui_tools.run_repair", new=AsyncMock()) as run_repair_mock:
+        await user.open("/tools/repair")
+        # export dir left blank
+        user.find("Run repair").click()
+        await user.should_see("valid export directory")
+        assert run_repair_mock.await_count == 0
+
+
+async def test_repair_page_surfaces_rolled_back_refusal(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-3.3: a rolled-back-state refusal is shown and no success is reported."""
+    from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.migrator.verify import RepairOutcome
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    async def refusing_repair(config, state, exports, on_event, **k):  # type: ignore[no-untyped-def]
+        on_event(
+            MigrationEvent(phase="repair", status="error", message="records a rollback. Refusing.")
+        )
+        return RepairOutcome()
+
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[]),
+        patch("discord_ferry.gui_tools.load_state", return_value=_StubState([])),
+        patch("discord_ferry.gui_tools.run_repair", new=refusing_repair),
+    ):
+        await user.open("/tools/repair")
+        user.find("Export directory").elements.pop().set_value(str(export_dir))
+        user.find("Run repair").click()
+        await user.should_see("Refusing")
+        await user.should_see("Repair did not complete")
+        await user.should_not_see("Repair complete.")
