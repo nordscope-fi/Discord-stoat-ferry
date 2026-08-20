@@ -1153,77 +1153,48 @@ async def test_no_credential_reaches_the_exception(fake_proxy, proxy_env, os_pro
 # rollback redaction in v2.6.16.
 
 
-def test_all_proxy_only_is_reported(proxy_env, os_proxy) -> None:
-    """SC-135-18. Killing TWO implementations.
-
-    First: delegating to get_env_proxy_for_url, which filters ALL_PROXY out
-    before Ferry can see it.
-
-    Second, and this is why the test does NOT call resolve_proxy first:
-    recording notices as a side effect of resolution. Every reader of
-    proxy_notices() -- engine preflight, build, rollback, probe, and the GUI
-    export screen -- runs BEFORE any request is made, so a resolve-time
-    implementation returns () at all five and the feature ships inert. A test
-    that called resolve_proxy first would create the condition it then asserts,
-    which is the shape that let this repo ship inert rollback redaction.
-    """
+def test_a_socks_all_proxy_is_reported_as_socks(proxy_env, os_proxy) -> None:
+    """SC-2.2. proxy_notices() must NOT call resolve_proxy first: every reader
+    (engine preflight, build, rollback, probe, GUI export) runs BEFORE any
+    request, so a resolve-time implementation returns () at all five and the
+    feature ships inert, the shape that let this repo ship inert rollback
+    redaction. Killing: routing a socks ALL_PROXY into a generic
+    'ALL_PROXY unsupported' text instead of the SOCKS message, now that a usable
+    ALL_PROXY is honoured (issue #141) and needs no notice."""
     with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080"):
         notices = http.proxy_notices()
-    assert any(n.kind == "all_proxy_only" for n in notices)
+    socks = [n for n in notices if n.kind == "socks" and n.scheme == "all"]
+    assert socks
+    assert "SOCKS is not supported" in socks[0].outcome
 
 
-def test_the_notice_outcome_is_true(proxy_env, os_proxy) -> None:
-    """SC-135-18. Killing: a notice claiming 'connected direct' when an OS proxy
-    was in fact used."""
-    with os_proxy(CORP), proxy_env(ALL_PROXY="socks5://sock:1080"):
+def test_a_usable_all_proxy_emits_no_notice(proxy_env, os_proxy) -> None:
+    """SC-2.1. Killing: leaving the old always-emit ALL_PROXY notice in place,
+    which would declare the proxy unsupported while resolution now uses it."""
+    with os_proxy({}), proxy_env(ALL_PROXY="http://p:8080"):
         notices = http.proxy_notices()
-    assert any("http" in n.outcome and "https" in n.outcome for n in notices)
+    assert all(n.scheme != "all" for n in notices)
+    assert all("ALL_PROXY is not supported" not in n.outcome for n in notices)
 
 
-def test_the_all_proxy_outcome_is_not_contradicted_by_its_own_siblings(proxy_env, os_proxy) -> None:
-    """Killing: `covered` built from key membership rather than usability.
-
-    The canonical SOCKS setup exports all three variables together, which
-    shadowsocks, v2ray, `ssh -D` and Tor all document. Under a membership test
-    the ALL_PROXY notice claims "Used the proxy configured for http, https
-    instead." while the two notices printed directly after it say "Connected
-    direct. SOCKS is not supported." The first line is false and contradicts the
-    other two.
-
-    `test_the_notice_outcome_is_true` cannot see this: it is the mirror case,
-    and its docstring names only the direction where an OS proxy WAS used.
-    """
-    with (
-        os_proxy({}),
-        proxy_env(
-            ALL_PROXY="socks5://127.0.0.1:1080",
-            HTTP_PROXY="socks5://127.0.0.1:1080",
-            HTTPS_PROXY="socks5://127.0.0.1:1080",
-        ),
-    ):
-        lines = http.format_proxy_notices()
-    joined = " ".join(lines)
-    assert "Used the proxy configured for" not in joined
-    assert any("ALL_PROXY is not supported" in line for line in lines)
-
-
-def test_the_all_proxy_outcome_does_not_name_a_single_source(proxy_env, os_proxy) -> None:
-    """Killing: an outcome that picks one source word for a mixed configuration.
-
-    With HTTP_PROXY in the environment and https from the OS, the two covered
-    schemes have different sources, so any one-word answer is wrong for one of
-    them. The outcome names the schemes and leaves the source to
-    `ferry tls-check`, which reports it per scheme.
-    """
-    with (
-        os_proxy({"https": "http://corp:8080"}),
-        proxy_env(ALL_PROXY="socks5://sock:1080", HTTP_PROXY="http://env:3128"),
-    ):
+def test_a_malformed_all_proxy_is_reported(proxy_env, os_proxy) -> None:
+    """SC-2.3. Killing: an unguarded URL(env['all']) that raises instead of
+    degrading to a notice."""
+    with os_proxy({}), proxy_env(ALL_PROXY="http://host:notaport"):
         notices = http.proxy_notices()
-    outcomes = " ".join(n.outcome for n in notices)
-    assert "http" in outcomes
-    assert "OS" not in outcomes
-    assert "environment" not in outcomes
+    assert any(n.kind == "malformed" and n.scheme == "all" for n in notices)
+
+
+def test_all_proxy_is_consistent_across_resolution_and_notices(proxy_env, os_proxy) -> None:
+    """SC-I1. Killing: any component disagreeing -- resolution uses the proxy
+    while a notice says 'connected direct', the contradiction the old covered
+    logic risked."""
+    with os_proxy({}), proxy_env(ALL_PROXY="http://p:8080"):
+        choice = http.resolve_proxy(TARGET)
+        notices = http.proxy_notices()
+    assert choice is not None
+    assert str(choice.url) == "http://p:8080"
+    assert all(n.scheme != "all" for n in notices)
 
 
 @pytest.mark.parametrize(
@@ -1327,7 +1298,7 @@ def test_a_malformed_proxy_url_is_reported(proxy_env, os_proxy) -> None:
 def test_a_notice_display_never_carries_userinfo(proxy_env, os_proxy, variable) -> None:
     """Constraint 5, at BOTH _safe_display call sites.
 
-    The ALL_PROXY case covers the display built in the all_proxy_only branch and
+    The ALL_PROXY case covers the display built in the "all" notice branch and
     the HTTPS_PROXY case the one built in the socks branch; a `display=raw`
     mutant at either site survives the other test. Notices reach ferry.log and
     the GUI, and a proxy password is a credential like any other.
@@ -1354,28 +1325,6 @@ def test_building_a_display_never_raises(proxy_env, os_proxy, bad: str) -> None:
     assert [n.display for n in notices] == ["<unparseable>"]
 
 
-def test_the_all_proxy_outcome_names_a_scheme_the_environment_supplies(proxy_env, os_proxy) -> None:
-    """The `s in env` half of the `covered` comprehension, which nothing else pins.
-
-    Dropping that half leaves test_the_notice_outcome_is_true green, because both
-    of its schemes come from the OS. It also survives
-    test_the_all_proxy_outcome_does_not_name_a_single_source: that test's
-    `"http" in outcomes` is satisfied by the substring inside "https", so an
-    outcome naming https alone still passes it. An exact outcome on an
-    environment-only configuration is what fails.
-    """
-    with (
-        os_proxy({}),
-        proxy_env(
-            ALL_PROXY="socks5://sock:1080",
-            HTTP_PROXY="http://env:3128",
-            HTTPS_PROXY="http://env:3128",
-        ),
-    ):
-        notices = http.proxy_notices()
-    assert [n.outcome for n in notices] == ["Used the proxy configured for http, https instead."]
-
-
 def test_the_kill_switch_silences_the_notices(proxy_env, os_proxy) -> None:
     """FERRY_DISABLE_PROXY, the one early return in proxy_notices nothing else
     takes. With the kill switch on, Ferry connects direct by instruction, so a
@@ -1395,7 +1344,7 @@ def test_format_proxy_notices_renders_one_line_per_notice(proxy_env, os_proxy) -
         lines = http.format_proxy_notices()
     assert lines == [
         "Proxy configuration Ferry cannot use: socks5://sock:1080 (all). "
-        "Connected direct. ALL_PROXY is not supported (see issue #141)."
+        "Connected direct. SOCKS is not supported (see issue #141)."
     ]
 
 
@@ -1404,28 +1353,6 @@ def test_format_proxy_notices_is_empty_on_a_clean_configuration(proxy_env, os_pr
     a shell would print as a blank row."""
     with os_proxy({}), proxy_env():
         assert http.format_proxy_notices() == []
-
-
-def test_a_malformed_scheme_proxy_does_not_count_as_covered(proxy_env, os_proxy) -> None:
-    """_usable's except arm, which nothing else enters.
-
-    test_a_malformed_proxy_url_is_reported sets no ALL_PROXY, so it never
-    evaluates `covered` at all. Without the guard here the ALL_PROXY notice
-    would claim a scheme was used that cannot even be parsed, on the same
-    configuration whose next line reports it as malformed.
-    """
-    with os_proxy({}), proxy_env(ALL_PROXY="socks5://sock:1080", HTTPS_PROXY="http://[::1"):
-        notices = http.proxy_notices()
-    # A list and an assertion, NOT next(). Under the mutant this test kills, the
-    # raise from _usable is caught by proxy_notices' never-raises boundary and
-    # the result is (), so next() died with a bare StopIteration that named
-    # neither the test's subject nor its expectation.
-    all_notices = [n for n in notices if n.kind == "all_proxy_only"]
-    assert all_notices, "the ALL_PROXY notice must survive an unparseable sibling"
-    assert all_notices[0].outcome == (
-        "Connected direct. ALL_PROXY is not supported (see issue #141)."
-    )
-    assert any(n.kind == "malformed" for n in notices)
 
 
 def test_the_kill_switch_wins_over_a_populated_cache(proxy_env, os_proxy) -> None:
@@ -1489,7 +1416,7 @@ def test_an_unreadable_configuration_is_not_cached(proxy_env, os_proxy) -> None:
         with patch("discord_ferry.core.http._scheme_map", side_effect=re.error("boom")):
             assert [n.kind for n in http.proxy_notices()] == ["unreadable"]
         assert http._proxy_notices == ()
-        assert [n.kind for n in http.proxy_notices()] == ["all_proxy_only"]
+        assert [n.kind for n in http.proxy_notices()] == ["socks"]
 
 
 # --- Proxy hints and the permanence gate (Task 6) ----------------------------
@@ -1922,6 +1849,21 @@ def test_a_resolved_source_wins_over_a_failing_sibling_scheme(proxy_env) -> None
 
     assert out["proxy-http"] == "envcorp:8080"
     assert out["proxy-https"] == "unreadable"
+    assert out["proxy-source"] == "env"
+
+
+def test_describe_proxy_reports_an_all_proxy(proxy_env) -> None:
+    """SC-2.5. Killing: a claim that describe_proxy needs its own ALL_PROXY
+    handling; it must inherit the fallback through resolve_proxy_or_raise. Also
+    guards release.yml's single proxy-source key."""
+    with (
+        proxy_env(ALL_PROXY="http://p:8080"),
+        patch.object(http, "_os_proxies", return_value={}),
+        patch.object(http, "_os_proxy_bypass", return_value=False),
+    ):
+        out = http.describe_proxy()
+    assert out["proxy-http"] == "p:8080"
+    assert out["proxy-https"] == "p:8080"
     assert out["proxy-source"] == "env"
 
 

@@ -241,7 +241,7 @@ class ProxyChoice:
 class ProxyNotice:
     """A proxy configuration Ferry found but cannot use."""
 
-    kind: str  # stable identifier, e.g. "all_proxy_only", "socks", "malformed"
+    kind: str  # stable identifier, e.g. "socks", "malformed"
     scheme: str
     display: str  # redacted, never carries userinfo
     outcome: str  # what Ferry did instead, e.g. "used the OS proxy", "connected direct"
@@ -586,38 +586,40 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
     found: list[ProxyNotice] = []
 
     if "all" in env:
-        # "Covered" means a scheme that actually RESOLVES, not one whose key is
-        # merely present. Key membership alone produces a self-contradicting
-        # notice on the commonest SOCKS setup, where shadowsocks, v2ray, `ssh -D`
-        # and Tor all document exporting ALL_PROXY, HTTP_PROXY and HTTPS_PROXY
-        # together as socks5. Ferry connects direct for both schemes
-        # (resolve_proxy returns None at the socks guard), yet a membership test
-        # reports "Used the proxy configured for http, https instead." on the
-        # line directly above two notices saying "Connected direct."
-        covered = [s for s in ("http", "https") if _usable(env.get(s) or os_side.get(s))]
-        found.append(
-            ProxyNotice(
-                kind="all_proxy_only",
-                scheme="all",
-                display=_safe_display(env["all"]),
-                # Name the schemes, never a single source. The source is
-                # per-scheme: HTTP_PROXY in the environment with https from the
-                # OS would make any one-word answer wrong for one of them.
-                #
-                # This comment used to hand off to `ferry tls-check` as
-                # reporting the source PER SCHEME. It does not. describe_proxy
-                # writes one `proxy-source` key inside its scheme loop, so on a
-                # mixed configuration the last scheme to resolve wins. Corrected
-                # at the final review; the handoff promise is dropped rather
-                # than the diagnostic widened, because release.yml asserts on
-                # the single key name.
-                outcome=(
-                    f"Used the proxy configured for {', '.join(covered)} instead."
-                    if covered
-                    else "Connected direct. ALL_PROXY is not supported (see issue #141)."
-                ),
+        # ALL_PROXY is now honoured as an http/https fallback (issue #141,
+        # resolve_proxy_or_raise). A value Ferry can use needs no notice, because
+        # it is used. Only a value Ferry still cannot use is reported, for the
+        # same two reasons the per-scheme loop below reports one: a SOCKS scheme,
+        # or a URL that will not process. `_strip_userinfo` is part of "will not
+        # process" here: resolution returns direct when it raises, so a proxy
+        # whose credential cannot be parsed is unusable exactly as a malformed
+        # URL is, and the ALL_PROXY path has always surfaced that case (its
+        # display was built unconditionally before this change).
+        raw_all = env["all"]
+        try:
+            parsed_all = URL(raw_all)
+            socks_all = parsed_all.scheme.startswith("socks")
+            if not socks_all:
+                _strip_userinfo(parsed_all)
+        except (ValueError, TypeError):
+            found.append(
+                ProxyNotice(
+                    kind="malformed",
+                    scheme="all",
+                    display=_safe_display(raw_all),
+                    outcome="Connected direct.",
+                )
             )
-        )
+        else:
+            if socks_all:
+                found.append(
+                    ProxyNotice(
+                        kind="socks",
+                        scheme="all",
+                        display=_safe_display(raw_all),
+                        outcome="Connected direct. SOCKS is not supported (see issue #141).",
+                    )
+                )
 
     for scheme, raw in (*env.items(), *os_side.items()):
         if scheme not in ("http", "https"):
@@ -645,27 +647,6 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
             )
 
     return tuple(found)
-
-
-def _usable(raw: str | None) -> bool:
-    """True when `raw` is a proxy Ferry can actually use. Never raises.
-
-    The `raw is None` guard is what makes the call below type-check. `raw` is
-    `str | None`, and deleting the guard removes the narrowing, so mypy reports
-    `Argument 1 to "URL" has incompatible type "str | None"` [arg-type].
-    Measured, and `mypy src/` is in the project verification command, so the gate
-    catches that mutant even though no pytest assertion can: at runtime the
-    except arm would catch the resulting TypeError from URL(None) and return the
-    same False. An earlier version of this comment called the guard
-    "documentation rather than behaviour", which was wrong for having checked
-    only one of the two tools that guard this file.
-    """
-    if raw is None:
-        return False
-    try:
-        return not URL(raw).scheme.startswith("socks")
-    except (ValueError, TypeError):
-        return False
 
 
 def _safe_display(raw: str) -> str:
