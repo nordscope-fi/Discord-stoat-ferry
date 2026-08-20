@@ -16,7 +16,7 @@ from nicegui import app, background_tasks, ui
 
 import discord_ferry.migrator.api as _api
 from discord_ferry.config import FerryConfig
-from discord_ferry.core.engine import run_repair
+from discord_ferry.core.engine import run_repair, run_retry_failed
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, StateError
@@ -370,3 +370,77 @@ def repair_page() -> None:
             run_tool(client, log.push, _do_repair, on_done)
 
         ui.button("Run repair", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/retry")
+def retry_page() -> None:
+    """Resend the messages that failed on a prior migration."""
+    client = ui.context.client
+    stoat_url = str(app.storage.user.get("stoat_url", ""))
+    token = _tab_token()
+
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Resend failed messages").classes("text-2xl font-bold mb-4")
+        if token is None:
+            ui.label("Session expired. Re-enter your token on the setup page.").classes(
+                "text-red-600"
+            )
+            return
+
+        default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
+        dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
+        export_input = ui.input("Export directory (the original DCE export)").classes("w-96")
+        log = ui.log(max_lines=300).classes("w-full max-w-2xl h-48 font-mono text-xs mt-2")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def on_event(event: MigrationEvent) -> None:
+            _safe_push(log.push, f"[{event.phase}] {event.message}")
+
+        def on_done(counts: tuple[int, int] | None) -> None:
+            results.clear()
+            with results:
+                if counts is None:
+                    ui.label("Retry failed. See the log above.").classes("text-red-600")
+                    return
+                succeeded, still_failed = counts
+                colour = "text-red-600" if still_failed else "text-green-600"
+                ui.label(f"{succeeded} succeeded, {still_failed} still failed.").classes(
+                    f"text-lg font-bold {colour}"
+                )
+
+        def _run() -> None:
+            results.clear()
+            export_dir = export_input.value.strip()
+            if not export_dir or not Path(export_dir).is_dir():
+                ui.notify(
+                    "Enter a valid export directory. Retry needs the original export.",
+                    type="warning",
+                )
+                return
+            output_dir = Path(dir_input.value)
+            for line in prepare_tool_call(token):
+                _safe_push(log.push, line)
+
+            async def _do_retry() -> tuple[int, int]:
+                exports = parse_export_directory(Path(export_dir))
+                if not exports:
+                    # Never hand run_retry_failed an empty list: it would resolve
+                    # nothing and report success (a silent no-op). Surface it.
+                    raise ValueError("No export files found in that directory.")
+                state = load_state(output_dir)
+                before = len(state.failed_messages)
+                config = FerryConfig(
+                    export_dir=Path(export_dir),
+                    stoat_url=stoat_url,
+                    token=token,
+                    output_dir=output_dir,
+                    server_id=state.stoat_server_id or None,
+                    skip_export=True,
+                )
+                await run_retry_failed(config, state, exports, on_event)
+                after = len(state.failed_messages)
+                return before - after, after
+
+            run_tool(client, log.push, _do_retry, on_done)
+
+        ui.button("Run retry", on_click=_run).classes("mt-2")
