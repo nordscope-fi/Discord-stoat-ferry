@@ -399,3 +399,127 @@ async def test_repair_page_surfaces_rolled_back_refusal(
         await user.should_see("Refusing")
         await user.should_see("Repair did not complete")
         await user.should_not_see("Repair complete.")
+
+
+async def test_retry_page_refuses_without_export_dir(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-4.1: retry refuses without a valid export dir; run_retry_failed not called."""
+    from unittest.mock import AsyncMock
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    with patch("discord_ferry.gui_tools.run_retry_failed", new=AsyncMock()) as retry_mock:
+        await user.open("/tools/retry")
+        user.find("Run retry").click()
+        await user.should_see("valid export directory")
+        assert retry_mock.await_count == 0
+
+
+async def test_retry_page_reports_succeeded_and_failed(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-4.2: the page shows N succeeded, M still failed from state.failed_messages."""
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    async def fake_retry(config, state, exports, on_event, **k):  # type: ignore[no-untyped-def]
+        state.failed_messages.clear()  # two were pending; both now succeed
+
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[object()]),
+        patch(
+            "discord_ferry.gui_tools.load_state",
+            return_value=_StubState([{"id": "1"}, {"id": "2"}]),
+        ),
+        patch("discord_ferry.gui_tools.run_retry_failed", new=fake_retry),
+    ):
+        await user.open("/tools/retry")
+        user.find("Export directory").elements.pop().set_value(str(export_dir))
+        user.find("Run retry").click()
+        await user.should_see("2 succeeded, 0 still failed")
+
+
+async def test_retry_page_handles_no_failures(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-4.3: with nothing failed, the page reports 0 and 0 without erroring."""
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    async def fake_retry(config, state, exports, on_event, **k):  # type: ignore[no-untyped-def]
+        return None  # early return: nothing to do
+
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[object()]),
+        patch("discord_ferry.gui_tools.load_state", return_value=_StubState([])),
+        patch("discord_ferry.gui_tools.run_retry_failed", new=fake_retry),
+    ):
+        await user.open("/tools/retry")
+        user.find("Export directory").elements.pop().set_value(str(export_dir))
+        user.find("Run retry").click()
+        await user.should_see("0 succeeded, 0 still failed")
+
+
+async def test_no_tool_page_renders_a_raw_token(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-I4: a token in an engine exception never reaches a tool page's rendered output.
+
+    The page registers the token (prepare_tool_call) before the run, and run_tool
+    sanitizes the error at the log-widget push site. Each page is exercised; the
+    error label is the positive control (proving the flow ran) so should_not_see
+    is not vacuous for the rendered label/table surface.
+    """
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store["token"] = _TOKEN
+
+    async def boom(*a, **k):  # type: ignore[no-untyped-def]
+        raise RuntimeError(f"upstream said {_TOKEN}")
+
+    # Check page: run_check raises with the token in its message.
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=_StubState([])),
+        patch("discord_ferry.gui_tools.run_check", new=boom),
+    ):
+        await user.open("/tools/check")
+        user.find("Run check").click()
+        await user.should_see("Check failed")  # positive control: the error path ran
+        await user.should_not_see(_TOKEN)
+
+    # Repair and retry pages: same, with the export dir filled in.
+    for route, button, target, label in (
+        ("/tools/repair", "Run repair", "run_repair", "Repair failed"),
+        ("/tools/retry", "Run retry", "run_retry_failed", "Retry failed"),
+    ):
+        with (
+            patch("discord_ferry.gui_tools.parse_export_directory", return_value=[object()]),
+            patch("discord_ferry.gui_tools.load_state", return_value=_StubState([])),
+            patch(f"discord_ferry.gui_tools.{target}", new=boom),
+        ):
+            await user.open(route)
+            user.find("Export directory").elements.pop().set_value(str(export_dir))
+            user.find(button).click()
+            await user.should_see(label)  # positive control: the error path ran
+            await user.should_not_see(_TOKEN)
