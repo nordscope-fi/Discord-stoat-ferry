@@ -1328,7 +1328,15 @@ def rollback_cmd(
 @click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
 @click.option("--token", envvar="STOAT_TOKEN", default=None, help="Stoat user token")
 @click.option("--test-server-id", required=True, help="Throwaway server for probe entities")
-@click.option("--deep", is_flag=True, default=False, help="Probe Autumn size boundaries by upload")
+@click.option(
+    "--deep",
+    is_flag=True,
+    default=False,
+    help=(
+        "Upload test files at each Autumn size boundary and report enforced vs "
+        "advertised limits. Leaves orphaned files in Autumn storage."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit machine-readable JSON")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def probe_cmd(
