@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from nicegui import background_tasks
+from nicegui import background_tasks, ui
 
 import discord_ferry.migrator.api as _api
 from discord_ferry.core.http import format_proxy_notices
@@ -78,3 +78,29 @@ def prepare_tool_call(token: str) -> list[str]:
     if not _semaphore_is_set():
         _api.init_request_semaphore()
     return format_proxy_notices()
+
+
+#: The tool pages, listed on the /tools landing screen. Every route is present
+#: from the start; each page comes online as its plan chunk lands.
+_TOOLS: list[tuple[str, str, str]] = [
+    ("Check", "/tools/check", "Verify a finished migration"),
+    ("Repair", "/tools/repair", "Recreate what is missing and resend"),
+    ("Retry", "/tools/retry", "Resend failed messages"),
+    ("Probe", "/tools/probe", "Check API limits before migrating"),
+    ("Blueprint export", "/tools/blueprint-export", "Turn an export into a reusable blueprint"),
+    ("Build", "/tools/build", "Build a server from a template or blueprint"),
+    ("Validate", "/tools/validate", "Check an export before migrating"),
+    ("Stats", "/tools/stats", "Summarise a past migration"),
+    ("TLS check", "/tools/tls-check", "Inspect trust and proxy state"),
+]
+
+
+@ui.page("/tools")
+def tools_page() -> None:
+    """Landing screen listing every tool page."""
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Tools").classes("text-2xl font-bold mb-4")
+        for name, route, desc in _TOOLS:
+            with ui.card().classes("w-full max-w-xl"):
+                ui.link(name, route).classes("text-lg font-bold")
+                ui.label(desc).classes("text-sm text-gray-500")

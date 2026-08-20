@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from nicegui import app, background_tasks, ui
 from nicegui.client import ClientConnectionTimeout
 
+from discord_ferry import gui_tools  # noqa: F401 -- registers the /tools routes as a side effect
 from discord_ferry.config import FerryConfig
 from discord_ferry.core import entry
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback

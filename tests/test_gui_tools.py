@@ -4,6 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from typing import TYPE_CHECKING
+
+import pytest
+
+if TYPE_CHECKING:
+    from nicegui.testing import User
+
+# The User-fixture tests below need the routes re-registered inside the
+# simulation; nicegui_app.py reloads both gui and gui_tools for that.
+pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_app.py")
 
 # A realistic-length opaque Stoat token, so the redaction test can actually fail
 # (a token too short to trigger the mask would pass a broken implementation).
@@ -110,3 +120,20 @@ def test_run_tool_error_path_sanitizes_and_reports_none(monkeypatch) -> None:  #
     assert done == [None]  # callback got None on error
     assert pushed and _TOKEN not in pushed[0]  # error line was sanitized
     reset_secret_registry()
+
+
+async def test_tools_landing_lists_tools(user: User) -> None:
+    """SC-1.1: /tools is reachable and lists every tool."""
+    await user.open("/tools")
+    for name in (
+        "Check",
+        "Repair",
+        "Retry",
+        "Probe",
+        "Blueprint export",
+        "Build",
+        "Validate",
+        "Stats",
+        "TLS check",
+    ):
+        await user.should_see(name)
