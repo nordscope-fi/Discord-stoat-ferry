@@ -511,19 +511,23 @@ def retry_page() -> None:
 def probe_page() -> None:
     """Preflight a live Stoat instance for Autumn limits, rate window, voice, webhooks.
 
-    A self-contained preflight: it collects its own URL and token rather than a
-    prior migration's session (design line 83), so it works before any migration
-    exists. No session-expired guard, for the same reason.
+    Reads stoat_url from the user store and the token from the tab store, with a
+    session-expired guard when the tab store is empty (design: every tool page
+    sources credentials this way; entering a token when the store is empty is the
+    deferred #524). Needs a throwaway test server id and an optional deep toggle.
     """
     client = ui.context.client
-    default_url = str(app.storage.user.get("stoat_url", ""))
-    default_token = _tab_token() or ""
+    stoat_url = str(app.storage.user.get("stoat_url", ""))
+    token = _tab_token()
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Preflight a Stoat instance").classes("text-2xl font-bold mb-4")
+        if token is None:
+            ui.label("Session expired. Re-enter your token on the setup page.").classes(
+                "text-red-600"
+            )
+            return
 
-        url_input = ui.input("Stoat URL", value=default_url).classes("w-96")
-        token_input = ui.input("Stoat token", value=default_token, password=True).classes("w-96")
         server_input = ui.input("Throwaway test server ID").classes("w-96")
         deep_cb = ui.checkbox("Deep probe (upload test files at each Autumn size boundary)")
         deep_warning = ui.label(
@@ -547,12 +551,7 @@ def probe_page() -> None:
 
         def _run() -> None:
             results.clear()
-            stoat_url = url_input.value.strip()
-            token = token_input.value.strip()
             server_id = server_input.value.strip()
-            if not stoat_url or not token:
-                ui.notify("Enter a Stoat URL and token.", type="warning")
-                return
             if not server_id:
                 ui.notify(
                     "Enter a throwaway test server ID. Probe creates and deletes entities in it.",

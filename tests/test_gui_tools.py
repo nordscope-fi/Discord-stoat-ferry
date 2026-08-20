@@ -346,6 +346,20 @@ def test_probe_report_summary_counts_by_status() -> None:
     assert gui_tools._probe_counts(report) == {"ok": 1, "warn": 1, "fail": 1}
 
 
+async def test_probe_page_bounces_without_token(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Chunk 6 Task 14: probe shows the session-expired guard when the tab store is empty."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store.pop("token", None)
+
+    await user.open("/tools/probe")
+    await user.should_see("Session expired")
+    await user.should_not_see("Run probe")
+
+
 async def test_probe_page_requires_test_server_id(
     user: User,
     user_store: dict[str, object],
