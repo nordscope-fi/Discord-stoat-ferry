@@ -15,7 +15,7 @@ from click.testing import CliRunner
 from discord_ferry.cli import main
 from discord_ferry.core.http import reset_http_state
 from discord_ferry.errors import MigrationError
-from discord_ferry.migrator.verify import CheckReport
+from discord_ferry.migrator.verify import CheckReport, RepairOutcome
 from discord_ferry.state import MigrationState
 
 if TYPE_CHECKING:
@@ -3032,3 +3032,107 @@ def test_repair_still_exits_zero_on_a_documented_partial_restore(
     assert result.exit_code == 0, (
         f"a documented partial restore exited {result.exit_code}, which fails every merge repair"
     )
+
+
+# ---------------------------------------------------------------------------
+# ferry repair --json (#308)
+# ---------------------------------------------------------------------------
+
+
+def _invoke_repair(
+    runner: CliRunner,
+    tmp_path: Path,
+    outcome: RepairOutcome,
+    *extra: str,
+    state: MigrationState | None = None,
+    post_check: CheckReport | None = None,
+    post_check_error: Exception | None = None,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> Any:
+    """Drive repair_cmd with a mocked run_repair outcome and post-repair check."""
+    st = state if state is not None else MigrationState(stoat_server_id="srv1")
+    check_mock = (
+        AsyncMock(side_effect=post_check_error)
+        if post_check_error is not None
+        else AsyncMock(return_value=post_check if post_check is not None else CheckReport())
+    )
+    with (
+        patch("discord_ferry.cli.register_secret", lambda *_a: None),
+        patch("discord_ferry.cli.init_request_semaphore", lambda *_a: None),
+        patch("discord_ferry.cli.load_state", return_value=st),
+        patch("discord_ferry.cli.parse_export_directory", return_value=[]),
+        patch("discord_ferry.cli.run_repair", new=AsyncMock(return_value=outcome)),
+        patch("discord_ferry.migrator.verify.run_check", new=check_mock),
+    ):
+        return runner.invoke(
+            main,
+            [
+                "repair",
+                str(tmp_path),
+                "--export-dir",
+                str(tmp_path),
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                "t",
+                *extra,
+            ],
+        )
+
+
+def test_repair_json_prints_one_parseable_document(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.1, SC-4.1. Asserted by parsing, never by inspecting the string (#145)."""
+    outcome = RepairOutcome(
+        recreated_channels=[
+            {"discord_id": "d1", "stoat_id": "s1", "name": "general", "resent_count": 2}
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome, "--json")
+    doc = json.loads(result.stdout)
+    assert set(doc) >= {"dry_run", "actions", "declined", "failed_messages", "check"}
+    assert doc["actions"]["recreated_channels"][0]["name"] == "general"
+    assert doc["check"] is not None
+
+
+def test_repair_json_keeps_human_output_off_stdout(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SC-1.2. The banner and proxy notices go to stderr; stdout is pure JSON."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8080")
+    monkeypatch.setenv("COLUMNS", "200")
+    outcome = RepairOutcome()
+    result = _invoke_repair(runner, tmp_path, outcome, "--json")
+    json.loads(result.stdout)  # stdout parses as JSON
+    assert "Discord Ferry" not in result.stdout
+    assert "Discord Ferry" in result.stderr
+
+
+def test_repair_without_json_prints_the_banner_on_stdout(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-1.3. Without --json the human banner is unchanged on stdout."""
+    result = _invoke_repair(runner, tmp_path, RepairOutcome())
+    assert "Discord Ferry" in result.output
+
+
+def test_repair_dry_run_json_has_null_check_and_exits_zero(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-4.3. --dry-run --json emits a valid document, check null, exit 0."""
+    result = _invoke_repair(runner, tmp_path, RepairOutcome(dry_run=True), "--json", "--dry-run")
+    doc = json.loads(result.stdout)
+    assert doc["dry_run"] is True
+    assert doc["check"] is None
+    assert result.exit_code == 0
+
+
+def test_repair_json_survives_a_failing_post_check(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-4.4. A failing post-repair check yields check null + check_error, no crash."""
+    result = _invoke_repair(
+        runner,
+        tmp_path,
+        RepairOutcome(),
+        "--json",
+        post_check_error=MigrationError("boom"),
+    )
+    doc = json.loads(result.stdout)
+    assert doc["check"] is None
+    assert "check_error" in doc
