@@ -18,14 +18,15 @@ import discord_ferry.migrator.api as _api
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, StateError
-from discord_ferry.migrator.verify import run_check
+from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
 from discord_ferry.state import load_state
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from discord_ferry.core.events import MigrationEvent
-    from discord_ferry.migrator.verify import CheckReport
+    from discord_ferry.migrator.verify import CheckReport, RepairOutcome
+    from discord_ferry.state import MigrationState
 
 T = TypeVar("T")
 
@@ -75,6 +76,20 @@ def _check_verdict(report: CheckReport) -> tuple[str, str]:
     if report.has_failures:
         return "Check found problems.", "text-red-600"
     return "Check passed.", "text-green-600"
+
+
+def _repair_verdict(outcome: RepairOutcome, state: MigrationState) -> tuple[bool, str, str]:
+    """Return (failed, label, colour), mirroring the CLI repair exit code exactly.
+
+    The CLI is ``1 if (state.failed_messages or declined) else 0`` where declined
+    is ``outcome.declined`` filtered to ``UNREPAIRED_WARNING_TYPES`` (cli.py, the
+    repair command). Sourced from the returned outcome, not the never-cleared
+    ``state.warnings``, per the #308 fix.
+    """
+    declined = [w for w in outcome.declined if w.get("type") in UNREPAIRED_WARNING_TYPES]
+    if state.failed_messages or declined:
+        return True, "Repair left unfixable problems.", "text-red-600"
+    return False, "Repair complete.", "text-green-600"
 
 
 def render_check_report(report: CheckReport) -> None:
