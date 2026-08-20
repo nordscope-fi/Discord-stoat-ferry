@@ -7,7 +7,12 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
-from discord_ferry.migrator.probe import ProbeReport, _make_test_file, _raw_autumn_upload
+from discord_ferry.migrator.probe import (
+    ProbeReport,
+    _check_autumn,
+    _make_test_file,
+    _raw_autumn_upload,
+)
 
 BASE_URL = "https://api.test"
 AUTUMN_URL = "https://cdn.test"
@@ -54,6 +59,28 @@ def test_make_test_file_png_various_tags(tmp_path: Path) -> None:
         assert path.stat().st_size == target, f"{tag} size mismatch"
         with open(path, "rb") as f:
             assert f.read(8) == b"\x89PNG\r\n\x1a\n", f"{tag} not valid PNG"
+
+
+async def test_check_autumn_returns_autumn_url(mock_aiohttp: aioresponses) -> None:
+    """_check_autumn returns the discovered autumn_url for deep probe reuse."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/",
+        payload={"features": {"autumn": {"url": AUTUMN_URL}}},
+    )
+    mock_aiohttp.get(f"{AUTUMN_URL}/", payload={"autumn": "0.5.0", "version": "0.5.0"})
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as sess:
+        result = await _check_autumn(sess, BASE_URL, report)
+    assert result == AUTUMN_URL
+
+
+async def test_check_autumn_returns_none_on_failure(mock_aiohttp: aioresponses) -> None:
+    """_check_autumn returns None when the root is unreachable."""
+    mock_aiohttp.get(f"{BASE_URL}/", exception=aiohttp.ClientError("conn refused"))
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as sess:
+        result = await _check_autumn(sess, BASE_URL, report)
+    assert result is None
 
 
 async def test_raw_upload_returns_status_without_raising(

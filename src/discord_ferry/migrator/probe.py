@@ -134,19 +134,23 @@ async def run_probe(
     own_session = session is None
     sess = session or new_session()
     try:
-        await _check_autumn(sess, stoat_url, report)
+        autumn_url = await _check_autumn(sess, stoat_url, report)
         await _check_voice_bug(sess, stoat_url, token, test_server_id, report)
         await _check_webhook(sess, stoat_url, token, test_server_id, report)
         await _check_rate_limit(sess, stoat_url, token, test_server_id, report)
         if deep:
-            report.add("deep_probe", "warn", "deep boundary-upload probe not yet implemented")
+            await _check_deep_uploads(
+                sess, stoat_url, autumn_url, token, test_server_id, report
+            )
     finally:
         if own_session:
             await sess.close()
     return report
 
 
-async def _check_autumn(sess: aiohttp.ClientSession, stoat_url: str, report: ProbeReport) -> None:
+async def _check_autumn(
+    sess: aiohttp.ClientSession, stoat_url: str, report: ProbeReport
+) -> str | None:
     """Diff our assumed upload limits against the ones this instance advertises.
 
     The limits live on the **Stoat** root under
@@ -168,11 +172,14 @@ async def _check_autumn(sess: aiohttp.ClientSession, stoat_url: str, report: Pro
         detail = f"{type(exc).__name__}: {exc}"
         report.add("autumn_limits", "fail", detail)
         report.add("autumn_reachable", "fail", f"Stoat root unreachable: {detail}")
-        return
+        return None
 
     features = _sub_dict(root, "features")
     _report_autumn_limits(features, report)
     await _report_autumn_reachable(sess, features, report)
+
+    autumn_url = _sub_dict(features, "autumn").get("url")
+    return autumn_url if isinstance(autumn_url, str) and autumn_url else None
 
 
 def _report_autumn_limits(features: dict[str, Any], report: ProbeReport) -> None:
@@ -344,3 +351,21 @@ async def _check_rate_limit(
         report.add("rate_limit", "ok", f"headers={rl or 'none observed'}")
     except Exception as exc:  # noqa: BLE001
         report.add("rate_limit", "fail", f"{type(exc).__name__}: {exc}")
+
+
+async def _check_deep_uploads(
+    sess: aiohttp.ClientSession,
+    stoat_url: str,
+    autumn_url: str | None,
+    token: str,
+    server_id: str,
+    report: ProbeReport,
+) -> None:
+    """Upload test files at each TAG_SIZE_LIMITS boundary and report enforcement.
+
+    Stub: the full implementation lands in the next task.
+    """
+    if not autumn_url:
+        report.add("deep_probe", "fail", "cannot run deep probe without Autumn URL")
+        return
+    report.add("deep_probe", "warn", "deep boundary-upload probe not yet implemented")
