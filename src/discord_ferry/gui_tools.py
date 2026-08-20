@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from nicegui import app, background_tasks, ui
 
 import discord_ferry.migrator.api as _api
+from discord_ferry.blueprint import blueprint_from_exports, export_blueprint
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_repair, run_retry_failed
 from discord_ferry.core.http import format_proxy_notices
@@ -28,6 +29,7 @@ from discord_ferry.state import load_state
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from discord_ferry.blueprint import ServerBlueprint
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.migrator.probe import ProbeReport
     from discord_ferry.migrator.verify import CheckReport, RepairOutcome
@@ -575,3 +577,65 @@ def probe_page() -> None:
             run_tool(client, log.push, _do_probe, on_done)
 
         ui.button("Run probe", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/blueprint-export")
+def blueprint_export_page() -> None:
+    """Turn a DCE export directory into a reusable server blueprint.
+
+    Offline: it reads local export files and writes a JSON blueprint, making no
+    API call, so there is no token and no runner. Unlike the CLI, which
+    overwrites the output silently, this asks before replacing an existing file.
+    """
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Export a blueprint").classes("text-2xl font-bold mb-4")
+        from_input = ui.input("Export directory (the DCE export)").classes("w-96")
+        output_input = ui.input("Output path (blueprint JSON)", value="blueprint.json").classes(
+            "w-96"
+        )
+        name_input = ui.input("Server name (optional, overrides the export's)").classes("w-96")
+        overwrite_cb = ui.checkbox("Overwrite the output file if it already exists")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def _write(bp: ServerBlueprint, output_path: Path) -> None:
+            export_blueprint(bp, output_path)
+            channels = sum(len(c.channels) for c in bp.categories) + len(bp.uncategorized_channels)
+            results.clear()
+            with results:
+                # Counts are integers and the path is user-supplied, so neither is
+                # server-controlled text; no sanitizing needed here.
+                ui.label(
+                    f"Blueprint written to {output_path} "
+                    f"({len(bp.categories)} categories, {channels} channels)."
+                ).classes("text-green-600")
+
+        def _run() -> None:
+            results.clear()
+            from_dir = from_input.value.strip()
+            output = output_input.value.strip()
+            if not from_dir or not Path(from_dir).is_dir():
+                ui.notify("Enter a valid export directory.", type="warning")
+                return
+            if not output:
+                ui.notify("Enter an output path for the blueprint.", type="warning")
+                return
+            exports = parse_export_directory(Path(from_dir))
+            if not exports:
+                with results:
+                    ui.label("No valid DCE JSON files found in that directory.").classes(
+                        "text-red-600"
+                    )
+                return
+            output_path = Path(output)
+            if output_path.exists() and not overwrite_cb.value:
+                # The CLI overwrites silently; here the write waits on an explicit
+                # confirmation so a user cannot lose an existing blueprint by accident.
+                with results:
+                    ui.label(
+                        f"{output_path} already exists. Tick 'Overwrite' to replace it."
+                    ).classes("text-amber-700")
+                return
+            bp = blueprint_from_exports(exports, name_input.value.strip() or None)
+            _write(bp, output_path)
+
+        ui.button("Export blueprint", on_click=_run).classes("mt-2")
