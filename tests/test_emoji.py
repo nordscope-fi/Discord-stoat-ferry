@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from discord_ferry.config import FerryConfig
 from discord_ferry.migrator.emoji import (
     _extract_emoji_from_content,
+    messages_using_emoji,
     run_emoji,
     upload_and_create_emoji,
 )
@@ -797,3 +798,23 @@ async def test_upload_and_create_emoji_uploads_then_creates(tmp_path: Path) -> N
     # api_create_emoji(session, stoat_url, token, autumn_id, name, server_id)
     assert cr.await_args.args[3] == "new_autumn"
     assert cr.await_args.args[5] == "srv1"
+
+
+def test_messages_using_emoji_finds_content_not_reaction() -> None:
+    """SC-2.1/2.5: content uses are found; a reaction-only use is excluded."""
+    m1 = _make_message(msg_id="m1", content="hi <:smile:123> there")
+    m2 = _make_message(msg_id="m2", content="plain text")
+    m3 = _make_message(
+        msg_id="m3",
+        reactions=[DCEReaction(emoji=DCEEmoji(id="123", name="smile", image_url="e.png"), count=1)],
+    )
+    exp = _make_export([m1, m2, m3])
+    hits = list(messages_using_emoji([exp], "123"))
+    assert [m.id for m in hits] == ["m1"]
+
+
+def test_messages_using_emoji_ignores_other_emoji() -> None:
+    """A message using a different custom emoji is not yielded."""
+    m1 = _make_message(msg_id="m1", content="<:other:999>")
+    exp = _make_export([m1])
+    assert list(messages_using_emoji([exp], "123")) == []
