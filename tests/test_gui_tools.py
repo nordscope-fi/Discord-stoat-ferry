@@ -151,3 +151,22 @@ def test_status_colour_covers_every_check_status() -> None:
         assert gui_tools._status_colour(status)
     # an unknown status resolves to a defined default, never a crash
     assert gui_tools._status_colour("nonsense")
+
+
+def test_check_rows_one_per_result_with_status_and_detail() -> None:
+    """SC-2.1: the check table has a row per result carrying status and detail."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.verify import CheckReport
+
+    report = CheckReport()
+    report.add(name="general", status="ok", kind="channel_present", detail="present")
+    report.add(name="mods", status="fail", kind="channel_missing", detail="missing on target")
+
+    rows = gui_tools._check_rows(report)
+
+    assert len(rows) == 2
+    assert rows[0]["name"] == "general"
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["detail"] == "present"
+    assert rows[1]["colour"] == gui_tools._status_colour("fail")
+    assert report.counts()["fail"] == 1

@@ -20,6 +20,8 @@ from discord_ferry.core.security import register_secret, sanitize_secrets
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from discord_ferry.migrator.verify import CheckReport
+
 T = TypeVar("T")
 
 
@@ -38,6 +40,38 @@ _STATUS_COLOURS: dict[str, str] = {
 def _status_colour(status: str) -> str:
     """The badge colour for a report status, grey for anything unrecognised."""
     return _STATUS_COLOURS.get(status, "grey")
+
+
+def _check_rows(report: CheckReport) -> list[dict[str, str]]:
+    """One table row per check result, carrying its badge colour."""
+    return [
+        {
+            "name": r.name,
+            "status": r.status,
+            "detail": r.detail,
+            "colour": _status_colour(r.status),
+        }
+        for r in report.results
+    ]
+
+
+def render_check_report(report: CheckReport) -> None:
+    """Render a CheckReport as a summary line and a per-result table.
+
+    Reused by the repair page for its embedded check. The report is a return
+    value, not an event stream, so this renders from the object directly.
+    """
+    counts = report.counts()
+    ui.label(
+        f"{counts['ok']} ok, {counts['warn']} warn, "
+        f"{counts['fail']} fail, {counts['unverifiable']} unverifiable"
+    ).classes("text-sm text-gray-600")
+    columns = [
+        {"name": "name", "label": "Entity", "field": "name", "align": "left"},
+        {"name": "status", "label": "Status", "field": "status", "align": "left"},
+        {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
+    ]
+    ui.table(columns=columns, rows=_check_rows(report)).classes("w-full mt-2")
 
 
 def _semaphore_is_set() -> bool:
