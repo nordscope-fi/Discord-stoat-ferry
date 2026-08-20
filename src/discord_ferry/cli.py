@@ -1803,8 +1803,9 @@ def repair_cmd(
         # forever even after the defect is fixed, while the --json document's
         # `declined` field (also from outcome.declined) correctly reports []. The
         # exit code and the document must agree. See #308 whole-branch review.
-        unrepaired = {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
-        declined = [w for w in outcome.declined if w.get("type") in unrepaired]
+        from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES
+
+        declined = [w for w in outcome.declined if w.get("type") in UNREPAIRED_WARNING_TYPES]
         code = 1 if (state.failed_messages or declined) else 0
 
     # The JSON document is emitted for BOTH exit codes, and its exit code is the
