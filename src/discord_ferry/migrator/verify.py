@@ -123,6 +123,17 @@ class CheckResult:
     found: str | None = None
 
 
+#: Warning types repair cannot fix, so the migration is not whole while any
+#: remains. merge_thread_content_not_restored and no_discord_metadata are
+#: deliberately excluded: the first names a partial restore of something repair
+#: DID fix, and failing every merge repair on it would make the code useless;
+#: the second is a degradation rather than an unrepaired defect. Shared by the
+#: CLI repair exit code and the GUI repair page so they cannot diverge.
+UNREPAIRED_WARNING_TYPES = frozenset(
+    {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
+)
+
+
 @dataclass
 class CheckReport:
     """Every verdict from one run."""
