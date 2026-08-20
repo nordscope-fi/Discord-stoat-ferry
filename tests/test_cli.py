@@ -2823,8 +2823,8 @@ def test_repair_exits_zero_when_nothing_is_left_failing(runner: CliRunner, tmp_p
 
     save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
 
-    async def _noop(*_a: Any, **_k: Any) -> None:
-        return None
+    async def _noop(*_a: Any, **_k: Any) -> RepairOutcome:
+        return RepairOutcome()
 
     with patch("discord_ferry.cli.run_repair", new=_noop):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -2838,8 +2838,8 @@ def test_repair_exits_non_zero_when_a_message_is_still_failed(
     export_dir = _write_minimal_export(tmp_path / "export")
     out_dir = _write_state_with_one_failure(tmp_path / "out")
 
-    async def _leaves_it(config: Any, state: Any, exports: Any, on_event: Any) -> None:
-        return None
+    async def _leaves_it(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
+        return RepairOutcome()
 
     with patch("discord_ferry.cli.run_repair", new=_leaves_it):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -2884,8 +2884,9 @@ def test_repair_passes_a_real_export_to_the_coroutine(runner: CliRunner, tmp_pat
     save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
     seen: dict[str, Any] = {}
 
-    async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+    async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
         seen["exports"] = exports
+        return RepairOutcome()
 
     with patch("discord_ferry.cli.run_repair", new=_capture):
         runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -2905,8 +2906,9 @@ def test_repair_registers_the_token_and_the_semaphore_before_any_request(
     save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
     order: list[str] = []
 
-    async def _noop(*_a: Any, **_k: Any) -> None:
+    async def _noop(*_a: Any, **_k: Any) -> RepairOutcome:
         order.append("request")
+        return RepairOutcome()
 
     with (
         patch(
@@ -2985,19 +2987,40 @@ def test_repair_exits_non_zero_when_it_declined_a_repair(runner: CliRunner, tmp_
 
     save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
 
-    async def _declines(config: Any, state: Any, exports: Any, on_event: Any) -> None:
-        state.warnings.append(
-            {
-                "phase": "repair",
-                "type": "no_recorded_name",
-                "message": "Cannot recreate channel 800000000000000001",
-            }
-        )
+    async def _declines(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
+        decline = {
+            "phase": "repair",
+            "type": "no_recorded_name",
+            "message": "Cannot recreate channel 800000000000000001",
+        }
+        state.warnings.append(decline)
+        return RepairOutcome(declined=[{"type": "no_recorded_name", "message": decline["message"]}])
 
     with patch("discord_ferry.cli.run_repair", new=_declines):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
     assert result.exit_code == 1, (
         f"a declined repair exited {result.exit_code}, which reads as success"
+    )
+
+
+def test_repair_exit_code_ignores_a_stale_decline_from_an_earlier_run(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """#308 whole-branch review. The exit code reflects THIS run, not history.
+
+    state.warnings is never cleared, so a not_in_export from an earlier run
+    persists on disk. If the exit code rescanned that list, it would report 1
+    forever, while the --json document's `declined` (scoped to this run) reports
+    []. The two must agree. This run declines nothing new and fails nothing, so
+    it must exit 0 and its document must show declined == [].
+    """
+    state = MigrationState(stoat_server_id="srv1")
+    state.warnings.append({"phase": "repair", "type": "not_in_export", "message": "old run"})
+    result = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json", state=state)
+    doc = json.loads(result.stdout)
+    assert doc["declined"] == []
+    assert result.exit_code == 0, (
+        f"a stale decline from an earlier run made this run exit {result.exit_code}"
     )
 
 
@@ -3018,14 +3041,14 @@ def test_repair_still_exits_zero_on_a_documented_partial_restore(
 
     save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
 
-    async def _partial(config: Any, state: Any, exports: Any, on_event: Any) -> None:
-        state.warnings.append(
-            {
-                "phase": "repair",
-                "type": "merge_thread_content_not_restored",
-                "message": "thread content not restored",
-            }
-        )
+    async def _partial(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
+        decline = {
+            "phase": "repair",
+            "type": "merge_thread_content_not_restored",
+            "message": "thread content not restored",
+        }
+        state.warnings.append(decline)
+        return RepairOutcome(declined=[{"type": decline["type"], "message": decline["message"]}])
 
     with patch("discord_ferry.cli.run_repair", new=_partial):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
