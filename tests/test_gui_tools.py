@@ -297,6 +297,55 @@ def test_check_rows_sanitizes_server_controlled_text() -> None:
     reset_secret_registry()
 
 
+def test_probe_rows_one_per_check_with_status_and_detail() -> None:
+    """Chunk 6 Task 13: the probe table has a row per check carrying status and detail."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.probe import ProbeReport
+
+    report = ProbeReport()
+    report.add("autumn_reachable", "ok", "https://autumn (version 1)")
+    report.add("voice_channel", "warn", "voice unsupported on this instance")
+
+    rows = gui_tools._probe_rows(report)
+
+    assert len(rows) == 2
+    assert rows[0]["name"] == "autumn_reachable"
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["detail"] == "https://autumn (version 1)"
+    assert rows[1]["colour"] == gui_tools._status_colour("warn")
+
+
+def test_probe_rows_sanitizes_server_controlled_text() -> None:
+    """The probe detail is instance-controlled text, so it is sanitized at the sink."""
+    from discord_ferry import gui_tools
+    from discord_ferry.core.security import register_secret, reset_secret_registry
+    from discord_ferry.migrator.probe import ProbeReport
+
+    reset_secret_registry()
+    register_secret("stoat", _TOKEN)
+    report = ProbeReport()
+    report.add("rate_limit", "ok", f"headers leaked {_TOKEN}")
+
+    rows = gui_tools._probe_rows(report)
+
+    assert _TOKEN not in rows[0]["detail"]
+    assert _TOKEN in report.checks[0].detail  # control: the token really was in the source
+    reset_secret_registry()
+
+
+def test_probe_report_summary_counts_by_status() -> None:
+    """render_probe_report's summary line counts ok/warn/fail from the checks."""
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.probe import ProbeReport
+
+    report = ProbeReport()
+    report.add("a", "ok", "x")
+    report.add("b", "warn", "y")
+    report.add("c", "fail", "z")
+
+    assert gui_tools._probe_counts(report) == {"ok": 1, "warn": 1, "fail": 1}
+
+
 class _StubState:
     """Minimal stand-in for MigrationState for the repair verdict and page."""
 
