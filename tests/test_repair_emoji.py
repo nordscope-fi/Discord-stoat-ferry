@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 from discord_ferry.config import FerryConfig
@@ -18,7 +17,10 @@ from discord_ferry.parser.models import (
     DCEMessage,
     DCEReaction,
 )
-from discord_ferry.state import MigrationState, load_state
+from discord_ferry.state import MigrationState
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 EMOJI_ID = "123"
 OLD_ID = "old_id"
@@ -179,3 +181,111 @@ async def test_rerun_when_present_makes_no_second_emoji(tmp_path: Path) -> None:
         outcome = await run_repair(config, state, [_export([_message()])], [].append)
     up.assert_not_awaited()
     assert outcome.recreated_emoji == []
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2: rewrite references
+# ---------------------------------------------------------------------------
+
+
+async def _run_with_messages(tmp_path: Path, messages: list[DCEMessage]) -> Any:
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_EDIT, new=AsyncMock()) as edit,
+    ):
+        outcome = await run_repair(config, state, [_export(messages)], [].append)
+    return outcome, edit, state
+
+
+async def test_rewrite_only_edits_message_map_messages(tmp_path: Path) -> None:
+    """SC-2.1: a referencing message not in message_map is never edited."""
+    m1 = _message()  # id "m1", in message_map
+    m2 = DCEMessage(
+        id="m2",  # NOT in message_map
+        type="Default",
+        timestamp="2024-01-01T00:00:00Z",
+        content="also <:smile:123>",
+        author=DCEAuthor(id="u", name="U"),
+        reactions=[],
+    )
+    outcome, edit, _ = await _run_with_messages(tmp_path, [m1, m2])
+    edited_ids = [call.args[4] for call in edit.await_args_list]
+    assert edited_ids == ["stoat_msg"]  # only m1's mapped id
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
+
+
+async def test_rewrite_content_points_at_new_id(tmp_path: Path) -> None:
+    """SC-2.2: the edited content carries the new emoji id, not the old one."""
+    outcome, edit, _ = await _run_with_messages(tmp_path, [_message()])
+    content = edit.await_args_list[0].kwargs["content"]
+    assert f":{NEW_ID}:" in content
+    assert f":{OLD_ID}:" not in content
+
+
+async def test_rewrite_split_first_edits_first_part(tmp_path: Path) -> None:
+    """SC-2.3: emoji in the first split part edits that part."""
+    long_tail = " ".join(["word"] * 600)  # well over 2000 chars once rendered
+    m = _message(content=f"<:smile:123> {long_tail}")
+    outcome, edit, _ = await _run_with_messages(tmp_path, [m])
+    assert edit.await_count == 1
+    content = edit.await_args_list[0].kwargs["content"]
+    assert f":{NEW_ID}:" in content
+    assert len(content) <= 2000
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
+
+
+async def test_rewrite_split_tail_declines(tmp_path: Path) -> None:
+    """SC-2.4: emoji in a later split part is declined, not edited."""
+    long_head = " ".join(["word"] * 600)
+    m = _message(content=f"{long_head} <:smile:123>")
+    outcome, edit, state = await _run_with_messages(tmp_path, [m])
+    edit.assert_not_awaited()
+    assert outcome.recreated_emoji[0]["messages_declined"] == 1
+    assert any(d.get("type") == "emoji_in_split_tail" for d in outcome.declined)
+
+
+async def test_rewrite_reaction_only_makes_no_edit(tmp_path: Path) -> None:
+    """SC-2.5: an emoji used only in a reaction rewrites nothing."""
+    m = _message(content="no emoji here", with_reaction=True)
+    outcome, edit, _ = await _run_with_messages(tmp_path, [m])
+    edit.assert_not_awaited()
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 0
+
+
+async def test_rewrite_counts_all_referencing_messages(tmp_path: Path) -> None:
+    """SC-2.6: every mapped referencing message is counted."""
+    msgs = []
+    config_state_ids = {"m1": "stoat_msg", "m2": "s2", "m3": "s3"}
+    for i, mid in enumerate(config_state_ids):
+        # The first message carries the reaction so the image is recoverable;
+        # all three reference the emoji in content and so are rewritten.
+        reactions = (
+            [DCEReaction(emoji=DCEEmoji(id=EMOJI_ID, name="smile", image_url="smile.png"), count=1)]
+            if i == 0
+            else []
+        )
+        msgs.append(
+            DCEMessage(
+                id=mid,
+                type="Default",
+                timestamp="2024-01-01T00:00:00Z",
+                content="x <:smile:123>",
+                author=DCEAuthor(id="u", name="U"),
+                reactions=reactions,
+            )
+        )
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    state.message_map = dict(config_state_ids)
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_EDIT, new=AsyncMock()) as edit,
+    ):
+        outcome = await run_repair(config, state, [_export(msgs)], [].append)
+    assert edit.await_count == 3
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 3
+    assert EMOJI_ID not in state.pending_emoji_rewrites  # cleared on full success
