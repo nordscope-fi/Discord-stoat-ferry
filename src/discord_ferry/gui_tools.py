@@ -48,12 +48,18 @@ def _status_colour(status: str) -> str:
 
 
 def _check_rows(report: CheckReport) -> list[dict[str, str]]:
-    """One table row per check result, carrying its badge colour."""
+    """One table row per check result, carrying its badge colour.
+
+    The name and detail are server-controlled (entity names, prose from the
+    Stoat API), and the table is a rendered sink the logging formatter does not
+    cover, so both are sanitized here, the same reason ``_safe_push`` sanitizes
+    the log widget. The status and colour are internal enums, not sanitized.
+    """
     return [
         {
-            "name": r.name,
+            "name": sanitize_secrets(r.name),
             "status": r.status,
-            "detail": r.detail,
+            "detail": sanitize_secrets(r.detail),
             "colour": _status_colour(r.status),
         }
         for r in report.results
