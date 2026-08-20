@@ -1796,8 +1796,14 @@ def repair_cmd(
     if dry_run:
         code = 0
     else:
+        # Source the declined set from THIS run's outcome, not the raw
+        # state.warnings list. state.warnings is never cleared, so a stale
+        # not_in_export from an earlier run would keep this exit code at 1
+        # forever even after the defect is fixed, while the --json document's
+        # `declined` field (also from outcome.declined) correctly reports []. The
+        # exit code and the document must agree. See #308 whole-branch review.
         unrepaired = {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
-        declined = [w for w in state.warnings if w.get("type") in unrepaired]
+        declined = [w for w in outcome.declined if w.get("type") in unrepaired]
         code = 1 if (state.failed_messages or declined) else 0
 
     # The JSON document is emitted for BOTH exit codes, and its exit code is the
