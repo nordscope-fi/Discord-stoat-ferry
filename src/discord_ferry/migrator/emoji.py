@@ -17,6 +17,8 @@ from discord_ferry.uploader.autumn import upload_with_cache
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import aiohttp
+
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEExport
@@ -95,6 +97,49 @@ def _numeric_id_key(value: str) -> tuple[int, int | str]:
     after, lexicographically. The ``0``/``1`` tuple head prevents any int-vs-str comparison.
     """
     return (0, int(value)) if value.isdigit() else (1, value)
+
+
+async def upload_and_create_emoji(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    *,
+    file_path: Path,
+    name: str,
+    used_names: dict[str, int],
+) -> str:
+    """Upload an emoji image to Autumn and register it on the Stoat server.
+
+    Returns the new Autumn file id, which IS the emoji's Stoat id. Shared by the
+    emoji migration phase and ``run_repair``'s emoji pass, so both mint emoji
+    identically. The caller checks that the image is usable and emits its own
+    progress; this does the upload-then-create and nothing else.
+    """
+    autumn_id = await upload_with_cache(
+        session,
+        state.autumn_url,
+        "emojis",
+        file_path,
+        config.token,
+        state.upload_cache,
+        config.upload_delay,
+    )
+    sanitized_name = sanitize_emoji_name(name, used_names)
+    if sanitized_name != sanitize_emoji_name(name):
+        logger.warning(
+            "Emoji name collision: :%s: → :%s: (duplicate sanitized name)",
+            name,
+            sanitized_name,
+        )
+    await api_create_emoji(
+        session,
+        config.stoat_url,
+        config.token,
+        autumn_id,
+        sanitized_name,
+        state.stoat_server_id,
+    )
+    return autumn_id
 
 
 async def run_emoji(
@@ -284,30 +329,13 @@ async def run_emoji(
                 continue
 
             try:
-                autumn_id = await upload_with_cache(
+                autumn_id = await upload_and_create_emoji(
                     session,
-                    state.autumn_url,
-                    "emojis",
-                    file_path,
-                    config.token,
-                    state.upload_cache,
-                    config.upload_delay,
-                )
-
-                sanitized_name = sanitize_emoji_name(name, used_names)
-                if sanitized_name != sanitize_emoji_name(name):
-                    logger.warning(
-                        "Emoji name collision: :%s: → :%s: (duplicate sanitized name)",
-                        name,
-                        sanitized_name,
-                    )
-                await api_create_emoji(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    autumn_id,
-                    sanitized_name,
-                    state.stoat_server_id,
+                    config,
+                    state,
+                    file_path=file_path,
+                    name=name,
+                    used_names=used_names,
                 )
                 state.emoji_map[discord_id] = autumn_id
 
