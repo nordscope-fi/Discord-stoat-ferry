@@ -15,13 +15,14 @@ from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.uploader.autumn import upload_with_cache
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     import aiohttp
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
-    from discord_ferry.parser.models import DCEExport
+    from discord_ferry.parser.models import DCEExport, DCEMessage
     from discord_ferry.state import MigrationState
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,29 @@ def _numeric_id_key(value: str) -> tuple[int, int | str]:
     after, lexicographically. The ``0``/``1`` tuple head prevents any int-vs-str comparison.
     """
     return (0, int(value)) if value.isdigit() else (1, value)
+
+
+def messages_using_emoji(exports: list[DCEExport], discord_emoji_id: str) -> Iterator[DCEMessage]:
+    """Yield every message whose CONTENT uses the given custom emoji.
+
+    Reaction-only uses are not yielded: there is nothing in the message text to
+    rewrite. Streams the same way ``run_emoji`` does, so it works on both eager
+    and ``json_path``-backed exports.
+    """
+    for export in exports:
+        msg_iter = (
+            stream_messages(export.json_path)
+            if export.json_path is not None
+            else iter(export.messages)
+        )
+        for msg in msg_iter:
+            if not msg.content:
+                continue
+            if any(
+                eid == discord_emoji_id
+                for eid, _name, _animated in _extract_emoji_from_content(msg.content)
+            ):
+                yield msg
 
 
 async def upload_and_create_emoji(
