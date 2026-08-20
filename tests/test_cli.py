@@ -16,7 +16,7 @@ from discord_ferry.cli import main
 from discord_ferry.core.http import reset_http_state
 from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.verify import CheckReport, RepairOutcome
-from discord_ferry.state import MigrationState
+from discord_ferry.state import FailedMessage, MigrationState
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -3136,3 +3136,103 @@ def test_repair_json_survives_a_failing_post_check(runner: CliRunner, tmp_path: 
     doc = json.loads(result.stdout)
     assert doc["check"] is None
     assert "check_error" in doc
+
+
+def test_repair_exit_code_identical_with_and_without_json(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """SC-1.4. The --json flag never changes the exit code."""
+    clean = MigrationState(stoat_server_id="srv1")
+    failing = MigrationState(stoat_server_id="srv1")
+    failing.failed_messages = [FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="x")]
+
+    for state, expected in ((clean, 0), (failing, 1)):
+        plain = _invoke_repair(runner, tmp_path, RepairOutcome(), state=state)
+        js = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json", state=state)
+        assert plain.exit_code == expected
+        assert js.exit_code == expected
+
+
+def test_repair_json_empty_sections_are_lists(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-3.3. A clean run serialises declined and failed_messages as []."""
+    result = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json")
+    doc = json.loads(result.stdout)
+    assert doc["declined"] == []
+    assert doc["failed_messages"] == []
+
+
+def test_repair_json_failed_messages_carry_ids_only(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-3.2. Residual failures expose identifying fields, never message content."""
+    outcome = RepairOutcome(failed_messages=[{"discord_msg_id": "m1", "stoat_channel_id": "c1"}])
+    result = _invoke_repair(runner, tmp_path, outcome, "--json")
+    doc = json.loads(result.stdout)
+    assert doc["failed_messages"] == [{"discord_msg_id": "m1", "stoat_channel_id": "c1"}]
+    assert "content_preview" not in doc["failed_messages"][0]
+
+
+def test_repair_json_stdout_survives_a_realistic_payload(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.2. Modelled on the probe #145 test: force a payload past 200 chars.
+
+    The empty-payload tests above never wrap, which is exactly how #145 shipped
+    unnoticed. This one asserts its own length so shortening it later fails loud.
+    """
+    long_msg = (
+        "Role 'moderators' was recreated with its name and permissions. Its colour, "
+        "rank, hoist setting and icon are not restored: set them by hand (see #344)."
+    )
+    outcome = RepairOutcome(
+        recreated_channels=[
+            {
+                "discord_id": "d1",
+                "stoat_id": "s1",
+                "name": "announcements-general",
+                "resent_count": 42,
+            }
+        ],
+        declined=[{"type": "role_attributes_not_restored", "message": long_msg}],
+    )
+    result = _invoke_repair(runner, tmp_path, outcome, "--json")
+    doc = json.loads(result.stdout)
+    assert len(result.stdout) > 200
+    assert doc["declined"][0]["message"] == long_msg
+    assert long_msg in result.stdout  # intact on one line, no injected newline
+
+
+def test_repair_json_strips_control_chars_from_stdout(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-5.3. A control char in a recorded name never reaches stdout."""
+    outcome = RepairOutcome(
+        recreated_channels=[
+            {"discord_id": "d1", "stoat_id": "s1", "name": "gen\x07eral", "resent_count": 0}
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome, "--json")
+    assert "\x07" not in result.stdout
+    doc = json.loads(result.stdout)
+    assert doc["actions"]["recreated_channels"][0]["name"] == "general"
+
+
+def test_repair_json_mixed_run_is_consistent(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-I1. Every section populated; exit code equals the non-json run's."""
+    state = MigrationState(stoat_server_id="srv1")
+    state.failed_messages = [FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="x")]
+    outcome = RepairOutcome(
+        recreated_channels=[
+            {"discord_id": "d1", "stoat_id": "s1", "name": "general", "resent_count": 5}
+        ],
+        restored_tails=[{"discord_id": "d2", "stoat_id": "s2", "name": "notices"}],
+        dead_letter={"drained": 2, "remaining": 1},
+        declined=[{"type": "role_attributes_not_restored", "message": "colour not restored"}],
+        failed_messages=[{"discord_msg_id": "m1", "stoat_channel_id": "c1"}],
+    )
+    post = CheckReport()
+    post.add(name="c", status="fail", kind="channel_missing", detail="still gone", discord_id="d3")
+
+    js = _invoke_repair(runner, tmp_path, outcome, "--json", state=state, post_check=post)
+    plain = _invoke_repair(runner, tmp_path, outcome, state=state, post_check=post)
+    doc = json.loads(js.stdout)
+
+    assert doc["actions"]["recreated_channels"] and doc["actions"]["restored_tails"]
+    assert doc["actions"]["dead_letter"] == {"drained": 2, "remaining": 1}
+    assert doc["declined"] and doc["failed_messages"]
+    assert doc["check"]["counts"]["fail"] == 1
+    assert js.exit_code == plain.exit_code == 1
