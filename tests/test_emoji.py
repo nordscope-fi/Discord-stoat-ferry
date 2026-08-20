@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from discord_ferry.config import FerryConfig
 from discord_ferry.migrator.emoji import (
     _extract_emoji_from_content,
+    find_emoji_in_exports,
     messages_using_emoji,
     run_emoji,
     upload_and_create_emoji,
@@ -818,3 +819,25 @@ def test_messages_using_emoji_ignores_other_emoji() -> None:
     m1 = _make_message(msg_id="m1", content="<:other:999>")
     exp = _make_export([m1])
     assert list(messages_using_emoji([exp], "123")) == []
+
+
+def test_find_emoji_in_exports_recovers_name_and_image() -> None:
+    """The recreate step needs the name and image the id map never stored."""
+    m = _make_message(
+        msg_id="m1",
+        content="<:smile:123>",
+        reactions=[
+            DCEReaction(emoji=DCEEmoji(id="123", name="smile", image_url="smile.png"), count=1)
+        ],
+    )
+    exp = _make_export([m])
+    rec = find_emoji_in_exports([exp], "123")
+    assert rec is not None
+    assert rec["name"] == "smile"
+    assert rec["image_url"] == "smile.png"
+    assert rec["is_animated"] is False
+
+
+def test_find_emoji_in_exports_none_when_absent() -> None:
+    exp = _make_export([_make_message(content="plain text")])
+    assert find_emoji_in_exports([exp], "123") is None
