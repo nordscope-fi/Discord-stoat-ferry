@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import struct
+import tempfile
 import zlib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
@@ -13,17 +15,19 @@ import aiohttp  # noqa: TCH002
 from discord_ferry.core.http import new_session
 from discord_ferry.migrator.api import (
     api_create_channel,
+    api_create_emoji,
     api_create_webhook,
     api_delete_channel,
+    api_delete_emoji,
     api_delete_webhook,
+    api_edit_server,
     api_execute_webhook,
     api_fetch_channel,
 )
-from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
+from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_to_autumn
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 # Tiers on the Stoat root that may carry upload limits. `global` carries none today; it
 # is listed so that it would be compared rather than missed if it ever gained them.
@@ -139,9 +143,7 @@ async def run_probe(
         await _check_webhook(sess, stoat_url, token, test_server_id, report)
         await _check_rate_limit(sess, stoat_url, token, test_server_id, report)
         if deep:
-            await _check_deep_uploads(
-                sess, stoat_url, autumn_url, token, test_server_id, report
-            )
+            await _check_deep_uploads(sess, stoat_url, autumn_url, token, test_server_id, report)
     finally:
         if own_session:
             await sess.close()
@@ -361,11 +363,101 @@ async def _check_deep_uploads(
     server_id: str,
     report: ProbeReport,
 ) -> None:
-    """Upload test files at each TAG_SIZE_LIMITS boundary and report enforcement.
-
-    Stub: the full implementation lands in the next task.
-    """
+    """Upload test files at each TAG_SIZE_LIMITS boundary and report enforcement."""
     if not autumn_url:
         report.add("deep_probe", "fail", "cannot run deep probe without Autumn URL")
         return
-    report.add("deep_probe", "warn", "deep boundary-upload probe not yet implemented")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for tag, limit in TAG_SIZE_LIMITS.items():
+            await _probe_one_tag(
+                sess, stoat_url, autumn_url, token, server_id, tag, limit, tmp, report
+            )
+
+
+async def _probe_one_tag(
+    sess: aiohttp.ClientSession,
+    stoat_url: str,
+    autumn_url: str,
+    token: str,
+    server_id: str,
+    tag: str,
+    limit: int,
+    tmp: Path,
+    report: ProbeReport,
+) -> None:
+    """Probe one Autumn tag at its size boundary."""
+    channel_id: str | None = None
+    emoji_id: str | None = None
+    icon_set = False
+    banner_set = False
+
+    try:
+        at_file = _make_test_file(tmp, tag, limit)
+        at_status: int | str = "skipped"
+        file_id: str | None = None
+        try:
+            file_id = await upload_to_autumn(sess, autumn_url, tag, at_file, token)
+            at_status = 200
+        except Exception as exc:  # noqa: BLE001
+            at_status = getattr(exc, "status", str(exc))
+
+        report.add(
+            f"deep_{tag}_at_limit",
+            "ok" if at_status == 200 else "warn",
+            f"size={limit}, limit={limit}, status={at_status}",
+        )
+
+        if file_id:
+            if tag == "attachments":
+                ch = await api_create_channel(
+                    sess,
+                    stoat_url,
+                    token,
+                    server_id,
+                    name="ferry-probe-deep",
+                    channel_type="Text",
+                )
+                channel_id = ch.get("_id")
+            elif tag == "emojis":
+                await api_create_emoji(
+                    sess,
+                    stoat_url,
+                    token,
+                    file_id,
+                    "ferryprobe",
+                    server_id,
+                )
+                emoji_id = file_id
+            elif tag == "icons":
+                await api_edit_server(sess, stoat_url, token, server_id, icon=file_id)
+                icon_set = True
+            elif tag == "banners":
+                await api_edit_server(sess, stoat_url, token, server_id, banner=file_id)
+                banner_set = True
+
+        over_file = _make_test_file(tmp, tag, limit + 1)
+        over_status = await _raw_autumn_upload(sess, autumn_url, tag, over_file, token)
+
+        report.add(
+            f"deep_{tag}_over_limit",
+            "ok" if over_status != 200 else "warn",
+            f"size={limit + 1}, limit={limit}, status={over_status}"
+            + ("" if over_status != 200 else " (limit NOT enforced)"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        report.add(f"deep_{tag}_at_limit", "fail", f"{type(exc).__name__}: {exc}")
+    finally:
+        if channel_id:
+            with contextlib.suppress(Exception):
+                await api_delete_channel(sess, stoat_url, token, channel_id)
+        if emoji_id:
+            with contextlib.suppress(Exception):
+                await api_delete_emoji(sess, stoat_url, token, emoji_id)
+        if icon_set:
+            with contextlib.suppress(Exception):
+                await api_edit_server(sess, stoat_url, token, server_id, remove=["Icon"])
+        if banner_set:
+            with contextlib.suppress(Exception):
+                await api_edit_server(sess, stoat_url, token, server_id, remove=["Banner"])
