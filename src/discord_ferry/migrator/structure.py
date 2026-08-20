@@ -672,6 +672,26 @@ def _collect_roles_to_order(
     return roles_to_create, export_role_ids, discord_metadata
 
 
+async def run_role_backfill(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> None:
+    """Re-apply Discord role ordering to a server migrated before #380.
+
+    Orders by the same roles list ``run_roles`` builds, via
+    ``_collect_roles_to_order``, then reuses ``_apply_role_ordering``. It creates
+    nothing and touches no role attribute. ``_apply_role_ordering`` already
+    returns early when the order is correct or fewer than two known roles are
+    present, and degrades a permission refusal to a ``state.warnings`` entry
+    rather than raising, so this function does neither of those itself. #388.
+    """
+    roles, _export_role_ids, _discord_metadata = _collect_roles_to_order(config, exports)
+    async with get_session(config) as session:
+        await _apply_role_ordering(session, config, state, roles, on_event)
+
+
 async def run_roles(
     config: FerryConfig,
     state: MigrationState,
@@ -691,9 +711,7 @@ async def run_roles(
     """
     # Collect the roles to create and order. The helper is a pure collection and
     # union: it makes no API call and mutates no state. See _collect_roles_to_order.
-    roles_to_create, export_role_ids, discord_metadata = _collect_roles_to_order(
-        config, exports
-    )
+    roles_to_create, export_role_ids, discord_metadata = _collect_roles_to_order(config, exports)
 
     # Role cap, scoped to the union path exactly as before. The guard must stay:
     # api_fetch_root is a request the export-only path never makes.

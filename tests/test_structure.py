@@ -27,6 +27,7 @@ from discord_ferry.migrator.structure import (
     make_unique_channel_name,
     run_categories,
     run_channels,
+    run_role_backfill,
     run_roles,
     run_server,
 )
@@ -4757,3 +4758,217 @@ async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Pat
     assert resume_bodies == clean_bodies, (
         "a resumed run must reach the same hierarchy as an uninterrupted one"
     )
+
+
+# run_role_backfill (#388, #481)
+
+
+def _backfill_meta(role_metadata: dict[str, RoleMeta]) -> DiscordMetadata:
+    return DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        role_metadata=role_metadata,
+    )
+
+
+async def test_run_role_backfill_orders_live_only_roles(tmp_path: Path) -> None:
+    """SC-2.1. A role present only in discord_metadata is placed, not dropped."""
+    config = _make_config(tmp_path)
+    save_discord_metadata(
+        _backfill_meta(
+            {"r1": RoleMeta(name="A", position=1), "r2": RoleMeta(name="B", position=9)}
+        ),
+        tmp_path,
+    )
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"r1": "s-r1", "r2": "s-r2"}
+    # Export author posts under r1 only; r2 exists only in live metadata.
+    export = _make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="A")])])
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-r1": 0, "s-r2": 1}))
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    assert bodies == [{"ranks": ["s-r2", "s-r1"]}]  # position desc, live-only r2 on top
+
+
+async def test_run_role_backfill_export_only_orders_by_export_position(tmp_path: Path) -> None:
+    """SC-2.2. With no discord_metadata, ordering uses export positions."""
+    config = _make_config(tmp_path)  # no metadata saved
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "s-a", "b": "s-b"}
+    export = _make_export(
+        messages=[
+            _make_message(
+                "m1",
+                roles=[
+                    DCERole(id="a", name="A", position=1),
+                    DCERole(id="b", name="B", position=9),
+                ],
+            )
+        ]
+    )
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}))
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    assert bodies == [{"ranks": ["s-b", "s-a"]}]  # b has the higher export position
+
+
+async def test_run_role_backfill_never_orders_everyone(tmp_path: Path) -> None:
+    """SC-2.3. @everyone (id == guild id) is excluded and keeps its slot."""
+    config = _make_config(tmp_path)
+    save_discord_metadata(
+        _backfill_meta(
+            {"r1": RoleMeta(name="A", position=1), "r2": RoleMeta(name="B", position=9)}
+        ),
+        tmp_path,
+    )
+    state = MigrationState(stoat_server_id="srv1")
+    # role_map maps @everyone too, but the collector must exclude it from ordering.
+    state.role_map = {"111": "s-everyone", "r1": "s-r1", "r2": "s-r2"}
+    export = _make_export(
+        guild_id="111",
+        messages=[
+            _make_message(
+                "m1", roles=[DCERole(id="111", name="everyone"), DCERole(id="r1", name="A")]
+            )
+        ],
+    )
+
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"s-everyone": 0, "s-r1": 1, "s-r2": 2}),
+        )
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"_id": "srv1"},
+            callback=lambda url, **kw: bodies.append(kw.get("json", {})),  # type: ignore[misc]
+        )
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    # @everyone stays at index 0; only r1 and r2 are permuted below it.
+    assert bodies == [{"ranks": ["s-everyone", "s-r2", "s-r1"]}]
+
+
+async def test_run_role_backfill_is_idempotent(tmp_path: Path) -> None:
+    """SC-3.1. A second run over an already-correct server sends no ranks write."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "s-a", "b": "s-b"}
+    export = _make_export(
+        messages=[
+            _make_message(
+                "m1",
+                roles=[
+                    DCERole(id="a", name="A", position=9),
+                    DCERole(id="b", name="B", position=1),
+                ],
+            )
+        ]
+    )
+
+    patches = 0
+
+    def _count(url: object, **kw: object) -> None:
+        nonlocal patches
+        patches += 1
+
+    with aioresponses() as m:
+        # Already position-desc: s-a rank 0, s-b rank 1.
+        m.get(
+            f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}), repeat=True
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={"_id": "srv1"}, callback=_count)
+        await run_role_backfill(config, state, [export], lambda e: None)
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    assert patches == 0
+
+
+async def test_run_role_backfill_single_known_role_makes_no_write(tmp_path: Path) -> None:
+    """SC-3.2. Fewer than two known roles cannot permute, so no write is sent."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "s-a"}
+    export = _make_export(messages=[_make_message("m1", roles=[DCERole(id="a", name="A")])])
+
+    with aioresponses() as m:
+        # No PATCH route registered: aioresponses raises if a write is attempted.
+        m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0}), repeat=True)
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+
+async def test_run_role_backfill_permission_refusal_warns(tmp_path: Path) -> None:
+    """SC-3.3. A NotElevated refusal degrades to a warning, not an exception."""
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"a": "s-a", "b": "s-b"}
+    export = _make_export(
+        messages=[
+            _make_message(
+                "m1",
+                roles=[
+                    DCERole(id="a", name="A", position=1),
+                    DCERole(id="b", name="B", position=9),
+                ],
+            )
+        ]
+    )
+
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}))
+        m.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            payload={"type": "NotElevated"},
+            status=403,
+        )
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    warned = [w for w in state.warnings if w["type"] == "role_ordering_not_permitted"]
+    assert len(warned) == 1
+    assert not [w for w in state.warnings if w["type"] == "role_ordering_failed"]
+
+
+async def test_run_role_backfill_rerun_does_not_grow_warnings(tmp_path: Path) -> None:
+    """SC-I1. The backfill path carries no cap-truncation, so no warning grows."""
+    config = _make_config(tmp_path)
+    save_discord_metadata(
+        _backfill_meta(
+            {"r1": RoleMeta(name="A", position=1), "r2": RoleMeta(name="B", position=9)}
+        ),
+        tmp_path,
+    )
+    state = MigrationState(stoat_server_id="srv1")
+    state.role_map = {"r1": "s-r1", "r2": "s-r2"}
+    export = _make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="A")])])
+
+    with aioresponses() as m:
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload=_server_payload({"s-r1": 0, "s-r2": 1}),
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={"_id": "srv1"}, repeat=True)
+        await run_role_backfill(config, state, [export], lambda e: None)
+        await run_role_backfill(config, state, [export], lambda e: None)
+
+    assert [w for w in state.warnings if w["type"] == "role_limit_exceeded"] == []
