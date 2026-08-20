@@ -331,13 +331,13 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 | **Cause** | When Ferry resolves a proxy from the system settings and that proxy needs a username and password, Ferry authenticates itself but cannot hand the credential to DiscordChatExporter. A password sitting in a child process's environment is readable by other processes on some systems, so Ferry withholds it and DCE receives only the proxy address. |
 | **Solution** | Set `HTTPS_PROXY` yourself with the credential in the URL (`https://user:pass@host:port`) if that trade-off is acceptable. DCE inherits a variable you set directly; it only misses the one Ferry resolved on your behalf. |
 
-### SOCKS and ALL_PROXY are not supported
+### SOCKS proxies are not supported
 
 | | |
 |---|---|
-| **Symptom** | A proxy notice at startup or in `ferry tls-check` names a SOCKS proxy or `ALL_PROXY`, and Ferry connects direct anyway |
-| **Cause** | Ferry supports HTTP and HTTPS proxies only. A SOCKS proxy, or a proxy set exclusively through `ALL_PROXY`, falls outside what Ferry can use ([issue #141](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/141)). |
-| **Solution** | Set `HTTP_PROXY` and `HTTPS_PROXY` directly if an HTTP or HTTPS proxy is available for the same server. Ferry writes a notice naming what it found, so the direct connection has a stated cause. There is no workaround for a SOCKS-only setup today; issue #141 tracks it. |
+| **Symptom** | A proxy notice at startup or in `ferry tls-check` names a SOCKS proxy, and Ferry connects direct anyway |
+| **Cause** | Ferry speaks HTTP and HTTPS to a proxy, not SOCKS. A SOCKS proxy set through any variable, including `ALL_PROXY`, falls outside what Ferry can use. |
+| **Solution** | Point `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` at an HTTP or HTTPS proxy for the same server. `ALL_PROXY` is honoured as a fallback for http and https when no scheme-specific proxy is set, so a single `ALL_PROXY=http://host:port` reaches every phase. There is no workaround for a SOCKS-only setup; Ferry writes a notice naming what it found, so the direct connection has a stated cause. |
 
 ---
 
