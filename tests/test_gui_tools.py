@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
+# A realistic-length opaque Stoat token, so the redaction test can actually fail
+# (a token too short to trigger the mask would pass a broken implementation).
+_TOKEN = "01F8MECHZX3TBDFGH4JKLMNPQR_opaque_base64url_like_secret_value"
+
 
 def test_repair_failure_set_is_shared_and_exact() -> None:
     """SC-1.8: the repair pass-or-fail set is one shared constant, exact."""
@@ -58,3 +65,48 @@ def test_prepare_returns_proxy_notices(monkeypatch) -> None:  # type: ignore[no-
     monkeypatch.setattr(gui_tools, "format_proxy_notices", lambda: ["proxy: on"])
 
     assert gui_tools.prepare_tool_call("tok") == ["proxy: on"]
+
+
+def test_safe_push_masks_token() -> None:
+    """SC-1.3: a token in a log-widget line is masked at the push site.
+
+    register_secret alone protects the Python-logging sink; the ui.log widget is
+    a separate sink the formatter never sees, and check/probe do no redaction of
+    their own. Proven by scratchpad/proto_redaction.py.
+    """
+    from discord_ferry import gui_tools
+    from discord_ferry.core.security import register_secret, reset_secret_registry
+
+    reset_secret_registry()
+    register_secret("stoat", _TOKEN)
+    pushed: list[str] = []
+
+    gui_tools._safe_push(pushed.append, f"[ERROR] boom: {_TOKEN}")
+
+    assert _TOKEN not in pushed[0]  # masked at the push site
+    assert _TOKEN in f"[ERROR] boom: {_TOKEN}"  # control: an unsanitized push would leak it
+    reset_secret_registry()
+
+
+def test_run_tool_error_path_sanitizes_and_reports_none(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """run_tool routes an exception to a sanitized log line and hands the callback None."""
+    from discord_ferry import gui_tools
+    from discord_ferry.core.security import register_secret, reset_secret_registry
+
+    reset_secret_registry()
+    register_secret("stoat", _TOKEN)
+
+    # Run the background coroutine synchronously instead of scheduling it.
+    monkeypatch.setattr(gui_tools.background_tasks, "create", lambda coro: asyncio.run(coro))
+
+    pushed: list[str] = []
+    done: list[object] = []
+
+    async def _boom() -> None:
+        raise RuntimeError(f"failed with {_TOKEN}")
+
+    gui_tools.run_tool(contextlib.nullcontext(), pushed.append, _boom, done.append)
+
+    assert done == [None]  # callback got None on error
+    assert pushed and _TOKEN not in pushed[0]  # error line was sanitized
+    reset_secret_registry()
