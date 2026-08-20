@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.22.0] - 2026-08-20
+
+### Added
+
+- **`ferry backfill-roles` corrects role ordering on a server migrated before
+  v2.21.0.** Migrations run before the ordering fix left their roles at Stoat's
+  default order, and the only correction was a full re-run. The new command reads
+  the same roles the migration built (the export unioned with
+  `discord_metadata.json`) and sets the server's role hierarchy to Discord order
+  in one call. It creates nothing, touches no role colour or icon, and is safe to
+  re-run: a server already in order gets no write, and roles added by hand after
+  the migration keep their place. Exits 0 when applied or already correct, 1 when
+  ordering was refused, 2 when the state or export cannot be read. The roles
+  collection was extracted from `run_roles` into a shared helper so the command
+  orders by exactly what the migration built. Closes #388.
+
 ## [2.21.0] - 2026-08-20
 
 ### Added

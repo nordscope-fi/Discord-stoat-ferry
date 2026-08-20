@@ -14,7 +14,7 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has eleven top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `retry`, `probe`, and `tls-check`.
+Ferry has twelve top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `backfill-roles`, `retry`, `probe`, and `tls-check`.
 
 ---
 
@@ -554,6 +554,56 @@ ferry repair ./ferry-output --export-dir ./export --dry-run
 # In a script: repair, then confirm against the server rather than trusting the tool
 ferry repair ./ferry-output --export-dir ./export
 ferry check ./ferry-output --json > result.json
+```
+
+## `ferry backfill-roles`
+
+Set role ordering on a server that was migrated before the ordering fix shipped in v2.21.0. Those
+servers have their roles at Stoat's default order. This command reads the same roles the migration
+built and puts them back in Discord order, in one call.
+
+```bash
+ferry backfill-roles <output-dir> --export-dir <export-dir> [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| `--export-dir PATH` | **Required.** The DCE export the original migration used |
+| `--stoat-url URL` | Stoat API base URL. Or set `STOAT_URL` |
+| `--token TOKEN` | Stoat user token. Prefer the `STOAT_TOKEN` environment variable |
+| `--dry-run` | Report what would be reordered, and change nothing |
+
+The export is required because the role positions live there and in `discord_metadata.json`, not in
+the state file. Point it at the same export the migration used.
+
+It is safe to re-run. A server that is already in order gets no write. Roles you added to the server
+by hand after the migration keep their place; only the roles Ferry created are moved.
+
+### What it does not touch
+
+- **A role's colour, rank-independent hoist setting or icon.** This command sets ordering only. Those
+  attributes are tracked separately in issue #344.
+- **The forward migration.** Migrations run on v2.21.0 or later already order roles correctly and do
+  not need this.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Ordering was applied, or the server was already in order |
+| 1 | Ordering was refused: Ferry lacks the ManageRole permission, holds no role above the ones it tried to move, or a read-back failed |
+| 2 | The state file or the export directory could not be read |
+
+`--dry-run` always exits 0.
+
+### Examples
+
+```bash
+# Correct the role order on a server migrated by an older Ferry
+ferry backfill-roles ./ferry-output --export-dir ./export --stoat-url https://api.stoat.chat
+
+# Preview first
+ferry backfill-roles ./ferry-output --export-dir ./export --dry-run
 ```
 
 ## `ferry retry`
