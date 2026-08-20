@@ -9,15 +9,16 @@ any request.
 
 from __future__ import annotations
 
+import importlib.resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from nicegui import app, background_tasks, ui
 
 import discord_ferry.migrator.api as _api
-from discord_ferry.blueprint import blueprint_from_exports, export_blueprint
+from discord_ferry.blueprint import blueprint_from_exports, export_blueprint, import_blueprint
 from discord_ferry.config import FerryConfig
-from discord_ferry.core.engine import run_repair, run_retry_failed
+from discord_ferry.core.engine import run_build, run_repair, run_retry_failed
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, MigrationError, StateError
@@ -638,3 +639,85 @@ def blueprint_export_page() -> None:
             _write(bp, output_path)
 
         ui.button("Export blueprint", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/build")
+def build_page() -> None:
+    """Build a Stoat server from a preset template or a blueprint file.
+
+    Makes live API calls, so it goes through the runner (register the token, init
+    the semaphore only when unset). Reads stoat_url from the user store and the
+    token from the tab store, with a session-expired guard. Exactly one source,
+    a template or a blueprint file, is required.
+    """
+    client = ui.context.client
+    stoat_url = str(app.storage.user.get("stoat_url", ""))
+    token = _tab_token()
+
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Build a server").classes("text-2xl font-bold mb-4")
+        if token is None:
+            ui.label("Session expired. Re-enter your token on the setup page.").classes(
+                "text-red-600"
+            )
+            return
+
+        ui.label(
+            "A server built here writes no state.json, so the rollback tool cannot undo it: "
+            "there is no recorded id map to reverse."
+        ).classes("text-amber-700 text-sm max-w-2xl")
+
+        template_select = ui.select(
+            ["gaming", "community", "education"], label="Template", clearable=True
+        ).classes("w-96")
+        blueprint_input = ui.input("Blueprint file (JSON), instead of a template").classes("w-96")
+        name_input = ui.input("Server name (optional, overrides the source's)").classes("w-96")
+        log = ui.log(max_lines=300).classes("w-full max-w-2xl h-48 font-mono text-xs mt-2")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def on_event(event: MigrationEvent) -> None:
+            _safe_push(log.push, f"[{event.phase}] {event.message}")
+
+        def on_done(server_id: str | None) -> None:
+            results.clear()
+            with results:
+                if server_id is None:
+                    ui.label("Build failed. See the log above.").classes("text-red-600")
+                    return
+                # server_id is a Stoat-assigned ULID, not free text, so no sanitizing.
+                ui.label(f"Server built ({server_id}).").classes("text-lg font-bold text-green-600")
+
+        def _run() -> None:
+            results.clear()
+            template = (template_select.value or "").strip()
+            blueprint_file = blueprint_input.value.strip()
+            if bool(template) == bool(blueprint_file):
+                # Reject neither and both: the CLI requires exactly one source.
+                ui.notify(
+                    "Choose exactly one source: a template or a blueprint file.",
+                    type="warning",
+                )
+                return
+            if blueprint_file and not Path(blueprint_file).is_file():
+                ui.notify("That blueprint file does not exist.", type="warning")
+                return
+            name = name_input.value.strip() or None
+            for line in prepare_tool_call(token):
+                _safe_push(log.push, line)
+
+            async def _do_build() -> str:
+                if template:
+                    templates_dir = importlib.resources.files("discord_ferry.templates")
+                    bp = import_blueprint(Path(str(templates_dir / f"{template}.json")))
+                else:
+                    bp = import_blueprint(Path(blueprint_file))
+                if name:
+                    bp.name = name
+                # A role-ordering failure is a warning event inside run_build, not a
+                # raise, so the build completes and on_done reports success, matching
+                # the CLI.
+                return await run_build(stoat_url, token, bp, on_event)
+
+            run_tool(client, log.push, _do_build, on_done)
+
+        ui.button("Build server", on_click=_run).classes("mt-2")

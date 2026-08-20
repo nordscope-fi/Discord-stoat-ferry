@@ -495,6 +495,97 @@ async def test_blueprint_export_page_confirms_before_overwrite(
     assert output.read_text(encoding="utf-8") != "OLD"  # overwritten after ticking Overwrite
 
 
+async def test_build_page_bounces_without_token(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Chunk 8 Task 16: the build page shows the session-expired guard with no token."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store.pop("token", None)
+
+    await user.open("/tools/build")
+    await user.should_see("Session expired")
+    await user.should_not_see("Build server")
+
+
+async def test_build_page_shows_no_rollback_notice(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Chunk 8 Task 16: the page states the built server cannot be rolled back."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    await user.open("/tools/build")
+    await user.should_see("rollback tool cannot undo it")
+
+
+async def test_build_page_requires_exactly_one_source(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """Chunk 8 Task 16: neither and both are rejected; run_build is not called."""
+    from unittest.mock import AsyncMock
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    with patch("discord_ferry.gui_tools.run_build", new=AsyncMock()) as build_mock:
+        await user.open("/tools/build")
+        # Neither a template nor a blueprint file.
+        user.find("Build server").click()
+        await user.should_see("exactly one source")
+
+        # Both a template and a blueprint file.
+        user.find("Template").elements.pop().set_value("gaming")
+        user.find("Blueprint file").elements.pop().set_value(str(tmp_path / "bp.json"))
+        user.find("Build server").click()
+        await user.should_see("exactly one source")
+
+        assert build_mock.await_count == 0
+
+
+async def test_build_page_runs_and_soft_role_warning_still_succeeds(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """Chunk 8 Task 17: a build with a role-ordering warning still reports success.
+
+    The role-ordering failure is a warning event inside run_build, not a raise,
+    so the page renders the success label rather than the error path. The token is
+    registered via the runner before the call.
+    """
+    from discord_ferry import gui_tools
+    from discord_ferry.core.events import MigrationEvent
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    registered: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        gui_tools, "register_secret", lambda name, value: registered.append((name, value))
+    )
+
+    async def fake_build(stoat_url, token, bp, on_event, *, session=None):  # type: ignore[no-untyped-def]
+        on_event(MigrationEvent(phase="build", status="warning", message="Role ordering failed: x"))
+        return "srv-123"
+
+    with patch("discord_ferry.gui_tools.run_build", new=fake_build):
+        await user.open("/tools/build")
+        user.find("Template").elements.pop().set_value("gaming")
+        user.find("Build server").click()
+        await user.should_see("Server built (srv-123)")
+        await user.should_not_see("Build failed")
+
+    assert ("stoat", _TOKEN) in registered  # token registered before the build
+
+
 class _StubState:
     """Minimal stand-in for MigrationState for the repair verdict and page."""
 
