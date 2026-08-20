@@ -20,6 +20,7 @@ from discord_ferry.core.engine import run_repair, run_retry_failed
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, MigrationError, StateError
+from discord_ferry.migrator.probe import run_probe
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
 from discord_ferry.parser.dce_parser import parse_export_directory
 from discord_ferry.state import load_state
@@ -502,3 +503,75 @@ def retry_page() -> None:
             run_tool(client, log.push, _do_retry, on_done)
 
         ui.button("Run retry", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/probe")
+def probe_page() -> None:
+    """Preflight a live Stoat instance for Autumn limits, rate window, voice, webhooks.
+
+    A self-contained preflight: it collects its own URL and token rather than a
+    prior migration's session (design line 83), so it works before any migration
+    exists. No session-expired guard, for the same reason.
+    """
+    client = ui.context.client
+    default_url = str(app.storage.user.get("stoat_url", ""))
+    default_token = _tab_token() or ""
+
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Preflight a Stoat instance").classes("text-2xl font-bold mb-4")
+
+        url_input = ui.input("Stoat URL", value=default_url).classes("w-96")
+        token_input = ui.input("Stoat token", value=default_token, password=True).classes("w-96")
+        server_input = ui.input("Throwaway test server ID").classes("w-96")
+        deep_cb = ui.checkbox("Deep probe (upload test files at each Autumn size boundary)")
+        deep_warning = ui.label(
+            "Deep probe uploads test files to Autumn and cannot delete them, so it "
+            "leaves orphaned files in storage. Tick the box below to confirm."
+        ).classes("text-amber-700 text-sm max-w-2xl")
+        deep_warning.bind_visibility_from(deep_cb, "value")
+        deep_confirm = ui.checkbox("I understand the deep probe leaves orphaned files in Autumn")
+        deep_confirm.bind_visibility_from(deep_cb, "value")
+
+        log = ui.log(max_lines=200).classes("w-full max-w-2xl h-48 font-mono text-xs mt-2")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def on_done(report: ProbeReport | None) -> None:
+            results.clear()
+            with results:
+                if report is None:
+                    ui.label("Probe failed. See the log above.").classes("text-red-600")
+                    return
+                render_probe_report(report)
+
+        def _run() -> None:
+            results.clear()
+            stoat_url = url_input.value.strip()
+            token = token_input.value.strip()
+            server_id = server_input.value.strip()
+            if not stoat_url or not token:
+                ui.notify("Enter a Stoat URL and token.", type="warning")
+                return
+            if not server_id:
+                ui.notify(
+                    "Enter a throwaway test server ID. Probe creates and deletes entities in it.",
+                    type="warning",
+                )
+                return
+            deep = deep_cb.value
+            if deep and not deep_confirm.value:
+                ui.notify(
+                    "Confirm the deep-probe warning before running a deep probe.",
+                    type="warning",
+                )
+                return
+            for line in prepare_tool_call(token):
+                _safe_push(log.push, line)
+
+            async def _do_probe() -> ProbeReport:
+                # run_probe never calls its on_event (it returns a report), so a
+                # no-op callback matches the CLI's `lambda _e: None`.
+                return await run_probe(stoat_url, token, server_id, lambda _e: None, deep=deep)
+
+            run_tool(client, log.push, _do_probe, on_done)
+
+        ui.button("Run probe", on_click=_run).classes("mt-2")
