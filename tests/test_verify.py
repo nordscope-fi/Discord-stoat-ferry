@@ -17,7 +17,12 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.errors import CheckError
-from discord_ferry.migrator.verify import CheckReport, CheckResult, run_check
+from discord_ferry.migrator.verify import (
+    CheckReport,
+    CheckResult,
+    RepairOutcome,
+    run_check,
+)
 from discord_ferry.state import MigrationState
 
 BASE_URL = "https://api.test"
@@ -1958,3 +1963,38 @@ class TestCheckReportToDict:
         d = report.to_dict()
         assert d["results"] == []
         assert all(v == 0 for v in d["counts"].values())
+
+
+class TestRepairOutcome:
+    """RepairOutcome.to_dict is the machine-readable contract for repair --json (#308)."""
+
+    def test_to_dict_strips_control_characters(self) -> None:
+        """Free-text fields pass through _strip_control on the way out."""
+        outcome = RepairOutcome(
+            recreated_channels=[
+                {
+                    "discord_id": "d-100",
+                    "stoat_id": "01JSTOAT",
+                    "name": "gen\x07eral",
+                    "resent_count": 3,
+                }
+            ],
+            declined=[{"type": "no_recorded_name", "message": "bad\x00name"}],
+        )
+        doc = outcome.to_dict()
+        assert doc["actions"]["recreated_channels"][0]["name"] == "general"
+        assert "\x00" not in doc["declined"][0]["message"]
+        # Non-string fields are untouched.
+        assert doc["actions"]["recreated_channels"][0]["resent_count"] == 3
+
+    def test_to_dict_empty_sets_are_lists(self) -> None:
+        """Empty sets serialise as [] with the keys present, never omitted."""
+        doc = RepairOutcome().to_dict()
+        assert doc["actions"]["recreated_channels"] == []
+        assert doc["actions"]["recreated_roles"] == []
+        assert doc["actions"]["recreated_categories"] == []
+        assert doc["actions"]["restored_tails"] == []
+        assert doc["declined"] == []
+        assert doc["failed_messages"] == []
+        assert doc["dry_run"] is False
+        assert doc["actions"]["dead_letter"] == {"drained": 0, "remaining": 0}

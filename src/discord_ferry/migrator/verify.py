@@ -201,6 +201,52 @@ class CheckReport:
         }
 
 
+@dataclass
+class RepairOutcome:
+    """Everything one ``run_repair`` did, plus what it could not.
+
+    Sibling of :class:`CheckReport`: the machine-readable contract for the repair
+    side, consumed by ``ferry repair --json`` (#308). ``run_repair`` returns one
+    of these on every path, including its early returns.
+
+    The post-repair ``check`` section is deliberately NOT stored here. The CLI
+    attaches it, because a check measured against the live server after the
+    writes is the shell's concern, and ``run_check`` refuses a dry-run state, so
+    only the shell knows whether to run it at all.
+    """
+
+    dry_run: bool = False
+    recreated_channels: list[dict[str, Any]] = field(default_factory=list)
+    recreated_roles: list[dict[str, Any]] = field(default_factory=list)
+    recreated_categories: list[dict[str, Any]] = field(default_factory=list)
+    restored_tails: list[dict[str, Any]] = field(default_factory=list)
+    dead_letter: dict[str, int] = field(default_factory=lambda: {"drained": 0, "remaining": 0})
+    declined: list[dict[str, Any]] = field(default_factory=list)
+    failed_messages: list[dict[str, Any]] = field(default_factory=list)
+
+    def _clean(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Strip control characters from every string value, matching CheckReport."""
+        return [
+            {k: (_strip_control(v) if isinstance(v, str) else v) for k, v in row.items()}
+            for row in rows
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Sanitized, JSON-ready dict. Every free-text field goes through _strip_control."""
+        return {
+            "dry_run": self.dry_run,
+            "actions": {
+                "recreated_channels": self._clean(self.recreated_channels),
+                "recreated_roles": self._clean(self.recreated_roles),
+                "recreated_categories": self._clean(self.recreated_categories),
+                "restored_tails": self._clean(self.restored_tails),
+                "dead_letter": dict(self.dead_letter),
+            },
+            "declined": self._clean(self.declined),
+            "failed_messages": self._clean(self.failed_messages),
+        }
+
+
 async def run_check(
     stoat_url: str,
     token: str,
