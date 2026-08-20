@@ -20,7 +20,7 @@ This page covers the most common problems encountered during migration, their ca
 |---|---|
 | **Symptom** | Ferry reports `403 Forbidden` when attempting to create the server |
 | **Cause** | You may be using a bot token instead of a regular user token. Bot accounts cannot create servers on Stoat. |
-| **Solution** | Make sure you are using the token from a **regular Stoat account** — the same account you log in to when you chat. Ferry does not use bots. See the [token guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token) for how to find the right token. |
+| **Solution** | Make sure you are using the token from a **regular Stoat account**, the same account you log in to when you chat. Ferry does not use bots. See the [token guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token) for how to find the right token. |
 
 ---
 
@@ -40,7 +40,7 @@ This page covers the most common problems encountered during migration, their ca
 
 !!! warning "Content missing from a migration you already ran?"
     If the migration finished cleanly and content is missing anyway, the cause may be a Ferry bug
-    rather than anything in this page — five silent ones were fixed between v2.8.2 and v2.10.0.
+    rather than anything in this page. Five silent ones were fixed between v2.8.2 and v2.10.0.
     See [Was my earlier migration affected?](earlier-migrations.md).
 
 ### Attachment file missing
@@ -79,16 +79,16 @@ stops here. `ferry migrate` is not affected by the warning and never asks about 
 | | |
 |---|---|
 | **Symptom** | Some messages in Stoat appear with the placeholder `[empty message]` |
-| **Cause** | The original Discord message had no text content — for example, a message that was only a sticker, a forwarded message, or a system event with no body. This is normal behavior. |
-| **Solution** | No action needed. These are faithfully representing messages that had no text in Discord. Forwarded messages are no longer among them — their content is migrated and marked `[forwarded]`. If your export was made with DiscordChatExporter older than 2.47 the forwarded content is not in the export at all; those are skipped with a warning in the migration report, and re-exporting recovers them. |
+| **Cause** | The original Discord message had no text content, for example, a message that was only a sticker, a forwarded message, or a system event with no body. This is normal behavior. |
+| **Solution** | No action needed. These are faithfully representing messages that had no text in Discord. Forwarded messages are no longer among them, their content is migrated and marked `[forwarded]`. If your export was made with DiscordChatExporter older than 2.47 the forwarded content is not in the export at all; those are skipped with a warning in the migration report, and re-exporting recovers them. |
 
 ### Messages show [continued 1/3] markers
 
 | | |
 |---|---|
 | **Symptom** | Some messages in Stoat are split across multiple sequential messages with `[continued 1/3]`, `[continued 2/3]`, `[continued 3/3]` markers |
-| **Cause** | The original Discord message exceeded Stoat's 2000-character message limit. Ferry automatically splits long messages into sequential parts. This is normal behavior — no content is lost. |
-| **Solution** | No action needed. The full original message content is preserved across all parts. If this affects readability, self-hosted admins can raise the `message_length` limit in `Revolt.overrides.toml` — see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
+| **Cause** | The original Discord message exceeded Stoat's 2000-character message limit. Ferry automatically splits long messages into sequential parts. This is normal behavior. No content is lost. |
+| **Solution** | No action needed. The full original message content is preserved across all parts. If this affects readability, self-hosted admins can raise the `message_length` limit in `Revolt.overrides.toml`, see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
 
 ---
 
@@ -100,7 +100,7 @@ stops here. `ferry migrate` is not affected by the warning and never asks about 
 |---|---|
 | **Symptom** | Ferry stops or warns that the server has reached its channel limit |
 | **Cause** | The combined count of channels and flattened threads exceeds the Stoat server's per-server channel limit (200 by default) |
-| **Solution** | Choose one of these options: (1) Use `--skip-threads` (CLI) or the **Skip threads** checkbox (GUI) to omit thread content; (2) If you run a self-hosted instance, raise the `server_channels` limit in `Revolt.overrides.toml` — see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
+| **Solution** | Choose one of these options: (1) Use `--skip-threads` (CLI) or the **Skip threads** checkbox (GUI) to omit thread content; (2) If you run a self-hosted instance, raise the `server_channels` limit in `Revolt.overrides.toml`, see [Self-Hosted Stoat Tips](self-hosted-tips.md). |
 
 ---
 
@@ -120,7 +120,7 @@ stops here. `ferry migrate` is not affected by the warning and never asks about 
 |---|---|
 | **Symptom** | Double-clicking `Ferry.app` shows a dialog reading *"Apple could not verify 'Ferry' is free of malware that may harm your Mac or compromise your privacy."* The only buttons are **Done** and **Move to Bin**. |
 | **Cause** | Ferry is not notarized through Apple's paid developer program, so Gatekeeper blocks the first launch. It is not a fault in the app. |
-| **Solution** | Click **Done** — never **Move to Bin**, which deletes Ferry. Then open **System Settings → Privacy & Security**, scroll to the **Security** section, and click **Open Anyway** next to *"Ferry" was blocked to protect your Mac*. Confirm with **Open Anyway** again and enter your password. See [Installation](../getting-started/install.md) for the illustrated walkthrough. |
+| **Solution** | Click **Done**, never **Move to Bin**, which deletes Ferry. Then open **System Settings → Privacy & Security**, scroll to the **Security** section, and click **Open Anyway** next to *"Ferry" was blocked to protect your Mac*. Confirm with **Open Anyway** again and enter your password. See [Installation](../getting-started/install.md) for the illustrated walkthrough. |
 
 !!! warning "The Open Anyway button is time-limited"
     It appears only after macOS has blocked Ferry, and it disappears again after about an hour. If it is not there, double-click `Ferry.app` again and return to **Privacy & Security**.
@@ -133,7 +133,7 @@ stops here. `ferry migrate` is not affected by the warning and never asks about 
 | | |
 |---|---|
 | **Symptom** | macOS refuses to open `Ferry.app` with a message that the app is damaged or cannot be opened |
-| **Cause** | macOS automatically marks files downloaded from the internet as untrusted. This is a built-in security check called Gatekeeper — it is not an actual problem with Ferry. |
+| **Cause** | macOS automatically marks files downloaded from the internet as untrusted. This is a built-in security check called Gatekeeper. It is not an actual problem with Ferry. |
 | **Solution** | Run the following command in Terminal, then try opening Ferry again: |
 
 ```bash
@@ -206,7 +206,7 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 4. Open Ferry again.
 
 !!! tip "You will not lose a migration in progress"
-    Ferry saves a checkpoint as it works. Start it again and choose **Resume** — it
+    Ferry saves a checkpoint as it works. Start it again and choose **Resume**, it
     picks up from the last completed step rather than starting over. Messages already
     copied are not copied twice.
 
@@ -226,9 +226,9 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 
 | | |
 |---|---|
-| **Symptom** | The GUI opens on the Migrate screen with a resume prompt, but Ferry immediately reports it cannot load the previous state — for example after you deleted or moved the output folder between runs |
+| **Symptom** | The GUI opens on the Migrate screen with a resume prompt, but Ferry immediately reports it cannot load the previous state, for example after you deleted or moved the output folder between runs |
 | **Cause** | The GUI persists a "resume available" flag alongside the state file. If the state file goes away and the flag does not, an older Ferry version raised a bare `StateError` that read like a bug in Ferry rather than an obviously stale flag |
-| **Solution** | From v2.19.7, Ferry clears the stale flag on the spot and surfaces a specific error naming the missing state file — the wizard then reopens fresh with your credentials filled in. No action is required beyond acknowledging the error. Nothing on the Stoat server is touched. On the CLI the equivalent is simply omitting `--resume` on the retry |
+| **Solution** | From v2.19.7, Ferry clears the stale flag on the spot and surfaces a specific error naming the missing state file, the wizard then reopens fresh with your credentials filled in. No action is required beyond acknowledging the error. Nothing on the Stoat server is touched. On the CLI the equivalent is simply omitting `--resume` on the retry |
 
 ---
 
@@ -240,7 +240,7 @@ If the window will not close, or Ferry does not start again, quit the leftovers 
 |---|---|
 | **Symptom** | Ferry reports "DCE binary hash mismatch" or "SHA-256 verification failed" |
 | **Cause** | The downloaded DiscordChatExporter binary does not match the expected SHA-256 checksum. This can happen if the download was corrupted, if the cached binary is from a different version, or if you are using a self-built DCE binary. |
-| **Solution** | Delete the cached DCE binary (found in the Ferry data directory) and re-run Ferry — it will re-download a fresh copy. If you are using a self-built or custom DCE binary, pass `--skip-dce-verify` to bypass the checksum check. |
+| **Solution** | Delete the cached DCE binary (found in the Ferry data directory) and re-run Ferry, it will re-download a fresh copy. If you are using a self-built or custom DCE binary, pass `--skip-dce-verify` to bypass the checksum check. |
 
 ### DCE export is N days old
 
@@ -380,7 +380,7 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 | | |
 |---|---|
 | **Symptom** | Messages in Stoat show `[+N more attachments not migrated]` at the end |
-| **Cause** | The original Discord message had more than 5 attachments. Stoat allows a maximum of 5 attachments per message — this is a platform limit, not a Ferry bug. |
+| **Cause** | The original Discord message had more than 5 attachments. Stoat allows a maximum of 5 attachments per message. This is a platform limit, not a Ferry bug. |
 | **Solution** | No action needed. The first 5 attachments are migrated. The overflow note tells you how many were left out. |
 
 ---
@@ -425,9 +425,9 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 
 If your issue is not listed here:
 
-1. Run `ferry validate` on your export and check the warnings output — it often points directly to the problem.
+1. Run `ferry validate` on your export and check the warnings output, it often points directly to the problem.
 2. Run the migration with `--verbose` (CLI) to get per-message detail in the log.
-3. Run `ferry stats <output-dir>` after a failed or partial migration to see the aggregate picture: counts, fidelity score, and a truncated preview of the most recent error — often faster than scanning `state.json` by hand. See the [CLI reference](cli-reference.md#ferry-stats).
+3. Run `ferry stats <output-dir>` after a failed or partial migration to see the aggregate picture: counts, fidelity score, and a truncated preview of the most recent error, often faster than scanning `state.json` by hand. See the [CLI reference](cli-reference.md#ferry-stats).
 4. Check the migration report in `ferry-output/` for a full list of errors and warnings.
 5. Open an issue on the Discord Ferry GitHub repository and include the relevant section of your log output.
 
