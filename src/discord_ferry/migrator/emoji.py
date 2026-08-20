@@ -123,6 +123,37 @@ def messages_using_emoji(exports: list[DCEExport], discord_emoji_id: str) -> Ite
                 yield msg
 
 
+def find_emoji_in_exports(
+    exports: list[DCEExport], discord_emoji_id: str
+) -> _EmojiRecord | None:
+    """Return the discovered record (name, image, animated) for one emoji id.
+
+    Runs the same reaction-then-content discovery as ``run_emoji``, so the image
+    source is upgraded from a reaction (which carries the downloaded asset) over
+    a content-only sighting (which carries none). The emoji-repair pass uses this
+    to recover a missing emoji's name and image, which the migration records
+    nowhere on the id map. Returns ``None`` when the id is not in the export.
+    """
+    discovered: dict[str, _EmojiRecord] = {}
+    for export in exports:
+        msg_iter = (
+            stream_messages(export.json_path)
+            if export.json_path is not None
+            else iter(export.messages)
+        )
+        for msg in msg_iter:
+            for reaction in msg.reactions:
+                emoji = reaction.emoji
+                if emoji.id:
+                    _record_emoji(
+                        discovered, emoji.id, emoji.name, emoji.is_animated, emoji.image_url
+                    )
+            if msg.content:
+                for eid, name, is_animated in _extract_emoji_from_content(msg.content):
+                    _record_emoji(discovered, eid, name, is_animated, "")
+    return discovered.get(discord_emoji_id)
+
+
 async def upload_and_create_emoji(
     session: aiohttp.ClientSession,
     config: FerryConfig,

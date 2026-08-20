@@ -54,7 +54,12 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
-from discord_ferry.migrator.emoji import run_emoji
+from discord_ferry.migrator.emoji import (
+    find_emoji_in_exports,
+    messages_using_emoji,
+    run_emoji,
+    upload_and_create_emoji,
+)
 from discord_ferry.migrator.messages import _THREAD_STRATEGIES, _process_message, run_messages
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
@@ -1199,6 +1204,11 @@ _REPAIRABLE_STRUCTURE = frozenset({"channel_missing", "role_missing", "category_
 #: there is nothing to act on and acting anyway is guessing at a live server.
 _REPAIRABLE_TAIL = frozenset({"tail_absent", "tail_and_after_absent"})
 
+#: The only emoji kind repair acts on. ``emoji_missing`` carries the emoji's
+#: Discord id and its old (now dead) Stoat id, both from ``emoji_map``, which is
+#: all the emoji pass needs to recreate it and rewrite its references (#307).
+_REPAIRABLE_EMOJI = frozenset({"emoji_missing"})
+
 #: A synthetic channel key repair declines even when the kind matches.
 #:
 #: The forum index writer stores ``channel_map["forum-index-{key}"]`` whose
@@ -1914,6 +1924,93 @@ async def _recreate_category(
     return True
 
 
+async def _run_emoji_repair_pass(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    emoji_work: list[CheckResult],
+    exports: list[DCEExport],
+    outcome: RepairOutcome,
+    on_event: EventCallback,
+) -> None:
+    """Recreate each missing emoji, then rewrite the messages that referenced it.
+
+    Runs before the structure and tail passes (see :func:`run_repair`) so the
+    re-render in the rewrite reproduces the sent text with only the emoji
+    changed. Per emoji: recover its name and image from the export, decline if
+    the image is not usable, else recreate it and, in ONE save, switch
+    ``emoji_map`` to the new id and write the resume record. A crash can then
+    never leave the map pointing at the new emoji without a record to finish the
+    rewrite from, nor the record without the new id.
+    """
+    used_names: dict[str, int] = {}
+    for result in emoji_work:
+        discord_id = result.discord_id or ""
+        old_id = result.stoat_id or ""
+        record = find_emoji_in_exports(exports, discord_id)
+
+        if record is None or not record["image_url"] or record["image_url"].startswith("http"):
+            reason = (
+                "its image is not in the export"
+                if record is None or not record["image_url"]
+                else "its image URL was never downloaded"
+            )
+            label = record["name"] if record is not None else discord_id
+            message = f"Cannot recreate emoji :{label}: — {reason}."
+            state.warnings.append(
+                {"phase": "repair", "type": "emoji_missing_media", "message": message}
+            )
+            on_event(MigrationEvent(phase="repair", status="warning", message=message))
+            continue
+
+        file_path = config.export_dir / record["image_url"]
+        if not file_path.exists():
+            message = f"Cannot recreate emoji :{record['name']}: — image file not found."
+            state.warnings.append(
+                {"phase": "repair", "type": "emoji_missing_media", "message": message}
+            )
+            on_event(MigrationEvent(phase="repair", status="warning", message=message))
+            continue
+
+        name = record["name"]
+        new_id = await upload_and_create_emoji(
+            session, config, state, file_path=file_path, name=name, used_names=used_names
+        )
+        # ONE save writes the new map value AND the resume record together, so a
+        # crash between here and the rewrite strands neither without the other.
+        # From this point emoji_map already points at the new emoji, so a re-run's
+        # check reports it present and never recreates a second one.
+        state.emoji_map[discord_id] = new_id
+        state.pending_emoji_rewrites[discord_id] = {"old": old_id, "new": new_id}
+        save_state(state, config.output_dir)
+
+        if record["is_animated"]:
+            warning = f"Emoji :{name}: is animated — animation is lost on Stoat."
+            state.warnings.append(
+                {"phase": "repair", "type": "animated_emoji", "message": warning}
+            )
+            on_event(MigrationEvent(phase="repair", status="warning", message=warning))
+
+        row: dict[str, Any] = {
+            "discord_id": discord_id,
+            "name": name,
+            "new_id": new_id,
+            "messages_rewritten": 0,
+            "messages_declined": 0,
+            "messages_failed": 0,
+        }
+        outcome.recreated_emoji.append(row)
+        on_event(
+            MigrationEvent(
+                phase="repair",
+                status="progress",
+                message=f"Recreated emoji :{name}: as {new_id}.",
+            )
+        )
+        # Task 3.2 adds the reference rewrite here: it updates row's counts and
+        # clears the resume record for this emoji once no message holds the old id.
+
+
 async def run_repair(
     config: FerryConfig,
     state: MigrationState,
@@ -1989,9 +2086,11 @@ async def run_repair(
 
     structure_work: list[CheckResult] = []
     tail_work: list[CheckResult] = []
+    emoji_work: list[CheckResult] = []
     for result in report.results:
         is_structure = result.kind in _REPAIRABLE_STRUCTURE
-        if not is_structure and result.kind not in _REPAIRABLE_TAIL:
+        is_emoji = result.kind in _REPAIRABLE_EMOJI
+        if not is_structure and not is_emoji and result.kind not in _REPAIRABLE_TAIL:
             continue
 
         # The exclusion is tested ONCE, against both families, and that placement
@@ -2024,6 +2123,8 @@ async def run_repair(
 
         if is_structure:
             structure_work.append(result)
+        elif is_emoji:
+            emoji_work.append(result)
         else:
             tail_work.append(result)
 
@@ -2034,12 +2135,31 @@ async def run_repair(
             status="progress",
             message=(
                 f"{prefix}{len(structure_work)} entities to recreate, "
-                f"{len(tail_work)} channels with a lost tail."
+                f"{len(tail_work)} channels with a lost tail, "
+                f"{len(emoji_work)} missing emoji."
             ),
         )
     )
 
     if config.dry_run:
+        for result in emoji_work:
+            discord_id = result.discord_id or ""
+            record = find_emoji_in_exports(exports, discord_id)
+            would_rewrite = (
+                sum(1 for _ in messages_using_emoji(exports, discord_id))
+                if record is not None
+                else 0
+            )
+            outcome.recreated_emoji.append(
+                {
+                    "discord_id": discord_id,
+                    "name": record["name"] if record is not None else discord_id,
+                    "new_id": "",
+                    "messages_rewritten": would_rewrite,
+                    "messages_declined": 0,
+                    "messages_failed": 0,
+                }
+            )
         on_event(
             MigrationEvent(
                 phase="repair",
@@ -2049,6 +2169,23 @@ async def run_repair(
         )
         outcome.declined = _repair_declined(state, warnings_start)
         return outcome
+
+    # Emoji pass, ordered BEFORE structure and tail so channel_map, role_map and
+    # author_names still hold their migration-time values when a referencing
+    # message is re-rendered. That ordering is what keeps the rewrite scoped to
+    # the emoji rather than sweeping in a reference a structure repair just
+    # changed in the same run. See
+    # docs/plans/designs/2026-08-20-repair-emoji-missing.md.
+    if emoji_work:
+        own_emoji_session = session is None
+        emoji_sess = session or new_session()
+        try:
+            await _run_emoji_repair_pass(
+                emoji_sess, config, state, emoji_work, exports, outcome, on_event
+            )
+        finally:
+            if own_emoji_session:
+                await emoji_sess.close()
 
     if structure_work:
         # Only when something is actually being recreated. A repair with nothing
