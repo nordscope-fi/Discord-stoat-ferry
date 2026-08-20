@@ -87,9 +87,13 @@ async def _raw_autumn_upload(
     url = f"{autumn_url.rstrip('/')}/{tag}"
     headers = {"x-session-token": token}
     form = aiohttp.FormData()
-    form.add_field("file", file_path.open("rb"), filename=file_path.name)
-    async with session.post(url, data=form, headers=headers) as resp:
-        return resp.status
+    fh = file_path.open("rb")
+    try:
+        form.add_field("file", fh, filename=file_path.name)
+        async with session.post(url, data=form, headers=headers) as resp:
+            return resp.status
+    finally:
+        fh.close()
 
 
 def _sub_dict(obj: Any, key: str) -> dict[str, Any]:
@@ -447,7 +451,7 @@ async def _probe_one_tag(
             + ("" if over_status != 200 else " (limit NOT enforced)"),
         )
     except Exception as exc:  # noqa: BLE001
-        report.add(f"deep_{tag}_at_limit", "fail", f"{type(exc).__name__}: {exc}")
+        report.add(f"deep_{tag}_error", "fail", f"{type(exc).__name__}: {exc}")
     finally:
         if channel_id:
             with contextlib.suppress(Exception):
