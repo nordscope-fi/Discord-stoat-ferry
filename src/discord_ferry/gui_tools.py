@@ -15,10 +15,13 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from nicegui import app, background_tasks, ui
 
 import discord_ferry.migrator.api as _api
+from discord_ferry.config import FerryConfig
+from discord_ferry.core.engine import run_repair
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, StateError
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
+from discord_ferry.parser.dce_parser import parse_export_directory
 from discord_ferry.state import load_state
 
 if TYPE_CHECKING:
@@ -95,8 +98,9 @@ def _repair_verdict(outcome: RepairOutcome, state: MigrationState) -> tuple[bool
 def render_check_report(report: CheckReport) -> None:
     """Render a CheckReport as a summary line and a per-result table.
 
-    Reused by the repair page for its embedded check. The report is a return
-    value, not an event stream, so this renders from the object directly.
+    The report is a return value, not an event stream, so this renders from the
+    object directly. The repair page renders its own RepairOutcome instead (that
+    object does not carry a check), see render_repair_outcome.
     """
     counts = report.counts()
     ui.label(
@@ -109,6 +113,37 @@ def render_check_report(report: CheckReport) -> None:
         {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
     ]
     ui.table(columns=columns, rows=_check_rows(report)).classes("w-full mt-2")
+
+
+def render_repair_outcome(outcome: RepairOutcome) -> None:
+    """Render what a repair did, and a table of what it could not fix.
+
+    RepairOutcome does not store a post-repair check (the engine leaves that to
+    the shell), so this renders the outcome's own fields rather than reusing the
+    check table. The declined text is server-controlled, so it is sanitized.
+    """
+    dlq = outcome.dead_letter
+    ui.label(
+        f"Recreated {len(outcome.recreated_channels)} channels, "
+        f"{len(outcome.recreated_roles)} roles, "
+        f"{len(outcome.recreated_categories)} categories. "
+        f"Restored {len(outcome.restored_tails)} tails. "
+        f"Dead-letter drained {dlq.get('drained', 0)}, {dlq.get('remaining', 0)} remaining."
+    ).classes("text-sm text-gray-600")
+    if outcome.declined:
+        ui.label("Could not fix:").classes("text-sm font-bold mt-2 text-red-600")
+        columns = [
+            {"name": "type", "label": "Kind", "field": "type", "align": "left"},
+            {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
+        ]
+        rows = [
+            {
+                "type": sanitize_secrets(str(w.get("type", ""))),
+                "detail": sanitize_secrets(str(w.get("detail", w.get("name", "")))),
+            }
+            for w in outcome.declined
+        ]
+        ui.table(columns=columns, rows=rows).classes("w-full mt-1")
 
 
 def _semaphore_is_set() -> bool:
@@ -255,3 +290,83 @@ def check_page() -> None:
             run_tool(client, log.push, _do_check, on_done)
 
         ui.button("Run check", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/repair")
+def repair_page() -> None:
+    """Verify a migration, then recreate what is missing and resend."""
+    client = ui.context.client
+    stoat_url = str(app.storage.user.get("stoat_url", ""))
+    token = _tab_token()
+
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Verify and fix a migration").classes("text-2xl font-bold mb-4")
+        if token is None:
+            ui.label("Session expired. Re-enter your token on the setup page.").classes(
+                "text-red-600"
+            )
+            return
+
+        default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
+        dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
+        export_input = ui.input("Export directory (the original DCE export)").classes("w-96")
+        dry_run_cb = ui.checkbox("Dry run (report only, change nothing)", value=True)
+        log = ui.log(max_lines=300).classes("w-full max-w-2xl h-48 font-mono text-xs mt-2")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        errors: list[str] = []
+        state_ref: list[MigrationState] = []
+
+        def on_event(event: MigrationEvent) -> None:
+            if event.status == "error":
+                errors.append(event.message)
+            _safe_push(log.push, f"[{event.phase}] {event.message}")
+
+        def on_done(outcome: RepairOutcome | None) -> None:
+            results.clear()
+            with results:
+                if outcome is None:
+                    ui.label("Repair failed. See the log above.").classes("text-red-600")
+                    return
+                if errors:
+                    ui.label(f"Repair did not complete: {sanitize_secrets(errors[-1])}").classes(
+                        "text-red-600"
+                    )
+                    return
+                _, label, colour = _repair_verdict(outcome, state_ref[0])
+                ui.label(label).classes(f"text-lg font-bold {colour}")
+                render_repair_outcome(outcome)
+
+        def _run() -> None:
+            results.clear()
+            errors.clear()
+            state_ref.clear()
+            export_dir = export_input.value.strip()
+            if not export_dir or not Path(export_dir).is_dir():
+                ui.notify(
+                    "Enter a valid export directory. Repair needs the original export.",
+                    type="warning",
+                )
+                return
+            output_dir = Path(dir_input.value)
+            for line in prepare_tool_call(token):
+                _safe_push(log.push, line)
+
+            async def _do_repair() -> RepairOutcome:
+                exports = parse_export_directory(Path(export_dir))
+                state = load_state(output_dir)
+                state_ref.append(state)
+                config = FerryConfig(
+                    export_dir=Path(export_dir),
+                    stoat_url=stoat_url,
+                    token=token,
+                    output_dir=output_dir,
+                    server_id=state.stoat_server_id or None,
+                    skip_export=True,
+                    dry_run=dry_run_cb.value,
+                )
+                return await run_repair(config, state, exports, on_event)
+
+            run_tool(client, log.push, _do_repair, on_done)
+
+        ui.button("Run repair", on_click=_run).classes("mt-2")
