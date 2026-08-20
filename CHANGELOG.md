@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.24.0] - 2026-08-20
+
+### Added
+
+- **GUI parity with the CLI toolchain, phase 1: the post-migration commands reach the
+  web interface.** Until now the web interface could only run a migration; verifying,
+  repairing, and retrying a migration were command-line only. A new Tools screen at
+  `/tools` adds:
+  - **Check**: verify a finished migration and see a per-entity pass or fail table,
+    with the same verdict `ferry check` gives.
+  - **Repair**: recreate missing channels, roles, and categories and resend messages,
+    with a dry-run default on and the same pass or fail rule as `ferry repair`. A
+    migration that was rolled back is refused, and shown as a neutral refusal rather
+    than a failure.
+  - **Retry**: resend the messages that failed on a prior migration, reporting how many
+    succeeded and how many are still failed.
+  - **Incremental**: a checkbox on the setup page for an incremental re-run, which the
+    engine will not accept together with resume.
+
+  Each tool page registers the Stoat token for redaction before it can log, sanitizes
+  every line and table cell it renders (the on-screen log does not pass through the
+  logging redactor), and starts the rate limiter only when it is off, so a read-only
+  tool cannot disturb a migration running in another browser tab. The preflight probe,
+  blueprint export, server build, and read-only diagnostic pages follow in a later phase.
+
 ## [2.23.0] - 2026-08-20
 
 ### Added
