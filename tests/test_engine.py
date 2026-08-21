@@ -3237,12 +3237,41 @@ async def _repair_recreating_role(
     *,
     recorded_name: str | None = "moderator",
     create_payload: dict[str, Any] | None = None,
+    role_meta: Any = None,
+    metadata_present: bool = False,
+    capture_edits: list[dict[str, object]] | None = None,
+    autumn_upload_status: int = 200,
 ) -> tuple[MigrationState, list[Any], list[MigrationEvent]]:
-    """Drive run_repair against one role_missing result."""
+    """Drive run_repair against one role_missing result.
+
+    ``role_meta`` (a RoleMeta) writes a discord_metadata.json carrying it under
+    D_ROLE, so repair restores the role's attributes. ``metadata_present`` writes
+    a metadata file with NO RoleMeta for the role (the "role absent from
+    role_metadata" case). ``capture_edits`` collects every role-edit PATCH body.
+    """
+    from discord_ferry.discord.metadata import (
+        DiscordMetadata,
+        save_discord_metadata,
+    )
+
     config = _make_repair_config(tmp_path)
-    state = MigrationState(stoat_server_id=R_SERVER, role_map={D_ROLE: S_ROLE_OLD})
+    state = MigrationState(
+        stoat_server_id=R_SERVER, role_map={D_ROLE: S_ROLE_OLD}, autumn_url=AUTUMN_URL
+    )
     if recorded_name is not None:
         state.created_role_names[D_ROLE] = recorded_name
+
+    if role_meta is not None or metadata_present:
+        meta = DiscordMetadata(
+            guild_id="g",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={},
+            role_metadata={D_ROLE: role_meta} if role_meta is not None else {},
+        )
+        save_discord_metadata(meta, config.output_dir)
+
     events: list[MigrationEvent] = []
 
     report = CheckReport()
@@ -3258,9 +3287,17 @@ async def _repair_recreating_role(
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
         return report
 
+    def _capture_patch(url: object, **kwargs: Any) -> None:
+        if capture_edits is not None:
+            capture_edits.append(kwargs.get("json", {}))
+
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
         aioresponses() as m,
     ):
         m.get(
@@ -3272,6 +3309,13 @@ async def _repair_recreating_role(
             f"{BASE_URL}/servers/{R_SERVER}/roles",
             payload=create_payload if create_payload is not None else {"id": S_ROLE_NEW},
         )
+        m.patch(
+            f"{BASE_URL}/servers/{R_SERVER}/roles/{S_ROLE_NEW}",
+            payload={},
+            repeat=True,
+            callback=_capture_patch,  # type: ignore[arg-type]
+        )
+        m.post(f"{AUTUMN_URL}/icons", payload={"id": "autumn-icon-id"}, status=autumn_upload_status)
         await run_repair(config, state, [], events.append)
         requests = list(m.requests)
     return state, requests, events
@@ -4821,21 +4865,78 @@ async def test_a_recreated_channel_with_no_attributes_sends_no_edit(tmp_path: Pa
 
 
 async def test_a_recreated_role_says_its_attributes_are_not_restored(tmp_path: Path) -> None:
-    """A DECLINE, recorded rather than silent.
+    """A DECLINE when there is no Discord metadata to restore from.
 
-    The migration sets a role's colour, rank, hoist and icon in two further
-    api_edit_role passes, and the icon one uploads a file to Autumn. Restoring
-    those is a second content path in a batch already carrying two commands, and
-    the reasoning that keeps emoji out of repair applies to the icon too.
-
-    Declining is defensible. Declining silently is not: the operator would see a
-    role that looks restored and is uncoloured and unranked.
+    Colour, hoist and icon live in Discord metadata. With no metadata file, repair
+    has no source for them, so it declines and says so rather than leaving a role
+    that looks restored and is uncoloured. Rank is restored only by an
+    --incremental re-run either way (see #344).
     """
-    state, _, _ = await _repair_recreating_role(tmp_path)
+    state, _, _ = await _repair_recreating_role(tmp_path)  # no metadata
     assert any(
         w.get("type") == "role_attributes_not_restored" and "#344" in w["message"]
         for w in state.warnings
     ), f"the role attribute decline was not recorded: {state.warnings}"
+
+
+async def test_repair_restores_colour_and_hoist_when_metadata_present(tmp_path: Path) -> None:
+    """With a RoleMeta, repair restores colour and hoist and does NOT decline."""
+    from discord_ferry.discord.metadata import RoleMeta
+
+    edits: list[dict[str, object]] = []
+    state, _, _ = await _repair_recreating_role(
+        tmp_path,
+        role_meta=RoleMeta(hoist=True, color="#3498db", name="moderator"),
+        capture_edits=edits,
+    )
+    assert any(e.get("colour") == 0x3498DB for e in edits), edits
+    assert any(e.get("hoist") is True for e in edits), edits
+    assert not any(
+        w.get("type") == "role_attributes_not_restored" for w in state.warnings
+    ), state.warnings
+
+
+async def test_repair_restores_icon_when_metadata_has_hash(tmp_path: Path) -> None:
+    """A RoleMeta with an icon_hash drives a re-download, an Autumn upload, and an icon edit."""
+    from discord_ferry.discord.metadata import RoleMeta
+
+    edits: list[dict[str, object]] = []
+    state, requests, _ = await _repair_recreating_role(
+        tmp_path,
+        role_meta=RoleMeta(icon_hash="abc", name="moderator"),
+        capture_edits=edits,
+    )
+    assert any("/icons" in str(k[1]) for k in requests), requests
+    assert any(e.get("icon") == "autumn-icon-id" for e in edits), edits
+    assert not any(
+        w.get("type") == "role_attributes_not_restored" for w in state.warnings
+    ), state.warnings
+
+
+async def test_repair_skips_an_emoji_role_icon(tmp_path: Path) -> None:
+    """An emoji icon (unicode_emoji, no icon_hash) is skipped, tagged phase=repair."""
+    from discord_ferry.discord.metadata import RoleMeta
+
+    state, requests, _ = await _repair_recreating_role(
+        tmp_path,
+        role_meta=RoleMeta(unicode_emoji="\U0001f600", name="moderator"),
+    )
+    assert any(
+        w.get("type") == "role_icon_skipped" and w.get("phase") == "repair"
+        for w in state.warnings
+    ), state.warnings
+    assert not any("/icons" in str(k[1]) for k in requests), requests
+
+
+async def test_repair_declines_when_role_absent_from_metadata(tmp_path: Path) -> None:
+    """Metadata present, but no RoleMeta for this role: still declined, no attribute edit."""
+    state, requests, _ = await _repair_recreating_role(tmp_path, metadata_present=True)
+    assert any(
+        w.get("type") == "role_attributes_not_restored" for w in state.warnings
+    ), state.warnings
+    assert not any(
+        k[0] == "PATCH" and str(k[1]).endswith(f"/roles/{S_ROLE_NEW}") for k in requests
+    ), requests
 
 
 async def test_re_attaching_removes_the_dead_channel_id(tmp_path: Path) -> None:
