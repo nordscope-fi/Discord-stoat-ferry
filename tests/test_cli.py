@@ -3020,18 +3020,14 @@ def test_repair_exits_non_zero_when_an_emoji_could_not_be_recreated(
     )
 
 
-def test_repair_exits_zero_on_a_split_tail_emoji_decline(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_repair_exits_zero_on_a_split_tail_emoji_decline(runner: CliRunner, tmp_path: Path) -> None:
     """emoji_in_split_tail is a partial restore of an emoji repair DID recreate (#307).
 
     Like merge_thread_content_not_restored, it must not exit non-zero: the emoji
     is back and its addressable reference fixed; only an unaddressable later send
     of a split message keeps the old id.
     """
-    outcome = RepairOutcome(
-        declined=[{"type": "emoji_in_split_tail", "message": "later send"}]
-    )
+    outcome = RepairOutcome(declined=[{"type": "emoji_in_split_tail", "message": "later send"}])
     result = _invoke_repair(runner, tmp_path, outcome)
     assert result.exit_code == 0, (
         f"a partial split-tail decline exited {result.exit_code}, which reads as failure"
