@@ -3020,6 +3020,44 @@ def test_repair_exits_non_zero_when_an_emoji_could_not_be_recreated(
     )
 
 
+def test_repair_exits_non_zero_when_a_role_attribute_edit_failed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A repair-time role attribute API failure leaves the role incomplete (#344).
+
+    Repair tried to restore the colour/hoist/icon and the Stoat/Autumn call failed,
+    so the role's appearance is left broken. Same shape as emoji_rewrite_failed: the
+    exit code must say the migration is not whole.
+    """
+    outcome = RepairOutcome(
+        declined=[{"type": "role_icon_upload_failed", "message": "Role icon upload failed"}]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 1, (
+        f"a failed role attribute repair exited {result.exit_code}, which reads as success"
+    )
+
+
+def test_repair_exits_zero_when_only_role_attributes_were_not_restored(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """role_attributes_not_restored is a no-metadata degradation, not a failure (#344).
+
+    The role WAS recreated; there was simply no Discord metadata to restore its
+    appearance from, and the documented remedy is an --incremental re-run. Like
+    no_discord_metadata, it must not push the exit code to 1.
+    """
+    outcome = RepairOutcome(
+        declined=[
+            {"type": "role_attributes_not_restored", "message": "colour/hoist/icon not restored"}
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 0, (
+        f"a no-metadata attribute degradation exited {result.exit_code}, which reads as a defect"
+    )
+
+
 def test_repair_exits_non_zero_when_an_emoji_rewrite_failed(
     runner: CliRunner, tmp_path: Path
 ) -> None:

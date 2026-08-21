@@ -36,6 +36,13 @@ def test_repair_failure_set_is_shared_and_exact() -> None:
                 # restore of a recreated emoji), matching the CLI comment.
                 "emoji_missing_media",
                 "emoji_rewrite_failed",
+                # #344 role attribute repair: an attempted-and-failed colour, hoist
+                # or icon edit leaves the role's appearance broken. role_attributes_not_restored
+                # is excluded (the no-metadata degradation, no_discord_metadata shape).
+                "role_colour_failed",
+                "role_attributes_failed",
+                "role_icon_download_failed",
+                "role_icon_upload_failed",
             }
         )
         == UNREPAIRED_WARNING_TYPES

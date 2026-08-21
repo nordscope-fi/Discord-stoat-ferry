@@ -143,6 +143,20 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         # keeps the old id (#307).
         "emoji_missing_media",
         "emoji_rewrite_failed",
+        # Repair TRIED to restore a recreated role's colour, hoist or icon and the
+        # Stoat/Autumn API call FAILED, so the role's appearance is left incomplete.
+        # Same shape as emoji_rewrite_failed: attempted, failed, something remains
+        # broken. These fire with phase == "repair" only via apply_role_attributes'
+        # repair caller; a migration-time failure carries phase == "roles" and the
+        # exit code scans this run's repair-phase warnings only, so it is unaffected.
+        # role_attributes_not_restored is deliberately ABSENT, like no_discord_metadata:
+        # it names the no-metadata degradation (the role was recreated, there was no
+        # source for its appearance), whose documented remedy is an --incremental
+        # re-run, not a failed operation (#344).
+        "role_colour_failed",
+        "role_attributes_failed",
+        "role_icon_download_failed",
+        "role_icon_upload_failed",
     }
 )
 
