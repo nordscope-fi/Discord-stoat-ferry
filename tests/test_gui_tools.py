@@ -989,9 +989,26 @@ def test_stats_rows_maps_summary_and_sanitizes_last_error() -> None:
     assert by_item["Channels"] == "3"
     assert by_item["Messages migrated"] == "1,234"
     assert by_item["Fidelity embeds"] == "n/a"  # None denominator, not 0%
+    assert by_item["Elapsed"] == "00:00:12"  # timing parity with the CLI (12.0s complete)
     errors_row = next(r["value"] for r in rows if r["item"] == "Errors")
     assert _TOKEN not in errors_row  # the last-error preview was sanitized
     reset_secret_registry()
+
+
+def test_stats_rows_elapsed_states() -> None:
+    """#493: the Elapsed row mirrors the CLI's trinary duration handling."""
+    from discord_ferry import gui_tools
+
+    def elapsed_for(state: str, seconds: float | None):  # type: ignore[no-untyped-def]
+        summary = _fake_summary()
+        summary.duration_state = state
+        summary.duration_seconds = seconds
+        rows = gui_tools._stats_rows(summary)  # type: ignore[arg-type]
+        return next(r["value"] for r in rows if r["item"] == "Elapsed")
+
+    assert elapsed_for("in_progress", None) == "in progress"
+    assert elapsed_for("unknown", None) == "unknown"
+    assert elapsed_for("complete", 3661.0) == "01:01:01"
 
 
 async def test_stats_page_renders_summary(
