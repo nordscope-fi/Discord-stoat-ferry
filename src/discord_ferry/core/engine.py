@@ -1056,6 +1056,24 @@ async def _rebuild_one_forum_index(
                 content=content,
             )
             index_msg_id: str = existing_msg_id
+        elif forum_key in state.forum_index_present_unknown_id:
+            # Present on the server, but its id was lost to an earlier duplicate send
+            # (#215). Re-sending would post a second index message once Stoat's
+            # idempotency LRU has evicted the key. Skip, and say so: the message stays
+            # with its prior content, only this run's count refresh is missed. Tested
+            # before the send branch, so a known id (rule 1) always supersedes this.
+            on_event(
+                MigrationEvent(
+                    phase="report",
+                    status="warning",
+                    message=_safe(
+                        config,
+                        f"Forum index for '{forum_name}' exists but its message id is "
+                        "unknown; its counts were not refreshed.",
+                    ),
+                )
+            )
+            return
         else:
             try:
                 msg_result = await api_send_message(
@@ -1069,17 +1087,19 @@ async def _rebuild_one_forum_index(
                 )
                 index_msg_id = msg_result["_id"]
             except DuplicateSendError:
-                # Already on the server with no recoverable id. Write NOTHING to
-                # forum_index_message_ids: an entry there persists into
-                # state.json and drives an api_edit_message against an id that
-                # does not exist on the next run. Letting the broad handler take
-                # this instead would report a rebuild failure that did not
-                # happen, which is the same defect as the FailedMessage on the
-                # message path.
+                # Already on the server with no recoverable id. Record the forum in the
+                # present-id-unknown set so the next run skips it instead of posting a
+                # duplicate (#215). Write NOTHING to forum_index_message_ids: a truthy
+                # entry there would drive an api_edit_message against an id that does not
+                # exist. Letting the broad handler take this instead would report a
+                # rebuild failure that did not happen.
+                state.forum_index_present_unknown_id.add(forum_key)
                 index_msg_id = ""
             await asyncio.sleep(config.upload_delay)
             if index_msg_id:
                 state.forum_index_message_ids[forum_key] = index_msg_id
+                # A recovered id supersedes any prior mark; keep the two disjoint.
+                state.forum_index_present_unknown_id.discard(forum_key)
                 await api_pin_message(
                     session,
                     config.stoat_url,

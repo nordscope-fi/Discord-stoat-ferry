@@ -1665,6 +1665,69 @@ async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) ->
             await _rebuild_one_forum_index(session, config, state, "forum-empty", lambda e: None)
 
 
+async def test_rebuild_marks_forum_on_duplicate(tmp_path: Path) -> None:
+    """SC-1.1: a DuplicateSendError marks the forum, records no id, does not pin."""
+    from discord_ferry.core.engine import _rebuild_one_forum_index
+
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="s",
+        forum_channel_members={"f": ["d1"]},
+        forum_category_names={"f": "F"},
+        channel_map={"d1": "s1", "forum-index-f": "idx"},
+    )
+    with aioresponses() as mock:
+        mock.post(
+            "https://api.test/channels/idx/messages",
+            status=409,
+            payload={"type": "DuplicateNonce", "location": "x:1:1"},
+        )
+        async with aiohttp.ClientSession() as session:
+            await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
+    assert state.forum_index_present_unknown_id == {"f"}
+    assert "f" not in state.forum_index_message_ids
+
+
+async def test_rebuild_skips_marked_forum(tmp_path: Path) -> None:
+    """SC-1.2: a marked forum is skipped, emits a frozen warning, sends nothing."""
+    from discord_ferry.core.engine import _rebuild_one_forum_index
+
+    config = _make_config(tmp_path)
+    events: list[MigrationEvent] = []
+    state = MigrationState(
+        stoat_server_id="s",
+        forum_channel_members={"f": ["d1"]},
+        forum_category_names={"f": "F"},
+        channel_map={"forum-index-f": "idx"},
+        forum_index_present_unknown_id={"f"},
+    )
+    with aioresponses():  # no routes registered: any HTTP call raises
+        async with aiohttp.ClientSession() as session:
+            await _rebuild_one_forum_index(session, config, state, "f", events.append)
+    assert any(e.status == "warning" and "unknown" in (e.message or "").lower() for e in events)
+    assert state.forum_index_present_unknown_id == {"f"}
+
+
+async def test_rebuild_success_never_leaves_forum_in_both(tmp_path: Path) -> None:
+    """SC-1.5: after a successful send, the id map and the marker set stay disjoint."""
+    from discord_ferry.core.engine import _rebuild_one_forum_index
+
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="s",
+        forum_channel_members={"f": ["d1"]},
+        forum_category_names={"f": "F"},
+        channel_map={"d1": "s1", "forum-index-f": "idx"},
+    )
+    with aioresponses() as mock:
+        mock.post("https://api.test/channels/idx/messages", payload={"_id": "m3"})
+        mock.post("https://api.test/channels/idx/messages/m3/pin", payload={})
+        async with aiohttp.ClientSession() as session:
+            await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
+    assert state.forum_index_message_ids["f"] == "m3"
+    assert set(state.forum_index_message_ids) & state.forum_index_present_unknown_id == set()
+
+
 # ---------------------------------------------------------------------------
 # S16: Orphan Autumn upload cleanup
 # ---------------------------------------------------------------------------
