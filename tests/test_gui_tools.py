@@ -880,3 +880,166 @@ async def test_check_page_shows_cannot_check_on_migration_error(
         user.find("Run check").click()
         await user.should_see("Cannot check this migration")
         await user.should_not_see("Check failed")  # not the generic error path
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: validate (#492), stats (#493), tls-check (#494)
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_page_no_dce_json_error(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """#492: an empty parse shows a clear error, not a crash."""
+    with patch("discord_ferry.gui_tools.parse_export_directory", return_value=[]):
+        await user.open("/tools/validate")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Validate export").click()
+        await user.should_see("No valid DCE JSON files found")
+
+
+async def test_validate_page_renders_warnings_and_ack_reason(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """#492: warnings render, and the plain-text-mentions acknowledgement reason shows."""
+    warnings = [
+        {"type": "rendered_markdown", "message": "3 mentions written as plain text", "count": "3"}
+    ]
+
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[object()]),
+        patch("discord_ferry.gui_tools.validate_export", return_value=warnings),
+        patch(
+            "discord_ferry.gui_tools.acknowledgement_required",
+            return_value="3 message(s) have mentions written as plain text.",
+        ),
+    ):
+        await user.open("/tools/validate")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Validate export").click()
+        await user.should_see("mentions written as plain text")
+        await user.should_see("1 warning(s)")
+
+
+async def test_validate_page_clean_export(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """#492: a clean export reports no warnings."""
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[object()]),
+        patch("discord_ferry.gui_tools.validate_export", return_value=[]),
+    ):
+        await user.open("/tools/validate")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Validate export").click()
+        await user.should_see("Export looks good")
+
+
+def _fake_summary(last_error: str | None = None):  # type: ignore[no-untyped-def]
+    """A StateSummary-shaped stub for the stats row-builder test."""
+    from types import SimpleNamespace
+
+    fidelity = SimpleNamespace(
+        overall=98.5, messages=99.0, attachments=100.0, embeds=None, replies=50.0, reactions=None
+    )
+    return SimpleNamespace(
+        channels=3,
+        roles=2,
+        categories=1,
+        emojis=0,
+        messages=1234,
+        attachments_uploaded=10,
+        attachments_skipped=1,
+        pins_applied=2,
+        reactions_applied=5,
+        replies_linked=4,
+        replies_total=8,
+        embeds_total=0,
+        embeds_dropped=0,
+        failed_messages=0,
+        prior_messages_total=0,
+        error_count=1 if last_error else 0,
+        warning_count=0,
+        last_error=last_error,
+        last_warning=None,
+        fidelity=fidelity,
+        rollback=None,
+        channel_breakdown={},
+        is_dry_run=False,
+        stoat_server_id="01SRV",
+        duration_seconds=12.0,
+        duration_state="complete",
+        current_phase="report",
+    )
+
+
+def test_stats_rows_maps_summary_and_sanitizes_last_error() -> None:
+    """#493: the stats rows carry the counters and mask a token in last_error."""
+    from discord_ferry import gui_tools
+    from discord_ferry.core.security import register_secret, reset_secret_registry
+
+    reset_secret_registry()
+    register_secret("stoat", _TOKEN)
+    rows = gui_tools._stats_rows(_fake_summary(last_error=f"boom {_TOKEN}"))
+
+    by_item = {r["item"]: r["value"] for r in rows}
+    assert by_item["Channels"] == "3"
+    assert by_item["Messages migrated"] == "1,234"
+    assert by_item["Fidelity embeds"] == "n/a"  # None denominator, not 0%
+    errors_row = next(r["value"] for r in rows if r["item"] == "Errors")
+    assert _TOKEN not in errors_row  # the last-error preview was sanitized
+    reset_secret_registry()
+
+
+async def test_stats_page_renders_summary(
+    user: User,
+    user_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """#493: a valid state renders the summary (the server-id label is the positive control)."""
+    user_store["output_dir"] = str(tmp_path)
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.summarize_state", return_value=_fake_summary()),
+    ):
+        await user.open("/tools/stats")
+        user.find("Show stats").click()
+        await user.should_see("Stoat server 01SRV")  # label, not a table cell
+
+
+async def test_stats_page_missing_state_error(
+    user: User,
+    user_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """#493: a missing or invalid state file shows a clear error."""
+    from discord_ferry.errors import StateError
+
+    user_store["output_dir"] = str(tmp_path)
+
+    with patch("discord_ferry.gui_tools.load_state", side_effect=StateError("no state.json found")):
+        await user.open("/tools/stats")
+        user.find("Show stats").click()
+        await user.should_see("Cannot read this migration")
+
+
+async def test_tls_check_page_renders_both_groups(
+    user: User,
+) -> None:
+    """#494: the TLS trust and proxy groups both render from the describe functions."""
+    with (
+        patch(
+            "discord_ferry.gui_tools.describe_trust",
+            return_value={"trust-source": "certifi+system"},
+        ),
+        patch("discord_ferry.gui_tools.describe_proxy", return_value={"proxy-source": "none"}),
+    ):
+        await user.open("/tools/tls-check")
+        await user.should_see("TLS trust")
+        await user.should_see("certifi+system")
+        await user.should_see("Proxy")
+        await user.should_see("proxy-source")

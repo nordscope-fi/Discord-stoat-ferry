@@ -19,13 +19,18 @@ import discord_ferry.migrator.api as _api
 from discord_ferry.blueprint import blueprint_from_exports, export_blueprint, import_blueprint
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_build, run_repair, run_retry_failed
-from discord_ferry.core.http import format_proxy_notices
+from discord_ferry.core.http import describe_proxy, describe_trust, format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, MigrationError, StateError
 from discord_ferry.migrator.probe import run_probe
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
-from discord_ferry.parser.dce_parser import parse_export_directory
+from discord_ferry.parser.dce_parser import (
+    acknowledgement_required,
+    parse_export_directory,
+    validate_export,
+)
 from discord_ferry.state import load_state
+from discord_ferry.stats import summarize_state
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -35,6 +40,7 @@ if TYPE_CHECKING:
     from discord_ferry.migrator.probe import ProbeReport
     from discord_ferry.migrator.verify import CheckReport, RepairOutcome
     from discord_ferry.state import MigrationState
+    from discord_ferry.stats import StateSummary
 
 T = TypeVar("T")
 
@@ -725,3 +731,158 @@ def build_page() -> None:
             run_tool(client, log.push, _do_build, on_done)
 
         ui.button("Build server", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/validate")
+def validate_page() -> None:
+    """Check a DCE export before migrating, reachable standalone from /tools.
+
+    Offline: it reads local export files and reports warnings, making no API call,
+    so there is no token and no runner. Mirrors the ``ferry validate`` warnings,
+    including the plain-text-mentions acknowledgement reason.
+    """
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Check an export").classes("text-2xl font-bold mb-4")
+        dir_input = ui.input("Export directory (the DCE export)").classes("w-96")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def _run() -> None:
+            results.clear()
+            export_dir = dir_input.value.strip()
+            if not export_dir or not Path(export_dir).is_dir():
+                ui.notify("Enter a valid export directory.", type="warning")
+                return
+            path = Path(export_dir)
+            exports = parse_export_directory(path)
+            with results:
+                if not exports:
+                    ui.label("No valid DCE JSON files found in that directory.").classes(
+                        "text-red-600"
+                    )
+                    return
+                warnings = validate_export(exports, path)
+                if not warnings:
+                    ui.label("Export looks good. No warnings.").classes(
+                        "text-lg font-bold text-green-600"
+                    )
+                else:
+                    ui.label(f"{len(warnings)} warning(s):").classes(
+                        "text-lg font-bold text-amber-700"
+                    )
+                    for w in warnings:
+                        # Warning messages carry export-controlled text (channel
+                        # names), so they are sanitized at this rendered sink.
+                        ui.label(f"- {sanitize_secrets(w.get('message', ''))}").classes(
+                            "text-sm text-amber-700"
+                        )
+                reason = acknowledgement_required(warnings)
+                if reason is not None:
+                    ui.label(sanitize_secrets(reason)).classes("text-red-600 font-bold mt-2")
+
+        ui.button("Validate export", on_click=_run).classes("mt-2")
+
+
+def _stats_rows(summary: StateSummary) -> list[dict[str, str]]:
+    """Rows for the stats table, mirroring the CLI's `_build_stats_table` sections.
+
+    ``last_error`` / ``last_warning`` are the only free-text fields (an error or
+    warning message can carry export or API prose), so their previews are
+    sanitized. Every other value is a count, a percentage, or an id.
+    """
+    fb = summary.fidelity
+
+    def pct(value: float | None) -> str:
+        return f"{value:.1f}%" if value is not None else "n/a"
+
+    rows: list[tuple[str, str]] = [
+        ("Channels", str(summary.channels)),
+        ("Roles", str(summary.roles)),
+        ("Categories", str(summary.categories)),
+        ("Emojis", str(summary.emojis)),
+        ("Messages migrated", f"{summary.messages:,}"),
+        ("Attachments uploaded", f"{summary.attachments_uploaded:,}"),
+        ("Attachments skipped", f"{summary.attachments_skipped:,}"),
+        ("Pins applied", str(summary.pins_applied)),
+        ("Reactions applied", f"{summary.reactions_applied:,}"),
+        ("Replies linked / total", f"{summary.replies_linked:,} / {summary.replies_total:,}"),
+        ("Embeds total / dropped", f"{summary.embeds_total:,} / {summary.embeds_dropped:,}"),
+        ("Failed messages", str(summary.failed_messages)),
+        ("Prior messages total", f"{summary.prior_messages_total:,}"),
+        ("Fidelity overall", pct(fb.overall)),
+        ("Fidelity messages", pct(fb.messages)),
+        ("Fidelity attachments", pct(fb.attachments)),
+        ("Fidelity embeds", pct(fb.embeds)),
+        ("Fidelity replies", pct(fb.replies)),
+        ("Fidelity reactions", pct(fb.reactions)),
+    ]
+    if summary.error_count == 0:
+        rows.append(("Errors", "0 (clean)"))
+    else:
+        preview = sanitize_secrets(summary.last_error or "")[:80]
+        rows.append(("Errors", f"{summary.error_count} — last: {preview}"))
+    if summary.warning_count == 0:
+        rows.append(("Warnings", "0 (clean)"))
+    else:
+        preview = sanitize_secrets(summary.last_warning or "")[:80]
+        rows.append(("Warnings", f"{summary.warning_count} — last: {preview}"))
+    return [{"item": item, "value": value} for item, value in rows]
+
+
+@ui.page("/tools/stats")
+def stats_page() -> None:
+    """Summarise a past migration from its state file. Local read, no token.
+
+    Reads ``state.json`` from an output directory and renders the same counters,
+    fidelity, and error/warning summary the CLI ``stats`` command builds.
+    """
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Summarise a migration").classes("text-2xl font-bold mb-4")
+        default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
+        dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
+        results = ui.column().classes("w-full max-w-2xl")
+
+        def _run() -> None:
+            results.clear()
+            with results:
+                try:
+                    state = load_state(Path(dir_input.value))
+                except StateError as exc:
+                    ui.label(f"Cannot read this migration: {sanitize_secrets(str(exc))}").classes(
+                        "text-red-600"
+                    )
+                    return
+                summary = summarize_state(state)
+                tag = " (dry run)" if summary.is_dry_run else ""
+                ui.label(f"Stoat server {summary.stoat_server_id}{tag}").classes(
+                    "text-sm text-gray-600"
+                )
+                columns = [
+                    {"name": "item", "label": "Item", "field": "item", "align": "left"},
+                    {"name": "value", "label": "Value", "field": "value", "align": "left"},
+                ]
+                ui.table(columns=columns, rows=_stats_rows(summary)).classes("w-full mt-2")
+
+        ui.button("Show stats", on_click=_run).classes("mt-2")
+
+
+@ui.page("/tools/tls-check")
+def tls_check_page() -> None:
+    """Inspect the TLS trust and proxy state. No inputs, no token, always succeeds.
+
+    Renders ``describe_trust`` and ``describe_proxy`` (each ``dict[str, str]`` of
+    internal config diagnostics, no credentials) as two labelled key-value groups.
+    Skips the runner's token steps entirely.
+    """
+
+    def _group(title: str, data: dict[str, str]) -> None:
+        with ui.card().classes("w-full max-w-xl"):
+            ui.label(title).classes("text-lg font-bold")
+            for key, value in data.items():
+                with ui.row().classes("w-full justify-between"):
+                    ui.label(key).classes("text-sm text-gray-500")
+                    ui.label(value).classes("text-sm font-mono")
+
+    with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
+        ui.label("Trust and proxy state").classes("text-2xl font-bold mb-4")
+        _group("TLS trust", describe_trust())
+        _group("Proxy", describe_proxy())
