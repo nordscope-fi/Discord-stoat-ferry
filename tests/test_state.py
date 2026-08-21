@@ -911,6 +911,7 @@ _KNOWN_STATE_FIELDS = frozenset(
         "channel_message_counts",
         "reaction_message_counts",
         "forum_index_message_ids",
+        "forum_index_present_unknown_id",
         "embeds_total",
         "embeds_dropped",
         "replies_linked",
@@ -953,6 +954,22 @@ def test_pending_emoji_rewrites_defaults_empty(tmp_path: Path) -> None:
     del raw["pending_emoji_rewrites"]
     (tmp_path / "state.json").write_text(json.dumps(raw))
     assert load_state(tmp_path).pending_emoji_rewrites == {}
+
+
+def test_forum_index_present_unknown_id_round_trips(tmp_path: Path) -> None:
+    """SC-2.2: the #215 marker survives save then load, as a set."""
+    state = MigrationState(forum_index_present_unknown_id={"forum-news"})
+    save_state(state, tmp_path)
+    assert load_state(tmp_path).forum_index_present_unknown_id == {"forum-news"}
+
+
+def test_forum_index_present_unknown_id_defaults_empty(tmp_path: Path) -> None:
+    """SC-2.3: a state file written before the field existed loads it as an empty set."""
+    save_state(MigrationState(), tmp_path)
+    raw = json.loads((tmp_path / "state.json").read_text())
+    del raw["forum_index_present_unknown_id"]
+    (tmp_path / "state.json").write_text(json.dumps(raw))
+    assert load_state(tmp_path).forum_index_present_unknown_id == set()
 
 
 def test_failed_message_fields_are_classified() -> None:

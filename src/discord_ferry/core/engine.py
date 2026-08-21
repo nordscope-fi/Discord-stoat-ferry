@@ -299,6 +299,7 @@ async def run_migration(
             }
             state.forum_category_names = dict(prior.forum_category_names)
             state.forum_index_message_ids = dict(prior.forum_index_message_ids)
+            state.forum_index_present_unknown_id = set(prior.forum_index_present_unknown_id)
             state.channel_message_counts = dict(prior.channel_message_counts)
             state.category_names = dict(prior.category_names)
             state.channel_categories = dict(prior.channel_categories)
@@ -318,7 +319,10 @@ async def run_migration(
             #     --incremental delta skipping),
             #     failed_messages (so incremental self-heals prior failures — #76),
             #     channel_message_counts, forum_channel_members /
-            #     forum_category_names / forum_index_message_ids,
+            #     forum_category_names / forum_index_message_ids /
+            #     forum_index_present_unknown_id (the #215 duplicate marker, carried
+            #     beside forum_index_message_ids so a resumed run keeps skipping an
+            #     index whose id was lost rather than re-posting it),
             #     native_fidelity_counts (cumulative fidelity counter), and the
             #     cumulative counters (attachments_uploaded/skipped,
             #     reactions_applied, pins_applied). prior_messages_total is DERIVED
