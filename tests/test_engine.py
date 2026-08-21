@@ -4891,9 +4891,9 @@ async def test_repair_restores_colour_and_hoist_when_metadata_present(tmp_path: 
     )
     assert any(e.get("colour") == 0x3498DB for e in edits), edits
     assert any(e.get("hoist") is True for e in edits), edits
-    assert not any(
-        w.get("type") == "role_attributes_not_restored" for w in state.warnings
-    ), state.warnings
+    assert not any(w.get("type") == "role_attributes_not_restored" for w in state.warnings), (
+        state.warnings
+    )
 
 
 async def test_repair_restores_icon_when_metadata_has_hash(tmp_path: Path) -> None:
@@ -4908,9 +4908,9 @@ async def test_repair_restores_icon_when_metadata_has_hash(tmp_path: Path) -> No
     )
     assert any("/icons" in str(k[1]) for k in requests), requests
     assert any(e.get("icon") == "autumn-icon-id" for e in edits), edits
-    assert not any(
-        w.get("type") == "role_attributes_not_restored" for w in state.warnings
-    ), state.warnings
+    assert not any(w.get("type") == "role_attributes_not_restored" for w in state.warnings), (
+        state.warnings
+    )
 
 
 async def test_repair_skips_an_emoji_role_icon(tmp_path: Path) -> None:
@@ -4922,8 +4922,7 @@ async def test_repair_skips_an_emoji_role_icon(tmp_path: Path) -> None:
         role_meta=RoleMeta(unicode_emoji="\U0001f600", name="moderator"),
     )
     assert any(
-        w.get("type") == "role_icon_skipped" and w.get("phase") == "repair"
-        for w in state.warnings
+        w.get("type") == "role_icon_skipped" and w.get("phase") == "repair" for w in state.warnings
     ), state.warnings
     assert not any("/icons" in str(k[1]) for k in requests), requests
 
@@ -4931,9 +4930,9 @@ async def test_repair_skips_an_emoji_role_icon(tmp_path: Path) -> None:
 async def test_repair_declines_when_role_absent_from_metadata(tmp_path: Path) -> None:
     """Metadata present, but no RoleMeta for this role: still declined, no attribute edit."""
     state, requests, _ = await _repair_recreating_role(tmp_path, metadata_present=True)
-    assert any(
-        w.get("type") == "role_attributes_not_restored" for w in state.warnings
-    ), state.warnings
+    assert any(w.get("type") == "role_attributes_not_restored" for w in state.warnings), (
+        state.warnings
+    )
     assert not any(
         k[0] == "PATCH" and str(k[1]).endswith(f"/roles/{S_ROLE_NEW}") for k in requests
     ), requests
