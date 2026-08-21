@@ -192,6 +192,16 @@ def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> Non
         storage.pop(key, None)
 
 
+def _stash_output_dir(storage: MutableMapping[str, Any], output_dir: Path) -> None:
+    """Record a finished migration's output dir so a tool page defaults to it.
+
+    Written to ``app.storage.user`` (which persists to disk); only the directory,
+    never a token, is stored here. The check, repair and retry pages read it back
+    via ``app.storage.user.get("output_dir", ...)``.
+    """
+    storage["output_dir"] = str(output_dir)
+
+
 _EXPOSED_REACTION_MODES = ("text", "native", "skip")
 
 # NiceGUI 3.x defaults `Client.connected()` to `timeout=None`, i.e. wait forever.
@@ -1359,6 +1369,12 @@ async def migrate_page() -> None:
                         "Rollback this migration",
                         on_click=lambda: _start_rollback(),
                     ).classes("bg-red-600 text-white")
+                    ui.button("Verify", on_click=lambda: _open_tool("/tools/check")).classes(
+                        "bg-blue-600 text-white"
+                    )
+                    ui.button("Repair", on_click=lambda: _open_tool("/tools/repair")).classes(
+                        "bg-blue-600 text-white"
+                    )
 
     # ---------------------------------------------------------------------------
     # Cancel confirmation dialog
@@ -1636,6 +1652,13 @@ async def migrate_page() -> None:
                     _show_rollback_dialog(event.detail["summary"])
 
         log_display.push(f"[{event.phase}] {event.status}: {event.message}")
+
+    def _open_tool(route: str) -> None:
+        # Stash this migration's output dir so the tool page defaults to it, then
+        # jump there. The session token was cleared on completion; #524 lets the
+        # tool page take a token when the session store is empty.
+        _stash_output_dir(app.storage.user, config.output_dir)
+        ui.navigate.to(route)
 
     def _on_migration_complete() -> None:
         controls_row.classes(add="hidden")

@@ -19,6 +19,8 @@ from discord_ferry.gui import (
 from discord_ferry.parser.dce_parser import parse_export_directory
 
 if TYPE_CHECKING:
+    from nicegui.testing import User
+
     from discord_ferry.core.engine import PhaseFunction
     from discord_ferry.core.events import MigrationEvent
     from discord_ferry.state import MigrationState
@@ -356,6 +358,15 @@ def test_session_token_keys_pinned() -> None:
     assert _SESSION_TOKEN_KEYS == ("token", "discord_token")
 
 
+def test_stash_output_dir_writes_string_path() -> None:
+    """SC-3.1/3.2 (storage half): the output dir is stashed as a string (#518)."""
+    from discord_ferry.gui import _stash_output_dir
+
+    storage: dict[str, Any] = {}
+    _stash_output_dir(storage, Path("./ferry-output"))
+    assert storage["output_dir"] == "ferry-output"
+
+
 # ---------------------------------------------------------------------------
 # Batch 8 — S1 cached-export gating
 # ---------------------------------------------------------------------------
@@ -684,3 +695,49 @@ def test_resume_and_incremental_conflict_detected() -> None:
     assert _resume_incremental_conflict({"resume": True, "incremental": False}) is False
     assert _resume_incremental_conflict({"resume": False, "incremental": True}) is False
     assert _resume_incremental_conflict({}) is False
+
+
+# ---------------------------------------------------------------------------
+# #518 — completion-card deep-links to Verify and Repair
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("button", "landing_title"),
+    [
+        ("Verify", "Verify a finished migration"),  # -> /tools/check
+        ("Repair", "Verify and fix a migration"),  # -> /tools/repair
+    ],
+)
+@pytest.mark.nicegui_main_file("tests/nicegui_app.py")
+async def test_completion_card_deep_links_to_tool_page(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    button: str,
+    landing_title: str,
+) -> None:
+    """SC-3.1/3.2: the completion card's button stashes the dir and opens the page (#518)."""
+    from discord_ferry.core.events import MigrationEvent
+
+    user_store["export_dir"] = str(tmp_path)
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = "stoat-tok"
+
+    async def fake_run_migration(config, *, on_event):  # type: ignore[no-untyped-def]
+        # Emit the terminal event so _on_migration_complete reveals the card,
+        # without running a real migration.
+        on_event(MigrationEvent(phase="report", status="completed", message="done"))
+
+    monkeypatch.setattr("discord_ferry.gui.run_migration", fake_run_migration)
+
+    await user.open("/migrate")
+    await user.should_see(button)
+
+    user.find(button).click()
+    # The User sim performs the navigation for real, so the target tool page renders.
+    await user.should_see(landing_title)
+    # The output dir was stashed for the tool page to default from.
+    assert user_store["output_dir"] == "ferry-output"  # config.output_dir is ./ferry-output
