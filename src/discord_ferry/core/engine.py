@@ -258,6 +258,13 @@ async def run_migration(
             state.roles_finalized = set(prior.roles_finalized)
             state.category_map = dict(prior.category_map)
             state.emoji_map = dict(prior.emoji_map)
+            # A repair resume record, carried BESIDE emoji_map for the same reason:
+            # emoji_map now points at a recreated emoji, and this records which
+            # messages still hold the old id. Dropping it while carrying emoji_map
+            # would strand those messages with no check able to catch it (#307).
+            state.pending_emoji_rewrites = {
+                k: dict(v) for k, v in prior.pending_emoji_rewrites.items()
+            }
             state.avatar_cache = dict(prior.avatar_cache)
             state.author_names = dict(prior.author_names)
             state.upload_cache = dict(prior.upload_cache)
@@ -296,6 +303,9 @@ async def run_migration(
             state.native_fidelity_counts = dict(prior.native_fidelity_counts)
             # Carry-over audit (every MigrationState field classified):
             #   CARRY: role_map / channel_map / category_map / emoji_map,
+            #     pending_emoji_rewrites (repair resume record, carried beside
+            #     emoji_map so a carried recreated emoji keeps its record of which
+            #     messages still hold the old id — #307),
             #     created_channel_names / created_role_names (a carried entity
             #     skips creation, so nothing re-records its name; omitting these
             #     makes ferry check report ok for a renamed channel),
@@ -2030,6 +2040,21 @@ async def _run_emoji_repair_pass(
         rewritten, declined, failed = await _rewrite_emoji_references(
             session, config, state, pending_id, pending["new"], exports, on_event
         )
+        # Record the resume work in the outcome too, so a run that only finishes a
+        # leftover record still reports what it edited (RepairOutcome is "everything
+        # one run_repair did"). The name is recovered from the export; the emoji
+        # itself was recreated on a prior run.
+        record = find_emoji_in_exports(exports, pending_id)
+        outcome.recreated_emoji.append(
+            {
+                "discord_id": pending_id,
+                "name": record["name"] if record is not None else pending_id,
+                "new_id": pending["new"],
+                "messages_rewritten": rewritten,
+                "messages_declined": declined,
+                "messages_failed": failed,
+            }
+        )
         if failed == 0:
             state.pending_emoji_rewrites.pop(pending_id, None)
             save_state(state, config.output_dir)
@@ -2282,6 +2307,20 @@ async def run_repair(
                     "name": record["name"] if record is not None else discord_id,
                     "new_id": "",
                     "messages_rewritten": would_rewrite,
+                    "messages_declined": 0,
+                    "messages_failed": 0,
+                }
+            )
+        # An outstanding resume record from a crashed run is work a real run would
+        # do first. The preview must name it, or it reads as "nothing to do".
+        for pending_id, pending in state.pending_emoji_rewrites.items():
+            record = find_emoji_in_exports(exports, pending_id)
+            outcome.recreated_emoji.append(
+                {
+                    "discord_id": pending_id,
+                    "name": record["name"] if record is not None else pending_id,
+                    "new_id": pending["new"],
+                    "messages_rewritten": sum(1 for _ in messages_using_emoji(exports, pending_id)),
                     "messages_declined": 0,
                     "messages_failed": 0,
                 }

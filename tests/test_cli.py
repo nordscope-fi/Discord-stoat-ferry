@@ -3020,6 +3020,17 @@ def test_repair_exits_non_zero_when_an_emoji_could_not_be_recreated(
     )
 
 
+def test_repair_exits_non_zero_when_an_emoji_rewrite_failed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """emoji_rewrite_failed leaves a message on the dead id and the record open (#307)."""
+    outcome = RepairOutcome(declined=[{"type": "emoji_rewrite_failed", "message": "edit boom"}])
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 1, (
+        f"a failed emoji rewrite exited {result.exit_code}, which reads as success"
+    )
+
+
 def test_repair_exits_zero_on_a_split_tail_emoji_decline(runner: CliRunner, tmp_path: Path) -> None:
     """emoji_in_split_tail is a partial restore of an emoji repair DID recreate (#307).
 

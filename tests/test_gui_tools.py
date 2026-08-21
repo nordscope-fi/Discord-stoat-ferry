@@ -26,7 +26,18 @@ def test_repair_failure_set_is_shared_and_exact() -> None:
     from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES
 
     assert (
-        frozenset({"no_recorded_name", "not_in_export", "forum_index_not_repairable"})
+        frozenset(
+            {
+                "no_recorded_name",
+                "not_in_export",
+                "forum_index_not_repairable",
+                # #307 emoji repair: could-not-recreate and failed-rewrite both
+                # leave something failing. emoji_in_split_tail is excluded (partial
+                # restore of a recreated emoji), matching the CLI comment.
+                "emoji_missing_media",
+                "emoji_rewrite_failed",
+            }
+        )
         == UNREPAIRED_WARNING_TYPES
     )
 
