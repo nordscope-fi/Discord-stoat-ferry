@@ -999,104 +999,119 @@ async def _rebuild_forum_indexes(
         on_event: Event callback for progress reporting.
     """
     async with get_session(config) as session:
-        for forum_key, discord_channel_ids in state.forum_channel_members.items():
-            index_channel_id = state.channel_map.get(f"forum-index-{forum_key}")
-            if not index_channel_id:
-                continue
+        for forum_key in list(state.forum_channel_members):
+            await _rebuild_one_forum_index(session, config, state, forum_key, on_event)
 
-            forum_name = state.forum_category_names.get(forum_key, forum_key)
 
-            # Build index lines using actual migrated message counts.
-            lines = [f"**Forum: {forum_name}** *(updated after migration)*\n"]
-            for discord_ch_id in discord_channel_ids:
-                stoat_ch_id = state.channel_map.get(discord_ch_id)
-                if not stoat_ch_id:
-                    continue
-                actual_count = state.channel_message_counts.get(discord_ch_id, 0)
-                lines.append(f"- <#{stoat_ch_id}> — {actual_count} messages migrated")
+async def _rebuild_one_forum_index(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    forum_key: str,
+    on_event: EventCallback,
+) -> None:
+    """Rebuild one forum's index message from current migration data.
 
-            if len(lines) <= 1:
-                content = f"**Forum: {forum_name}**\nNo posts migrated."
-            else:
-                content = "\n".join(lines)
-                if len(content) > 2000:
-                    while len(lines) > 1 and len("\n".join(lines)) > 1950:
-                        lines.pop()
-                    remaining = len(discord_channel_ids) - (len(lines) - 1)
-                    lines.append(f"\n*...and {remaining} more posts*")
-                    content = "\n".join(lines)
+    Shared by ``_rebuild_forum_indexes`` (the REPORT-phase loop) and the repair path,
+    so the two cannot drift. Reads the forum's members with ``.get`` because the repair
+    caller may pass a zero-post forum, which never gets a ``forum_channel_members`` entry.
+    """
+    index_channel_id = state.channel_map.get(f"forum-index-{forum_key}")
+    if not index_channel_id:
+        return
 
+    forum_name = state.forum_category_names.get(forum_key, forum_key)
+    discord_channel_ids = state.forum_channel_members.get(forum_key, [])
+
+    # Build index lines using actual migrated message counts.
+    lines = [f"**Forum: {forum_name}** *(updated after migration)*\n"]
+    for discord_ch_id in discord_channel_ids:
+        stoat_ch_id = state.channel_map.get(discord_ch_id)
+        if not stoat_ch_id:
+            continue
+        actual_count = state.channel_message_counts.get(discord_ch_id, 0)
+        lines.append(f"- <#{stoat_ch_id}> — {actual_count} messages migrated")
+
+    if len(lines) <= 1:
+        content = f"**Forum: {forum_name}**\nNo posts migrated."
+    else:
+        content = "\n".join(lines)
+        if len(content) > 2000:
+            while len(lines) > 1 and len("\n".join(lines)) > 1950:
+                lines.pop()
+            remaining = len(discord_channel_ids) - (len(lines) - 1)
+            lines.append(f"\n*...and {remaining} more posts*")
+            content = "\n".join(lines)
+
+    try:
+        existing_msg_id = state.forum_index_message_ids.get(forum_key)
+        if existing_msg_id:
+            # Re-run: edit the existing index message instead of creating a duplicate.
+            await api_edit_message(
+                session,
+                config.stoat_url,
+                config.token,
+                index_channel_id,
+                existing_msg_id,
+                content=content,
+            )
+            index_msg_id: str = existing_msg_id
+        else:
             try:
-                existing_msg_id = state.forum_index_message_ids.get(forum_key)
-                if existing_msg_id:
-                    # Re-run: edit the existing index message instead of creating a duplicate.
-                    await api_edit_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        index_channel_id,
-                        existing_msg_id,
-                        content=content,
-                    )
-                    index_msg_id: str = existing_msg_id
-                else:
-                    try:
-                        msg_result = await api_send_message(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            index_channel_id,
-                            content=content,
-                            masquerade={"name": "Discord Ferry"},
-                            idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
-                        )
-                        index_msg_id = msg_result["_id"]
-                    except DuplicateSendError:
-                        # Already on the server with no recoverable id. Write NOTHING to
-                        # forum_index_message_ids: an entry there persists into
-                        # state.json and drives an api_edit_message against an id that
-                        # does not exist on the next run. Letting the broad handler take
-                        # this instead would report a rebuild failure that did not
-                        # happen, which is the same defect as the FailedMessage on the
-                        # message path.
-                        index_msg_id = ""
-                    await asyncio.sleep(config.upload_delay)
-                    if index_msg_id:
-                        state.forum_index_message_ids[forum_key] = index_msg_id
-                        await api_pin_message(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            index_channel_id,
-                            index_msg_id,
-                        )
-                        await asyncio.sleep(config.upload_delay)
-                on_event(
-                    MigrationEvent(
-                        phase="report",
-                        status="progress",
-                        message=f"Rebuilt forum index for '{forum_name}' with actual data",
-                    )
+                msg_result = await api_send_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    content=content,
+                    masquerade={"name": "Discord Ferry"},
+                    idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
                 )
-            except Exception as exc:  # noqa: BLE001
-                state.warnings.append(
-                    {
-                        "phase": "report",
-                        "type": "forum_index_rebuild_failed",
-                        "message": _safe(
-                            config, f"Failed to rebuild forum index for '{forum_name}': {exc}"
-                        ),
-                    }
+                index_msg_id = msg_result["_id"]
+            except DuplicateSendError:
+                # Already on the server with no recoverable id. Write NOTHING to
+                # forum_index_message_ids: an entry there persists into
+                # state.json and drives an api_edit_message against an id that
+                # does not exist on the next run. Letting the broad handler take
+                # this instead would report a rebuild failure that did not
+                # happen, which is the same defect as the FailedMessage on the
+                # message path.
+                index_msg_id = ""
+            await asyncio.sleep(config.upload_delay)
+            if index_msg_id:
+                state.forum_index_message_ids[forum_key] = index_msg_id
+                await api_pin_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    index_msg_id,
                 )
-                on_event(
-                    MigrationEvent(
-                        phase="report",
-                        status="warning",
-                        message=_safe(
-                            config, f"Forum index rebuild for '{forum_name}' failed: {exc}"
-                        ),
-                    )
-                )
+                await asyncio.sleep(config.upload_delay)
+        on_event(
+            MigrationEvent(
+                phase="report",
+                status="progress",
+                message=f"Rebuilt forum index for '{forum_name}' with actual data",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        state.warnings.append(
+            {
+                "phase": "report",
+                "type": "forum_index_rebuild_failed",
+                "message": _safe(
+                    config, f"Failed to rebuild forum index for '{forum_name}': {exc}"
+                ),
+            }
+        )
+        on_event(
+            MigrationEvent(
+                phase="report",
+                status="warning",
+                message=_safe(config, f"Forum index rebuild for '{forum_name}' failed: {exc}"),
+            )
+        )
 
 
 async def run_retry_failed(

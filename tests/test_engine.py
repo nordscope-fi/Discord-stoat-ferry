@@ -1627,6 +1627,44 @@ async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) ->
     assert "News" in sent_content[0]
 
 
+async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
+    """SC-3 helper parity: the per-forum helper sends and pins the index and records its id."""
+    from discord_ferry.core.engine import _rebuild_one_forum_index
+
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="stoat-srv",
+        forum_channel_members={"forum-news": ["d1"]},
+        forum_category_names={"forum-news": "News"},
+        channel_map={"d1": "s1", "forum-index-forum-news": "idx"},
+        channel_message_counts={"d1": 3},
+    )
+    with aioresponses() as mock:
+        mock.post("https://api.test/channels/idx/messages", payload={"_id": "m1"})
+        mock.post("https://api.test/channels/idx/messages/m1/pin", payload={})
+        async with aiohttp.ClientSession() as session:
+            await _rebuild_one_forum_index(session, config, state, "forum-news", lambda e: None)
+    assert state.forum_index_message_ids["forum-news"] == "m1"
+
+
+async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) -> None:
+    """SC-I3: a forum with no forum_channel_members entry rebuilds to the no-posts body."""
+    from discord_ferry.core.engine import _rebuild_one_forum_index
+
+    config = _make_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="stoat-srv",
+        forum_category_names={"forum-empty": "Empty"},
+        channel_map={"forum-index-forum-empty": "idx"},
+        forum_index_message_ids={"forum-empty": "old-msg"},
+    )
+    with aioresponses() as mock:
+        mock.patch("https://api.test/channels/idx/messages/old-msg", payload={})
+        async with aiohttp.ClientSession() as session:
+            # forum_channel_members has no "forum-empty" key: a subscript would KeyError.
+            await _rebuild_one_forum_index(session, config, state, "forum-empty", lambda e: None)
+
+
 # ---------------------------------------------------------------------------
 # S16: Orphan Autumn upload cleanup
 # ---------------------------------------------------------------------------
