@@ -31,6 +31,9 @@ def test_repair_failure_set_is_shared_and_exact() -> None:
                 "no_recorded_name",
                 "not_in_export",
                 "forum_index_not_repairable",
+                # #311 forum-index repair: a missing forum index is now recreated,
+                # but a gone forum category leaves it unrepairable and forces exit 1.
+                "forum_index_category_missing",
                 # #307 emoji repair: could-not-recreate and failed-rewrite both
                 # leave something failing. emoji_in_split_tail is excluded (partial
                 # restore of a recreated emoji), matching the CLI comment.
