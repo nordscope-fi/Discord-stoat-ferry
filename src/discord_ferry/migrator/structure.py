@@ -380,8 +380,14 @@ async def _resolve_role_icon(
     role_name: str,
     role_id: str,
     icon_hash: str,
+    *,
+    phase: str = "roles",
 ) -> str | None:
     """Download a role icon, upload to Autumn, return the attachment id or None.
+
+    ``phase`` tags the two failure warnings so a repair caller's failures land in
+    the ``phase == "repair"`` declined set rather than under ``"roles"``. The
+    default keeps the migration call site on ``"roles"``.
 
     Token-safe: an AutumnUploadError (which may carry the HTTP body) is never
     interpolated into a warning. The temp file is always cleaned up.
@@ -390,7 +396,7 @@ async def _resolve_role_icon(
     if icon_bytes is None:
         state.warnings.append(
             {
-                "phase": "roles",
+                "phase": phase,
                 "type": "role_icon_download_failed",
                 "message": f"Role icon download failed for role '{role_name}'.",
             }
@@ -431,7 +437,7 @@ async def _resolve_role_icon(
         hint = proxy_hint(exc, target=state.autumn_url) or tls_hint(exc) or ""
         state.warnings.append(
             {
-                "phase": "roles",
+                "phase": phase,
                 "type": "role_icon_upload_failed",
                 "message": f"Role icon upload failed for role '{role_name}'.{hint}",
             }
