@@ -172,10 +172,12 @@ Ferry originally gave it, and that name is recorded only from 2.17.0 onward. Whe
 repair declines and says so rather than inventing one: an entity restored under a different name
 looks repaired and is not.
 
-**A recreated role comes back without its colour, rank, hoist setting or icon.** Repair restores a
-role's name and its permissions. The rest is set by separate calls during a migration, and the icon
-is an uploaded file whose identifier cannot be reused, so repair records a warning naming the role
-rather than restoring them. Set them by hand, or re-run the migration with `--incremental`.
+**A recreated role's rank is not restored by repair itself.** Repair restores a recreated role's
+name, permissions, colour, hoist setting and icon when Discord metadata is present, and a role icon
+is re-fetched from Discord and re-uploaded. Rank is the exception: the per-role edit cannot set it,
+so a full `--incremental` re-run restores position. With no Discord metadata (no token at migration
+time, or the role absent from it) colour, hoist and icon cannot be restored either, and repair
+records a warning naming the role.
 
 **Repair never renames anything.** A renamed channel, role or category is reported by the check as a
 warning and left alone, because a rename almost always means you made it.
