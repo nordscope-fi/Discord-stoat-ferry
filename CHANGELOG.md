@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.26.0] - 2026-08-21
+
+### Added
+
+- **`ferry repair` restores a missing emoji.** When `ferry check` reports an emoji that was
+  migrated but is now gone from the Stoat server, repair recreates it from the export and
+  rewrites every message Ferry sent that referenced the old copy, so those references point at
+  the restored emoji instead of a dead id. Recreating an emoji mints a new id, so the rewrite
+  is the half that makes the restoration real.
+  - A crash partway through is finished on the next run. The recreation and a small resume
+    record are written in one step, and a later run completes any messages that were not yet
+    rewritten, so an interrupted repair never leaves a half-updated server behind.
+  - An emoji whose image is not in the export is reported as unrepairable rather than guessed
+    at. A reference in a later send of a message split across the 2000-character limit is left
+    as is, because only the first send can be addressed.
+  - A dry run previews the work without changing anything, and the result appears in both the
+    plain output and `ferry repair --json`.
+
 ## [2.25.0] - 2026-08-21
 
 ### Added
