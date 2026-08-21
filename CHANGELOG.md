@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.27.0] - 2026-08-21
+
+### Added
+
+- **GUI parity with the CLI toolchain, phase 3: the read-only diagnostics reach the web
+  interface.** The Tools screen at `/tools` gains its last three pages, none of which needs
+  a token:
+  - **Validate**: check a Discord export before migrating and list any warnings, including
+    the reason a plain-text-mention warning has to be acknowledged.
+  - **Stats**: summarise a finished migration from its saved state, with the same entity
+    counts, fidelity scores, and error and warning summary the command line shows.
+  - **TLS check**: show the certificate-trust and proxy state the app resolved, with no
+    input needed.
+
 ## [2.26.0] - 2026-08-21
 
 ### Added
