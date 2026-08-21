@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.29.0] - 2026-08-21
+
+### Added
+
+- **The finished-migration screen links straight to Verify and Repair.** When a migration
+  completes, the completion card now offers **Verify** and **Repair** buttons that open the
+  matching tool page for the migration that just ran, carrying its output directory across so
+  the page is ready to run (#518).
+- **The token-taking tool pages accept a Stoat token when the session store is empty.** Check,
+  repair, retry, probe and build now show a password token field instead of a dead-end
+  "Session expired" message when no session token is present. A migration clears the session
+  token on completion, so a tool page reached from the finish screen would otherwise have no
+  way to run; the field lets the user supply a token for that one run without it being written
+  to disk (#524).
+
 ## [2.27.0] - 2026-08-21
 
 ### Added
