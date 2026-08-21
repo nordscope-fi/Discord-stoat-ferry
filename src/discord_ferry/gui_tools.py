@@ -10,6 +10,7 @@ any request.
 from __future__ import annotations
 
 import importlib.resources
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -297,20 +298,51 @@ def _tab_token() -> str | None:
     return token if isinstance(token, str) and token else None
 
 
+@dataclass(frozen=True)
+class _TokenSource:
+    """The Stoat token for a tool run, resolved at run time.
+
+    When the session store held a token, ``session`` carries it and no field is
+    rendered. When it did not, ``field`` is the password input the user fills in,
+    read inside the run handler (the user types it after the page is built).
+    """
+
+    session: str | None
+    field: ui.input | None
+
+    def resolve(self) -> str | None:
+        if self.session is not None:
+            return self.session
+        value = self.field.value if self.field is not None else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+
+def _token_source() -> _TokenSource:
+    """Return the session token, or render a password field for one when absent.
+
+    Call inside the page's layout context: when the session store is empty it
+    renders a ``ui.input``, replacing the old "Session expired" dead end. The
+    entered token stays in this closure for the run and is never persisted to
+    disk (matching the memory-only session token).
+    """
+    session = _tab_token()
+    if session is not None:
+        return _TokenSource(session=session, field=None)
+    field = ui.input("Stoat token", password=True).classes("w-96")
+    return _TokenSource(session=None, field=field)
+
+
 @ui.page("/tools/check")
 def check_page() -> None:
     """Verify a finished migration by loading its state and running run_check."""
     client = ui.context.client
     stoat_url = str(app.storage.user.get("stoat_url", ""))
-    token = _tab_token()
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Verify a finished migration").classes("text-2xl font-bold mb-4")
-        if token is None:
-            ui.label("Session expired. Re-enter your token on the setup page.").classes(
-                "text-red-600"
-            )
-            return
+        token_src = _token_source()
 
         default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
         dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
@@ -335,6 +367,10 @@ def check_page() -> None:
 
         def _run() -> None:
             results.clear()
+            token = token_src.resolve()
+            if token is None:
+                ui.notify("Enter your Stoat token", type="warning")
+                return
             output_dir = Path(dir_input.value)
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
@@ -361,15 +397,10 @@ def repair_page() -> None:
     """Verify a migration, then recreate what is missing and resend."""
     client = ui.context.client
     stoat_url = str(app.storage.user.get("stoat_url", ""))
-    token = _tab_token()
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Verify and fix a migration").classes("text-2xl font-bold mb-4")
-        if token is None:
-            ui.label("Session expired. Re-enter your token on the setup page.").classes(
-                "text-red-600"
-            )
-            return
+        token_src = _token_source()
 
         default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
         dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
@@ -416,6 +447,10 @@ def repair_page() -> None:
                     type="warning",
                 )
                 return
+            token = token_src.resolve()
+            if token is None:
+                ui.notify("Enter your Stoat token", type="warning")
+                return
             output_dir = Path(dir_input.value)
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
@@ -445,15 +480,10 @@ def retry_page() -> None:
     """Resend the messages that failed on a prior migration."""
     client = ui.context.client
     stoat_url = str(app.storage.user.get("stoat_url", ""))
-    token = _tab_token()
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Resend failed messages").classes("text-2xl font-bold mb-4")
-        if token is None:
-            ui.label("Session expired. Re-enter your token on the setup page.").classes(
-                "text-red-600"
-            )
-            return
+        token_src = _token_source()
 
         default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
         dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
@@ -484,6 +514,10 @@ def retry_page() -> None:
                     "Enter a valid export directory. Retry needs the original export.",
                     type="warning",
                 )
+                return
+            token = token_src.resolve()
+            if token is None:
+                ui.notify("Enter your Stoat token", type="warning")
                 return
             output_dir = Path(dir_input.value)
             for line in prepare_tool_call(token):
@@ -518,22 +552,17 @@ def retry_page() -> None:
 def probe_page() -> None:
     """Preflight a live Stoat instance for Autumn limits, rate window, voice, webhooks.
 
-    Reads stoat_url from the user store and the token from the tab store, with a
-    session-expired guard when the tab store is empty (design: every tool page
-    sources credentials this way; entering a token when the store is empty is the
-    deferred #524). Needs a throwaway test server id and an optional deep toggle.
+    Reads stoat_url from the user store and the token via _token_source: the
+    session token when present, otherwise a password field the user fills in
+    (#524, so a page reached with an empty session store still runs). Needs a
+    throwaway test server id and an optional deep toggle.
     """
     client = ui.context.client
     stoat_url = str(app.storage.user.get("stoat_url", ""))
-    token = _tab_token()
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Preflight a Stoat instance").classes("text-2xl font-bold mb-4")
-        if token is None:
-            ui.label("Session expired. Re-enter your token on the setup page.").classes(
-                "text-red-600"
-            )
-            return
+        token_src = _token_source()
 
         server_input = ui.input("Throwaway test server ID").classes("w-96")
         deep_cb = ui.checkbox("Deep probe (upload test files at each Autumn size boundary)")
@@ -575,6 +604,10 @@ def probe_page() -> None:
                     "Confirm the deep-probe warning before running a deep probe.",
                     type="warning",
                 )
+                return
+            token = token_src.resolve()
+            if token is None:
+                ui.notify("Enter your Stoat token", type="warning")
                 return
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
@@ -657,20 +690,16 @@ def build_page() -> None:
 
     Makes live API calls, so it goes through the runner (register the token, init
     the semaphore only when unset). Reads stoat_url from the user store and the
-    token from the tab store, with a session-expired guard. Exactly one source,
-    a template or a blueprint file, is required.
+    token via _token_source: the session token when present, otherwise a password
+    field the user fills in (#524). Exactly one source, a template or a blueprint
+    file, is required.
     """
     client = ui.context.client
     stoat_url = str(app.storage.user.get("stoat_url", ""))
-    token = _tab_token()
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Build a server").classes("text-2xl font-bold mb-4")
-        if token is None:
-            ui.label("Session expired. Re-enter your token on the setup page.").classes(
-                "text-red-600"
-            )
-            return
+        token_src = _token_source()
 
         ui.label(
             "A server built here writes no state.json, so the rollback tool cannot undo it: "
@@ -712,6 +741,10 @@ def build_page() -> None:
                 ui.notify("That blueprint file does not exist.", type="warning")
                 return
             name = name_input.value.strip() or None
+            token = token_src.resolve()
+            if token is None:
+                ui.notify("Enter your Stoat token", type="warning")
+                return
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
 
