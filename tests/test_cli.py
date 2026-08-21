@@ -3007,6 +3007,37 @@ def test_repair_exits_non_zero_when_it_declined_a_repair(runner: CliRunner, tmp_
     )
 
 
+def test_repair_exits_non_zero_when_an_emoji_could_not_be_recreated(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """emoji_missing_media is an unrepaired defect: the emoji stays missing (#307)."""
+    outcome = RepairOutcome(
+        declined=[{"type": "emoji_missing_media", "message": "no usable image"}]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 1, (
+        f"an unrecreatable emoji exited {result.exit_code}, which reads as success"
+    )
+
+
+def test_repair_exits_zero_on_a_split_tail_emoji_decline(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """emoji_in_split_tail is a partial restore of an emoji repair DID recreate (#307).
+
+    Like merge_thread_content_not_restored, it must not exit non-zero: the emoji
+    is back and its addressable reference fixed; only an unaddressable later send
+    of a split message keeps the old id.
+    """
+    outcome = RepairOutcome(
+        declined=[{"type": "emoji_in_split_tail", "message": "later send"}]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 0, (
+        f"a partial split-tail decline exited {result.exit_code}, which reads as failure"
+    )
+
+
 def test_repair_exit_code_ignores_a_stale_decline_from_an_earlier_run(
     runner: CliRunner, tmp_path: Path
 ) -> None:

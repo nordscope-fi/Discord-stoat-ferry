@@ -130,7 +130,17 @@ class CheckResult:
 #: the second is a degradation rather than an unrepaired defect. Shared by the
 #: CLI repair exit code and the GUI repair page so they cannot diverge.
 UNREPAIRED_WARNING_TYPES = frozenset(
-    {"no_recorded_name", "not_in_export", "forum_index_not_repairable"}
+    {
+        "no_recorded_name",
+        "not_in_export",
+        "forum_index_not_repairable",
+        # A missing emoji repair could not recreate (its image is not in the
+        # export). emoji_in_split_tail is deliberately absent, like a merge
+        # partial restore: the emoji WAS recreated and its addressable reference
+        # fixed; only an unaddressable later send of a split message keeps the
+        # old id (#307).
+        "emoji_missing_media",
+    }
 )
 
 

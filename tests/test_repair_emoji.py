@@ -364,3 +364,33 @@ def test_run_repair_docstring_admits_the_checkpoint() -> None:
     doc = run_repair.__doc__ or ""
     assert "nothing to checkpoint" not in doc
     assert "pending_emoji_rewrites" in doc
+
+
+# ---------------------------------------------------------------------------
+# Task 4.1: outcome surface
+# ---------------------------------------------------------------------------
+
+
+async def test_human_output_names_emoji_and_rewrite_count(tmp_path: Path) -> None:
+    """SC-4.1: progress events name the recreated emoji and the rewrite count."""
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    events: list[Any] = []
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_EDIT, new=AsyncMock()),
+    ):
+        await run_repair(config, state, [_export([_message()])], events.append)
+    messages = [e.message for e in events]
+    assert any("Recreated emoji :smile:" in m for m in messages)
+    assert any("Rewrote 1 reference" in m for m in messages)
+
+
+async def test_outcome_to_dict_carries_recreated_emoji_end_to_end(tmp_path: Path) -> None:
+    """SC-4.2: a real run's outcome document carries recreated_emoji under actions."""
+    outcome, _, _ = await _run_with_messages(tmp_path, [_message()])
+    row = outcome.to_dict()["actions"]["recreated_emoji"][0]
+    assert row["discord_id"] == EMOJI_ID
+    assert row["new_id"] == NEW_ID
+    assert row["messages_rewritten"] == 1
