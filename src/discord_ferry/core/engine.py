@@ -2362,30 +2362,37 @@ async def run_repair(
     structure_work: list[CheckResult] = []
     tail_work: list[CheckResult] = []
     emoji_work: list[CheckResult] = []
+    # Forum-index repair (#311). A forum index is stored under a synthetic
+    # `forum-index-{key}` channel id, so it reports channel_missing / tail_absent
+    # like any channel but needs its own path (recreate or rebuild the index
+    # message, not a generic channel restore). Split by kind here.
+    forum_index_work: list[CheckResult] = []
+    forum_index_rebuild_work: list[CheckResult] = []
     for result in report.results:
         is_structure = result.kind in _REPAIRABLE_STRUCTURE
         is_emoji = result.kind in _REPAIRABLE_EMOJI
         if not is_structure and not is_emoji and result.kind not in _REPAIRABLE_TAIL:
             continue
 
-        # The exclusion is tested ONCE, against both families, and that placement
-        # is the fix for a real gap rather than tidiness. Guarding only the
-        # structure branch let a forum index channel with `tail_absent` through
-        # into the tail work, and the tail of a forum index channel IS the index
-        # message: it lives in forum_index_message_ids and has no message in any
-        # export to re-send. Measured during the chunk 3 review.
+        # The prefix is tested ONCE, against every family: a forum index reports
+        # channel_missing (structure) OR tail_absent (tail), and both need the
+        # forum-index path rather than the generic one. Route by kind: a missing
+        # channel recreates, a missing index message rebuilds (the channel is
+        # still there), any other kind declines defensively.
         if (result.discord_id or "").startswith(_UNREPAIRABLE_CHANNEL_PREFIX):
+            if result.kind == "channel_missing":
+                forum_index_work.append(result)
+                continue
+            if result.kind in _REPAIRABLE_TAIL:
+                forum_index_rebuild_work.append(result)
+                continue
+            # No kind other than the two above carries a forum-index id today;
+            # this branch is a defensive decline, not a live path.
             notice = (
                 f"Forum index channel {result.discord_id} needs repair ({result.kind}) and "
-                "repair cannot do it. The index message is derived content with no message "
-                "in the export to restore from, and rebuilding it needs the forum's posts. "
-                "Re-run the migration with --incremental to rebuild it (see issue #311)."
+                "repair cannot do it."
             )
             on_event(MigrationEvent(phase="repair", status="warning", message=notice))
-            # Not under --dry-run. A dry run reports and changes nothing, and
-            # state.warnings is state: mutating it during a preview would leave
-            # an in-memory record the run never persists and the operator never
-            # asked for. The event above carries the same information either way.
             if not config.dry_run:
                 state.warnings.append(
                     {
@@ -2411,7 +2418,8 @@ async def run_repair(
             message=(
                 f"{prefix}{len(structure_work)} entities to recreate, "
                 f"{len(tail_work)} channels with a lost tail, "
-                f"{len(emoji_work)} missing emoji."
+                f"{len(emoji_work)} missing emoji, "
+                f"{len(forum_index_work) + len(forum_index_rebuild_work)} forum indexes."
             ),
         )
     )
@@ -2649,6 +2657,40 @@ async def run_repair(
         finally:
             if own_session:
                 await sess.close()
+
+    # Forum-index repair (#311). Its own session block, like every other work list:
+    # run_repair opens a session per non-empty list, and _live_server_view is fetched
+    # only inside the structure_work block, so a repair whose ONLY broken entity is a
+    # forum index (empty structure_work) would otherwise run nothing. The live view is
+    # fetched here only when a recreation needs it, so a rebuild-only pass still spends
+    # no /servers-bucket request.
+    if forum_index_work or forum_index_rebuild_work:
+        own_fi_session = session is None
+        fi_sess = session or new_session()
+        try:
+            if forum_index_work:
+                existing_names, live_categories = await _live_server_view(fi_sess, config, state)
+                for result in forum_index_work:
+                    created = await _recreate_forum_index(
+                        fi_sess, config, state, result, existing_names, live_categories, on_event
+                    )
+                    if created:
+                        discord_id = result.discord_id or ""
+                        outcome.recreated_channels.append(
+                            {
+                                "discord_id": discord_id,
+                                "stoat_id": state.channel_map.get(discord_id),
+                                "name": state.created_channel_names.get(discord_id, discord_id),
+                                "resent_count": 0,
+                            }
+                        )
+            for result in forum_index_rebuild_work:
+                forum_key = (result.discord_id or "").removeprefix("forum-index-")
+                await _rebuild_one_forum_index(fi_sess, config, state, forum_key, on_event)
+                save_state(state, config.output_dir)
+        finally:
+            if own_fi_session:
+                await fi_sess.close()
 
     if tail_work:
         own_tail_session = session is None
