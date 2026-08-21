@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_repair
 from discord_ferry.migrator.verify import CheckReport
@@ -394,3 +396,143 @@ async def test_outcome_to_dict_carries_recreated_emoji_end_to_end(tmp_path: Path
     assert row["discord_id"] == EMOJI_ID
     assert row["new_id"] == NEW_ID
     assert row["messages_rewritten"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 4.2: integration
+# ---------------------------------------------------------------------------
+
+
+def _two_referencing_messages() -> list[DCEMessage]:
+    return [
+        _message(),  # m1, carries the reaction/image
+        DCEMessage(
+            id="m2",
+            type="Default",
+            timestamp="2024-01-01T00:00:00Z",
+            content="again <:smile:123>",
+            author=DCEAuthor(id="u", name="U"),
+            reactions=[],
+        ),
+    ]
+
+
+async def test_integration_recreate_rewrite_and_verifiable(tmp_path: Path) -> None:
+    """SC-I1: end to end. The emoji is recreated once, both messages rewritten, and
+    emoji_map now points at the new id, which is exactly what makes a later check
+    report emoji_present.
+    """
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    state.message_map = {"m1": "s1", "m2": "s2"}
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)) as up,
+        patch(_EDIT, new=AsyncMock()) as edit,
+    ):
+        outcome = await run_repair(config, state, [_export(_two_referencing_messages())], [].append)
+    assert up.await_count == 1
+    assert edit.await_count == 2
+    assert all(f":{NEW_ID}:" in c.kwargs["content"] for c in edit.await_args_list)
+    assert state.emoji_map[EMOJI_ID] == NEW_ID  # a follow-up check would report present
+    assert EMOJI_ID not in state.pending_emoji_rewrites
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 2
+
+
+async def test_integration_interrupted_run_matches_clean_run(tmp_path: Path) -> None:
+    """SC-I2: a failed edit keeps the record; a second run resumes to the same end
+    state as an uninterrupted run (both messages on the new id, one emoji, cleared).
+    """
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    state.message_map = {"m1": "s1", "m2": "s2"}
+    exports = [_export(_two_referencing_messages())]
+
+    # Run 1: the second edit fails, standing in for a crash mid-rewrite.
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_EDIT, new=AsyncMock(side_effect=[None, RuntimeError("crash")])),
+    ):
+        await run_repair(config, state, exports, [].append)
+    assert state.pending_emoji_rewrites[EMOJI_ID] == {"old": OLD_ID, "new": NEW_ID}
+
+    # Run 2: the emoji is present now, so the resume step finishes the stragglers.
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_present_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value="should-not-run")) as up2,
+        patch(_EDIT, new=AsyncMock()) as edit2,
+    ):
+        await run_repair(config, state, exports, [].append)
+    up2.assert_not_awaited()  # no second emoji
+    assert edit2.await_count >= 1  # the stranded message is finished
+    assert EMOJI_ID not in state.pending_emoji_rewrites  # same end state as a clean run
+
+
+async def test_integration_emoji_pass_runs_before_structure(tmp_path: Path) -> None:
+    """SC-I3 (ordering): the load-bearing guarantee behind the self-healing channel
+    case. When both an emoji and a channel are missing, the emoji pass runs before
+    the structure pass, so the rewrite re-renders through pristine maps.
+    """
+    order: list[str] = []
+
+    async def emoji_pass(*_a: Any, **_k: Any) -> None:
+        order.append("emoji")
+
+    async def live_view(*_a: Any, **_k: Any) -> Any:
+        order.append("structure")
+        raise RuntimeError("stop after recording order")
+
+    report = CheckReport()
+    report.add(
+        name="emoji:123",
+        status="fail",
+        kind="emoji_missing",
+        detail="",
+        discord_id="123",
+        stoat_id="old_id",
+    )
+    report.add(
+        name="channel:ch1",
+        status="fail",
+        kind="channel_missing",
+        detail="",
+        discord_id="ch1",
+        stoat_id="sc",
+    )
+    config, state = _config(tmp_path), _state()
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=report)),
+        patch(f"{_ENGINE}._run_emoji_repair_pass", new=emoji_pass),
+        patch(f"{_ENGINE}._live_server_view", new=live_view),
+        pytest.raises(RuntimeError),
+    ):
+        await run_repair(config, state, [_export([_message()])], [].append)
+    assert order == ["emoji", "structure"]
+
+
+async def test_integration_dry_run_writes_nothing(tmp_path: Path) -> None:
+    """SC-I4: a dry run performs no upload, create, edit or save, and lists the work."""
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    config = FerryConfig(
+        export_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="t",
+        upload_delay=0.0,
+        output_dir=tmp_path,
+        dry_run=True,
+    )
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)) as up,
+        patch(_EDIT, new=AsyncMock()) as edit,
+        patch(f"{_ENGINE}.save_state", side_effect=AssertionError("dry run must not save")),
+    ):
+        outcome = await run_repair(config, state, [_export([_message()])], [].append)
+    up.assert_not_awaited()
+    edit.assert_not_awaited()
+    assert outcome.dry_run is True
+    assert outcome.recreated_emoji[0]["discord_id"] == EMOJI_ID
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 1  # would-rewrite count
+    assert state.emoji_map[EMOJI_ID] == OLD_ID  # unchanged
