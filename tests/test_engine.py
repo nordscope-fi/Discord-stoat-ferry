@@ -2816,7 +2816,9 @@ async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path
         FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="boom"),
         FailedMessage(discord_msg_id="m2", stoat_channel_id="c2", error="boom"),
     ]
-    # A forum-index result: run_repair declines it (a repair-phase warning appended this run).
+    # A forum-index whose forum category is itself gone: run_repair recreates the
+    # index (#311) but has nowhere to attach it, so it declines with a repair-phase
+    # warning appended this run (forum_index_category_missing).
     report = _report_with("channel_missing", "fail", discord_id="forum-index-800000000000000009")
 
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
@@ -2828,12 +2830,13 @@ async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "run_retry_failed", _fake_retry),
+        patch.object(engine_module, "_live_server_view", new=AsyncMock(return_value=(set(), []))),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
     ):
         outcome = await run_repair(config, state, [], lambda _e: None)
 
     assert outcome.dead_letter == {"drained": 1, "remaining": 1}
-    assert any(d["type"] == "forum_index_not_repairable" for d in outcome.declined)
+    assert any(d["type"] == "forum_index_category_missing" for d in outcome.declined)
     assert all(d["type"] != "proxy_notice" for d in outcome.declined), (
         "the legacy non-repair warning leaked into the repair outcome"
     )
@@ -2981,35 +2984,32 @@ async def test_repair_never_acts_on_a_non_actionable_tail_kind(tmp_path: Path, k
     assert _partition_counts(events) == (0, 0), f"{kind} entered the work lists"
 
 
-async def test_repair_declines_a_missing_forum_index_channel(tmp_path: Path) -> None:
-    """SC-3.17. A DELIBERATE EXCLUSION, not an unimplemented case.
+async def test_repair_recreates_a_missing_forum_index_channel(tmp_path: Path) -> None:
+    """#311. No longer a deliberate exclusion: a deleted forum index is recreated.
 
-    The forum index writer stores its channel under a SYNTHETIC key,
-    `channel_map["forum-index-{forum_key}"]`, whose value is a real Stoat
-    channel id. So the check reports a deleted index as channel_missing exactly
-    like any other channel, and a membership test on `kind` alone would sweep it
-    into generic recreation.
-
-    Generic recreation cannot restore it. There is no ChannelMeta for a
-    synthetic id, the channel-scoped export scan finds zero messages because the
-    key names no Discord channel, and nothing rebuilds the index message or
-    forum_index_message_ids. _select_invite_channel already excludes the same
-    prefix for the same reason. Deferred as #311.
-
-    This is the second level of the lesson the partition comment records: a test
-    on `status` would sweep in a future kind, and a test on `kind` alone sweeps
-    in a channel TYPE nobody considered.
+    The forum index is stored under a SYNTHETIC `channel_map["forum-index-{key}"]`,
+    so the check reports a deleted one as channel_missing like any channel. It now
+    routes into the forum-index recreation path (its own session block, which runs
+    even when structure_work is empty) rather than being declined.
     """
     forum_key = "forum-index-800000000000000009"
     report = _report_with("channel_missing", "fail", discord_id=forum_key)
-    state, requests, events = await _repair_with_report(tmp_path, report)
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    events: list[MigrationEvent] = []
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
+        patch.object(engine_module, "_live_server_view", new=AsyncMock(return_value=(set(), []))),
+        patch.object(
+            engine_module, "_recreate_forum_index", new=AsyncMock(return_value=True)
+        ) as recreate,
+    ):
+        await run_repair(config, state, [], events.append)
 
-    assert requests == [], "repair tried to recreate a forum index channel"
-    assert _partition_counts(events) == (0, 0), "the forum index entered the work lists"
-    assert any(
-        w.get("type") == "forum_index_not_repairable" and w.get("phase") == "repair"
-        for w in state.warnings
-    ), f"no warning names the declined forum index: {state.warnings}"
+    recreate.assert_awaited_once()
+    assert not any(w.get("type") == "forum_index_not_repairable" for w in state.warnings), (
+        "the forum index was declined instead of recreated"
+    )
 
 
 async def _repair_recording_saves(
@@ -3173,18 +3173,12 @@ async def test_repair_does_not_swallow_a_check_error(tmp_path: Path) -> None:
         await run_repair(config, state, [], lambda _e: None)
 
 
-async def test_repair_declines_a_forum_index_whose_tail_is_missing(tmp_path: Path) -> None:
-    """The gap the chunk 3 review found, and the reason the exclusion moved.
+async def test_repair_rebuilds_a_forum_index_whose_tail_is_missing(tmp_path: Path) -> None:
+    """#311. A forum index whose channel survives but message is gone now rebuilds.
 
-    Guarding only the structure branch let a forum index channel reporting
-    tail_absent through into the tail work. That path cannot restore it: the
-    tail of a forum index channel IS the index message, which lives in
-    forum_index_message_ids and has no message in any export to re-send.
-
-    The review that surfaced this described the mechanism wrongly, claiming the
-    `continue` dropped a tail result. A CheckResult has exactly one kind, so a
-    result taking the structure branch could never have taken the tail branch.
-    Running it found the real defect underneath.
+    The tail of a forum index channel IS the index message. It routes into the
+    forum-index REBUILD path (no channel create, just the shared rebuild helper),
+    not into the generic tail work and not into a decline.
     """
     report = CheckReport()
     report.add(
@@ -3195,11 +3189,19 @@ async def test_repair_declines_a_forum_index_whose_tail_is_missing(tmp_path: Pat
         discord_id="forum-index-800000000000000009",
         stoat_id="01JSTOATCHN000000000IDX",
     )
-    state, requests, events = await _repair_with_report(tmp_path, report)
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER, channel_map={R_D_CHANNEL: R_S_CHANNEL})
+    events: list[MigrationEvent] = []
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
+        patch.object(engine_module, "_rebuild_one_forum_index", new=AsyncMock()) as rebuild,
+    ):
+        await run_repair(config, state, [], events.append)
 
-    assert _partition_counts(events) == (0, 0), "a forum index entered the tail work"
-    assert requests == [], "repair acted on a forum index tail"
-    assert any(w.get("type") == "forum_index_not_repairable" for w in state.warnings)
+    assert _partition_counts(events) == (0, 0), "a forum index entered the generic tail work"
+    rebuild.assert_awaited_once()
+    assert rebuild.await_args.args[3] == "800000000000000009", "wrong forum key rebuilt"
+    assert not any(w.get("type") == "forum_index_not_repairable" for w in state.warnings)
 
 
 async def test_repair_dry_run_does_not_mutate_state_warnings(tmp_path: Path) -> None:

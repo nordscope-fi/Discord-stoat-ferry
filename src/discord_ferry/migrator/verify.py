@@ -134,6 +134,10 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         "no_recorded_name",
         "not_in_export",
         "forum_index_not_repairable",
+        # A forum index whose forum category is itself gone: repair recreates the
+        # index (#311) but has nowhere to attach it, so this names a real
+        # unrepaired gap and forces a non-zero exit like the others here.
+        "forum_index_category_missing",
         # A missing emoji repair could not recreate (its image is not in the
         # export). emoji_rewrite_failed too: a reference edit failed, so a message
         # still points at the dead id and the resume record stays open. Both leave
