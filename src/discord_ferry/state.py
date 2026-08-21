@@ -194,6 +194,10 @@ class MigrationState:
     # Forum index message IDs: forum_cat_key -> stoat_message_id.
     # Populated by _rebuild_forum_indexes; used to PATCH (not re-POST) on re-runs.
     forum_index_message_ids: dict[str, str] = field(default_factory=dict)
+    # Forum keys whose index message exists on the server but whose id was lost to a
+    # DuplicateSendError (#215). Distinct from a known id (edit) and absence (send).
+    # Holds internal keys only, no free text.
+    forum_index_present_unknown_id: set[str] = field(default_factory=set)
 
     # Fidelity counters (S18)
     embeds_total: int = 0
@@ -332,6 +336,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "channel_message_counts": state.channel_message_counts,
         "reaction_message_counts": state.reaction_message_counts,
         "forum_index_message_ids": state.forum_index_message_ids,
+        "forum_index_present_unknown_id": sorted(state.forum_index_present_unknown_id),
         "embeds_total": state.embeds_total,
         "embeds_dropped": state.embeds_dropped,
         "replies_linked": state.replies_linked,
@@ -410,6 +415,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             channel_message_counts=data.get("channel_message_counts", {}),
             reaction_message_counts=data.get("reaction_message_counts", {}),
             forum_index_message_ids=data.get("forum_index_message_ids", {}),
+            forum_index_present_unknown_id=set(data.get("forum_index_present_unknown_id", [])),
             embeds_total=data.get("embeds_total", 0),
             embeds_dropped=data.get("embeds_dropped", 0),
             replies_linked=data.get("replies_linked", 0),
