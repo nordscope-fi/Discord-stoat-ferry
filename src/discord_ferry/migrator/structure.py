@@ -507,9 +507,7 @@ async def apply_role_attributes(
                 {
                     "phase": phase,
                     "type": "role_icon_skipped",
-                    "message": (
-                        f"Role '{role.name}' has an emoji icon (not migratable to Stoat)."
-                    ),
+                    "message": (f"Role '{role.name}' has an emoji icon (not migratable to Stoat)."),
                 }
             )
     if not edit_kwargs:
