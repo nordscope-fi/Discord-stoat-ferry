@@ -137,7 +137,7 @@ These limitations relate to platform-level features that either work differently
 
 **A channel your token cannot read reports `unverifiable`.** Check can tell this apart from a deleted channel, because the server lists every channel's identifier even when it will not return the channel itself.
 
-**A duplicate forum index message is not detected.** Ferry records only the most recent index message it posted.
+**A forum index whose message id was lost is not refreshed.** If Stoat accepts the index message as a duplicate, it returns no identifier, so Ferry cannot edit that message on a later run. It records the index as present and leaves its counts as they were, rather than posting a second copy.
 
 **Check refuses to run against a dry run.** A dry run records placeholders for channels and messages that were never created, so there is nothing on a server to compare them with.
 
@@ -160,9 +160,10 @@ parent that absorbed thread content, it restores the parent's own messages and r
 naming each thread it left behind. `flatten`, the default, gives every thread its own channel and is
 restored completely.
 
-**A missing forum index channel is declined.** Its index message is generated from the forum's
-posts rather than copied from the export, so there is nothing to re-send. Re-run the migration with
-`--incremental` to rebuild it.
+**A missing forum index is recreated and rebuilt.** Repair recreates the index channel, puts it
+back at the top of its forum category, and rebuilds its pinned index message from Ferry's own record
+of the forum's posts. If the forum's category was also deleted and this run cannot restore it,
+repair declines the index and says so.
 
 **A missing custom emoji is declined.** An emoji's identifier on Stoat *is* its uploaded file, so
 recreating one produces a different emoji that merely looks the same.
