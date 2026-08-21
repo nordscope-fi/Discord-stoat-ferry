@@ -400,6 +400,37 @@ async def test_probe_page_deep_requires_confirmation(
         assert probe_mock.await_count == 0  # blocked until confirmed
 
 
+async def test_probe_page_deep_confirm_resets_when_toggled_off(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Whole-branch review: turning deep off then on again must not carry a stale confirm.
+
+    Binding only the confirm box's visibility would hide it while keeping value True,
+    so a re-tick of deep could run a deep probe without a fresh acknowledgement.
+    """
+    from unittest.mock import AsyncMock
+
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store["token"] = _TOKEN
+
+    with patch("discord_ferry.gui_tools.run_probe", new=AsyncMock()) as probe_mock:
+        await user.open("/tools/probe")
+        user.find("Throwaway test server ID").elements.pop().set_value("srv-throwaway")
+        deep = user.find("Deep probe").elements.pop()
+        deep.set_value(True)  # confirm box is now visible, so it can be found
+        confirm = user.find("I understand the deep probe").elements.pop()
+        confirm.set_value(True)
+        deep.set_value(False)  # toggling deep off resets the confirmation
+        assert confirm.value is False
+        deep.set_value(True)  # re-enabling deep still shows an unconfirmed box
+        assert confirm.value is False
+        user.find("Run probe").click()
+        await user.should_see("Confirm the deep-probe warning")
+        assert probe_mock.await_count == 0  # blocked: the stale tick did not carry
+
+
 async def test_probe_page_registers_token_and_renders(
     user: User,
     user_store: dict[str, object],

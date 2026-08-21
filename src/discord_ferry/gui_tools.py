@@ -538,6 +538,10 @@ def probe_page() -> None:
         deep_warning.bind_visibility_from(deep_cb, "value")
         deep_confirm = ui.checkbox("I understand the deep probe leaves orphaned files in Autumn")
         deep_confirm.bind_visibility_from(deep_cb, "value")
+        # Reset the confirmation whenever the deep toggle changes, so turning deep
+        # off and on again cannot carry a stale tick past the guard: binding only
+        # its visibility would hide the box while keeping its value True.
+        deep_cb.on_value_change(lambda: deep_confirm.set_value(False))
 
         log = ui.log(max_lines=200).classes("w-full max-w-2xl h-48 font-mono text-xs mt-2")
         results = ui.column().classes("w-full max-w-2xl")
