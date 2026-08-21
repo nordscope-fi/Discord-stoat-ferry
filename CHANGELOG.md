@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.25.0] - 2026-08-21
+
+### Added
+
+- **GUI parity with the CLI toolchain, phase 2: the preflight and build commands reach the
+  web interface.** The Tools screen at `/tools` gains three more pages:
+  - **Probe**: check a Stoat instance before migrating, showing Autumn upload limits, the
+    rate-limit window, voice-channel support, and whether webhooks are enabled, as a
+    per-check pass, warn, or fail table. A deeper probe that uploads a test file at each
+    size boundary is available behind a confirmation, because it leaves those files in
+    Autumn storage.
+  - **Blueprint export**: turn a Discord export directory into a reusable server blueprint
+    file, and confirm before replacing an existing file.
+  - **Build**: create a Stoat server from a preset template or a blueprint file. The page
+    states up front that a server built this way cannot be rolled back, because it records
+    no migration state.
+
+### Changed
+
+- The Discord-to-blueprint channel mapping and the server-build sequence each now live in
+  one place, shared by the command line and the web interface, so the two cannot drift
+  apart on them. Behaviour is unchanged.
+
 ## [2.24.0] - 2026-08-20
 
 ### Added
