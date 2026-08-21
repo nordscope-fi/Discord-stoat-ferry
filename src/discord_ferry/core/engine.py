@@ -71,8 +71,10 @@ from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import (
     _generate_category_id,
+    _role_from_metadata,
     _stoat_channel_type,
     apply_channel_permissions,
+    apply_role_attributes,
     apply_role_permissions,
     make_unique_channel_name,
     run_categories,
@@ -2396,20 +2398,6 @@ async def run_repair(
                 if result.kind == "role_missing":
                     role_created = await _recreate_role(sess, config, state, result, on_event)
                     if role_created:
-                        # DECLINED, and said so rather than left silent. The
-                        # migration sets a role's colour, hoist and icon through
-                        # api_edit_role, and the icon path uploads a file to
-                        # Autumn. Rank is NOT among them since #380: the per-role
-                        # PATCH discards that field, and ordering now goes through
-                        # _apply_role_ordering, which recomputes the whole server
-                        # from a read-back. So an --incremental re-run does now
-                        # restore this role's position, which is why that advice
-                        # stays in the message below. Restoring the rest is a second
-                        # content path in a batch already carrying two commands,
-                        # and the reasoning that keeps emoji out of repair (#307)
-                        # applies to the icon. Recorded whether or not metadata
-                        # exists, because the attributes are lost either way.
-                        # Deferred as #344.
                         role_label = state.created_role_names.get(discord_id, discord_id)
                         outcome.recreated_roles.append(
                             {
@@ -2418,18 +2406,40 @@ async def run_repair(
                                 "name": role_label,
                             }
                         )
-                        state.warnings.append(
-                            {
-                                "phase": "repair",
-                                "type": "role_attributes_not_restored",
-                                "message": (
-                                    f"Role '{role_label}' was recreated with its name and "
-                                    "permissions. Its colour, rank, hoist setting and icon are "
-                                    "not restored: set them by hand, or re-run the migration "
-                                    "with --incremental (see issue #344)."
-                                ),
-                            }
-                        )
+                        # Colour, hoist and icon live in Discord metadata. With a
+                        # RoleMeta for this role we restore them the same way the
+                        # migration does (apply_role_attributes); the icon is
+                        # re-fetched from Discord's CDN and re-uploaded to Autumn.
+                        # With none (no metadata file, or the role absent from it)
+                        # there is no source, so we decline and say so. Rank is NOT
+                        # restored here: the per-role PATCH discards it and ordering
+                        # goes through _apply_role_ordering, so an --incremental
+                        # re-run restores position. See #344.
+                        role_meta = metadata.role_metadata.get(discord_id) if metadata else None
+                        if role_meta is not None:
+                            await apply_role_attributes(
+                                sess,
+                                config,
+                                state,
+                                state.role_map[discord_id],
+                                _role_from_metadata(discord_id, role_meta),
+                                role_meta,
+                                phase="repair",
+                            )
+                        else:
+                            state.warnings.append(
+                                {
+                                    "phase": "repair",
+                                    "type": "role_attributes_not_restored",
+                                    "message": (
+                                        f"Role '{role_label}' was recreated with its name and "
+                                        "permissions. Its colour, hoist setting and icon are not "
+                                        "restored (no Discord metadata for it): set them by hand, "
+                                        "or re-run the migration with --incremental (see issue "
+                                        "#344)."
+                                    ),
+                                }
+                            )
                     if role_created and metadata:
                         # ONE role. The server-default call that follows the loop
                         # this helper was extracted from is deliberately not here:
