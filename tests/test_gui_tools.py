@@ -89,6 +89,45 @@ def test_prepare_returns_proxy_notices(monkeypatch) -> None:  # type: ignore[no-
     assert gui_tools.prepare_tool_call("tok") == ["proxy: on"]
 
 
+def test_token_source_resolve_returns_session_when_present() -> None:
+    """SC-1.1: session token wins, no field involved."""
+    from discord_ferry.gui_tools import _TokenSource
+
+    src = _TokenSource(session="tok", field=None)
+    assert src.resolve() == "tok"
+
+
+def test_token_source_resolve_returns_field_value_when_no_session() -> None:
+    """SC-1.2: with no session, the field's value is used."""
+    from types import SimpleNamespace
+
+    from discord_ferry.gui_tools import _TokenSource
+
+    src = _TokenSource(session=None, field=SimpleNamespace(value="typed-tok"))
+    assert src.resolve() == "typed-tok"
+
+
+def test_token_source_resolve_none_for_empty_or_whitespace() -> None:
+    """SC-1.3: empty, whitespace, or None field resolves to None (refuse the run)."""
+    from types import SimpleNamespace
+
+    from discord_ferry.gui_tools import _TokenSource
+
+    for bad in ("", "   ", None):
+        src = _TokenSource(session=None, field=SimpleNamespace(value=bad))
+        assert src.resolve() is None
+
+
+def test_token_source_resolve_strips_surrounding_whitespace() -> None:
+    """SC-1.4: a pasted trailing newline is stripped; internal token is intact."""
+    from types import SimpleNamespace
+
+    from discord_ferry.gui_tools import _TokenSource
+
+    src = _TokenSource(session=None, field=SimpleNamespace(value="  tok\n"))
+    assert src.resolve() == "tok"
+
+
 def test_safe_push_masks_token() -> None:
     """SC-1.3: a token in a log-widget line is masked at the push site.
 
@@ -184,18 +223,71 @@ def test_check_rows_one_per_result_with_status_and_detail() -> None:
     assert report.counts()["fail"] == 1
 
 
-async def test_check_page_bounces_without_token(
+async def test_check_page_shows_token_field_when_session_empty(
     user: User,
     user_store: dict[str, object],
     tab_store: dict[str, object],
 ) -> None:
-    """SC-1.6: the session-expired guard fires from the page builder."""
+    """SC-1.5: no session token -> a token field, not the dead-end message."""
     user_store["stoat_url"] = "https://example.invalid"
     tab_store.pop("token", None)
 
     await user.open("/tools/check")
-    await user.should_see("Session expired")
-    await user.should_not_see("Run check")
+    await user.should_see("Stoat token")
+    await user.should_see("Run check")
+    await user.should_not_see("Session expired")
+
+
+async def test_check_page_refuses_run_with_empty_token(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-1.7: empty field -> the engine is never called."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store.pop("token", None)
+
+    called = False
+
+    async def spy_check(*a, **k):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+        raise AssertionError("run_check must not be reached with an empty token")
+
+    with patch("discord_ferry.gui_tools.run_check", new=spy_check):
+        await user.open("/tools/check")
+        user.find("Run check").click()
+    assert called is False
+
+
+async def test_check_page_uses_entered_token_when_session_empty(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-1.6: a filled field flows into run_check as the token arg."""
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)
+    tab_store.pop("token", None)
+
+    seen: dict[str, object] = {}
+
+    async def fake_check(stoat_url, token, state, on_event, *, session=None):  # type: ignore[no-untyped-def]
+        seen["token"] = token
+        from discord_ferry.migrator.verify import CheckReport
+
+        return CheckReport()
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.run_check", new=fake_check),
+    ):
+        await user.open("/tools/check")
+        user.find("Stoat token").elements.pop().set_value(_TOKEN)
+        user.find("Run check").click()
+        await user.should_see("passed")  # verdict rendered after the run
+    assert seen["token"] == _TOKEN
 
 
 async def test_check_page_streams_banners_and_renders_table(
@@ -362,13 +454,13 @@ async def test_probe_page_bounces_without_token(
     user_store: dict[str, object],
     tab_store: dict[str, object],
 ) -> None:
-    """Chunk 6 Task 14: probe shows the session-expired guard when the tab store is empty."""
+    """SC-2.2: probe shows a token field, not the session-expired dead end (#524)."""
     user_store["stoat_url"] = "https://example.invalid"
     tab_store.pop("token", None)
 
     await user.open("/tools/probe")
-    await user.should_see("Session expired")
-    await user.should_not_see("Run probe")
+    await user.should_see("Stoat token")
+    await user.should_not_see("Session expired")
 
 
 async def test_probe_page_requires_test_server_id(
@@ -542,13 +634,13 @@ async def test_build_page_bounces_without_token(
     user_store: dict[str, object],
     tab_store: dict[str, object],
 ) -> None:
-    """Chunk 8 Task 16: the build page shows the session-expired guard with no token."""
+    """SC-2.2: the build page shows a token field, not the session-expired dead end (#524)."""
     user_store["stoat_url"] = "https://example.invalid"
     tab_store.pop("token", None)
 
     await user.open("/tools/build")
-    await user.should_see("Session expired")
-    await user.should_not_see("Build server")
+    await user.should_see("Stoat token")
+    await user.should_not_see("Session expired")
 
 
 async def test_build_page_shows_no_rollback_notice(
@@ -1060,3 +1152,38 @@ async def test_tls_check_page_renders_both_groups(
         await user.should_see("certifi+system")
         await user.should_see("Proxy")
         await user.should_see("proxy-source")
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["/tools/check", "/tools/repair", "/tools/retry", "/tools/probe", "/tools/build"],
+)
+async def test_every_token_page_shows_field_when_session_empty(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    route: str,
+) -> None:
+    """SC-2.1: the extracted _token_source helper reaches all five token pages."""
+    user_store["stoat_url"] = "https://example.invalid"
+    tab_store.pop("token", None)
+
+    await user.open(route)
+    await user.should_see("Stoat token")
+    await user.should_not_see("Session expired")
+
+
+async def test_check_page_defaults_dir_from_stashed_output_dir(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """SC-I1: arriving from the completion card (empty session, stashed dir) recovers."""
+    user_store["stoat_url"] = "https://example.invalid"
+    user_store["output_dir"] = str(tmp_path)  # written by the #518 button
+    tab_store.pop("token", None)
+
+    await user.open("/tools/check")
+    await user.should_see("Stoat token")  # field shown, not a dead end
+    await user.should_see(str(tmp_path))  # dir input defaulted from the stash
