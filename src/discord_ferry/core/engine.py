@@ -1810,6 +1810,89 @@ async def _recreate_channel(
     return True
 
 
+async def _recreate_forum_index(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    result: CheckResult,
+    existing_names: set[str],
+    live_categories: list[dict[str, Any]],
+    on_event: EventCallback,
+) -> bool:
+    """Recreate a missing forum-index channel and rebuild its index message (#311).
+
+    The forum index is stored under a synthetic ``forum-index-{forum_key}`` key whose
+    value is a real Stoat channel id, so a deleted one reports ``channel_missing`` like
+    any channel. Generic recreation cannot restore it: ``_recreate_channel`` declines a
+    key with no matching export, and ``_reattach_to_category`` resolves its target through
+    ``state.channel_categories`` (keyed by real Discord ids), which never holds the
+    synthetic key. This helper does both directly, then delegates the message to the
+    shared ``_rebuild_one_forum_index``. Returns True when the channel was recreated.
+    """
+    discord_id = result.discord_id or ""
+    forum_key = discord_id.removeprefix("forum-index-")
+
+    # The forum category must exist to attach the index to. If it is gone and cannot be
+    # restored from this run, decline distinctly rather than create an orphan channel.
+    stoat_category_id = state.category_map.get(forum_key)
+    if not stoat_category_id:
+        message = (
+            f"Cannot recreate the forum index for '{forum_key}': its forum category is "
+            "gone and not in this run to restore from. Re-run the migration with the "
+            "original export to rebuild the forum."
+        )
+        state.warnings.append(
+            {"phase": "repair", "type": "forum_index_category_missing", "message": message}
+        )
+        on_event(MigrationEvent(phase="repair", status="warning", message=message))
+        return False
+
+    recorded = state.created_channel_names.get(discord_id, discord_id)
+    unique_name = make_unique_channel_name(recorded, existing_names)
+    created = await api_create_channel(
+        session,
+        config.stoat_url,
+        config.token,
+        state.stoat_server_id,
+        name=unique_name,
+        channel_type="Text",
+    )
+    new_id: str = created["_id"]
+    state.channel_map[discord_id] = new_id
+    state.created_channel_names[discord_id] = created.get("name") or unique_name
+    existing_names.add(state.created_channel_names[discord_id])
+    save_state(state, config.output_dir)
+
+    # Position 0 of the forum category, mirroring the create path, so the index sits at
+    # the top. NOT via _reattach_to_category, which would no-op on the synthetic key.
+    old_id = result.stoat_id
+    target = next((c for c in live_categories if c.get("id") == stoat_category_id), None)
+    if target is not None and isinstance(target.get("channels"), list):
+        channels = target["channels"]
+        if old_id is not None and old_id in channels:
+            channels.remove(old_id)
+        if new_id not in channels:
+            channels.insert(0, new_id)
+        await api_upsert_categories(
+            session, config.stoat_url, config.token, state.stoat_server_id, live_categories
+        )
+
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="progress",
+            message=f"Recreated forum index channel '{state.created_channel_names[discord_id]}'.",
+        )
+    )
+    # Rebuild the index message through the shared helper (sends, pins, records the id,
+    # or marks present-id-unknown on a duplicate). The generic message resend and the
+    # "no discord_metadata" warning are deliberately not run: a forum index names no
+    # Discord channel, so it has zero messages and no ChannelMeta.
+    await _rebuild_one_forum_index(session, config, state, forum_key, on_event)
+    save_state(state, config.output_dir)
+    return True
+
+
 async def _apply_channel_attributes(
     session: aiohttp.ClientSession,
     config: FerryConfig,
