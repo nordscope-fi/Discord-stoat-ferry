@@ -455,6 +455,84 @@ def _role_from_metadata(role_id: str, rm: RoleMeta) -> DCERole:
     return DCERole(id=role_id, name=rm.name, color=rm.color or None, position=rm.position)
 
 
+async def apply_role_attributes(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    stoat_role_id: str,
+    role: DCERole,
+    rm: RoleMeta | None,
+    *,
+    phase: str,
+) -> None:
+    """Set ONE role's colour, hoist and icon. Shared by run_roles and repair.
+
+    Colour comes from ``role.color``; hoist and icon from ``rm`` (Discord
+    metadata). Every warning is tagged with ``phase`` so the repair --json
+    declined set can see failures that happen during a repair. Rank is not set
+    here: the per-role PATCH discards it, and ordering lives in
+    ``_apply_role_ordering``.
+    """
+    if role.color:
+        color_str = role.color.lstrip("#")
+        try:
+            colour_int = int(color_str, 16)
+            await api_edit_role(
+                session,
+                config.stoat_url,
+                config.token,
+                state.stoat_server_id,
+                stoat_role_id,
+                colour=colour_int,
+            )
+        except (ValueError, MigrationError) as exc:
+            state.warnings.append(
+                {
+                    "phase": phase,
+                    "type": "role_colour_failed",
+                    "message": f"Failed to set colour for role '{role.name}': {exc}",
+                }
+            )
+    edit_kwargs: dict[str, Any] = {}
+    if rm is not None:
+        edit_kwargs["hoist"] = rm.hoist
+        if rm.icon_hash:
+            icon_id = await _resolve_role_icon(
+                session, config, state, role.name, role.id, rm.icon_hash, phase=phase
+            )
+            if icon_id is not None:
+                edit_kwargs["icon"] = icon_id
+        elif rm.unicode_emoji:
+            state.warnings.append(
+                {
+                    "phase": phase,
+                    "type": "role_icon_skipped",
+                    "message": (
+                        f"Role '{role.name}' has an emoji icon (not migratable to Stoat)."
+                    ),
+                }
+            )
+    if not edit_kwargs:
+        return
+    try:
+        await api_edit_role(
+            session,
+            config.stoat_url,
+            config.token,
+            state.stoat_server_id,
+            stoat_role_id,
+            **edit_kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        state.warnings.append(
+            {
+                "phase": phase,
+                "type": "role_attributes_failed",
+                "message": (f"Failed to set attributes for role '{role.name}': {exc}"),
+            }
+        )
+
+
 async def apply_role_permissions(
     session: aiohttp.ClientSession,
     config: FerryConfig,
@@ -849,65 +927,15 @@ async def run_roles(
             attribute_role_id = state.role_map.get(role.id)
             if not attribute_role_id:
                 continue
-            if role.color:
-                color_str = role.color.lstrip("#")
-                try:
-                    colour_int = int(color_str, 16)
-                    await api_edit_role(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        state.stoat_server_id,
-                        attribute_role_id,
-                        colour=colour_int,
-                    )
-                except (ValueError, MigrationError) as exc:
-                    state.warnings.append(
-                        {
-                            "phase": "roles",
-                            "type": "role_colour_failed",
-                            "message": f"Failed to set colour for role '{role.name}': {exc}",
-                        }
-                    )
-            edit_kwargs: dict[str, Any] = {}
-            rm = role_meta.get(role.id)
-            if rm is not None:
-                edit_kwargs["hoist"] = rm.hoist
-                if rm.icon_hash:
-                    icon_id = await _resolve_role_icon(
-                        session, config, state, role.name, role.id, rm.icon_hash
-                    )
-                    if icon_id is not None:
-                        edit_kwargs["icon"] = icon_id
-                elif rm.unicode_emoji:
-                    state.warnings.append(
-                        {
-                            "phase": "roles",
-                            "type": "role_icon_skipped",
-                            "message": (
-                                f"Role '{role.name}' has an emoji icon (not migratable to Stoat)."
-                            ),
-                        }
-                    )
-            if not edit_kwargs:
-                continue
-            try:
-                await api_edit_role(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    state.stoat_server_id,
-                    attribute_role_id,
-                    **edit_kwargs,
-                )
-            except Exception as exc:  # noqa: BLE001
-                state.warnings.append(
-                    {
-                        "phase": "roles",
-                        "type": "role_attributes_failed",
-                        "message": (f"Failed to set attributes for role '{role.name}': {exc}"),
-                    }
-                )
+            await apply_role_attributes(
+                session,
+                config,
+                state,
+                attribute_role_id,
+                role,
+                role_meta.get(role.id),
+                phase="roles",
+            )
     if discord_metadata is None:
         on_event(
             MigrationEvent(
