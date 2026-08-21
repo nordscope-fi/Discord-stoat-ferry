@@ -24,6 +24,8 @@ from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     _apply_role_ordering,
+    _resolve_role_icon,
+    get_session,
     make_unique_channel_name,
     run_categories,
     run_channels,
@@ -2842,6 +2844,42 @@ async def test_run_roles_icon_upload_failure_degrades(tmp_path: Path) -> None:
     # SC-18 token-safety: the warning carries no response body and no token.
     for w in icon_warnings:
         assert "SENTINEL_BODY" not in w["message"]
+        assert config.token not in w["message"]
+
+
+async def test_resolve_role_icon_tags_failure_with_caller_phase(tmp_path: Path) -> None:
+    """The phase arg decides which warning bucket an icon failure lands in.
+
+    Repair's --json declined set filters phase == "repair"; without this the
+    failure would sit only under "roles" and never surface there. Default keeps
+    the migration path on "roles".
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    with (
+        aioresponses() as m,
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+    ):
+        # Autumn upload fails, so _resolve_role_icon appends role_icon_upload_failed.
+        m.post(f"{AUTUMN_URL}/icons", status=500, body=b"nope", repeat=True)
+        async with get_session(config) as session:
+            repair_result = await _resolve_role_icon(
+                session, config, state, "moderator", "111", "abc", phase="repair"
+            )
+            default_result = await _resolve_role_icon(
+                session, config, state, "moderator", "111", "abc"
+            )
+
+    assert repair_result is None
+    assert default_result is None
+    upload_failures = [w for w in state.warnings if w["type"] == "role_icon_upload_failed"]
+    assert any(w["phase"] == "repair" for w in upload_failures), state.warnings
+    assert any(w["phase"] == "roles" for w in upload_failures), state.warnings
+    for w in upload_failures:
         assert config.token not in w["message"]
 
 
