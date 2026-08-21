@@ -292,6 +292,23 @@ async def test_incremental_carried_failed_messages_are_independent_copies(tmp_pa
     assert state.failed_messages[0] is not prior.failed_messages[0]
 
 
+async def test_incremental_carries_pending_emoji_rewrites(tmp_path: Path) -> None:
+    """#307: a repair resume record survives an incremental run.
+
+    emoji_map is carried, so a recreated emoji reads as present. Dropping its
+    resume record would strand the messages that still hold the old id, and no
+    check would catch it. The record must ride along beside emoji_map.
+    """
+    _make_prior_state(
+        tmp_path,
+        emoji_map={"e1": "new_stoat"},
+        pending_emoji_rewrites={"e1": {"old": "old_stoat", "new": "new_stoat"}},
+    )
+    config = _make_config(tmp_path, incremental=True)
+    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    assert state.pending_emoji_rewrites == {"e1": {"old": "old_stoat", "new": "new_stoat"}}
+
+
 async def test_incremental_carries_roles_finalized(tmp_path: Path) -> None:
     """SC-19: incremental carry-over copies prior.roles_finalized (C1)."""
     _make_prior_state(

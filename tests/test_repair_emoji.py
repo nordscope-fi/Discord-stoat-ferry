@@ -327,10 +327,15 @@ async def test_resume_finishes_a_crashed_rewrite(tmp_path: Path) -> None:
         patch(_UPLOAD, new=AsyncMock(return_value="second")) as up,
         patch(_EDIT, new=AsyncMock()) as edit,
     ):
-        await run_repair(config, state, [_export([_message()])], [].append)
+        outcome = await run_repair(config, state, [_export([_message()])], [].append)
     up.assert_not_awaited()  # no second emoji
     edit.assert_awaited_once()  # the stranded message is finished
     assert EMOJI_ID not in state.pending_emoji_rewrites
+    # A resume-only run still reports the rewrite work in the outcome document.
+    row = outcome.recreated_emoji[0]
+    assert row["discord_id"] == EMOJI_ID
+    assert row["new_id"] == NEW_ID
+    assert row["messages_rewritten"] == 1
 
 
 async def test_edit_failure_keeps_the_record(tmp_path: Path) -> None:
@@ -536,3 +541,31 @@ async def test_integration_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert outcome.recreated_emoji[0]["discord_id"] == EMOJI_ID
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 1  # would-rewrite count
     assert state.emoji_map[EMOJI_ID] == OLD_ID  # unchanged
+
+
+async def test_dry_run_lists_an_outstanding_resume_record(tmp_path: Path) -> None:
+    """F4: a dry run names a leftover resume record a real run would finish first."""
+    _with_image(tmp_path)
+    config = FerryConfig(
+        export_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="t",
+        upload_delay=0.0,
+        output_dir=tmp_path,
+        dry_run=True,
+    )
+    state = _state()
+    state.emoji_map[EMOJI_ID] = NEW_ID
+    state.pending_emoji_rewrites[EMOJI_ID] = {"old": OLD_ID, "new": NEW_ID}
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_present_report())),
+        patch(_UPLOAD, new=AsyncMock()) as up,
+        patch(_EDIT, new=AsyncMock()) as edit,
+        patch(f"{_ENGINE}.save_state", side_effect=AssertionError("dry run must not save")),
+    ):
+        outcome = await run_repair(config, state, [_export([_message()])], [].append)
+    up.assert_not_awaited()
+    edit.assert_not_awaited()
+    row = next(r for r in outcome.recreated_emoji if r["discord_id"] == EMOJI_ID)
+    assert row["new_id"] == NEW_ID
+    assert row["messages_rewritten"] == 1  # would finish the stranded message
