@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **`ferry repair` restores a recreated role's colour, hoist and icon.** When repair recreates a
+  role that was deleted from a migrated server, it now sets the role's colour, hoist setting and
+  icon (the icon is re-fetched from Discord and re-uploaded) the same way the original migration
+  did, provided the Discord metadata is present. Rank is still restored only by a full
+  `--incremental` re-run, and a role with no Discord metadata is still declined with a warning.
+  Closes #344.
+
 ## [2.29.0] - 2026-08-21
 
 ### Added
