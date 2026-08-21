@@ -825,6 +825,16 @@ def _stats_rows(summary: StateSummary) -> list[dict[str, str]]:
     else:
         preview = sanitize_secrets(summary.last_warning or "")[:80]
         rows.append(("Warnings", f"{summary.warning_count} — last: {preview}"))
+    # Timing, same trinary as the CLI's _build_stats_table: an exact elapsed only
+    # for a complete run, else a plain state word.
+    if summary.duration_state == "complete":
+        secs = int(summary.duration_seconds or 0)
+        elapsed = f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}"
+    elif summary.duration_state == "in_progress":
+        elapsed = "in progress"
+    else:
+        elapsed = "unknown"
+    rows.append(("Elapsed", elapsed))
     return [{"item": item, "value": value} for item, value in rows]
 
 
