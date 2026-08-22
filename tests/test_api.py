@@ -19,6 +19,7 @@ from discord_ferry.migrator.api import (
     _circuit_state,
     _headers,
     _reset_circuit_state,
+    _reset_pacer_state,
     _reset_rate_state,
     api_add_reaction,
     api_create_channel,
@@ -62,15 +63,17 @@ TOKEN = "test-session-token"
 
 @pytest.fixture(autouse=True)
 def _clean_circuit() -> None:  # type: ignore[misc]
-    """Reset circuit breaker, semaphore, and adaptive rate state between tests."""
+    """Reset circuit breaker, semaphore, adaptive rate, and pacer state between tests."""
     import discord_ferry.migrator.api as _api_mod
 
     _reset_circuit_state()
     _reset_rate_state()
+    _reset_pacer_state()
     _api_mod._request_semaphore = None
     yield  # type: ignore[misc]
     _reset_circuit_state()
     _reset_rate_state()
+    _reset_pacer_state()
     _api_mod._request_semaphore = None
 
 
