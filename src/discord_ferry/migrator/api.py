@@ -270,6 +270,16 @@ async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
     return max(0.0, min(retry_ms / 1000, _MAX_RETRY_DELAY_SECONDS))
 
 
+def _update_pacer_state(url: str, headers: Mapping[str, str]) -> None:
+    """Refresh the pacer's per-bucket state from a response's headers."""
+    parsed = _parse_ratelimit_headers(headers)
+    if parsed is None:
+        return
+    bucket_hash, new_state = parsed
+    _bucket_state[bucket_hash] = new_state
+    _url_to_bucket[url] = bucket_hash
+
+
 async def _api_request_inner(
     session: aiohttp.ClientSession,
     method: str,
@@ -299,10 +309,30 @@ async def _api_request_inner(
         _circuit_state.consecutive_failures = 0
 
     for attempt in range(MAX_API_RETRIES):
+        # Proactive pacer: if we have seen this URL's bucket and the shadow
+        # counter says the budget is exhausted, wait for the window to reset.
+        # The shadow counter is decremented before the request, not after, so
+        # two concurrent requests to the same bucket do not both fire.
+        bucket_hash = _url_to_bucket.get(url)
+        if bucket_hash is not None:
+            state = _bucket_state.get(bucket_hash)
+            if state is not None:
+                if state.remaining <= 0:
+                    wait = state.reset_at - time.monotonic()
+                    if wait > 0:
+                        logger.debug(
+                            "Pacer: bucket %s exhausted, waiting %.1fs",
+                            bucket_hash,
+                            wait,
+                        )
+                        await asyncio.sleep(wait)
+                state.remaining = max(state.remaining - 1, 0)
+
         try:
             async with session.request(method, url, json=body, headers=headers) as resp:
                 if resp.status in (200, 201):
                     _circuit_state.consecutive_failures = 0
+                    _update_pacer_state(url, resp.headers)
                     # Decay the rate multiplier gradually on successful requests.
                     if _rate_multiplier > 1.0 and not any(
                         time.monotonic() - t < 30 for t in _rate_429_window
@@ -317,6 +347,7 @@ async def _api_request_inner(
                         ) from exc
                 if resp.status == 204 or (resp.status == 404 and expected_404_ok):
                     _circuit_state.consecutive_failures = 0
+                    _update_pacer_state(url, resp.headers)
                     # Decay the rate multiplier gradually on successful requests.
                     if _rate_multiplier > 1.0 and not any(
                         time.monotonic() - t < 30 for t in _rate_429_window
@@ -340,6 +371,7 @@ async def _api_request_inner(
                         # content-type-guarded so a non-JSON 429 can't escape into the network
                         # path and prime the breaker; honour Retry-After over the body delay.
                         await asyncio.sleep(await _resolve_429_delay_seconds(resp))
+                        _update_pacer_state(url, resp.headers)
                         # Track 429 frequency and ramp up the rate multiplier.
                         _rate_429_window.append(time.monotonic())
                         recent = sum(1 for t in _rate_429_window if time.monotonic() - t < 60)
@@ -375,6 +407,7 @@ async def _api_request_inner(
                         # A delivered message, so this must not prime the breaker. Same
                         # bookkeeping as the 204 branch above.
                         _circuit_state.consecutive_failures = 0
+                        _update_pacer_state(url, resp.headers)
                         if _rate_multiplier > 1.0 and not any(
                             time.monotonic() - t < 30 for t in _rate_429_window
                         ):
