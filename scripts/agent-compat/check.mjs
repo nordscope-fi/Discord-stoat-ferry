@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Discord Ferry — Cross-platform agent config drift verifier.
-// Validates: instructions exist, generated files match templates, skills are bridged,
-// hook parity holds, no unresolved placeholders in generated files.
-// Run: ./scripts/agent-check.sh [--strict] [--generated-only]
+// Validates: instructions exist, ferry blocks present, plain-english lint hooks synced,
+// skills are bridged, hook parity holds, no unresolved placeholders in generated files.
+// Run: ./scripts/agent-check.sh [--strict] [--generated-only] [--ci]
+//   --ci: check only tracked templates and hook parity structure (no gitignored files, CI-safe)
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { codexPostToolMatcher, vibePostToolMatcher, auditHookParity, HOOK_PARITY } from './hook-parity.mjs';
+import { auditHookParity, HOOK_PARITY, validateHookParity } from './hook-parity.mjs';
 import { buildSkillPlan } from './skill-topology.mjs';
 
 const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
@@ -17,6 +18,7 @@ const home = process.env.HOME;
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
 const generatedOnly = args.includes('--generated-only');
+const ci = args.includes('--ci');
 
 const failures = [];
 const warnings = [];
@@ -42,6 +44,56 @@ function fileMatches(generatedPath, expectedContent) {
   const actual = readFileSync(generatedPath, 'utf8');
   if (actual !== expectedContent) {
     fail(`drift: ${generatedPath} does not match template. Re-run ./scripts/agent-install.sh`);
+  }
+}
+
+function ferryBlocksPresent(generatedPath, adapterScript) {
+  if (!existsSync(generatedPath)) {
+    fail(`missing: ${generatedPath}`);
+    return;
+  }
+  const content = readFileSync(generatedPath, 'utf8');
+  if (!content.includes(adapterScript)) {
+    fail(`ferry blocks missing: ${generatedPath} does not contain ${adapterScript}. Re-run ./scripts/agent-install.sh`);
+  }
+}
+
+function plainEnglishAvailable() {
+  const result = spawnSync('plain-english', ['--version'], { encoding: 'utf8', stdio: 'pipe' });
+  return result.status === 0;
+}
+
+function plainEnglishUpToDate(agent) {
+  if (!plainEnglishAvailable()) {
+    warn(`plain-english not installed; skipping lint-hook sync check for ${agent}`);
+    return;
+  }
+  let output;
+  try {
+    output = execFileSync('plain-english', ['init', '--agent', agent, '--dry-run', '--root', projectRoot], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+  } catch (err) {
+    warn(`plain-english init --dry-run failed for ${agent}: ${err.message}`);
+    return;
+  }
+  const lines = output.split('\n');
+  const pending = lines.filter(line => {
+    if (line.includes('Nothing was written') || line.includes('After installing')) return false;
+    if (/added:\s+(?!none\b)/.test(line)) {
+      return !line.includes('mcp__linear__') && !line.includes('_save_(issue|comment)');
+    }
+    const createMatch = line.match(/^\s+create\s+(.+)/);
+    if (createMatch) {
+      const filePath = createMatch[1].trim();
+      return !existsSync(join(projectRoot, filePath));
+    }
+    if (/^\s+delete\s/.test(line)) return true;
+    return false;
+  });
+  if (pending.length > 0) {
+    fail(`plain-english lint hooks out of sync for ${agent}. Re-run ./scripts/agent-install.sh:\n${pending.map(l => l.trim()).join('\n')}`);
   }
 }
 
@@ -78,11 +130,9 @@ function checkCodexState() {
     return;
   }
 
-  const postMatcher = codexPostToolMatcher();
   fileMatches(join(codexDir, 'config.toml'), render('codex-config.toml'));
-  fileMatches(join(codexDir, 'hooks.json'), render('codex-hooks.json', {
-    '__POST_TOOL_MATCHER__': postMatcher,
-  }));
+  ferryBlocksPresent(join(codexDir, 'hooks.json'), 'codex-hook-adapter.mjs');
+  plainEnglishUpToDate('codex');
 
   const expectedRoles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
   const agentsDir = join(codexDir, 'agents');
@@ -114,10 +164,8 @@ function checkVibeState() {
     return;
   }
 
-  const vibePostMatcher = vibePostToolMatcher();
-  fileMatches(join(vibeDir, 'hooks.toml'), render('vibe-hooks.toml', {
-    '__VIBE_POST_TOOL_MATCHER__': vibePostMatcher,
-  }));
+  ferryBlocksPresent(join(vibeDir, 'hooks.toml'), 'vibe-hook-adapter.mjs');
+  plainEnglishUpToDate('vibe');
   fileMatches(join(vibeDir, 'mcp.toml'), render('vibe-mcp.toml'));
 }
 
@@ -233,21 +281,69 @@ function checkConfigSafety() {
   }
 }
 
+// --- Check: Templates (CI mode) -------------------------------------------------
+
+function checkTemplates() {
+  const requiredTemplates = [
+    'codex-config.toml', 'codex-hooks.json',
+    'vibe-hooks.toml', 'vibe-mcp.toml',
+  ];
+  for (const t of requiredTemplates) {
+    if (!existsSync(join(templateDir, t))) {
+      fail(`missing template: config/agent-compat/${t}`);
+    }
+  }
+
+  const roleFiles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
+  for (const role of roleFiles) {
+    if (!existsSync(join(templateDir, 'agents', role))) {
+      fail(`missing template: config/agent-compat/agents/${role}`);
+    }
+  }
+
+  const testReplacements = {
+    '__POST_TOOL_MATCHER__': '^(test)$',
+    '__VIBE_POST_TOOL_MATCHER__': 're:^(test)$',
+  };
+  for (const t of requiredTemplates) {
+    const rendered = render(t, testReplacements);
+    if (rendered.includes('__') && /__[A-Z_]+__/.test(rendered)) {
+      fail(`unresolved placeholder in template ${t}`);
+    }
+  }
+
+  try {
+    const codexHooks = render('codex-hooks.json', testReplacements);
+    JSON.parse(codexHooks);
+  } catch (err) {
+    fail(`codex-hooks.json template is not valid JSON after rendering: ${err.message}`);
+  }
+
+  const parityIssues = validateHookParity(HOOK_PARITY);
+  for (const issue of parityIssues) {
+    fail(`hook parity structure: ${issue}`);
+  }
+}
+
 // --- Main -----------------------------------------------------------------------
 
-if (!generatedOnly) {
-  checkInstructions();
+if (ci) {
+  checkTemplates();
+} else {
+  if (!generatedOnly) {
+    checkInstructions();
+  }
+
+  checkCodexState();
+  checkVibeState();
+  checkSkills();
+
+  if (!generatedOnly) {
+    checkHookParity();
+  }
+
+  checkConfigSafety();
 }
-
-checkCodexState();
-checkVibeState();
-checkSkills();
-
-if (!generatedOnly) {
-  checkHookParity();
-}
-
-checkConfigSafety();
 
 // Report
 if (warnings.length > 0) {

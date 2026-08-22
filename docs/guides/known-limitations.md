@@ -4,7 +4,7 @@ Every migration involves trade-offs. Discord and Stoat are different platforms w
 
 !!! warning "Already migrated with an older version?"
     Everything on this page is a deliberate limitation. Ferry also had five **bugs** that lost
-    content silently, fixed between v2.8.2 and v2.10.0 — missing forwarded messages, missing
+    content without any warning, fixed between v2.8.2 and v2.10.0 (missing forwarded messages, missing
     attachments, and voice channels nobody could use. If you migrated before v2.10.0, see
     [Was my earlier migration affected?](earlier-migrations.md).
 
@@ -24,7 +24,7 @@ These limitations relate to how channels, threads, and server organization are r
 | Channel topic longer than 1,024 characters | Stoat and Discord both cap channel topics at 1,024. Ferry truncates a longer topic to 1,024 characters before sending; the tail is discarded silently as a defensive measure for hand-edited or corrupt exports. | None — a valid Discord export cannot exceed 1,024 to begin with; shorten the topic in Discord if you need it faithfully preserved |
 
 !!! note "Thread handling and channel limits"
-    With the default `flatten` strategy, every thread becomes a channel. A busy Discord server with hundreds of threads can easily exceed Stoat's 200-channel limit. Use `--thread-strategy merge` or `archive` to avoid creating extra channels, or use `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md).
+    With the default `flatten` strategy, every thread becomes a channel. A busy Discord server with hundreds of threads can easily exceed Stoat's 200-channel limit. Use `--thread-strategy merge` or `archive` to avoid creating extra channels, or use `--skip-threads` to omit threads entirely. Self-hosted admins can raise the limit (see [Self-Hosted Tips](self-hosted-tips.md)).
 
 ---
 
@@ -156,9 +156,9 @@ neither the check nor the repair can tell whether it is there.
 **Merged thread content is not restored.** Under `--thread-strategy=merge` a thread's messages were
 appended to its parent channel, and Ferry finds them by the parent's *name* rather than its
 identifier. A repair working from a channel's own export cannot reach them. If repair recreates a
-parent that absorbed thread content, it restores the parent's own messages and records a warning
-naming each thread it left behind. `flatten`, the default, gives every thread its own channel and is
-restored completely.
+parent that absorbed thread content, it restores the parent's own messages. It records a warning
+naming each thread it left behind. `flatten`, the default, gives every thread its own channel and
+is restored completely.
 
 **A missing forum index is recreated and rebuilt.** Repair recreates the index channel, puts it
 back at the top of its forum category, and rebuilds its pinned index message from Ferry's own record
@@ -189,6 +189,6 @@ rebuilding a server you chose to remove.
 
 ## See Also
 
-- [Troubleshooting](troubleshooting.md) — solutions for common migration errors
-- [Self-Hosted Tips](self-hosted-tips.md) — raising limits and configuring your own Stoat instance
-- [Timestamp Preservation](timestamps.md) — detailed explanation of how timestamps work after migration
+- [Troubleshooting](troubleshooting.md) (solutions for common migration errors)
+- [Self-Hosted Tips](self-hosted-tips.md) (raising limits and configuring your own Stoat instance)
+- [Timestamp Preservation](timestamps.md) (detailed explanation of how timestamps work after migration)

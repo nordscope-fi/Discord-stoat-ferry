@@ -138,3 +138,10 @@ jobs:
           # merged pull request bodies do.
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/check-deferrals.sh "origin/${{ github.base_ref || 'main' }}"
+
+      - name: Agent config template check
+        # --ci mode checks only tracked files (templates, hook parity structure).
+        # It does not read ~/.claude/ or the gitignored generated layer, so it runs
+        # on a fresh runner. Catches template drift, missing template files, and
+        # parity ledger structural issues.
+        run: ./scripts/agent-check.sh --ci

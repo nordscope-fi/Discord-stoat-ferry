@@ -4,7 +4,7 @@
 // creates .agents/skills/ symlinks via the skill topology bridger.
 // Run: ./scripts/agent-install.sh (or: node scripts/agent-compat/install-local.mjs)
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { codexPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
@@ -35,6 +35,47 @@ function reconcileDirectory(dirPath, expectedNames) {
       unlinkSync(fullPath);
       console.log(`  removed unexpected: ${name}`);
     }
+  }
+}
+
+function plainEnglishAvailable() {
+  const result = spawnSync('plain-english', ['--version'], { encoding: 'utf8', stdio: 'pipe' });
+  return result.status === 0;
+}
+
+function runPlainEnglishInit(agent) {
+  try {
+    execFileSync('plain-english', ['init', `--agent`, agent, '--root', projectRoot], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    console.log(`  plain-english init --agent ${agent}: merged lint hooks`);
+  } catch (err) {
+    console.error(`  plain-english init --agent ${agent} failed: ${err.message}`);
+    console.error('  Run `npm install -g plain-english` and re-run ./scripts/agent-install.sh');
+  }
+}
+
+function stripIssueChannel() {
+  const codexPath = join(projectRoot, '.codex', 'hooks.json');
+  if (existsSync(codexPath)) {
+    const raw = JSON.parse(readFileSync(codexPath, 'utf8'));
+    if (raw.hooks?.PreToolUse) {
+      raw.hooks.PreToolUse = raw.hooks.PreToolUse.filter(
+        group => !group.matcher?.includes('mcp__linear__')
+      );
+      writeFileSync(codexPath, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
+    }
+  }
+
+  const vibePath = join(projectRoot, '.vibe', 'hooks.toml');
+  if (existsSync(vibePath)) {
+    const content = readFileSync(vibePath, 'utf8');
+    const blocks = content.split(/(?=\[\[hooks\]\])/);
+    const filtered = blocks.filter(block =>
+      !block.includes('plain-english-issue') && !block.includes('_save_(issue|comment)')
+    );
+    writeFileSync(vibePath, filtered.join('').replace(/\n{3,}/g, '\n\n'), { mode: 0o600 });
   }
 }
 
@@ -96,8 +137,30 @@ async function main() {
   writeFileSync(join(vibeDir, 'hooks.toml'), render('vibe-hooks.toml', {
     '__VIBE_POST_TOOL_MATCHER__': vibePostMatcher,
   }), { mode: 0o600 });
-  writeFileSync(join(vibeDir, 'mcp.toml'), render('vibe-mcp.toml'), { mode: 0o600 });
-  console.log('  hooks.toml, mcp.toml');
+  // Vibe reads MCP servers from .vibe/config.toml, not a separate mcp.toml.
+  // Older installer runs wrote mcp.toml, which Vibe ignores; remove the stale file.
+  writeFileSync(join(vibeDir, 'config.toml'), render('vibe-mcp.toml'), { mode: 0o600 });
+  const legacyMcp = join(vibeDir, 'mcp.toml');
+  if (existsSync(legacyMcp)) {
+    unlinkSync(legacyMcp);
+    console.log('  removed legacy: mcp.toml');
+  }
+  console.log('  hooks.toml, config.toml (mcp servers)');
+
+  // 4b. Merge plain-english lint hooks into both hook files.
+  // The ferry templates carry only the adapter hooks. plain-english owns its own
+  // blocks and merges them in, preserving the ferry hooks. This avoids duplicating
+  // plain-english config in the templates (ADR-024).
+  console.log('Merging plain-english lint hooks ...');
+  if (plainEnglishAvailable()) {
+    runPlainEnglishInit('codex');
+    runPlainEnglishInit('vibe');
+    stripIssueChannel();
+    console.log('  stripped issue channel (Linear MCP not used in this repo)');
+  } else {
+    console.log('  plain-english not found; skipping lint hook merge');
+    console.log('  Install it (npm install -g plain-english) and re-run to get lint hooks');
+  }
 
   // 5. Bridge skills
   console.log('Bridging skills ...');
@@ -120,7 +183,7 @@ async function main() {
   console.log('');
   console.log('  Vibe:');
   console.log('    1. Set MISTRAL_API_KEY (env var or ~/.vibe/config.toml)');
-  console.log('    2. Set model in ~/.vibe/config.toml (e.g. codestral-latest)');
+  console.log('    2. Set the active model in ~/.vibe/config.toml (active_model = "<model>")');
   console.log('    3. Restart Vibe CLI');
   console.log('');
   console.log('  Verify: ./scripts/agent-check.sh');

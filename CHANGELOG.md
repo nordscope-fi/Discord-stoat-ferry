@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **content: Em-dash and banned-word debt removed from known-limitations guide.** Five
+  em-dashes and a `silently` in `docs/guides/known-limitations.md` failed the plain-english
+  lint. Replaced with commas, parentheses, and a split sentence. The lint is now clean.
+
+- **The agent-compat installer no longer wipes writing-style lint hooks on refresh.**
+  `agent-install.sh` wrote ferry-only hook templates as a full overwrite, stripping the
+  plain-english lint hooks from Codex and Vibe. It now writes the ferry blocks, then runs
+  `plain-english init` to merge the lint blocks back in. The drift verifier checks ferry
+  blocks are present and plain-english is in sync, instead of exact-matching against
+  ferry-only templates (ADR-024).
+- **The writing-guide skill is now visible to Codex and Vibe.** The `writing-a-document`
+  skill was added after the last install and was not bridged into `.agents/skills/`.
+  Running the installer bridges it; the skill count is corrected to 15.
+- **The shared contract no longer names a Vibe model that is not the one running.** The
+  cognitive tiering table now says "active model in `~/.vibe/config.toml`" and the tool
+  mapping lists the `explore` read-only subagent Vibe exposes.
+- **The session pre-flight skill is now in the on-demand list.** `/df-start` was bridged
+  and available but undocumented in AGENTS.md and CLAUDE.md.
+- **The fallback-reviewer MCP table no longer implies it is live on Codex.** It now says
+  the MCP is disabled on Codex and the `codex exec` CLI is the primary reviewer.
+- **The Linear issue-tracker channel is stripped from all hook configs.** The plain-english
+  issue channel matched the Linear MCP, which is not used in this repo. The installer now
+  strips it after merging, and the parity ledger no longer carries the entries.
+- **CI now runs an agent-config template check.** The `gates` job runs `agent-check.sh --ci`,
+  which validates tracked templates and parity structure without reading gitignored files,
+  so template drift fails the build instead of going unnoticed.
+
 ## [2.31.0] - 2026-08-22
 
 ### Added
