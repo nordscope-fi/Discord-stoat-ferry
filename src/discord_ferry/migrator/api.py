@@ -213,6 +213,35 @@ def _stoat_rate_delay_seconds(headers: Mapping[str, str]) -> float | None:
     return None
 
 
+def _parse_ratelimit_headers(
+    headers: Mapping[str, str],
+) -> tuple[str, _BucketState] | None:
+    """Parse X-RateLimit-* headers into a bucket hash and a _BucketState.
+
+    Returns None when the headers are missing or non-numeric, so the caller
+    skips the pacer update without crashing. ``X-RateLimit-Reset-After`` is
+    milliseconds (same unit rule as :func:`_stoat_rate_delay_seconds`).
+    """
+    raw_bucket = headers.get("X-RateLimit-Bucket")
+    raw_remaining = headers.get("X-RateLimit-Remaining")
+    raw_limit = headers.get("X-RateLimit-Limit")
+    raw_reset = headers.get("X-RateLimit-Reset-After")
+    if not raw_bucket or raw_remaining is None or raw_limit is None or raw_reset is None:
+        return None
+    try:
+        remaining = int(raw_remaining)
+        limit = int(raw_limit)
+        reset_after_s = float(raw_reset) / 1000
+    except (ValueError, TypeError):
+        logger.debug("Non-numeric X-RateLimit header: %s", dict(headers))
+        return None
+    return raw_bucket, _BucketState(
+        remaining=remaining,
+        limit=limit,
+        reset_at=time.monotonic() + reset_after_s,
+    )
+
+
 async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
     """Resolve the 429 sleep in seconds: headers → body ``retry_after`` (ms) → 1s; capped.
 

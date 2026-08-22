@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import ssl
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -2188,3 +2189,46 @@ async def test_emoji_list_rejects_a_non_list_body(mock_aiohttp: aioresponses) ->
     async with aiohttp.ClientSession() as session:
         with pytest.raises(MigrationError, match="JSON array"):
             await api_fetch_emoji_list(session, BASE_URL, TOKEN, "srv1")
+
+
+# ---------------------------------------------------------------------------
+# Proactive pacer — _parse_ratelimit_headers (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_pacer_parses_headers_from_response() -> None:
+    """_parse_ratelimit_headers extracts remaining, limit, bucket, reset_at."""
+    from discord_ferry.migrator.api import _parse_ratelimit_headers
+
+    headers = {
+        "X-RateLimit-Remaining": "3",
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "hash123",
+        "X-RateLimit-Reset-After": "8000",
+    }
+    result = _parse_ratelimit_headers(headers)
+    assert result is not None
+    bucket, state = result
+    assert bucket == "hash123"
+    assert state.remaining == 3
+    assert state.limit == 5
+    assert state.reset_at - time.monotonic() == pytest.approx(8.0, rel=0.1)
+
+
+def test_pacer_missing_headers_returns_none() -> None:
+    """Missing X-RateLimit headers return None, no crash."""
+    from discord_ferry.migrator.api import _parse_ratelimit_headers
+
+    assert _parse_ratelimit_headers({}) is None
+    assert _parse_ratelimit_headers({"X-RateLimit-Remaining": "3"}) is None
+    assert (
+        _parse_ratelimit_headers(
+            {
+                "X-RateLimit-Bucket": "b1",
+                "X-RateLimit-Remaining": "x",
+                "X-RateLimit-Limit": "5",
+                "X-RateLimit-Reset-After": "1000",
+            }
+        )
+        is None
+    )
