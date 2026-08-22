@@ -1009,16 +1009,34 @@ async def _rebuild_one_forum_index(
     state: MigrationState,
     forum_key: str,
     on_event: EventCallback,
+    *,
+    phase: str = "report",
+    force_new: bool = False,
 ) -> None:
     """Rebuild one forum's index message from current migration data.
 
     Shared by ``_rebuild_forum_indexes`` (the REPORT-phase loop) and the repair path,
     so the two cannot drift. Reads the forum's members with ``.get`` because the repair
     caller may pass a zero-post forum, which never gets a ``forum_channel_members`` entry.
+
+    ``phase`` tags the events and warnings this emits. The repair callers pass
+    ``phase="repair"`` so a rebuild failure reaches ``outcome.declined`` and the repair
+    exit code, rather than being filed under ``report`` where it is invisible to repair.
+
+    ``force_new`` sends a fresh index message instead of editing the recorded one. The
+    repair callers set it: the id in ``forum_index_message_ids`` was written for the OLD
+    channel or the OLD (now-deleted) message, so editing it would fail silently. Clearing
+    it first forces the send branch and keeps a dead id out of the map for later runs.
     """
     index_channel_id = state.channel_map.get(f"forum-index-{forum_key}")
     if not index_channel_id:
         return
+
+    if force_new:
+        # The recorded id is stale for a repair (its channel or message is gone). Drop it
+        # and any present-id-unknown mark so the send branch runs and records a real id.
+        state.forum_index_message_ids.pop(forum_key, None)
+        state.forum_index_present_unknown_id.discard(forum_key)
 
     forum_name = state.forum_category_names.get(forum_key, forum_key)
     discord_channel_ids = state.forum_channel_members.get(forum_key, [])
@@ -1062,9 +1080,10 @@ async def _rebuild_one_forum_index(
             # idempotency LRU has evicted the key. Skip, and say so: the message stays
             # with its prior content, only this run's count refresh is missed. Tested
             # before the send branch, so a known id (rule 1) always supersedes this.
+            # Unreachable under force_new, which discards the mark above.
             on_event(
                 MigrationEvent(
-                    phase="report",
+                    phase=phase,
                     status="warning",
                     message=_safe(
                         config,
@@ -1108,17 +1127,21 @@ async def _rebuild_one_forum_index(
                     index_msg_id,
                 )
                 await asyncio.sleep(config.upload_delay)
-        on_event(
-            MigrationEvent(
-                phase="report",
-                status="progress",
-                message=f"Rebuilt forum index for '{forum_name}' with actual data",
+        if index_msg_id:
+            # Only when something was actually edited or sent. A duplicate send leaves
+            # index_msg_id empty and marks the forum instead; claiming "Rebuilt" there
+            # would report success for a rebuild that did not happen.
+            on_event(
+                MigrationEvent(
+                    phase=phase,
+                    status="progress",
+                    message=f"Rebuilt forum index for '{forum_name}' with actual data",
+                )
             )
-        )
     except Exception as exc:  # noqa: BLE001
         state.warnings.append(
             {
-                "phase": "report",
+                "phase": phase,
                 "type": "forum_index_rebuild_failed",
                 "message": _safe(
                     config, f"Failed to rebuild forum index for '{forum_name}': {exc}"
@@ -1127,7 +1150,7 @@ async def _rebuild_one_forum_index(
         )
         on_event(
             MigrationEvent(
-                phase="report",
+                phase=phase,
                 status="warning",
                 message=_safe(config, f"Forum index rebuild for '{forum_name}' failed: {exc}"),
             )
@@ -1832,10 +1855,15 @@ async def _recreate_forum_index(
     discord_id = result.discord_id or ""
     forum_key = discord_id.removeprefix("forum-index-")
 
-    # The forum category must exist to attach the index to. If it is gone and cannot be
-    # restored from this run, decline distinctly rather than create an orphan channel.
+    # The forum category must be LIVE to attach the index to. category_map is not a
+    # sufficient test: check and repair preserve dead ids, so a deleted category that
+    # structure_work did not restore this run still has a truthy category_map entry.
+    # Resolve against the freshly fetched live categories (which include anything
+    # _recreate_category rebuilt earlier this run) and decline if it is genuinely gone,
+    # rather than creating an orphan channel and reporting success.
     stoat_category_id = state.category_map.get(forum_key)
-    if not stoat_category_id:
+    target = next((c for c in live_categories if c.get("id") == stoat_category_id), None)
+    if target is None or not isinstance(target.get("channels"), list):
         message = (
             f"Cannot recreate the forum index for '{forum_key}': its forum category is "
             "gone and not in this run to restore from. Re-run the migration with the "
@@ -1866,16 +1894,14 @@ async def _recreate_forum_index(
     # Position 0 of the forum category, mirroring the create path, so the index sits at
     # the top. NOT via _reattach_to_category, which would no-op on the synthetic key.
     old_id = result.stoat_id
-    target = next((c for c in live_categories if c.get("id") == stoat_category_id), None)
-    if target is not None and isinstance(target.get("channels"), list):
-        channels = target["channels"]
-        if old_id is not None and old_id in channels:
-            channels.remove(old_id)
-        if new_id not in channels:
-            channels.insert(0, new_id)
-        await api_upsert_categories(
-            session, config.stoat_url, config.token, state.stoat_server_id, live_categories
-        )
+    channels = target["channels"]
+    if old_id is not None and old_id in channels:
+        channels.remove(old_id)
+    if new_id not in channels:
+        channels.insert(0, new_id)
+    await api_upsert_categories(
+        session, config.stoat_url, config.token, state.stoat_server_id, live_categories
+    )
 
     on_event(
         MigrationEvent(
@@ -1884,11 +1910,14 @@ async def _recreate_forum_index(
             message=f"Recreated forum index channel '{state.created_channel_names[discord_id]}'.",
         )
     )
-    # Rebuild the index message through the shared helper (sends, pins, records the id,
-    # or marks present-id-unknown on a duplicate). The generic message resend and the
-    # "no discord_metadata" warning are deliberately not run: a forum index names no
-    # Discord channel, so it has zero messages and no ChannelMeta.
-    await _rebuild_one_forum_index(session, config, state, forum_key, on_event)
+    # Rebuild the index message through the shared helper. force_new: the recorded id (if
+    # any) was for the OLD channel, so an edit would fail silently; send fresh instead.
+    # phase="repair" so a rebuild failure reaches outcome.declined and the exit code. The
+    # generic message resend and the "no discord_metadata" warning are deliberately not
+    # run: a forum index names no Discord channel, so it has zero messages and no ChannelMeta.
+    await _rebuild_one_forum_index(
+        session, config, state, forum_key, on_event, phase="repair", force_new=True
+    )
     save_state(state, config.output_dir)
     return True
 
@@ -2686,7 +2715,24 @@ async def run_repair(
                         )
             for result in forum_index_rebuild_work:
                 forum_key = (result.discord_id or "").removeprefix("forum-index-")
-                await _rebuild_one_forum_index(fi_sess, config, state, forum_key, on_event)
+                # tail_absent: the channel is intact but the recorded index message is
+                # confirmed gone, so force_new sends a fresh one rather than editing the
+                # dead id. phase="repair" surfaces a failure at the exit code.
+                await _rebuild_one_forum_index(
+                    fi_sess, config, state, forum_key, on_event, phase="repair", force_new=True
+                )
+                # Record a positive outcome only when a fresh id was actually written, so
+                # a rebuild that hit a duplicate (marked, no id) or failed is not reported
+                # as a restored tail. The failure path already lands in outcome.declined.
+                if forum_key in state.forum_index_message_ids:
+                    discord_id = result.discord_id or ""
+                    outcome.restored_tails.append(
+                        {
+                            "discord_id": discord_id,
+                            "stoat_id": state.channel_map.get(discord_id),
+                            "name": state.created_channel_names.get(discord_id, discord_id),
+                        }
+                    )
                 save_state(state, config.output_dir)
         finally:
             if own_fi_session:

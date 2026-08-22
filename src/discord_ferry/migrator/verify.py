@@ -138,6 +138,11 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         # index (#311) but has nowhere to attach it, so this names a real
         # unrepaired gap and forces a non-zero exit like the others here.
         "forum_index_category_missing",
+        # A forum-index rebuild that failed during repair (the send raised). The helper
+        # tags it phase="repair" for a repair caller, so it reaches outcome.declined; it
+        # forces a non-zero exit rather than a silent empty index. A REPORT-phase rebuild
+        # failure is tagged phase="report" and never reaches the repair exit code.
+        "forum_index_rebuild_failed",
         # A missing emoji repair could not recreate (its image is not in the
         # export). emoji_rewrite_failed too: a reference edit failed, so a message
         # still points at the dead id and the resume record stays open. Both leave
