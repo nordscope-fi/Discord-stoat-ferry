@@ -83,6 +83,78 @@ async def test_recreate_forum_index_creates_and_rebuilds(tmp_path: Path) -> None
     assert live_categories[0]["channels"] == ["new-idx"]
 
 
+async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_path: Path) -> None:
+    """Whole-branch review: a migrated forum already has a forum_index_message_ids entry.
+
+    That recorded id belongs to the DELETED old channel, so editing it in the new channel
+    would fail silently. Repair must send a fresh message and record its id, not edit the
+    stale one.
+    """
+    config = _config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv",
+        category_map={"f": "cat-s"},
+        created_channel_names={"forum-index-f": "F-index"},
+        forum_channel_members={"f": ["d1"]},
+        forum_category_names={"f": "F"},
+        channel_map={"d1": "s1"},
+        channel_message_counts={"d1": 2},
+        forum_index_message_ids={"f": "stale-old-msg"},  # from the original migration
+    )
+    live_categories = [{"id": "cat-s", "title": "F", "channels": ["old-idx"]}]
+
+    with aioresponses() as mock:
+        mock.post(
+            "https://api.test/servers/srv/channels",
+            payload={"_id": "new-idx", "name": "F-index"},
+        )
+        mock.patch("https://api.test/servers/srv", payload={})
+        # Only the SEND route is registered. If the code took the edit branch against the
+        # stale id, the PATCH would have no route and the rebuild would fail silently.
+        mock.post("https://api.test/channels/new-idx/messages", payload={"_id": "fresh-msg"})
+        mock.post("https://api.test/channels/new-idx/messages/fresh-msg/pin", payload={})
+        async with aiohttp.ClientSession() as session:
+            created = await _recreate_forum_index(
+                session, config, state, _result(), set(), live_categories, lambda e: None
+            )
+
+    assert created is True
+    assert state.forum_index_message_ids["f"] == "fresh-msg", "repair edited the stale id"
+
+
+async def test_recreate_forum_index_clears_a_stale_present_unknown_mark(tmp_path: Path) -> None:
+    """Whole-branch/second-opinion: a carried present-id-unknown mark must not suppress the send.
+
+    force_new discards the mark so the new channel gets a fresh index message.
+    """
+    config = _config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv",
+        category_map={"f": "cat-s"},
+        created_channel_names={"forum-index-f": "F-index"},
+        forum_channel_members={"f": ["d1"]},
+        forum_category_names={"f": "F"},
+        channel_map={"d1": "s1"},
+        forum_index_present_unknown_id={"f"},  # marked from an earlier duplicate
+    )
+    live_categories = [{"id": "cat-s", "title": "F", "channels": []}]
+    with aioresponses() as mock:
+        mock.post(
+            "https://api.test/servers/srv/channels",
+            payload={"_id": "new-idx", "name": "F-index"},
+        )
+        mock.patch("https://api.test/servers/srv", payload={})
+        mock.post("https://api.test/channels/new-idx/messages", payload={"_id": "fresh-msg"})
+        mock.post("https://api.test/channels/new-idx/messages/fresh-msg/pin", payload={})
+        async with aiohttp.ClientSession() as session:
+            created = await _recreate_forum_index(
+                session, config, state, _result(), set(), live_categories, lambda e: None
+            )
+    assert created is True
+    assert state.forum_index_message_ids["f"] == "fresh-msg"
+    assert "f" not in state.forum_index_present_unknown_id, "the stale mark suppressed the send"
+
+
 async def test_recreate_forum_index_declines_missing_category(tmp_path: Path) -> None:
     """SC-5.2: a gone forum category yields a distinct decline and creates nothing."""
     config = _config(tmp_path)
@@ -101,6 +173,31 @@ async def test_recreate_forum_index_declines_missing_category(tmp_path: Path) ->
     assert created is False
     assert any(w.get("type") == "forum_index_category_missing" for w in state.warnings)
     assert "forum-index-f" not in state.channel_map
+
+
+async def test_recreate_forum_index_declines_a_dead_but_mapped_category(tmp_path: Path) -> None:
+    """Second-opinion finding 3: a category_map id absent from the live server is dead.
+
+    Check and repair preserve dead ids, so a truthy category_map entry is not proof the
+    category exists. Resolving against live_categories declines instead of creating an
+    orphan channel and reporting success.
+    """
+    config = _config(tmp_path)
+    state = MigrationState(
+        stoat_server_id="srv",
+        category_map={"f": "deleted-category"},  # truthy, but not on the server
+        created_channel_names={"forum-index-f": "F-index"},
+    )
+
+    with aioresponses():  # no routes: creating a channel would raise
+        async with aiohttp.ClientSession() as session:
+            created = await _recreate_forum_index(
+                session, config, state, _result(), set(), [], lambda e: None
+            )
+
+    assert created is False
+    assert any(w.get("type") == "forum_index_category_missing" for w in state.warnings)
+    assert "forum-index-f" not in state.channel_map, "an orphan channel was created"
 
 
 # --- Routing through run_repair (Task 2.2) ---------------------------------
@@ -162,6 +259,9 @@ async def test_repair_routes_tail_absent_to_rebuild_without_create(tmp_path: Pat
         await run_repair(config, state, [], [].append)
     rebuild.assert_awaited_once()
     assert rebuild.await_args.args[3] == "f"  # forum_key
+    # force_new: the recorded id is the message just confirmed gone, so send fresh.
+    assert rebuild.await_args.kwargs.get("force_new") is True
+    assert rebuild.await_args.kwargs.get("phase") == "repair"
     recreate.assert_not_awaited()
 
 
@@ -185,6 +285,30 @@ async def test_repair_forum_index_dry_run_mutates_nothing(tmp_path: Path) -> Non
     assert state.channel_map["forum-index-f"] == "old-idx"  # unchanged
 
 
+async def test_tail_rebuild_records_a_restored_tail(tmp_path: Path) -> None:
+    """Second-opinion finding 4: a successful tail rebuild is recorded in the outcome.
+
+    Without this the rebuild-only path did real work but reported nothing to --json / GUI.
+    """
+    config = _config(tmp_path)
+    state = _routing_state(tmp_path)
+
+    async def _fake_rebuild(_sess, _cfg, st, forum_key, _ev, *, phase="report", force_new=False):  # type: ignore[no-untyped-def]
+        st.forum_index_message_ids[forum_key] = "rebuilt-msg"
+
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_report("tail_absent"))),
+        patch(_REBUILD, new=_fake_rebuild),
+    ):
+        outcome = await run_repair(config, state, [], [].append)
+    assert any(t["discord_id"] == "forum-index-f" for t in outcome.restored_tails)
+
+
 def test_category_missing_decline_is_in_exit_set() -> None:
     """SC-5.2: the distinct decline forces a non-zero exit, like other unrepaired gaps."""
     assert "forum_index_category_missing" in UNREPAIRED_WARNING_TYPES
+
+
+def test_rebuild_failed_is_in_exit_set() -> None:
+    """Second-opinion finding 1/2: a repair rebuild failure forces a non-zero exit."""
+    assert "forum_index_rebuild_failed" in UNREPAIRED_WARNING_TYPES
