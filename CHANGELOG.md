@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.31.0] - 2026-08-22
+
+### Added
+
+- **`ferry repair` recreates and rebuilds a missing forum index.** When a forum's index channel is
+  deleted from a migrated server, repair now recreates it, puts it back at the top of its forum
+  category, and rebuilds its pinned index message from Ferry's own record of the forum's posts,
+  instead of declining. A forum index whose channel survives but whose message alone was deleted is
+  rebuilt in place. If the forum's own category is also gone and cannot be restored this run, repair
+  declines that index with a clear warning and a non-zero exit. Closes #311.
+
+### Fixed
+
+- **A forum-index rebuild no longer posts a duplicate index message on a later run.** When Stoat
+  accepted the index message as a duplicate, Ferry recorded nothing, so the next run sent it again
+  once Stoat's idempotency cache had evicted the key. Ferry now records that the index is present
+  with an unknown id and skips the resend, leaving the existing message in place rather than adding a
+  second copy. Closes #215.
+
 ## [2.30.0] - 2026-08-21
 
 ### Added
