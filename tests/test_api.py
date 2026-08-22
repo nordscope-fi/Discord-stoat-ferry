@@ -2232,3 +2232,158 @@ def test_pacer_missing_headers_returns_none() -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Proactive pacer — pacing logic in _api_request_inner (Task 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_pacer_pauses_on_remaining_zero(mock_aiohttp: aioresponses) -> None:
+    """A response with Remaining: 0 causes the next request to wait."""
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "100",  # 0.1s in ms
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        start = time.monotonic()
+        await _api_request(session, "GET", url, TOKEN)
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.08  # waited at least ~0.1s
+
+
+async def test_pacer_no_pause_on_remaining_positive(mock_aiohttp: aioresponses) -> None:
+    """Remaining: 4 does not trigger a pause."""
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "4",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "4",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        start = time.monotonic()
+        await _api_request(session, "GET", url, TOKEN)
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05  # no pacing delay
+
+
+async def test_pacer_bucket_state_updated_from_response(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """After a 200, _bucket_state has the response's bucket info."""
+    from discord_ferry.migrator.api import _bucket_state, _url_to_bucket
+
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "3",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "hash123",
+            "X-RateLimit-Reset-After": "8000",
+        },
+    )
+
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+
+    assert "hash123" in _bucket_state
+    assert _bucket_state["hash123"].remaining == 3
+    assert _bucket_state["hash123"].limit == 5
+    assert url in _url_to_bucket
+    assert _url_to_bucket[url] == "hash123"
+
+
+async def test_pacer_first_request_not_delayed(mock_aiohttp: aioresponses) -> None:
+    """A URL with no prior state sends immediately."""
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+
+    start = time.monotonic()
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.05
+
+
+async def test_pacer_shadow_decrement(mock_aiohttp: aioresponses) -> None:
+    """The shadow counter decrements before the request, then the response overwrites it."""
+    from discord_ferry.migrator.api import _bucket_state
+
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "2",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "1",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        await _api_request(session, "GET", url, TOKEN)
+        # After the second response, _update_pacer_state overwrites the shadow
+        # with the server's actual value. The shadow decrement happened before
+        # the request (protecting against concurrency), but the response
+        # refreshes it. So remaining == 1 (from the header), not 0 (from the
+        # decrement).
+        assert _bucket_state["b1"].remaining == 1
