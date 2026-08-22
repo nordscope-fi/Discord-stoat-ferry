@@ -17,6 +17,7 @@ from discord_ferry.core.http import new_session
 from discord_ferry.errors import DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
     _api_request,
+    _BucketState,
     _circuit_state,
     _headers,
     _reset_circuit_state,
@@ -2387,3 +2388,187 @@ async def test_pacer_shadow_decrement(mock_aiohttp: aioresponses) -> None:
         # refreshes it. So remaining == 1 (from the header), not 0 (from the
         # decrement).
         assert _bucket_state["b1"].remaining == 1
+
+
+# ---------------------------------------------------------------------------
+# Proactive pacer — remaining scenario tests (Task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_pacer_429_fires_when_stale(mock_aiohttp: aioresponses) -> None:
+    """The 429 retry path fires if the pacer's shadow was stale."""
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "1",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        status=429,
+        payload={"retry_after": 100},
+        headers={
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "100",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        await _api_request(session, "GET", url, TOKEN)  # gets 429, retries, succeeds
+
+
+async def test_pacer_shadow_clamps_negative(mock_aiohttp: aioresponses) -> None:
+    """Shadow counter going negative clamps to 0, not left negative."""
+    from discord_ferry.migrator.api import _bucket_state, _url_to_bucket
+
+    url = f"{BASE_URL}/servers/srv1"
+    _url_to_bucket[url] = "b1"
+    _bucket_state["b1"] = _BucketState(remaining=1, limit=5, reset_at=time.monotonic() + 100)
+
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        assert _bucket_state["b1"].remaining >= 0
+
+
+async def test_pacer_different_bucket_not_delayed(mock_aiohttp: aioresponses) -> None:
+    """An exhausted bucket does not delay a request to a different bucket."""
+    from discord_ferry.migrator.api import _bucket_state, _url_to_bucket
+
+    _bucket_state["bucket_A"] = _BucketState(remaining=0, limit=5, reset_at=time.monotonic() + 100)
+    _url_to_bucket[f"{BASE_URL}/servers/srv1"] = "bucket_A"
+
+    url2 = f"{BASE_URL}/channels/ch1"
+    mock_aiohttp.get(
+        url2,
+        payload={"_id": "ch1"},
+        headers={
+            "X-RateLimit-Remaining": "15",
+            "X-RateLimit-Limit": "15",
+            "X-RateLimit-Bucket": "bucket_B",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    start = time.monotonic()
+    async with new_session() as session:
+        await _api_request(session, "GET", url2, TOKEN)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.05
+
+
+async def test_pacer_reset_after_expiry(mock_aiohttp: aioresponses) -> None:
+    """After the reset time passes, a previously-exhausted bucket sends immediately."""
+    from discord_ferry.migrator.api import _bucket_state, _url_to_bucket
+
+    url = f"{BASE_URL}/servers/srv1"
+    _url_to_bucket[url] = "b1"
+    _bucket_state["b1"] = _BucketState(remaining=0, limit=5, reset_at=time.monotonic() - 0.01)
+
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    start = time.monotonic()
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.05
+
+
+async def test_pacer_debug_log_on_pace(
+    mock_aiohttp: aioresponses,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A paced pause produces a debug log line with the bucket hash."""
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "100",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    with caplog.at_level(logging.DEBUG, logger="discord_ferry.migrator.api"):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+    assert any("Pacer" in r.message and "b1" in r.message for r in caplog.records)
+
+
+async def test_pacer_no_debug_log_when_not_paced(
+    mock_aiohttp: aioresponses,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-paced request produces no pacing log line."""
+    url = f"{BASE_URL}/servers/srv1"
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "5",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    with caplog.at_level(logging.DEBUG, logger="discord_ferry.migrator.api"):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+    assert not any("Pacer" in r.message for r in caplog.records)
