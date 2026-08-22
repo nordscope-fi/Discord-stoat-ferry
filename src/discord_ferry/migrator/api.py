@@ -45,6 +45,20 @@ class _CircuitState:
     consecutive_failures: int = 0
 
 
+@dataclass
+class _BucketState:
+    """Proactive pacer state for one rate-limit bucket.
+
+    ``remaining`` is a shadow counter decremented on each outgoing request
+    and refreshed from ``X-RateLimit-Remaining`` on each response. It can go
+    negative under concurrency; the pacer clamps to 0 and paces.
+    """
+
+    remaining: int = 0
+    limit: int = 0
+    reset_at: float = 0.0  # monotonic time when the window replenishes
+
+
 # Module-level state — safe for single-migration-per-process model.
 _circuit_state = _CircuitState()
 _request_semaphore: asyncio.Semaphore | None = None
@@ -52,6 +66,12 @@ _request_semaphore: asyncio.Semaphore | None = None
 # Adaptive rate state — tracks 429 pressure and adjusts inter-request delay.
 _rate_429_window: deque[float] = deque(maxlen=20)  # timestamps of recent 429s
 _rate_multiplier: float = 1.0
+
+# Proactive pacer state — keyed by the X-RateLimit-Bucket hash from responses.
+# Foundational area: see .claude/rules/decision-accountability.md. Additive:
+# no modification to _rate_multiplier, _rate_429_window, or _circuit_state.
+_bucket_state: dict[str, _BucketState] = {}
+_url_to_bucket: dict[str, str] = {}
 
 
 def _reset_circuit_state() -> None:
@@ -64,6 +84,12 @@ def _reset_rate_state() -> None:
     global _rate_multiplier  # noqa: PLW0603
     _rate_429_window.clear()
     _rate_multiplier = 1.0
+
+
+def _reset_pacer_state() -> None:
+    """Reset proactive pacer state. Called by test fixtures."""
+    _bucket_state.clear()
+    _url_to_bucket.clear()
 
 
 def get_rate_multiplier() -> float:
