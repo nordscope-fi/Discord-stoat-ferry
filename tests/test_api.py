@@ -2390,6 +2390,39 @@ async def test_pacer_shadow_decrement(mock_aiohttp: aioresponses) -> None:
         assert _bucket_state["b1"].remaining == 1
 
 
+async def test_pacer_5xx_retries_refund_decrement(mock_aiohttp: aioresponses) -> None:
+    """A request that exhausts retries on 502 burns only one rate-limit unit, not one per retry."""
+    from discord_ferry.migrator.api import _bucket_state
+
+    url = f"{BASE_URL}/servers/srv1"
+    # Prime the pacer so the bucket has a known remaining count.
+    mock_aiohttp.get(
+        url,
+        payload={"id": "srv1"},
+        headers={
+            "X-RateLimit-Remaining": "3",
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Bucket": "b1",
+            "X-RateLimit-Reset-After": "10000",
+        },
+    )
+    for _ in range(3):
+        mock_aiohttp.get(
+            url,
+            status=502,
+            body="Bad Gateway",
+        )
+
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        with pytest.raises(MigrationError, match="API request failed after 3 retries"):
+            await _api_request(session, "GET", url, TOKEN)
+        # Three 502 retries refunded the first two decrements; the last attempt
+        # (which raises) left exactly one unit consumed. Before the refund fix
+        # this was 0 (three decrements, no refresh).
+        assert _bucket_state["b1"].remaining == 2
+
+
 # ---------------------------------------------------------------------------
 # Proactive pacer — remaining scenario tests (Task 4)
 # ---------------------------------------------------------------------------
