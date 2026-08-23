@@ -869,6 +869,7 @@ _KNOWN_STATE_FIELDS = frozenset(
         # a local user's own storage file, and it never carries a Ferry secret.
         "created_channel_names",
         "created_role_names",
+        "created_emoji_names",
         "thread_strategy",
         "channel_categories",
         "message_map",
@@ -1151,6 +1152,7 @@ def test_contract_fields_roundtrip(tmp_path: Path) -> None:
         thread_strategy="merge",
         created_channel_names={"d-100": "general"},
         created_role_names={"d-role-1": "mods"},
+        created_emoji_names={"d-e1": "party"},
     )
     save_state(state, tmp_path)
 
@@ -1158,6 +1160,7 @@ def test_contract_fields_roundtrip(tmp_path: Path) -> None:
     assert loaded.thread_strategy == "merge"
     assert loaded.created_channel_names == {"d-100": "general"}
     assert loaded.created_role_names == {"d-role-1": "mods"}
+    assert loaded.created_emoji_names == {"d-e1": "party"}
 
 
 def test_contract_fields_default_when_absent(tmp_path: Path) -> None:
@@ -1174,6 +1177,7 @@ def test_contract_fields_default_when_absent(tmp_path: Path) -> None:
     assert loaded.thread_strategy == ""
     assert loaded.created_channel_names == {}
     assert loaded.created_role_names == {}
+    assert loaded.created_emoji_names == {}
 
 
 def test_a_recorded_name_containing_a_secret_is_not_rewritten() -> None:
