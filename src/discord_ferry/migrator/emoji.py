@@ -165,11 +165,13 @@ async def upload_and_create_emoji(
     file_path: Path,
     name: str,
     used_names: dict[str, int],
-) -> str:
+) -> tuple[str, str]:
     """Upload an emoji image to Autumn and register it on the Stoat server.
 
-    Returns the new Autumn file id, which IS the emoji's Stoat id. Shared by the
-    emoji migration phase and ``run_repair``'s emoji pass, so both mint emoji
+    Returns ``(autumn_id, emoji_name)`` where ``autumn_id`` IS the emoji's Stoat
+    id and ``emoji_name`` is the name the server echoed back, falling back to
+    the sanitized input name if the response carries none. Shared by the emoji
+    migration phase and ``run_repair``'s emoji pass, so both mint emoji
     identically. The caller checks that the image is usable and emits its own
     progress; this does the upload-then-create and nothing else.
     """
@@ -189,7 +191,7 @@ async def upload_and_create_emoji(
             name,
             sanitized_name,
         )
-    await api_create_emoji(
+    result = await api_create_emoji(
         session,
         config.stoat_url,
         config.token,
@@ -197,7 +199,8 @@ async def upload_and_create_emoji(
         sanitized_name,
         state.stoat_server_id,
     )
-    return autumn_id
+    emoji_name = result.get("name") or sanitized_name
+    return autumn_id, emoji_name
 
 
 async def run_emoji(
@@ -387,7 +390,7 @@ async def run_emoji(
                 continue
 
             try:
-                autumn_id = await upload_and_create_emoji(
+                autumn_id, emoji_name = await upload_and_create_emoji(
                     session,
                     config,
                     state,
@@ -396,6 +399,7 @@ async def run_emoji(
                     used_names=used_names,
                 )
                 state.emoji_map[discord_id] = autumn_id
+                state.created_emoji_names[discord_id] = emoji_name
 
                 if is_animated:
                     state.warnings.append(

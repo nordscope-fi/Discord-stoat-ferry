@@ -115,7 +115,7 @@ async def test_repair_acts_on_emoji_missing(tmp_path: Path) -> None:
     events: list[Any] = []
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)) as up,
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))) as up,
         patch(_EDIT, new=AsyncMock()),
     ):
         outcome = await run_repair(config, state, [_export([_message()])], events.append)
@@ -123,6 +123,7 @@ async def test_repair_acts_on_emoji_missing(tmp_path: Path) -> None:
     assert not any(d.get("type") == "emoji_missing_media" for d in outcome.declined)
     assert [r["discord_id"] for r in outcome.recreated_emoji] == [EMOJI_ID]
     assert outcome.recreated_emoji[0]["new_id"] == NEW_ID
+    assert state.created_emoji_names[EMOJI_ID] == "smile"
 
 
 async def test_recreate_writes_map_and_record_in_one_save(tmp_path: Path) -> None:
@@ -143,7 +144,7 @@ async def test_recreate_writes_map_and_record_in_one_save(tmp_path: Path) -> Non
 
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))),
         patch(_EDIT, new=AsyncMock()),
         patch(f"{_ENGINE}.save_state", side_effect=capture),
     ):
@@ -159,7 +160,7 @@ async def test_missing_image_declines_no_record(tmp_path: Path) -> None:
     config, state = _config(tmp_path), _state()
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)) as up,
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))) as up,
         patch(_EDIT, new=AsyncMock()),
     ):
         outcome = await run_repair(config, state, [_export([_message()])], [].append)
@@ -177,7 +178,7 @@ async def test_rerun_when_present_makes_no_second_emoji(tmp_path: Path) -> None:
     state.emoji_map[EMOJI_ID] = NEW_ID
     with (
         patch(_CHECK, new=AsyncMock(return_value=_present_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value="second")) as up,
+        patch(_UPLOAD, new=AsyncMock(return_value=("second", "second_name"))) as up,
         patch(_EDIT, new=AsyncMock()),
     ):
         outcome = await run_repair(config, state, [_export([_message()])], [].append)
@@ -195,7 +196,7 @@ async def _run_with_messages(tmp_path: Path, messages: list[DCEMessage]) -> Any:
     config, state = _config(tmp_path), _state()
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))),
         patch(_EDIT, new=AsyncMock()) as edit,
     ):
         outcome = await run_repair(config, state, [_export(messages)], [].append)
@@ -299,7 +300,7 @@ async def test_rewrite_counts_all_referencing_messages(tmp_path: Path) -> None:
     state.message_map = dict(config_state_ids)
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))),
         patch(_EDIT, new=AsyncMock()) as edit,
     ):
         outcome = await run_repair(config, state, [_export(msgs)], [].append)
@@ -324,7 +325,7 @@ async def test_resume_finishes_a_crashed_rewrite(tmp_path: Path) -> None:
     state.pending_emoji_rewrites[EMOJI_ID] = {"old": OLD_ID, "new": NEW_ID}
     with (
         patch(_CHECK, new=AsyncMock(return_value=_present_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value="second")) as up,
+        patch(_UPLOAD, new=AsyncMock(return_value=("second", "second_name"))) as up,
         patch(_EDIT, new=AsyncMock()) as edit,
     ):
         outcome = await run_repair(config, state, [_export([_message()])], [].append)
@@ -356,7 +357,7 @@ async def test_edit_failure_keeps_the_record(tmp_path: Path) -> None:
     ]
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))),
         patch(_EDIT, new=AsyncMock(side_effect=[None, RuntimeError("boom")])),
     ):
         outcome = await run_repair(config, state, [_export(msgs)], [].append)
@@ -385,7 +386,7 @@ async def test_human_output_names_emoji_and_rewrite_count(tmp_path: Path) -> Non
     events: list[Any] = []
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))),
         patch(_EDIT, new=AsyncMock()),
     ):
         await run_repair(config, state, [_export([_message()])], events.append)
@@ -432,7 +433,7 @@ async def test_integration_recreate_rewrite_and_verifiable(tmp_path: Path) -> No
     state.message_map = {"m1": "s1", "m2": "s2"}
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)) as up,
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))) as up,
         patch(_EDIT, new=AsyncMock()) as edit,
     ):
         outcome = await run_repair(config, state, [_export(_two_referencing_messages())], [].append)
@@ -456,7 +457,7 @@ async def test_integration_interrupted_run_matches_clean_run(tmp_path: Path) -> 
     # Run 1: the second edit fails, standing in for a crash mid-rewrite.
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))),
         patch(_EDIT, new=AsyncMock(side_effect=[None, RuntimeError("crash")])),
     ):
         await run_repair(config, state, exports, [].append)
@@ -465,7 +466,7 @@ async def test_integration_interrupted_run_matches_clean_run(tmp_path: Path) -> 
     # Run 2: the emoji is present now, so the resume step finishes the stragglers.
     with (
         patch(_CHECK, new=AsyncMock(return_value=_present_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value="should-not-run")) as up2,
+        patch(_UPLOAD, new=AsyncMock(return_value=("should-not-run", "should-not-run"))) as up2,
         patch(_EDIT, new=AsyncMock()) as edit2,
     ):
         await run_repair(config, state, exports, [].append)
@@ -530,7 +531,7 @@ async def test_integration_dry_run_writes_nothing(tmp_path: Path) -> None:
     )
     with (
         patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
-        patch(_UPLOAD, new=AsyncMock(return_value=NEW_ID)) as up,
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))) as up,
         patch(_EDIT, new=AsyncMock()) as edit,
         patch(f"{_ENGINE}.save_state", side_effect=AssertionError("dry run must not save")),
     ):
