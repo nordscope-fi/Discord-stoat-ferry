@@ -608,11 +608,7 @@ async def _check_structure(
                 stoat_id=stoat_id,
             )
 
-    emoji_names = {
-        e["_id"]: _readable_name(e)
-        for e in emoji
-        if isinstance(e, dict) and "_id" in e
-    }
+    emoji_names = {e["_id"]: _readable_name(e) for e in emoji if isinstance(e, dict) and "_id" in e}
     for discord_id, stoat_id in state.emoji_map.items():
         present = stoat_id in emoji_names
         if present:
