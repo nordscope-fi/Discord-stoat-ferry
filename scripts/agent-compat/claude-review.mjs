@@ -1,30 +1,26 @@
 #!/usr/bin/env node
-// Discord Ferry — Codex second-opinion reviewer.
-// Runs `codex exec` (default gpt-5.6-sol, high effort) as the primary code reviewer for
+// Discord Ferry - Claude Code second-opinion reviewer.
+// Runs `claude -p` (default claude-opus-4-8) as a cross-host fallback reviewer for
 // /df-ship step 4 and /df-chunk-review step 3, returning findings in Ferry's own
 // `code_review_findings` schema. See ADR-023.
 //
 // The caller pipes the review payload on stdin: the `git diff` for a whole-branch review, or
 // the full changed files followed by their diff for a chunk review. The instruction (focus text)
-// is passed with --focus. On any Codex failure this exits non-zero so the caller can fall back
-// to the Mistral MCP call.
+// is passed with --focus. On any Claude failure this exits non-zero so the caller can fall back
+// to the next reviewer in the chain.
 //
 // Usage:
-//   git diff origin/main | node codex-review.mjs --focus "API: rate limits, retry logic" --title "chunk 2"
-//   node codex-review.mjs --self-test
+//   git diff origin/main | node claude-review.mjs --focus "API: rate limits, retry logic" --title "chunk 2"
+//   node claude-review.mjs --self-test
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 
-const DEFAULT_MODEL = 'gpt-5.6-sol';
-const DEFAULT_EFFORT = 'high';
+const DEFAULT_MODEL = 'claude-opus-4-8';
 
-// Ferry's canonical review schema, unwrapped from Mistral's response_format envelope.
+// Ferry's canonical review schema, identical to codex-review.mjs.
 // Kept in sync with .claude/skills/df-chunk-review/SKILL.md step 3.
-// OpenAI structured outputs run in strict mode: every object needs additionalProperties:false,
-// and every property must appear in `required` (optional fields use a nullable type instead).
+// Claude's --json-schema accepts a bare JSON Schema object, same shape as Codex's --output-schema.
 const FINDINGS_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -87,7 +83,7 @@ verification command that distinguishes the finding being true from being false;
 be run by the caller, so you never need to run it yourself.`;
 
 function parseArgs(argv) {
-  const args = { mode: 'whole-branch', focus: '', title: '', model: DEFAULT_MODEL, effort: DEFAULT_EFFORT, selfTest: false };
+  const args = { mode: 'whole-branch', focus: '', title: '', model: DEFAULT_MODEL, selfTest: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
@@ -96,43 +92,40 @@ function parseArgs(argv) {
       case '--focus': args.focus = argv[++i] ?? ''; break;
       case '--title': args.title = argv[++i] ?? ''; break;
       case '--model': args.model = argv[++i] ?? DEFAULT_MODEL; break;
-      case '--effort': args.effort = argv[++i] ?? DEFAULT_EFFORT; break;
       default:
-        process.stderr.write(`codex-review: unknown argument "${a}"\n`);
+        process.stderr.write(`claude-review: unknown argument "${a}"\n`);
         process.exit(2);
     }
   }
   return args;
 }
 
-function buildInstruction(args) {
+function buildPrompt(args) {
   const label = args.mode === 'chunk' ? 'chunk review' : 'whole-branch review';
   const titleLine = args.title ? `\nUnder review: ${args.title}` : '';
   const focusLine = args.focus ? `\nReview focus: ${args.focus}` : '';
   return [
     `You are a code reviewer performing a ${label} for the Discord Ferry project.`,
-    '',
-    PROJECT_CONTEXT,
     titleLine,
     focusLine,
     '',
     REVIEW_DIRECTIVES,
     '',
-    'The changed code follows on stdin.',
+    'The changed code follows below.',
   ].join('\n');
 }
 
-// Build a safe failure reason. Never echo an execFileSync error's `.message`/`.stderr`/`.stdout`:
+// Build a safe failure reason. Never echo an execFileSync error's .message/.stderr/.stdout:
 // those can carry child output (diff text, tokens). Report only structural metadata for a child
 // failure, and our own thrown messages (JSON parse, schema mismatch) verbatim, since we author them.
 function failureReason(err) {
   if (!err) return 'unknown error';
-  if (err.code === 'ENOENT') return 'codex CLI not found';
+  if (err.code === 'ENOENT') return 'claude CLI not found';
   if (typeof err.status === 'number' || err.signal) {
     const parts = [];
     if (typeof err.status === 'number') parts.push(`status ${err.status}`);
     if (err.signal) parts.push(`signal ${err.signal}`);
-    return `codex exec failed (${parts.join(', ')})`;
+    return `claude -p failed (${parts.join(', ')})`;
   }
   return err.message ?? String(err);
 }
@@ -163,45 +156,46 @@ function isValidResult(r) {
   return true;
 }
 
-function runCodex(args, payload) {
-  const tmp = mkdtempSync(join(tmpdir(), 'ferry-codex-review-'));
-  const schemaFile = join(tmp, 'schema.json');
-  const lastMsgFile = join(tmp, 'last-message.json');
+function runClaude(args, payload) {
+  const prompt = buildPrompt(args) + '\n' + payload;
+  const cliArgs = [
+    '-p',
+    '--model', args.model,
+    '--json-schema', JSON.stringify(FINDINGS_SCHEMA),
+    '--dangerously-skip-permissions',
+    '--allowedTools', '',
+    '--append-system-prompt', PROJECT_CONTEXT,
+  ];
+  // No internal timeout: the bash timeout is the only guard (see ADR-023).
+  // --allowedTools '' grants NO tools at all: not Bash, not Write, not Read, not WebFetch. A
+  // prompt-injection in the diff cannot read files or exfiltrate credentials. This is stronger
+  // than --disallowedTools with a partial denylist, which leaves read and network tools available.
+  // --dangerously-skip-permissions only suppresses the interactive prompt; it does not constrain
+  // the tool surface on its own.
+  // Capture stdout; ignore stderr so Claude diagnostics never reach our error output
+  // (ADR-014: tokens and diff text must not leak into errors).
+  const raw = execFileSync('claude', cliArgs, {
+    input: prompt,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  // Claude -p with --json-schema returns the constrained JSON directly (bare JSON, no envelope).
+  // Wrap the parse so a SyntaxError (which embeds a snippet of the raw input) never leaks child
+  // stdout into our error output.
+  let parsed;
   try {
-    writeFileSync(schemaFile, JSON.stringify(FINDINGS_SCHEMA));
-    const cliArgs = [
-      'exec',
-      '-m', args.model,
-      '-c', `model_reasoning_effort="${args.effort}"`,
-      '-s', 'read-only',
-      '--skip-git-repo-check',
-      '--color', 'never',
-      '--output-schema', schemaFile,
-      '-o', lastMsgFile,
-      buildInstruction(args),
-    ];
-    // The -o file is the only output we read. Ignore the child's stdout/stderr so a verbose
-    // reasoning trace can never overflow execFileSync's buffer (turning a good review into a
-    // failure), and so Codex diagnostics can never reach our own error output (ADR-014: tokens
-    // and diff text must not leak into errors).
-    execFileSync('codex', cliArgs, {
-      input: payload,
-      encoding: 'utf8',
-      timeout: 600000,
-      stdio: ['pipe', 'ignore', 'ignore'],
-    });
-    const raw = readFileSync(lastMsgFile, 'utf8').trim();
-    const parsed = JSON.parse(raw); // throws on non-JSON → caller falls back
-    if (!isValidResult(parsed)) {
-      // Codex enforces the schema server-side, but do not trust that alone: a degraded CLI or a
-      // non-strict response could still parse as JSON. Reject anything off-shape so the caller
-      // falls back rather than acting on a malformed review.
-      throw new Error('codex response did not match the findings schema');
-    }
-    return parsed;
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('claude returned non-JSON stdout');
   }
+  if (!isValidResult(parsed)) {
+    // Claude enforces the schema via --json-schema, but do not trust that alone: a degraded CLI
+    // or a non-strict response could still parse as JSON. Reject anything off-shape so the caller
+    // falls back rather than acting on a malformed review.
+    throw new Error('claude response did not match the findings schema');
+  }
+  return parsed;
 }
 
 function selfTest() {
@@ -213,13 +207,12 @@ function selfTest() {
   record('parseArgs title', a.title === 'chunk 1');
   record('parseArgs mode', a.mode === 'chunk');
   record('parseArgs model default', a.model === DEFAULT_MODEL);
-  record('parseArgs effort default', a.effort === DEFAULT_EFFORT);
 
-  const instruction = buildInstruction(a);
-  record('instruction has project context', instruction.includes('core/engine.py never imports'));
-  record('instruction has focus', instruction.includes('Security: token handling'));
-  record('instruction has title', instruction.includes('chunk 1'));
-  record('instruction names chunk mode', instruction.includes('chunk review'));
+  const prompt = buildPrompt(a);
+  record('prompt has focus', prompt.includes('Security: token handling'));
+  record('prompt has title', prompt.includes('chunk 1'));
+  record('prompt names chunk mode', prompt.includes('chunk review'));
+  record('prompt does not embed project context', !prompt.includes('core/engine.py never imports'));
 
   // Schema is a bare JSON Schema (no Mistral response_format envelope).
   record('schema is unwrapped', FINDINGS_SCHEMA.type === 'object' && !('json_schema' in FINDINGS_SCHEMA));
@@ -244,17 +237,17 @@ function selfTest() {
   record('isValidResult rejects non-number line', isValidResult({ summary: 's', confidence: 'high', findings: [{ ...goodResult.findings[0], line: '42' }] }) === false);
 
   // Failure reasons never echo child output.
-  record('failureReason: missing binary', failureReason({ code: 'ENOENT' }) === 'codex CLI not found');
-  record('failureReason: exit status only', failureReason({ status: 23, stderr: 'SENSITIVE' }) === 'codex exec failed (status 23)');
+  record('failureReason: missing binary', failureReason({ code: 'ENOENT' }) === 'claude CLI not found');
+  record('failureReason: exit status only', failureReason({ status: 23, stderr: 'SENSITIVE' }) === 'claude -p failed (status 23)');
   record('failureReason: does not leak stderr', !failureReason({ status: 1, stderr: 'SENSITIVE', message: 'x SENSITIVE y' }).includes('SENSITIVE'));
 
   const failed = checks.filter((c) => !c.ok);
   for (const c of checks) process.stderr.write(`  ${c.ok ? 'ok  ' : 'FAIL'} ${c.name}\n`);
   if (failed.length) {
-    process.stderr.write(`codex-review self-test: ${failed.length} failure(s)\n`);
+    process.stderr.write(`claude-review self-test: ${failed.length} failure(s)\n`);
     process.exit(1);
   }
-  process.stderr.write('codex-review self-test: all checks passed\n');
+  process.stderr.write('claude-review self-test: all checks passed\n');
   process.exit(0);
 }
 
@@ -271,9 +264,9 @@ function main() {
 
   let result;
   try {
-    result = runCodex(args, payload);
+    result = runClaude(args, payload);
   } catch (err) {
-    process.stderr.write(`codex-review: ${failureReason(err)}\n`);
+    process.stderr.write(`claude-review: ${failureReason(err)}\n`);
     process.exit(1);
   }
   process.stdout.write(JSON.stringify(result));
