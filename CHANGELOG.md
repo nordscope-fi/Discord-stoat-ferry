@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `ferry check` now detects renamed emoji. The name Ferry creates for each emoji is recorded in
+  `state.json` and compared against the server on check, producing an `emoji_renamed` warning when
+  they differ. Closes #304.
+
 - **Cross-host second-opinion review.** The /df-ship and /df-chunk-review review gates now run a
   cross-host fallback chain so the reviewer is never the same model family as the host running
   the build. On Vibe, Codex reviews with Claude as fallback. On Claude Code, Codex reviews with
