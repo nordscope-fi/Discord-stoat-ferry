@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Cross-host second-opinion review.** The /df-ship and /df-chunk-review review gates now run a
+  cross-host fallback chain so the reviewer is never the same model family as the host running
+  the build. On Vibe, Codex reviews with Claude as fallback. On Claude Code, Codex reviews with
+  the Mistral MCP as fallback. On Codex, Claude reviews with the Mistral MCP as last resort.
+  A new helper, `scripts/agent-compat/claude-review.mjs`, wraps `claude -p` with `--json-schema`
+  and no tool access (`--allowedTools ''`), returning findings in the same `code_review_findings`
+  schema as the Codex helper. Closes the circular-review gap noted in ADR-023.
+
 - **Ferry paces Stoat API requests proactively before a rate-limit bucket exhausts.** Stoat
   sends `X-RateLimit-Remaining` on every response, not just 429s. Ferry now reads that header
   on every response and pauses before the next request to the same bucket when the remaining
@@ -20,6 +28,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Closes #111.
 
 ### Fixed
+
+- **Pacer no longer over-spends rate-limit budget on 5xx and network-error retries.** The
+  proactive pacer decremented its shadow counter before each request attempt, but only the 429
+  path refreshed the shadow from response headers. A request that retried on a 502 or a network
+  error burned one unit per retry against a stale shadow, causing the next request to pace
+  spuriously. The 5xx and network-error paths now refund the decrement, so one logical request
+  consumes exactly one unit regardless of retry count.
 
 - **content: Reference pages now describe the rendered-mention check accurately.** Two
   reference pages still framed the VALIDATE check as detecting only a missing `--markdown
