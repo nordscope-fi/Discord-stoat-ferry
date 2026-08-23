@@ -308,6 +308,13 @@ async def _api_request_inner(
         await asyncio.sleep(_CIRCUIT_PAUSE_SECONDS)
         _circuit_state.consecutive_failures = 0
 
+    # Track the pacer charge so a retry on 5xx or network error can refund it.
+    # Without this, each retry attempt burns a rate-limit unit that the 429 path
+    # refreshes via _update_pacer_state but the 5xx/network paths do not, leaving
+    # the shadow counter too low until a headered response resets it.
+    charged_state = None
+    prev_remaining: int | None = None
+
     for attempt in range(MAX_API_RETRIES):
         # Proactive pacer: if we have seen this URL's bucket and the shadow
         # counter says the budget is exhausted, wait for the window to reset.
@@ -326,6 +333,8 @@ async def _api_request_inner(
                             wait,
                         )
                         await asyncio.sleep(wait)
+                charged_state = state
+                prev_remaining = state.remaining
                 state.remaining = max(state.remaining - 1, 0)
 
         try:
@@ -386,6 +395,11 @@ async def _api_request_inner(
                         delay = min(2**attempt, 60) + random.uniform(0.1, 0.5)
                         await asyncio.sleep(delay)
                         _circuit_state.consecutive_failures += 1
+                        # Refund the pacer charge: a 5xx carries no rate-limit headers,
+                        # so _update_pacer_state is not called. Without the refund, each
+                        # retry burns a unit the server never accounted for.
+                        if charged_state is not None and prev_remaining is not None:
+                            charged_state.remaining = prev_remaining
                     continue
 
                 if resp.status == 409:
@@ -446,6 +460,11 @@ async def _api_request_inner(
             delay = min(2**attempt, 60) + random.uniform(0.1, 0.5)
             await asyncio.sleep(delay)
             _circuit_state.consecutive_failures += 1
+            # Refund the pacer charge: a network error carries no rate-limit headers,
+            # so _update_pacer_state is not called. Without the refund, each retry burns
+            # a unit the server never accounted for.
+            if charged_state is not None and prev_remaining is not None:
+                charged_state.remaining = prev_remaining
 
     # Unreachable, but satisfies mypy.
     raise MigrationError(f"API request failed after {MAX_API_RETRIES} retries")
