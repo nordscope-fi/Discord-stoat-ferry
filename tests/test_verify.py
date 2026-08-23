@@ -1886,8 +1886,8 @@ def test_no_prose_still_claims_warn_has_a_single_home() -> None:
         for phrase in stale:
             assert phrase not in text, (
                 f"{path.name} still claims warn has one home: {phrase!r}. "
-                "It has three producers: category_title_mismatch, channel_renamed "
-                "and role_renamed."
+                "It has four producers: category_title_mismatch, "
+                "channel_renamed, role_renamed and emoji_renamed."
             )
 
 
@@ -1902,6 +1902,7 @@ def test_the_kind_vocabulary_lists_both_rename_kinds() -> None:
     doc = CheckResult.__doc__ or ""
     assert "channel_renamed" in doc
     assert "role_renamed" in doc
+    assert "emoji_renamed" in doc
 
 
 def test_every_emitted_kind_is_documented_and_a_literal() -> None:

@@ -54,7 +54,7 @@ CheckStatus = Literal["ok", "warn", "fail", "unverifiable"]
 #: extension of a permission map leave its expansion behind.
 #:
 #: ``warn`` exists for a cosmetic difference on an entity whose content is
-#: intact. It has exactly **three** producers, all name comparisons, and they are
+#: intact. It has exactly **four** producers, all name comparisons, and they are
 #: enumerated here rather than left implicit because a design review once found
 #: ``warn`` promised in two acceptance criteria and produced by no code path at
 #: all:
@@ -63,6 +63,8 @@ CheckStatus = Literal["ok", "warn", "fail", "unverifiable"]
 #: * ``channel_renamed`` and ``role_renamed``, since 2.17.0, once
 #:   ``created_channel_names`` and ``created_role_names`` gave the check an
 #:   expected name to compare against
+#: * ``emoji_renamed``, since 2.33.0, once ``created_emoji_names`` gave the
+#:   check an expected name to compare against
 #:
 #: The tail check emits no ``warn`` at all, which
 #: ``test_the_tail_check_never_emits_warn`` pins across every tail scenario.
