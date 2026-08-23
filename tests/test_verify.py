@@ -406,7 +406,6 @@ async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
     assert next(r for r in report.results if r.discord_id == "d-e1").status == "ok"
 
 
-
 async def test_a_renamed_emoji_warns(mock_aiohttp: aioresponses) -> None:
     """A renamed emoji reports warn with kind emoji_renamed, not ok."""
     emoji_id = "01JAUTUMNEMOJI00000000A"
