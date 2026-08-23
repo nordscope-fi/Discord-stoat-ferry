@@ -6,7 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Ferry paces Stoat API requests proactively before a rate-limit bucket exhausts.** Stoat
+  sends `X-RateLimit-Remaining` on every response, not just 429s. Ferry now reads that header
+  on every response and pauses before the next request to the same bucket when the remaining
+  budget reaches zero, waiting for the advertised window reset instead of burning a request
+  to discover the bucket is empty. A shadow counter decremented before each request prevents
+  two concurrent requests from both firing into the same exhausted budget. This applies to
+  every Stoat API call through the shared request layer, so the structure, emoji, reactions
+  and pins phases, which previously had no damping at all, now benefit alongside the messages
+  phase. The existing adaptive multiplier and 429 retry path remain unchanged as a safety net.
+  Closes #111.
+
 ### Fixed
+
+- **content: Reference pages now describe the rendered-mention check accurately.** Two
+  reference pages still framed the VALIDATE check as detecting only a missing `--markdown
+  false` flag. The check also flags `@Unknown`, which DiscordChatExporter writes for a member
+  it could not resolve, and no longer fires on a reply, an embed-carried mention or an
+  attachment-only message. Closes #153.
 
 - **content: Em-dash and banned-word debt removed from known-limitations guide.** Five
   em-dashes and a `silently` in `docs/guides/known-limitations.md` failed the plain-english
