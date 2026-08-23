@@ -255,6 +255,7 @@ async def run_migration(
             # and ferry check reports ok for a renamed channel.
             state.created_channel_names = dict(prior.created_channel_names)
             state.created_role_names = dict(prior.created_role_names)
+            state.created_emoji_names = dict(prior.created_emoji_names)
             # C1: carry finalized-roles so incremental skips re-editing (load_state seeds `prior`
             # for old-ferry states). Without this every incremental run re-PATCHes all roles.
             state.roles_finalized = set(prior.roles_finalized)
