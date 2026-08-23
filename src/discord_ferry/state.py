@@ -78,6 +78,11 @@ class MigrationState:
     # channel_names.
     created_channel_names: dict[str, str] = field(default_factory=dict)
     created_role_names: dict[str, str] = field(default_factory=dict)
+    # discord_emoji_id -> the name the server stored (echoed from the create
+    # response, falling back to the sanitized input name). Structural, not
+    # free text: an emoji name matches ^[a-z0-9_]+$ and never carries a Ferry
+    # secret, matching created_channel_names / created_role_names.
+    created_emoji_names: dict[str, str] = field(default_factory=dict)
     # discord_ch_id -> effective discord_cat_id (the forum key for forum channels).
     # Persisted so incremental re-runs can re-attach carried channels to the
     # CORRECT category in the full-replace upsert, even with multiple
@@ -296,6 +301,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "category_names": state.category_names,
         "created_channel_names": state.created_channel_names,
         "created_role_names": state.created_role_names,
+        "created_emoji_names": state.created_emoji_names,
         "thread_strategy": state.thread_strategy,
         "channel_categories": state.channel_categories,
         "message_map": state.message_map,
@@ -375,6 +381,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             category_names=data.get("category_names", {}),
             created_channel_names=data.get("created_channel_names", {}),
             created_role_names=data.get("created_role_names", {}),
+            created_emoji_names=data.get("created_emoji_names", {}),
             thread_strategy=data.get("thread_strategy", ""),
             channel_categories=data.get("channel_categories", {}),
             message_map=data.get("message_map", {}),
