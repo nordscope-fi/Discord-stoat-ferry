@@ -406,6 +406,77 @@ async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
     assert next(r for r in report.results if r.discord_id == "d-e1").status == "ok"
 
 
+
+async def test_a_renamed_emoji_warns(mock_aiohttp: aioresponses) -> None:
+    """A renamed emoji reports warn with kind emoji_renamed, not ok."""
+    emoji_id = "01JAUTUMNEMOJI00000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}/emojis",
+        payload=[{"_id": emoji_id, "name": "renamed"}],
+    )
+    _allow_any_message_window(mock_aiohttp)
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.emoji_map = {"d-e1": emoji_id}
+    state.created_emoji_names = {"d-e1": "party"}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = next(r for r in report.results if r.discord_id == "d-e1")
+    assert result.status == "warn"
+    assert result.kind == "emoji_renamed"
+    assert result.expected == "party"
+    assert result.found == "renamed"
+    assert report.has_failures is False
+
+
+async def test_a_matching_emoji_name_is_ok(mock_aiohttp: aioresponses) -> None:
+    """When the server name matches the recorded name, the emoji reports ok."""
+    emoji_id = "01JAUTUMNEMOJI00000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}/emojis",
+        payload=[{"_id": emoji_id, "name": "party"}],
+    )
+    _allow_any_message_window(mock_aiohttp)
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.emoji_map = {"d-e1": emoji_id}
+    state.created_emoji_names = {"d-e1": "party"}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = next(r for r in report.results if r.discord_id == "d-e1")
+    assert result.status == "ok"
+    assert result.kind == "emoji_present"
+
+
+async def test_emoji_with_no_recorded_name_degrades_to_ok(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """A pre-change state file with no created_emoji_names skips the comparison."""
+    emoji_id = "01JAUTUMNEMOJI00000000A"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{SRV}/emojis",
+        payload=[{"_id": emoji_id, "name": "renamed"}],
+    )
+    _allow_any_message_window(mock_aiohttp)
+    state = MigrationState()
+    state.stoat_server_id = SRV
+    state.emoji_map = {"d-e1": emoji_id}
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    result = next(r for r in report.results if r.discord_id == "d-e1")
+    assert result.status == "ok"
+    assert result.kind == "emoji_present"
+
+
 # ---------------------------------------------------------------------------
 # structure: categories, warn's first producer and still its clearest (task #254)
 # ---------------------------------------------------------------------------

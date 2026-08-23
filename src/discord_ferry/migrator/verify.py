@@ -95,7 +95,7 @@ class CheckResult:
     Role identity       ``role_present``, ``role_missing``, ``role_renamed``
     Category identity   ``category_present``, ``category_missing``,
                         ``category_title_mismatch``, ``category_title_unknown``
-    Emoji identity      ``emoji_present``, ``emoji_missing``
+    Emoji identity      ``emoji_present``, ``emoji_missing``, ``emoji_renamed``
     Tail                ``nothing_expected``, ``tail_present``,
                         ``channel_empty``,
                         ``tail_absent``, ``tail_and_after_absent``,
@@ -608,21 +608,48 @@ async def _check_structure(
                 stoat_id=stoat_id,
             )
 
-    emoji_ids = {e["_id"] for e in emoji if isinstance(e, dict) and "_id" in e}
+    emoji_names = {
+        e["_id"]: _readable_name(e)
+        for e in emoji
+        if isinstance(e, dict) and "_id" in e
+    }
     for discord_id, stoat_id in state.emoji_map.items():
-        present = stoat_id in emoji_ids
-        report.add(
-            name=f"emoji:{discord_id}",
-            status="ok" if present else "fail",
-            kind="emoji_present" if present else "emoji_missing",
-            detail=(
-                "emoji exists under its recorded id"
-                if present
-                else "the server does not list this emoji"
-            ),
-            discord_id=discord_id,
-            stoat_id=stoat_id,
-        )
+        present = stoat_id in emoji_names
+        if present:
+            recorded_name = state.created_emoji_names.get(discord_id)
+            found_name = emoji_names.get(stoat_id)
+            if recorded_name is not None and found_name is not None and recorded_name != found_name:
+                report.add(
+                    name=f"emoji:{discord_id}",
+                    status="warn",
+                    kind="emoji_renamed",
+                    detail=(
+                        "the emoji exists under its recorded id, but it has "
+                        "been renamed on the server since the migration"
+                    ),
+                    discord_id=discord_id,
+                    stoat_id=stoat_id,
+                    expected=recorded_name,
+                    found=found_name,
+                )
+                continue
+            report.add(
+                name=f"emoji:{discord_id}",
+                status="ok",
+                kind="emoji_present",
+                detail="emoji exists under its recorded id",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
+        else:
+            report.add(
+                name=f"emoji:{discord_id}",
+                status="fail",
+                kind="emoji_missing",
+                detail="the server does not list this emoji",
+                discord_id=discord_id,
+                stoat_id=stoat_id,
+            )
 
 
 #: How many channels the tail check reads at once.
