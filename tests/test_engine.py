@@ -2441,6 +2441,8 @@ async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
         created_channel_names={"d-100": "general"},
         role_map={"d-role-1": "01JSTOATRL0000000000AAA"},
         created_role_names={"d-role-1": "mods"},
+        emoji_map={"d-e1": "01JAUTUMNEMOJI00000000A"},
+        created_emoji_names={"d-e1": "party"},
     )
     save_state(prior, tmp_path)
 
@@ -2449,6 +2451,7 @@ async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
 
     assert state.created_channel_names == {"d-100": "general"}
     assert state.created_role_names == {"d-role-1": "mods"}
+    assert state.created_emoji_names == {"d-e1": "party"}
 
 
 # ---------------------------------------------------------------------------
@@ -2484,6 +2487,12 @@ def assert_nothing_dropped(prior: MigrationState, carried: MigrationState) -> No
             assert carried.created_role_names.get(key) == name, (
                 f"role {key}: prior recorded {name!r}, carried has "
                 f"{carried.created_role_names.get(key)!r}"
+            )
+    for key, name in prior.created_emoji_names.items():
+        if key in carried.emoji_map:
+            assert carried.created_emoji_names.get(key) == name, (
+                f"emoji {key}: prior recorded {name!r}, carried has "
+                f"{carried.created_emoji_names.get(key)!r}"
             )
 
 
