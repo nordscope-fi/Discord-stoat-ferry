@@ -313,6 +313,7 @@ async def run_migration(
             #     created_channel_names / created_role_names (a carried entity
             #     skips creation, so nothing re-records its name; omitting these
             #     makes ferry check report ok for a renamed channel),
+            #     created_emoji_names (same reason, for emoji),
             #     category_names, channel_categories, message_map, avatar_cache,
             #     upload_cache, author_names, stoat_server_id, autumn_url,
             #     invite_code / invite_url, channel_message_offsets,
