@@ -19,6 +19,7 @@ without an explicit assertion.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -127,3 +128,114 @@ async def test_non_orchestrated_mode_redirects(
     user_store.update({"mode": "offline", "export_dir": str(tmp_path)})
     await user.open("/export")
     await user.should_not_see("Exporting from Discord")
+
+
+async def test_use_cached_clears_only_discord_token(
+    user: User,
+    tmp_path: Path,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-1.1: 'Use Cached' clears discord_token only; Stoat token survives.
+
+    Guards the _use_cached handler at gui.py:884-886. The real _clear_tokens
+    semantics are already unit-tested at test_gui.py:325; this test covers the
+    handler wiring, which the old source-string assertion at test_gui.py:409
+    was a stand-in for.
+    """
+    export_dir = tmp_path / "dce_cache"
+    export_dir.mkdir()
+    (export_dir / "channel.json").write_text("{}", encoding="utf-8")
+
+    _seed_orchestrated_session(user_store, export_dir)
+    tab_store["discord_token"] = DISCORD_TOKEN
+    tab_store["token"] = STOAT_TOKEN
+
+    await user.open("/export")
+    await user.should_see("Found cached exports")
+    user.find("Use Cached").click()
+    await user.should_see("Export")
+
+    assert "discord_token" not in tab_store
+    assert tab_store["token"] == STOAT_TOKEN
+
+
+async def test_export_finally_clears_discord_token(
+    user: User,
+    tmp_path: Path,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-1.2: the export finally block clears discord_token after completion.
+
+    Guards gui.py:1090-1091. The existing test_export_page_reaches_the_first_progress_event
+    proves the task starts; this one proves the finally clears the token when
+    the export runs to completion.
+    """
+    export_dir = tmp_path / "dce_cache"
+    export_dir.mkdir()
+    _seed_orchestrated_session(user_store, export_dir)
+    tab_store["discord_token"] = DISCORD_TOKEN
+    tab_store["token"] = STOAT_TOKEN
+
+    with (
+        patch("discord_ferry.exporter.validate_discord_token", new=AsyncMock()),
+        patch("discord_ferry.exporter.get_dce_path", return_value=tmp_path / "dce"),
+        patch("discord_ferry.exporter.detect_dotnet", return_value=True),
+        patch("discord_ferry.exporter.run_dce_export", new=AsyncMock()),
+    ):
+        await user.open("/export")
+        await user.should_see("Export complete!")
+        # The finally runs after asyncio.sleep(1) + navigate.to("/validate").
+        # Poll the tab_store until the finally clears discord_token.
+        for _ in range(50):
+            if "discord_token" not in tab_store:
+                break
+            await asyncio.sleep(0.1)
+
+    assert "discord_token" not in tab_store
+    assert tab_store["token"] == STOAT_TOKEN
+
+
+async def test_export_config_carries_coerced_advanced_settings(
+    user: User,
+    tmp_path: Path,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """SC-1.3: the FerryConfig passed to run_dce_export carries the seven defaults.
+
+    Guards that _coerce_advanced_settings output flows into config construction
+    at gui.py:1042. Inspects the config object's attributes, not kwargs.
+    """
+    from discord_ferry.config import FerryConfig
+
+    export_dir = tmp_path / "dce_cache"
+    export_dir.mkdir()
+    _seed_orchestrated_session(user_store, export_dir)
+    tab_store["discord_token"] = DISCORD_TOKEN
+    tab_store["token"] = STOAT_TOKEN
+
+    captured: list[FerryConfig] = []
+
+    async def capture_config(config: FerryConfig, dce_path: Path, on_event: object) -> None:
+        captured.append(config)
+
+    with (
+        patch("discord_ferry.exporter.validate_discord_token", new=AsyncMock()),
+        patch("discord_ferry.exporter.get_dce_path", return_value=tmp_path / "dce"),
+        patch("discord_ferry.exporter.detect_dotnet", return_value=True),
+        patch("discord_ferry.exporter.run_dce_export", new=capture_config),
+    ):
+        await user.open("/export")
+        await user.should_see("Validating Discord token")
+
+    assert len(captured) == 1
+    config = captured[0]
+    assert config.reaction_mode == "text"
+    assert config.min_thread_messages == 0
+    assert config.checkpoint_interval == 50
+    assert config.max_concurrent_channels == 3
+    assert config.max_concurrent_requests == 5
+    assert config.skip_avatars is False
+    assert config.validate_after is False
