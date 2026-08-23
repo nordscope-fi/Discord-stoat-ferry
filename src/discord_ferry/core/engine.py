@@ -2253,7 +2253,7 @@ async def _run_emoji_repair_pass(
             continue
 
         name = record["name"]
-        new_id = await upload_and_create_emoji(
+        new_id, emoji_name = await upload_and_create_emoji(
             session, config, state, file_path=file_path, name=name, used_names=used_names
         )
         # ONE save writes the new map value AND the resume record together, so a
@@ -2261,6 +2261,7 @@ async def _run_emoji_repair_pass(
         # From this point emoji_map already points at the new emoji, so a re-run's
         # check reports it present and never recreates a second one.
         state.emoji_map[discord_id] = new_id
+        state.created_emoji_names[discord_id] = emoji_name
         state.pending_emoji_rewrites[discord_id] = {"old": old_id, "new": new_id}
         save_state(state, config.output_dir)
 

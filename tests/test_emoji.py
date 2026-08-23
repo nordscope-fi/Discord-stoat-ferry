@@ -788,12 +788,16 @@ async def test_upload_and_create_emoji_uploads_then_creates(tmp_path: Path) -> N
             "discord_ferry.migrator.emoji.upload_with_cache",
             new=AsyncMock(return_value="new_autumn"),
         ) as up,
-        patch("discord_ferry.migrator.emoji.api_create_emoji", new=AsyncMock()) as cr,
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "new_autumn", "name": "smile"}),
+        ) as cr,
     ):
-        new_id = await upload_and_create_emoji(
+        new_id, emoji_name = await upload_and_create_emoji(
             None, config, state, file_path=img, name="smile", used_names={}
         )
     assert new_id == "new_autumn"
+    assert emoji_name == "smile"
     up.assert_awaited_once()
     cr.assert_awaited_once()
     # api_create_emoji(session, stoat_url, token, autumn_id, name, server_id)
@@ -841,3 +845,67 @@ def test_find_emoji_in_exports_recovers_name_and_image() -> None:
 def test_find_emoji_in_exports_none_when_absent() -> None:
     exp = _make_export([_make_message(content="plain text")])
     assert find_emoji_in_exports([exp], "123") is None
+
+
+
+async def test_run_emoji_records_server_echoed_name(tmp_path: Path) -> None:
+    """The emoji name is recorded from the server response, not the input name."""
+    img = tmp_path / "smile.png"
+    img.write_bytes(b"PNG")
+    msg = _make_message(
+        reactions=[
+            DCEReaction(
+                emoji=DCEEmoji(id="999", name="smile", image_url="smile.png"), count=1
+            )
+        ]
+    )
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="autumn_file_1"),
+        ),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "autumn_file_1", "name": "party"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(config, state, exports, lambda e: None)
+
+    assert state.emoji_map == {"999": "autumn_file_1"}
+    assert state.created_emoji_names == {"999": "party"}
+
+
+async def test_run_emoji_falls_back_to_sanitized_name(tmp_path: Path) -> None:
+    """When the server response carries no name, the sanitized input name is recorded."""
+    img = tmp_path / "smile.png"
+    img.write_bytes(b"PNG")
+    msg = _make_message(
+        reactions=[
+            DCEReaction(
+                emoji=DCEEmoji(id="999", name="smile", image_url="smile.png"), count=1
+            )
+        ]
+    )
+    exports = [_make_export([msg])]
+    config = _make_config(tmp_path)
+    state = _make_state()
+
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="autumn_file_1"),
+        ),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "autumn_file_1"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(config, state, exports, lambda e: None)
+
+    assert state.created_emoji_names == {"999": "smile"}
