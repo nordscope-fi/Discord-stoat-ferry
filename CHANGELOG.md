@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.34.0] - 2026-08-23
+
+### Added
+
+- `report.json` and the markdown report now include `merge_duplicates_suppressed`, a per-run
+  counter of thread messages the merge strategy skipped because the parent channel already held
+  them. The suppression stays silent (no per-message warning, no change to the "Merged thread X
+  (N messages)" event), but the counter makes it observable. Closes #239.
+
+### Changed
+
+- The six `inspect.getsource` source-string assertions in `tests/test_gui.py` are replaced by
+  NiceGUI `user`-fixture tests that execute real page code. The export, setup, migrate, and
+  validate screens now have user-fixture coverage that catches regressions by running the actual
+  page builders, not by matching source text. Closes #147.
+
 ## [2.33.0] - 2026-08-23
 
 ### Added
