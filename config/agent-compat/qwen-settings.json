@@ -29,7 +29,7 @@
           },
           {
             "type": "command",
-            "command": "\"__HOME__/.claude/hooks/github-plain-english-guard.sh\"",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-tool-translate.mjs\" \"__HOME__/.claude/hooks/github-plain-english-guard.sh\"",
             "timeout": 8000
           },
           {
@@ -39,7 +39,7 @@
           },
           {
             "type": "command",
-            "command": "\"__PROJECT_ROOT__/.claude/hooks/plain-english-github.sh\"",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-tool-translate.mjs\" \"__PROJECT_ROOT__/.claude/hooks/plain-english-github.sh\"",
             "timeout": 30000
           }
         ]
@@ -54,12 +54,12 @@
           },
           {
             "type": "command",
-            "command": "\"__HOME__/.claude/hooks/docs-plain-english-guard.sh\"",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-tool-translate.mjs\" \"__HOME__/.claude/hooks/docs-plain-english-guard.sh\"",
             "timeout": 8000
           },
           {
             "type": "command",
-            "command": "\"__PROJECT_ROOT__/.claude/hooks/plain-english-docs.sh\"",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-tool-translate.mjs\" \"__PROJECT_ROOT__/.claude/hooks/plain-english-docs.sh\"",
             "timeout": 30000
           }
         ]
