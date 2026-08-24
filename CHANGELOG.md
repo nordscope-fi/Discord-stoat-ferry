@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   validate screens now have user-fixture coverage that catches regressions by running the actual
   page builders, not by matching source text. Closes #147.
 
+- **Dependabot scheduled version updates are now on.** A `.github/dependabot.yml` enables weekly
+  grouped updates for the `uv` ecosystem. Security updates continue as before. ADR-025 records
+  the decision to enable this consequential default. Closes #158.
+
 ## [2.33.0] - 2026-08-23
 
 ### Added
