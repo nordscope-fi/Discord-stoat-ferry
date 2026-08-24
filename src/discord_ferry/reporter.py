@@ -163,6 +163,7 @@ def generate_report(
             "reactions_added": state.reactions_applied,
             "pins_restored": state.pins_applied,
             "threads_flattened": threads_flattened,
+            "merge_duplicates_suppressed": state.merge_duplicates_suppressed,
             "errors": len(state.errors),
             "warnings": len(state.warnings),
         },
@@ -402,6 +403,8 @@ def generate_markdown_report(
     lines.append(f"| Attachments skipped | {state.attachments_skipped} |")
     lines.append(f"| Reactions applied | {state.reactions_applied} |")
     lines.append(f"| Pins restored | {state.pins_applied} |")
+    if state.merge_duplicates_suppressed:
+        lines.append(f"| Merge duplicates suppressed | {state.merge_duplicates_suppressed} |")
     lines.append("")
 
     if state.invite_code:
