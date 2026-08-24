@@ -1040,6 +1040,37 @@ async def api_pin_message(
     return await _api_request(session, "POST", url, token, None)
 
 
+async def api_search_pinned_messages(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch a channel's pinned messages (POST /channels/{id}/search).
+
+    Uses the search endpoint with ``pinned: true`` rather than a query, which
+    the upstream route rejects when combined with ``pinned``. The search route
+    has a bot guard (``IsBot``), but Ferry authenticates with a session token,
+    not a bot token, so the guard does not fire.
+
+    ``include_users`` is never sent, so the response is a bare array of Message
+    objects, the same shape :func:`api_fetch_messages` returns. Narrowed the
+    same way: ``_api_request`` is declared ``-> dict[str, Any]`` but this route
+    returns an array.
+
+    Requires ``ReadMessageHistory``. Lands in the ``messaging`` rate bucket
+    (POST), 10 per 10 seconds keyed per channel id.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/search"
+    data = {"pinned": True, "limit": 100, "sort": "Latest"}
+    raw: object = await _api_request(session, "POST", url, token, data)
+    if not isinstance(raw, list):
+        raise MigrationError(
+            f"Expected a JSON array of messages from {redact_url(url)}, got {type(raw).__name__}"
+        )
+    return raw
+
+
 async def api_set_role_permissions(
     session: aiohttp.ClientSession,
     stoat_url: str,

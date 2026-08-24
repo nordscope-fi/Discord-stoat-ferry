@@ -46,6 +46,7 @@ from discord_ferry.migrator.api import (
     api_fetch_server,
     api_fetch_server_with_channels,
     api_pin_message,
+    api_search_pinned_messages,
     api_send_message,
     api_set_role_permissions,
     api_upsert_categories,
@@ -1006,6 +1007,56 @@ async def _rebuild_forum_indexes(
             await _rebuild_one_forum_index(session, config, state, forum_key, on_event)
 
 
+async def _recover_forum_index_id(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    index_channel_id: str,
+    forum_name: str,
+    content: str,
+) -> str:
+    """Recover a lost forum-index message id from the channel's pinned messages.
+
+    After a ``DuplicateSendError`` the index message is on the server but its id
+    was not returned. The message is pinned after send (a separate API call), so
+    searching pinned messages and matching by the ``**Forum: {name}**`` content
+    prefix recovers it in the common case. If a prior run crashed between send
+    and pin the message is unpinned and this search returns empty; the forum is
+    then marked, and ``force_new`` is the escape hatch. If found, the message is
+    edited with the current content so the counts refresh on this run rather
+    than the next.
+
+    Returns the recovered message id, or an empty string if the message was not
+    found or the search failed. Swallows all exceptions: recovery is best-effort,
+    and a failure here must fall back to the present-id-unknown marker rather
+    than report a rebuild failure (#561).
+    """
+    try:
+        pinned = await api_search_pinned_messages(
+            session,
+            config.stoat_url,
+            config.token,
+            index_channel_id,
+        )
+        for msg in pinned:
+            mid = msg.get("_id")
+            if not mid:
+                continue
+            if (msg.get("content") or "").startswith(f"**Forum: {forum_name}**"):
+                index_msg_id = str(mid)
+                await api_edit_message(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    index_channel_id,
+                    index_msg_id,
+                    content=content,
+                )
+                return index_msg_id
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 async def _rebuild_one_forum_index(
     session: aiohttp.ClientSession,
     config: FerryConfig,
@@ -1079,23 +1130,36 @@ async def _rebuild_one_forum_index(
             index_msg_id: str = existing_msg_id
         elif forum_key in state.forum_index_present_unknown_id:
             # Present on the server, but its id was lost to an earlier duplicate send
-            # (#215). Re-sending would post a second index message once Stoat's
-            # idempotency LRU has evicted the key. Skip, and say so: the message stays
-            # with its prior content, only this run's count refresh is missed. Tested
-            # before the send branch, so a known id (rule 1) always supersedes this.
-            # Unreachable under force_new, which discards the mark above.
-            on_event(
-                MigrationEvent(
-                    phase=phase,
-                    status="warning",
-                    message=_safe(
-                        config,
-                        f"Forum index for '{forum_name}' exists but its message id is "
-                        "unknown; its counts were not refreshed.",
-                    ),
-                )
+            # (#215). Try to recover the id from pinned messages before skipping
+            # (#561): the index is pinned on send, so a search should find it. If
+            # recovered, the message is edited with current content and the forum
+            # is un-marked. If not, skip and say so. Tested before the send branch,
+            # so a known id (rule 1) always supersedes this. Unreachable under
+            # force_new, which discards the mark above.
+            recovered_id = await _recover_forum_index_id(
+                session,
+                config,
+                index_channel_id,
+                forum_name,
+                content,
             )
-            return
+            if recovered_id:
+                state.forum_index_message_ids[forum_key] = recovered_id
+                state.forum_index_present_unknown_id.discard(forum_key)
+                index_msg_id = recovered_id
+            else:
+                on_event(
+                    MigrationEvent(
+                        phase=phase,
+                        status="warning",
+                        message=_safe(
+                            config,
+                            f"Forum index for '{forum_name}' exists but its message id is "
+                            "unknown; its counts were not refreshed.",
+                        ),
+                    )
+                )
+                return
         else:
             try:
                 msg_result = await api_send_message(
@@ -1109,14 +1173,26 @@ async def _rebuild_one_forum_index(
                 )
                 index_msg_id = msg_result["_id"]
             except DuplicateSendError:
-                # Already on the server with no recoverable id. Record the forum in the
-                # present-id-unknown set so the next run skips it instead of posting a
-                # duplicate (#215). Write NOTHING to forum_index_message_ids: a truthy
-                # entry there would drive an api_edit_message against an id that does not
-                # exist. Letting the broad handler take this instead would report a
-                # rebuild failure that did not happen.
-                state.forum_index_present_unknown_id.add(forum_key)
-                index_msg_id = ""
+                # Already on the server with no recoverable id. Try to recover
+                # the id from pinned messages (#561) before falling back to the
+                # present-id-unknown marker (#215). If recovered, the message
+                # is edited with current content and the id is recorded below.
+                # If not, mark the forum so the next run attempts recovery again
+                # from the skip branch rather than posting a duplicate. Write
+                # NOTHING to forum_index_message_ids on failure: a truthy entry
+                # there would drive an api_edit_message against a missing id.
+                recovered_id = await _recover_forum_index_id(
+                    session,
+                    config,
+                    index_channel_id,
+                    forum_name,
+                    content,
+                )
+                if recovered_id:
+                    index_msg_id = recovered_id
+                else:
+                    state.forum_index_present_unknown_id.add(forum_key)
+                    index_msg_id = ""
             await asyncio.sleep(config.upload_delay)
             if index_msg_id:
                 state.forum_index_message_ids[forum_key] = index_msg_id
