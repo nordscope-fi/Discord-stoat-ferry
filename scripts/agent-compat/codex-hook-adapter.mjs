@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { routesFor } from './hook-parity.mjs';
+import { isDestructiveGitCommand } from './destructive-git.mjs';
 
 const mode = process.argv[2];
 const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
@@ -92,28 +93,16 @@ function runRoutes(event, toolName, payload) {
   }
 }
 
-// --- Destructive git check (inline, mirrors settings.local.json) ----------------
-
-const DESTRUCTIVE_PATTERNS = [
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+push\s+--force\b/,
-  /\bgit\s+push\s+-f\b/,
-  /\bgit\s+clean\s+-f/,
-  /\bgit\s+branch\s+-D\b/,
-  /\bgit\s+checkout\s+--\s+\./,
-  /\bgit\s+restore\s+\./,
-];
+// --- Destructive git check (shared detection with the Qwen and Vibe guards) ---
 
 function checkDestructiveGit(payload) {
   const cmd = payload.tool_input?.command ?? payload.tool_input?.cmd ?? '';
-  for (const pat of DESTRUCTIVE_PATTERNS) {
-    if (pat.test(cmd)) {
-      process.stdout.write(JSON.stringify({
-        decision: 'block',
-        reason: `Destructive git operation. Confirm with the user first.`,
-      }));
-      process.exit(0);
-    }
+  if (isDestructiveGitCommand(cmd)) {
+    process.stdout.write(JSON.stringify({
+      decision: 'block',
+      reason: `Destructive git operation. Confirm with the user first.`,
+    }));
+    process.exit(0);
   }
   return { ok: true };
 }
