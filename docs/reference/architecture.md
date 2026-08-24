@@ -129,50 +129,56 @@ engine. Never persisted to disk.
 @dataclass
 class FerryConfig:
     # Required credentials
-    export_dir: Path                 # DCE JSON exports directory
-    stoat_url: str                   # Stoat API base URL
-    token: str                       # Stoat user token (repr=False — hidden in logs)
+    export_dir: Path  # DCE JSON exports directory
+    stoat_url: str  # Stoat API base URL
+    token: str  # Stoat user token (repr=False — hidden in logs)
 
     # Optional input
-    server_id: str | None            # Attach to existing Stoat server (else create new)
-    server_name: str | None          # Override server display name
-    dry_run: bool                    # Preview without API calls
-    skip_messages: bool              # Structure-only migration
-    skip_emoji: bool                 # Skip emoji upload
-    skip_reactions: bool             # Skip reaction application
-    skip_threads: bool               # Skip thread/forum flattening
-    message_rate_limit: float        # Seconds per message (default 1.0)
-    upload_delay: float              # Seconds between Autumn uploads (default 0.5)
-    output_dir: Path                 # Where state.json and report go
-    resume: bool                     # Load existing state and continue
-    verbose: bool                    # Extra logging for CLI
-    max_channels: int                # Stoat channel limit (default 200)
-    max_emoji: int                   # Stoat emoji limit (default 100)
-    checkpoint_interval: int         # State save frequency during messages (default 50, min 1, throttled max 1/5s)
-    skip_avatars: bool               # Skip the avatar pre-flight phase (default False)
-    reaction_mode: str               # "text" (default), "native" (Phase 9 API), or "skip"
-    min_thread_messages: int         # Filter threads below this count (0 = include all)
-    validate_after: bool             # Run post-migration validation phase (default False)
-    max_concurrent_requests: int     # asyncio.Semaphore bound for API requests (default 5, min 1)
-    max_concurrent_channels: int     # Parallel channel workers in MESSAGES (default 3)
-    thread_strategy: str             # "flatten" (default), "merge", or "archive"
-    incremental: bool                # Delta migration (default False; mutually exclusive with resume)
-    force: bool                      # Override DCE freshness warning (>30 days old) and soft errors
-    create_invite: bool              # Create an invite to the migrated server on completion (default True)
-    invite_channel_id: str | None    # Discord channel ID to base the invite on (default: first eligible text channel)
-    verify_uploads: bool             # Post-upload file size verification for Autumn uploads (default False)
-    cleanup_orphans: bool            # Report unreferenced Autumn uploads after migration (report-only)
-    force_unlock: bool               # Override a stale [FERRY_LOCK:...] marker on the target server
-    skip_dce_verify: bool            # Skip SHA-256 verification of DCE binary downloads
-    token_store: SecureTokenStore | None  # Injected credential store for masking at output boundaries
+    server_id: str | None  # Attach to existing Stoat server (else create new)
+    server_name: str | None  # Override server display name
+    dry_run: bool  # Preview without API calls
+    skip_messages: bool  # Structure-only migration
+    skip_emoji: bool  # Skip emoji upload
+    skip_reactions: bool  # Skip reaction application
+    skip_threads: bool  # Skip thread/forum flattening
+    message_rate_limit: float  # Seconds per message (default 1.0)
+    upload_delay: float  # Seconds between Autumn uploads (default 0.5)
+    output_dir: Path  # Where state.json and report go
+    resume: bool  # Load existing state and continue
+    verbose: bool  # Extra logging for CLI
+    max_channels: int  # Stoat channel limit (default 200)
+    max_emoji: int  # Stoat emoji limit (default 100)
+    checkpoint_interval: (
+        int  # State save frequency during messages (default 50, min 1, throttled max 1/5s)
+    )
+    skip_avatars: bool  # Skip the avatar pre-flight phase (default False)
+    reaction_mode: str  # "text" (default), "native" (Phase 9 API), or "skip"
+    min_thread_messages: int  # Filter threads below this count (0 = include all)
+    validate_after: bool  # Run post-migration validation phase (default False)
+    max_concurrent_requests: int  # asyncio.Semaphore bound for API requests (default 5, min 1)
+    max_concurrent_channels: int  # Parallel channel workers in MESSAGES (default 3)
+    thread_strategy: str  # "flatten" (default), "merge", or "archive"
+    incremental: bool  # Delta migration (default False; mutually exclusive with resume)
+    force: bool  # Override DCE freshness warning (>30 days old) and soft errors
+    create_invite: bool  # Create an invite to the migrated server on completion (default True)
+    invite_channel_id: (
+        str | None
+    )  # Discord channel ID to base the invite on (default: first eligible text channel)
+    verify_uploads: bool  # Post-upload file size verification for Autumn uploads (default False)
+    cleanup_orphans: bool  # Report unreferenced Autumn uploads after migration (report-only)
+    force_unlock: bool  # Override a stale [FERRY_LOCK:...] marker on the target server
+    skip_dce_verify: bool  # Skip SHA-256 verification of DCE binary downloads
+    token_store: (
+        SecureTokenStore | None
+    )  # Injected credential store for masking at output boundaries
 
     # Discord API (orchestrated mode only)
-    discord_token: str | None        # Discord user token (repr=False)
-    discord_server_id: str | None    # Source Discord guild ID
+    discord_token: str | None  # Discord user token (repr=False)
+    discord_server_id: str | None  # Source Discord guild ID
 
     # Runtime control (set by engine, not by user)
-    skip_export: bool                # Don't run DCE subprocess
-    pause_event: asyncio.Event | None   # GUI: block until user resumes
+    skip_export: bool  # Don't run DCE subprocess
+    pause_event: asyncio.Event | None  # GUI: block until user resumes
     cancel_event: asyncio.Event | None  # User stopped migration
     session: aiohttp.ClientSession | None  # Shared HTTP session (set by engine)
 ```
@@ -189,35 +195,43 @@ class MigrationState:
     role_map: dict[str, str]
     channel_map: dict[str, str]
     category_map: dict[str, str]
-    message_map: dict[str, str]         # For reply reference resolution — saved to message_map.json
+    message_map: dict[str, str]  # For reply reference resolution — saved to message_map.json
     emoji_map: dict[str, str]
 
     # Upload caches (avoid re-uploading identical files)
-    avatar_cache: dict[str, str]        # User ID → Autumn avatar file ID
-    upload_cache: dict[str, str]        # Local file path → Autumn file ID
+    avatar_cache: dict[str, str]  # User ID → Autumn avatar file ID
+    upload_cache: dict[str, str]  # Local file path → Autumn file ID
 
     # Author context (for mention remapping in transforms)
-    author_names: dict[str, str]        # Discord user ID → display name
+    author_names: dict[str, str]  # Discord user ID → display name
 
     # Name mirrors (used by ferry check to detect renames on the server)
-    category_names: dict[str, str]        # Discord category ID → name Ferry created it under
-    created_channel_names: dict[str, str] # Stoat channel ID → name Ferry created it under
-    created_role_names: dict[str, str]    # Stoat role ID → name Ferry created it under
-    channel_categories: dict[str, str]    # Stoat channel ID → Stoat category ID it belongs to
+    category_names: dict[str, str]  # Discord category ID → name Ferry created it under
+    created_channel_names: dict[str, str]  # Stoat channel ID → name Ferry created it under
+    created_role_names: dict[str, str]  # Stoat role ID → name Ferry created it under
+    channel_categories: dict[str, str]  # Stoat channel ID → Stoat category ID it belongs to
 
     # Deferred operations (collected during MESSAGES, applied in later phases)
-    pending_pins: list[tuple[str, str]]         # (stoat_channel_id, stoat_message_id)
-    pending_reactions: list[dict[str, object]]   # {channel_id, message_id, emoji, and optional count}
+    pending_pins: list[tuple[str, str]]  # (stoat_channel_id, stoat_message_id)
+    pending_reactions: list[
+        dict[str, object]
+    ]  # {channel_id, message_id, emoji, and optional count}
 
     # Dead-letter queue (messages that failed after retries)
-    failed_messages: list[FailedMessage]  # discord_msg_id, stoat_channel_id, error, retry_count, content_preview
+    failed_messages: list[
+        FailedMessage
+    ]  # discord_msg_id, stoat_channel_id, error, retry_count, content_preview
 
     # Autumn upload tracking (for orphan detection and resume)
-    autumn_uploads: dict[str, str]        # Autumn file_id → source_id
-    referenced_autumn_ids: set[str]       # Autumn IDs confirmed used in sent messages (serialised as list)
+    autumn_uploads: dict[str, str]  # Autumn file_id → source_id
+    referenced_autumn_ids: set[
+        str
+    ]  # Autumn IDs confirmed used in sent messages (serialised as list)
 
     # Post-migration validation results
-    validation_results: dict[str, object] # Channel/role count comparisons from VALIDATE MIGRATION phase
+    validation_results: dict[
+        str, object
+    ]  # Channel/role count comparisons from VALIDATE MIGRATION phase
 
     # Logs (structured dicts with phase, type, and message)
     errors: list[dict[str, str]]
@@ -225,53 +239,71 @@ class MigrationState:
 
     # Server discovery
     stoat_server_id: str
-    autumn_url: str                     # Discovered during CONNECT phase
-    invite_code: str                    # Server invite code created after migration (empty when disabled)
-    invite_url: str                     # Full https://rvlt.gg/... URL matching invite_code
+    autumn_url: str  # Discovered during CONNECT phase
+    invite_code: str  # Server invite code created after migration (empty when disabled)
+    invite_url: str  # Full https://rvlt.gg/... URL matching invite_code
 
     # Forum/thread tracking (keyed by forum-category key, not by forum channel ID)
-    forum_index_message_ids: dict[str, str]      # forum_cat_key → index message Stoat ID
-    forum_channel_members: dict[str, list[str]]  # forum_cat_key → Discord channel IDs of the forum's members
-    forum_category_names: dict[str, str]         # forum_cat_key → category name on Stoat
+    forum_index_message_ids: dict[str, str]  # forum_cat_key → index message Stoat ID
+    forum_channel_members: dict[
+        str, list[str]
+    ]  # forum_cat_key → Discord channel IDs of the forum's members
+    forum_category_names: dict[str, str]  # forum_cat_key → category name on Stoat
 
     # Resume tracking
-    current_phase: str                  # Phase name for resume skip logic
-    completed_channel_ids: set[str]     # Discord channel IDs fully processed in MESSAGES phase
-    channel_message_offsets: dict[str, str]  # Discord channel ID → last checkpointed Discord message ID
-    channel_high_water: dict[str, str]  # Discord channel ID → highest Discord message ID successfully sent (durable for merge/incremental)
-    thread_strategy: str                # The strategy the migration ran under (recorded from 2.17.0 for ferry check)
+    current_phase: str  # Phase name for resume skip logic
+    completed_channel_ids: set[str]  # Discord channel IDs fully processed in MESSAGES phase
+    channel_message_offsets: dict[
+        str, str
+    ]  # Discord channel ID → last checkpointed Discord message ID
+    channel_high_water: dict[
+        str, str
+    ]  # Discord channel ID → highest Discord message ID successfully sent (durable for merge/incremental)
+    thread_strategy: (
+        str  # The strategy the migration ran under (recorded from 2.17.0 for ferry check)
+    )
 
     # Counters
     attachments_uploaded: int
     attachments_skipped: int
     reactions_applied: int
-    reactions_capped: int               # Reactions dropped because Stoat's 20-per-message cap was hit
-    reactions_dropped: int              # Reactions dropped for any other reason (invalid emoji, unreachable message)
-    reaction_message_counts: dict[str, int]  # Stoat channel ID → messages that carried a text-mode reaction summary
+    reactions_capped: int  # Reactions dropped because Stoat's 20-per-message cap was hit
+    reactions_dropped: (
+        int  # Reactions dropped for any other reason (invalid emoji, unreachable message)
+    )
+    reaction_message_counts: dict[
+        str, int
+    ]  # Stoat channel ID → messages that carried a text-mode reaction summary
     pins_applied: int
-    channel_message_counts: dict[str, int]   # Discord channel ID → messages sent count
-    source_messages_total: int              # Total messages seen in the source export (denominator for fidelity)
-    prior_messages_total: int               # Total messages in prior (resumed) state
+    channel_message_counts: dict[str, int]  # Discord channel ID → messages sent count
+    source_messages_total: (
+        int  # Total messages seen in the source export (denominator for fidelity)
+    )
+    prior_messages_total: int  # Total messages in prior (resumed) state
     embeds_total: int
-    embeds_dropped: int                    # Embeds dropped when validate_sum would exceed the 2000-char body ceiling
-    native_fidelity_counts: dict[str, int]  # Per-strategy native reaction sends, for fidelity scoring
+    embeds_dropped: int  # Embeds dropped when validate_sum would exceed the 2000-char body ceiling
+    native_fidelity_counts: dict[
+        str, int
+    ]  # Per-strategy native reaction sends, for fidelity scoring
     replies_linked: int
     replies_total: int
 
     # Roles finalization
-    roles_finalized: bool               # ROLES phase completed the attributes/rank pass (guards resume)
+    roles_finalized: bool  # ROLES phase completed the attributes/rank pass (guards resume)
 
     # Timing
-    started_at: str                     # ISO 8601
-    completed_at: str                   # ISO 8601
+    started_at: str  # ISO 8601
+    completed_at: str  # ISO 8601
 
     # Rollback tracking (populated by ferry rollback)
     rollback_progress: dict[str, object]  # rolled_back_ids, failures, per-category counters
 
     # Flags
-    is_dry_run: bool                    # Reject resume from dry-run state
-    export_completed: bool              # Smart export phase skipping
-    migration_lock_marker: str          # The [FERRY_LOCK:ts:host] marker Ferry wrote (for force-unlock diagnostics)
+    is_dry_run: bool  # Reject resume from dry-run state
+    export_completed: bool  # Smart export phase skipping
+    migration_lock_marker: (
+        str  # The [FERRY_LOCK:ts:host] marker Ferry wrote (for force-unlock diagnostics)
+    )
 ```
 
 **Persistence**: `save_state()` writes atomically (temp file + rename). `load_state()` reads
@@ -297,19 +329,20 @@ Ten dataclasses representing DiscordChatExporter JSON structure:
 ### Discord Metadata Models (`discord/models.py`, `discord/metadata.py`)
 
 ```python
-PermissionOverwrite(id, type, allow, deny)     # type: 0=role, 1=member
+PermissionOverwrite(id, type, allow, deny)  # type: 0=role, 1=member
 DiscordRole(id, name, permissions, position, color, hoist, managed)
 DiscordChannel(id, name, type, nsfw, permission_overwrites)
 
-PermissionPair(allow, deny)                    # In Stoat bit space (translated)
-RoleOverride(discord_role_id, allow, deny)     # Per-role channel override
+PermissionPair(allow, deny)  # In Stoat bit space (translated)
+RoleOverride(discord_role_id, allow, deny)  # Per-role channel override
 ChannelMeta(nsfw, default_override, role_overrides)
 
-DiscordMetadata(                               # Persisted to discord_metadata.json
-    guild_id, fetched_at,
-    server_default_permissions,                # @everyone server-wide permissions
-    role_permissions,                          # {role_id: PermissionPair}
-    channel_metadata,                          # {channel_id: ChannelMeta}
+DiscordMetadata(  # Persisted to discord_metadata.json
+    guild_id,
+    fetched_at,
+    server_default_permissions,  # @everyone server-wide permissions
+    role_permissions,  # {role_id: PermissionPair}
+    channel_metadata,  # {channel_id: ChannelMeta}
 )
 ```
 
@@ -317,7 +350,7 @@ DiscordMetadata(                               # Persisted to discord_metadata.j
 
 ```python
 BlueprintRole(name, colour, permissions, rank)
-BlueprintChannel(name, type, nsfw)             # type: "Text" or "Voice"
+BlueprintChannel(name, type, nsfw)  # type: "Text" or "Voice"
 BlueprintCategory(name, channels)
 ServerBlueprint(name, description, roles, categories, uncategorized_channels)
 ```
@@ -497,13 +530,13 @@ on the server. Added in v1.6.0; switched from a bare count comparison to the sha
 ```python
 @dataclass
 class MigrationEvent:
-    phase: str              # "export", "validate", "messages", etc.
-    status: str             # See table below
-    message: str            # Human-readable status text
-    current: int = 0        # Progress: items processed so far
-    total: int = 0          # Progress: total items in this phase
+    phase: str  # "export", "validate", "messages", etc.
+    status: str  # See table below
+    message: str  # Human-readable status text
+    current: int = 0  # Progress: items processed so far
+    total: int = 0  # Progress: total items in this phase
     channel_name: str = ""  # Currently active channel (if applicable)
-    detail: dict | None     # Extra context (review summary, error info)
+    detail: dict | None  # Extra context (review summary, error info)
 ```
 
 ### Status Values
@@ -636,8 +669,16 @@ what let Ferry ship voice channels that granted no voice permissions. One table,
 
 ```python
 FERRY_MIN_PERMISSIONS = (
-    8 | 16 | 1_048_576 | 2_097_152 | 4_194_304
-    | 8_388_608 | 67_108_864 | 134_217_728 | 268_435_456 | 536_870_912
+    8
+    | 16
+    | 1_048_576
+    | 2_097_152
+    | 4_194_304
+    | 8_388_608
+    | 67_108_864
+    | 134_217_728
+    | 268_435_456
+    | 536_870_912
 )  # == 1_022_361_624
 ```
 
@@ -874,9 +915,9 @@ Discord author:
 
 ```python
 masquerade = {
-    "name": "Alice",                          # Original display name
-    "avatar": "autumn-file-id-for-avatar",    # Uploaded once, cached
-    "colour": "#5865F2",                      # British spelling required
+    "name": "Alice",  # Original display name
+    "avatar": "autumn-file-id-for-avatar",  # Uploaded once, cached
+    "colour": "#5865F2",  # British spelling required
 }
 ```
 
