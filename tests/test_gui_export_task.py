@@ -208,7 +208,7 @@ async def test_export_config_carries_coerced_advanced_settings(
     Guards that _coerce_advanced_settings output flows into config construction
     at gui.py:1042. Inspects the config object's attributes, not kwargs.
     """
-    from discord_ferry.config import FerryConfig
+    from discord_ferry.config import FerryConfig  # noqa: TC001
 
     export_dir = tmp_path / "dce_cache"
     export_dir.mkdir()
