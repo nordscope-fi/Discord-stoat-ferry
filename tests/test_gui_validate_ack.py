@@ -89,3 +89,18 @@ async def test_a_clean_export_needs_no_acknowledgement(
 
     assert user.find("Start Migration").elements.pop().enabled is True
     await user.should_not_see("I understand")
+
+
+async def test_missing_export_dir_bounces_from_validate(
+    user: User,
+    user_store: dict[str, object],
+) -> None:
+    """SC-4.1: no export_dir in user_store -> bounce, no export summary shown.
+
+    Guards the validate guard at gui.py:1111. The old source-string assertion
+    at test_gui.py:482 checked that the guard reads export_dir/stoat_url, not
+    storage.get('token'). This test exercises the real guard.
+    """
+    # user_store is empty: no export_dir, no stoat_url
+    await user.open("/validate")
+    await user.should_not_see("Export:")
