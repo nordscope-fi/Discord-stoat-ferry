@@ -7,7 +7,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { codexPostToolMatcher, qwenPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
+import { codexPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
+import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan, applySkillPlan } from './skill-topology.mjs';
 
 const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
@@ -80,78 +81,6 @@ function stripIssueChannel() {
     );
     writeFileSync(vibePath, filtered.join('').replace(/\n{3,}/g, '\n\n'), { mode: 0o600 });
   }
-}
-
-// --- Qwen prompt hook merge -------------------------------------------------------
-// Qwen supports prompt hooks natively. Their text is owned by plain-english
-// (the docs and github judges) and by the local settings (verify reminder,
-// compaction memory), so the installer copies them from .claude/settings.json
-// and .claude/settings.local.json at render time instead of duplicating them
-// in the template. Claude-only fields (model pin, continueOnBlock, if) are
-// dropped: a Qwen prompt hook runs on the session model.
-
-function collectClaudePromptHooks() {
-  const hooks = [];
-  for (const name of ['settings.json', 'settings.local.json']) {
-    const settingsPath = join(projectRoot, '.claude', name);
-    if (!existsSync(settingsPath)) continue;
-    let raw;
-    try {
-      raw = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    } catch {
-      continue;
-    }
-    const events = raw.hooks ?? {};
-    for (const [event, groups] of Object.entries(events)) {
-      if (!Array.isArray(groups)) continue;
-      for (const group of groups) {
-        for (const hook of group.hooks ?? []) {
-          if (hook.type !== 'prompt') continue;
-          hooks.push({ event, matcher: group.matcher ?? null, hook });
-        }
-      }
-    }
-  }
-  return hooks;
-}
-
-function qwenPromptHook(hook) {
-  return { type: 'prompt', prompt: hook.prompt, timeout: hook.timeout ?? 30 };
-}
-
-// Maps a Claude prompt hook to the [event, matcher] of the .qwen/settings.json
-// group it belongs to. Null when there is no Qwen home for it.
-function qwenTargetFor(entry) {
-  if (entry.event === 'PreToolUse') {
-    if (entry.matcher?.includes('Bash')) return ['PreToolUse', 'run_shell_command'];
-    if (entry.matcher?.includes('Write') || entry.matcher?.includes('Edit')) {
-      return ['PreToolUse', 'write_file|edit'];
-    }
-    return null;
-  }
-  if (entry.event === 'PostToolUse') return ['PostToolUse', qwenPostToolMatcher()];
-  if (entry.event === 'PreCompact') return ['PreCompact', null];
-  return null;
-}
-
-function mergeQwenPromptHooks(qwenSettings) {
-  const prompts = collectClaudePromptHooks();
-  let merged = 0;
-  for (const entry of prompts) {
-    const target = qwenTargetFor(entry);
-    if (!target) continue;
-    const [event, matcher] = target;
-    const groups = qwenSettings.hooks[event] ?? [];
-    let group = groups.find(g => (g.matcher ?? null) === matcher);
-    if (!group) {
-      group = matcher ? { matcher, hooks: [] } : { hooks: [] };
-      groups.push(group);
-      qwenSettings.hooks[event] = groups;
-    }
-    group.hooks.push(qwenPromptHook(entry.hook));
-    merged += 1;
-  }
-  return merged;
 }
 
 // --- Main -----------------------------------------------------------------------
@@ -232,14 +161,17 @@ async function main() {
   const qwenDir = join(projectRoot, '.qwen');
   mkdirSync(qwenDir, { recursive: true });
 
-  const qwenSettings = JSON.parse(render('qwen-settings.json', {
-    '__QWEN_POST_TOOL_MATCHER__': qwenPostToolMatcher(),
-  }));
-  const mergedPrompts = mergeQwenPromptHooks(qwenSettings);
+  // The builder is shared with the drift checker, so install and check
+  // agree by construction.
+  const qwenSettings = buildQwenSettings({ projectRoot, home, templateDir });
+  const promptCount = Object.values(qwenSettings.hooks ?? {})
+    .flat()
+    .flatMap(g => g.hooks ?? [])
+    .filter(h => h.type === 'prompt').length;
   writeFileSync(join(qwenDir, 'settings.json'), JSON.stringify(qwenSettings, null, 2) + '\n', { mode: 0o600 });
   reconcileDirectory(qwenDir, ['settings.json']);
-  if (mergedPrompts > 0) {
-    console.log(`  settings.json (${mergedPrompts} prompt hooks merged from .claude/)`);
+  if (promptCount > 0) {
+    console.log(`  settings.json (${promptCount} prompt hooks merged from .claude/)`);
   } else {
     console.log('  settings.json (no prompt hooks found in .claude/ to merge)');
   }

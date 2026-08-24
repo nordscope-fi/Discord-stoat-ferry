@@ -8,7 +8,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { auditHookParity, HOOK_PARITY, qwenPostToolMatcher, validateHookParity } from './hook-parity.mjs';
+import { auditHookParity, HOOK_PARITY, validateHookParity } from './hook-parity.mjs';
+import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan } from './skill-topology.mjs';
 
 const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
@@ -172,79 +173,10 @@ function checkVibeState() {
 }
 
 // --- Check: Generated state (Qwen) ----------------------------------------------
-
-const QWEN_FERRY_BLOCKS = [
-  'credential-guard.sh',
-  'branch-guard.sh',
-  'github-plain-english-guard.sh',
-  'write-guard.sh',
-  'read-guard.sh',
-  'docs-plain-english-guard.sh',
-  'plain-english-docs.sh',
-  'plain-english-github.sh',
-  'qmd-live-update.sh',
-  'destructive-git-guard.mjs',
-  'qwen-session-start.mjs',
-  'qwen-stop-guard.mjs',
-];
-
-// The prompt hooks the installer copies into .qwen/settings.json, with the
-// Claude event/matcher they come from. User-global prompts (~/.claude/) are
-// out of scope, same as for the installer.
-function claudePromptHooks() {
-  const prompts = [];
-  for (const name of ['settings.json', 'settings.local.json']) {
-    const settingsPath = join(projectRoot, '.claude', name);
-    if (!existsSync(settingsPath)) continue;
-    let raw;
-    try {
-      raw = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    } catch {
-      continue;
-    }
-    for (const [event, groups] of Object.entries(raw.hooks ?? {})) {
-      if (!Array.isArray(groups)) continue;
-      for (const group of groups) {
-        for (const hook of group.hooks ?? []) {
-          if (hook.type !== 'prompt') continue;
-          prompts.push({ event, matcher: group.matcher ?? null, prompt: hook.prompt });
-        }
-      }
-    }
-  }
-  return prompts;
-}
-
-function mappableOnQwen({ event, matcher }) {
-  if (event === 'PreToolUse') {
-    return Boolean(matcher?.includes('Bash') || matcher?.includes('Write') || matcher?.includes('Edit'));
-  }
-  return event === 'PostToolUse' || event === 'PreCompact';
-}
-
-// Where the installer places a Claude prompt hook inside .qwen/settings.json.
-// Mirrors qwenTargetFor in install-local.mjs; both must move together.
-function qwenPromptTargetFor({ event, matcher }) {
-  if (event === 'PreToolUse') {
-    if (matcher?.includes('Bash')) return ['PreToolUse', 'run_shell_command'];
-    return ['PreToolUse', 'write_file|edit'];
-  }
-  if (event === 'PostToolUse') return ['PostToolUse', qwenPostToolMatcher()];
-  return ['PreCompact', null];
-}
-
-function qwenPromptHookTuples(settings) {
-  const tuples = new Set();
-  for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
-    if (!Array.isArray(groups)) continue;
-    for (const group of groups) {
-      for (const hook of group.hooks ?? []) {
-        if (hook.type === 'prompt') tuples.add(`${event}|${group.matcher ?? ''}|${hook.prompt}`);
-      }
-    }
-  }
-  return tuples;
-}
+// .qwen/settings.json is fully generator-owned (plain-english has no qwen
+// profile that would merge into it), so the right strength here is exact
+// equality with a fresh build from the shared builder. A guard moved under
+// the wrong event, a changed matcher, or a stale prompt all fail.
 
 function checkQwenState() {
   const settingsPath = join(projectRoot, '.qwen', 'settings.json');
@@ -253,37 +185,17 @@ function checkQwenState() {
     return;
   }
 
-  let settings;
+  let expected;
   try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    expected = buildQwenSettings({ projectRoot, home, templateDir });
   } catch (err) {
-    fail(`.qwen/settings.json is not valid JSON: ${err.message}`);
+    fail(`qwen template failed to render: ${err.message}`);
     return;
   }
 
-  const content = readFileSync(settingsPath, 'utf8');
-  for (const block of QWEN_FERRY_BLOCKS) {
-    if (!content.includes(block)) {
-      fail(`ferry blocks missing: .qwen/settings.json does not contain ${block}. Re-run ./scripts/agent-install.sh`);
-    }
-  }
-
-  for (const server of ['qmd', 'serena', 'context7']) {
-    if (!settings.mcpServers?.[server]) {
-      fail(`mcp server missing from .qwen/settings.json: ${server}`);
-    }
-  }
-
-  // Compare event, matcher and prompt text as one tuple. A judge moved to a
-  // different event or group would otherwise keep passing this check.
-  const merged = qwenPromptHookTuples(settings);
-  for (const entry of claudePromptHooks()) {
-    if (!mappableOnQwen(entry)) continue;
-    const [event, matcher] = qwenPromptTargetFor(entry);
-    if (!merged.has(`${event}|${matcher ?? ''}|${entry.prompt}`)) {
-      fail(`prompt hook drifted: a .claude/ prompt hook (${entry.event}) is missing or misplaced in .qwen/settings.json. Re-run ./scripts/agent-install.sh`);
-      break;
-    }
+  const actual = readFileSync(settingsPath, 'utf8');
+  if (actual !== JSON.stringify(expected, null, 2) + '\n') {
+    fail('drift: .qwen/settings.json does not match the template plus merged prompt hooks. Re-run ./scripts/agent-install.sh');
   }
 }
 
