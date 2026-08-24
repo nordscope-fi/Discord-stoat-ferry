@@ -1563,6 +1563,29 @@ async def test_the_merge_suppression_records_no_warning(tmp_path: Path) -> None:
     assert not state.failed_messages, "a suppressed message is not a failure"
 
 
+async def test_the_merge_suppression_increments_the_counter(tmp_path: Path) -> None:
+    """#239: the suppression is observable in report.json via a per-run counter.
+
+    The suppression stays silent (no warning, no _posted bump), but
+    `state.merge_duplicates_suppressed` must increment so report.json can show
+    how many messages were skipped. Proven able to fail: removing the increment
+    makes this test fail.
+    """
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent, thread = _post_bump_pair()
+
+    keys: list[str] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, "premise: the origin was suppressed"
+    assert state.merge_duplicates_suppressed == 1, (
+        f"expected 1 suppressed duplicate, got {state.merge_duplicates_suppressed}"
+    )
+
+
 async def test_merge_still_duplicates_after_a_parent_duplicate_nonce(tmp_path: Path) -> None:
     """SC-3.6: a KNOWN MISS, pinned so it stays visible. Not the intended outcome.
 

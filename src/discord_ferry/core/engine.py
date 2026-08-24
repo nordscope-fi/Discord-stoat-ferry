@@ -333,6 +333,7 @@ async def run_migration(
             #     new msgs); pending_pins / pending_reactions (consumed by the
             #     reactions/pins phases — carrying a stale list would re-pin/re-react);
             #     warnings / errors, validation_results, embeds_* / replies_*
+            #     / merge_duplicates_suppressed (per-run merge counter, #239);
             #     (per-run fidelity counters); current_phase, started_at,
             #     completed_at, export_completed, rollback_progress, is_dry_run;
             #     thread_strategy, which describes THIS run and is set from

@@ -896,6 +896,7 @@ _KNOWN_STATE_FIELDS = frozenset(
         "reactions_capped",
         "reactions_dropped",
         "pins_applied",
+        "merge_duplicates_suppressed",
         "started_at",
         "completed_at",
         "is_dry_run",
