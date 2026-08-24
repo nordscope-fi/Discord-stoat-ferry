@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Qwen Code becomes the fourth parity host.** The agent-compat generator now renders
+  `.qwen/settings.json` from `config/agent-compat/qwen-settings.json`: the Ferry guard hooks
+  registered directly (Qwen speaks the Claude hook envelope), the qmd, serena and context7 MCP
+  servers, the model tiers, and a permissions allowlist. Prompt hooks are merged from `.claude/`
+  at install time, so plain-english stays the single source for its judges. Worktree and ignore
+  coverage now carries AGENTS.md, `.agents/` and `.qwen/`. ADR-026 records the decisions.
+  Closes #590.
+
+- **Plan and design review goes cross-host.** Both review helpers gain `--mode design`, and
+  `/df-critique` gains a step 4b that dispatches the design document through the same fallback
+  chain the code reviews use, on every host. On the Qwen host the chain is Codex, Claude, then
+  the Mistral MCP. Qwen is its own model family, so no leg of the chain is circular.
+
+### Fixed
+
+- **The drift verifier no longer demands the legacy `.vibe/mcp.toml`.** The installer renders
+  Vibe's MCP servers into `.vibe/config.toml` and removes the old file, but `check.mjs` kept
+  asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
+  `.vibe/config.toml`.
+
 ## [2.35.0] - 2026-08-23
 
 ### Added
