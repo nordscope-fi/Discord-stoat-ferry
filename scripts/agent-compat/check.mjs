@@ -8,7 +8,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { auditHookParity, HOOK_PARITY, validateHookParity } from './hook-parity.mjs';
+import { auditHookParity, HOOK_PARITY, qwenPostToolMatcher, validateHookParity } from './hook-parity.mjs';
 import { buildSkillPlan } from './skill-topology.mjs';
 
 const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
@@ -166,7 +166,125 @@ function checkVibeState() {
 
   ferryBlocksPresent(join(vibeDir, 'hooks.toml'), 'vibe-hook-adapter.mjs');
   plainEnglishUpToDate('vibe');
-  fileMatches(join(vibeDir, 'mcp.toml'), render('vibe-mcp.toml'));
+  // Vibe reads MCP servers from .vibe/config.toml; the installer renders the
+  // vibe-mcp.toml template there and removes any legacy mcp.toml.
+  fileMatches(join(vibeDir, 'config.toml'), render('vibe-mcp.toml'));
+}
+
+// --- Check: Generated state (Qwen) ----------------------------------------------
+
+const QWEN_FERRY_BLOCKS = [
+  'credential-guard.sh',
+  'branch-guard.sh',
+  'github-plain-english-guard.sh',
+  'write-guard.sh',
+  'read-guard.sh',
+  'docs-plain-english-guard.sh',
+  'plain-english-docs.sh',
+  'plain-english-github.sh',
+  'qmd-live-update.sh',
+  'destructive-git-guard.mjs',
+  'qwen-session-start.mjs',
+  'qwen-stop-guard.mjs',
+];
+
+// The prompt hooks the installer copies into .qwen/settings.json, with the
+// Claude event/matcher they come from. User-global prompts (~/.claude/) are
+// out of scope, same as for the installer.
+function claudePromptHooks() {
+  const prompts = [];
+  for (const name of ['settings.json', 'settings.local.json']) {
+    const settingsPath = join(projectRoot, '.claude', name);
+    if (!existsSync(settingsPath)) continue;
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    } catch {
+      continue;
+    }
+    for (const [event, groups] of Object.entries(raw.hooks ?? {})) {
+      if (!Array.isArray(groups)) continue;
+      for (const group of groups) {
+        for (const hook of group.hooks ?? []) {
+          if (hook.type !== 'prompt') continue;
+          prompts.push({ event, matcher: group.matcher ?? null, prompt: hook.prompt });
+        }
+      }
+    }
+  }
+  return prompts;
+}
+
+function mappableOnQwen({ event, matcher }) {
+  if (event === 'PreToolUse') {
+    return Boolean(matcher?.includes('Bash') || matcher?.includes('Write') || matcher?.includes('Edit'));
+  }
+  return event === 'PostToolUse' || event === 'PreCompact';
+}
+
+// Where the installer places a Claude prompt hook inside .qwen/settings.json.
+// Mirrors qwenTargetFor in install-local.mjs; both must move together.
+function qwenPromptTargetFor({ event, matcher }) {
+  if (event === 'PreToolUse') {
+    if (matcher?.includes('Bash')) return ['PreToolUse', 'run_shell_command'];
+    return ['PreToolUse', 'write_file|edit'];
+  }
+  if (event === 'PostToolUse') return ['PostToolUse', qwenPostToolMatcher()];
+  return ['PreCompact', null];
+}
+
+function qwenPromptHookTuples(settings) {
+  const tuples = new Set();
+  for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      for (const hook of group.hooks ?? []) {
+        if (hook.type === 'prompt') tuples.add(`${event}|${group.matcher ?? ''}|${hook.prompt}`);
+      }
+    }
+  }
+  return tuples;
+}
+
+function checkQwenState() {
+  const settingsPath = join(projectRoot, '.qwen', 'settings.json');
+  if (!existsSync(settingsPath)) {
+    fail('.qwen/settings.json not found. Run ./scripts/agent-install.sh');
+    return;
+  }
+
+  let settings;
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  } catch (err) {
+    fail(`.qwen/settings.json is not valid JSON: ${err.message}`);
+    return;
+  }
+
+  const content = readFileSync(settingsPath, 'utf8');
+  for (const block of QWEN_FERRY_BLOCKS) {
+    if (!content.includes(block)) {
+      fail(`ferry blocks missing: .qwen/settings.json does not contain ${block}. Re-run ./scripts/agent-install.sh`);
+    }
+  }
+
+  for (const server of ['qmd', 'serena', 'context7']) {
+    if (!settings.mcpServers?.[server]) {
+      fail(`mcp server missing from .qwen/settings.json: ${server}`);
+    }
+  }
+
+  // Compare event, matcher and prompt text as one tuple. A judge moved to a
+  // different event or group would otherwise keep passing this check.
+  const merged = qwenPromptHookTuples(settings);
+  for (const entry of claudePromptHooks()) {
+    if (!mappableOnQwen(entry)) continue;
+    const [event, matcher] = qwenPromptTargetFor(entry);
+    if (!merged.has(`${event}|${matcher ?? ''}|${entry.prompt}`)) {
+      fail(`prompt hook drifted: a .claude/ prompt hook (${entry.event}) is missing or misplaced in .qwen/settings.json. Re-run ./scripts/agent-install.sh`);
+      break;
+    }
+  }
 }
 
 // --- Check: Skills --------------------------------------------------------------
@@ -268,7 +386,8 @@ function checkConfigSafety() {
     join(projectRoot, '.codex', 'config.toml'),
     join(projectRoot, '.codex', 'hooks.json'),
     join(projectRoot, '.vibe', 'hooks.toml'),
-    join(projectRoot, '.vibe', 'mcp.toml'),
+    join(projectRoot, '.vibe', 'config.toml'),
+    join(projectRoot, '.qwen', 'settings.json'),
   ];
 
   for (const filePath of generatedFiles) {
@@ -287,6 +406,7 @@ function checkTemplates() {
   const requiredTemplates = [
     'codex-config.toml', 'codex-hooks.json',
     'vibe-hooks.toml', 'vibe-mcp.toml',
+    'qwen-settings.json',
   ];
   for (const t of requiredTemplates) {
     if (!existsSync(join(templateDir, t))) {
@@ -304,6 +424,7 @@ function checkTemplates() {
   const testReplacements = {
     '__POST_TOOL_MATCHER__': '^(test)$',
     '__VIBE_POST_TOOL_MATCHER__': 're:^(test)$',
+    '__QWEN_POST_TOOL_MATCHER__': 'write_file|edit',
   };
   for (const t of requiredTemplates) {
     const rendered = render(t, testReplacements);
@@ -317,6 +438,13 @@ function checkTemplates() {
     JSON.parse(codexHooks);
   } catch (err) {
     fail(`codex-hooks.json template is not valid JSON after rendering: ${err.message}`);
+  }
+
+  try {
+    const qwenSettings = render('qwen-settings.json', testReplacements);
+    JSON.parse(qwenSettings);
+  } catch (err) {
+    fail(`qwen-settings.json template is not valid JSON after rendering: ${err.message}`);
   }
 
   const parityIssues = validateHookParity(HOOK_PARITY);
@@ -336,6 +464,7 @@ if (ci) {
 
   checkCodexState();
   checkVibeState();
+  checkQwenState();
   checkSkills();
 
   if (!generatedOnly) {
