@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.35.0] - 2026-08-23
+
+### Added
+
+- Forum index messages whose id was lost to a `DuplicateSendError` are now recovered by
+  searching the channel's pinned messages. The index is pinned after send, so a pinned-message
+  search finds it, edits it with current counts, and records the id. This un-freezes an index
+  that previously stayed stuck with stale counts because there was no id to edit. Closes #561.
+
 ## [2.34.0] - 2026-08-23
 
 ### Added
