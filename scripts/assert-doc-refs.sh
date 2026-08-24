@@ -59,6 +59,11 @@ for doc in $DOCS; do
     case "$t" in */*) : ;; *) continue ;; esac               # require a slash
     clean="${t%%#*}"                                         # strip #fragment
     clean=$(printf '%s' "$clean" | sed -E 's/:[0-9]+$//')    # strip :line citation
+    # The change manifest is transient: created when a build starts, deleted by
+    # /df-ship after merge. CLAUDE.md cites the convention, not a file that
+    # survives a ship, so a missing manifest is not drift. Without this, the
+    # guard fails locally after every ship until the next build recreates it.
+    [ "$clean" = ".claude/change-manifest.md" ] && continue
     seg="${clean%%/*}"
     [ -e "$seg" ] || continue          # first segment must be a real top-level entry
     is_excluded "$clean" && continue

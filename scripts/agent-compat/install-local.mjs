@@ -5,7 +5,7 @@
 // Run: ./scripts/agent-install.sh (or: node scripts/agent-compat/install-local.mjs)
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { codexPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
 import { buildQwenSettings } from './qwen-settings-build.mjs';
@@ -159,21 +159,30 @@ async function main() {
   // its own init against (ADR-026).
   console.log('Generating .qwen/ ...');
   const qwenDir = join(projectRoot, '.qwen');
-  mkdirSync(qwenDir, { recursive: true });
 
-  // The builder is shared with the drift checker, so install and check
-  // agree by construction.
-  const qwenSettings = buildQwenSettings({ projectRoot, home, templateDir });
-  const promptCount = Object.values(qwenSettings.hooks ?? {})
-    .flat()
-    .flatMap(g => g.hooks ?? [])
-    .filter(h => h.type === 'prompt').length;
-  writeFileSync(join(qwenDir, 'settings.json'), JSON.stringify(qwenSettings, null, 2) + '\n', { mode: 0o600 });
-  reconcileDirectory(qwenDir, ['settings.json']);
-  if (promptCount > 0) {
-    console.log(`  settings.json (${promptCount} prompt hooks merged from .claude/)`);
+  // Worktrees link .qwen/ back to the checkout that owns it. Writing through
+  // the link would embed this worktree's root in settings the canonical root
+  // then fails to match, so the owner keeps generating and the link follows.
+  const qwenDirStat = lstatSync(qwenDir, { throwIfNoEntry: false });
+  if (qwenDirStat?.isSymbolicLink()) {
+    console.log(`  .qwen/ is linked to another checkout; skipped (the canonical root owns it)`);
   } else {
-    console.log('  settings.json (no prompt hooks found in .claude/ to merge)');
+    mkdirSync(qwenDir, { recursive: true });
+
+    // The builder is shared with the drift checker, so install and check
+    // agree by construction.
+    const qwenSettings = buildQwenSettings({ projectRoot, home, templateDir });
+    const promptCount = Object.values(qwenSettings.hooks ?? {})
+      .flat()
+      .flatMap(g => g.hooks ?? [])
+      .filter(h => h.type === 'prompt').length;
+    writeFileSync(join(qwenDir, 'settings.json'), JSON.stringify(qwenSettings, null, 2) + '\n', { mode: 0o600 });
+    reconcileDirectory(qwenDir, ['settings.json']);
+    if (promptCount > 0) {
+      console.log(`  settings.json (${promptCount} prompt hooks merged from .claude/)`);
+    } else {
+      console.log('  settings.json (no prompt hooks found in .claude/ to merge)');
+    }
   }
 
   // 4b. Merge plain-english lint hooks into both hook files.
