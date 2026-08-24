@@ -1,5 +1,5 @@
 // Discord Ferry — Hook parity ledger.
-// Maps every Claude Code hook registration to its Codex and Vibe disposition.
+// Maps every Claude Code hook registration to its Codex, Vibe and Qwen disposition.
 // The adapter reads routesFor() at runtime; the verifier reads auditHookParity() at check time.
 
 import { createHash } from 'node:crypto';
@@ -9,6 +9,19 @@ import { readFileSync } from 'node:fs';
 
 const VIBE_TOOL_MAP = Object.freeze({
   Bash: 'bash',
+  Read: 'read_file',
+  Write: 'write_file',
+  Edit: 'edit',
+  WebFetch: 'web_fetch',
+  apply_patch: null,
+});
+
+// --- Qwen tool name translation -------------------------------------------------
+// Qwen hooks match on runtime tool ids and speak the Claude hook envelope, so the
+// guard scripts themselves run unchanged; only the matcher names differ.
+
+const QWEN_TOOL_MAP = Object.freeze({
+  Bash: 'run_shell_command',
   Read: 'read_file',
   Write: 'write_file',
   Edit: 'edit',
@@ -61,6 +74,31 @@ function deriveVibeFields(entry) {
     ...entry,
     vibeDisposition: vibeTools.length > 0 ? entry.disposition : 'unsupported',
     vibeTools: Object.freeze(vibeTools),
+  };
+}
+
+// Qwen supports prompt hooks natively. Project prompt entries are compensated
+// there: the installer merges them from .claude/settings.json at render time.
+// User prompt entries stay unsupported: they live in ~/.claude/settings.json,
+// which the Ferry installer does not write. Command entries with no Codex/Vibe
+// equivalent (the plain-english chat gates) stay unsupported until plain-english
+// ships a qwen agent profile.
+function deriveQwenFields(entry) {
+  if (entry.handlerType === 'prompt') {
+    const qwenDisposition = entry.source === 'project' ? 'compensated' : 'unsupported';
+    return { ...entry, qwenDisposition, qwenTools: Object.freeze([]) };
+  }
+  if (entry.disposition === 'unsupported') {
+    return { ...entry, qwenDisposition: 'unsupported', qwenTools: Object.freeze([]) };
+  }
+  const qwenTools = entry.codexTools
+    .map(t => (t in QWEN_TOOL_MAP ? QWEN_TOOL_MAP[t] : t))
+    .filter(Boolean);
+  const droppedByMap = entry.codexTools.length > 0 && qwenTools.length === 0;
+  return {
+    ...entry,
+    qwenDisposition: droppedByMap ? 'unsupported' : entry.disposition,
+    qwenTools: Object.freeze(qwenTools),
   };
 }
 
@@ -124,7 +162,7 @@ const RAW_ENTRIES = [
     'read-guard.sh', null, 'ported', ['Read'], 'read', null),
 ];
 
-export const HOOK_PARITY = Object.freeze(RAW_ENTRIES.map(e => Object.freeze(deriveVibeFields(e))));
+export const HOOK_PARITY = Object.freeze(RAW_ENTRIES.map(e => Object.freeze(deriveQwenFields(deriveVibeFields(e)))));
 
 // --- Query helpers --------------------------------------------------------------
 
@@ -158,6 +196,17 @@ export function vibePostToolMatcher(entries = HOOK_PARITY) {
     for (const t of e.vibeTools) tools.add(t);
   }
   return tools.size > 0 ? `re:^(${[...tools].join('|')})$` : 're:^$';
+}
+
+// Qwen matchers are Claude-style alternations of runtime tool ids, unanchored.
+export function qwenPostToolMatcher(entries = HOOK_PARITY) {
+  const tools = new Set();
+  for (const e of entries) {
+    if (e.event !== 'PostToolUse') continue;
+    if (e.qwenDisposition !== 'ported') continue;
+    for (const t of e.qwenTools) tools.add(t);
+  }
+  return tools.size > 0 ? [...tools].join('|') : '(?!)';
 }
 
 // --- Validation -----------------------------------------------------------------
@@ -204,6 +253,9 @@ export function validateHookParity(entries = HOOK_PARITY) {
     ids.add(e.id);
     if (!['ported', 'compensated', 'unsupported'].includes(e.disposition)) {
       issues.push(`${e.id}: invalid disposition "${e.disposition}"`);
+    }
+    if (!['ported', 'compensated', 'unsupported'].includes(e.qwenDisposition)) {
+      issues.push(`${e.id}: invalid qwenDisposition "${e.qwenDisposition}"`);
     }
     if (e.disposition === 'ported' && !e.route && e.codexTools.length > 0) {
       issues.push(`${e.id}: ported with codexTools but no route`);
