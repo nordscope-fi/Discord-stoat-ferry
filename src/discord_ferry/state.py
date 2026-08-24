@@ -143,6 +143,7 @@ class MigrationState:
     reactions_capped: int = 0  # Batch 4 (S4): reactions skipped at the 20/msg Stoat cap
     reactions_dropped: int = 0  # Batch 4 (S1): custom reactions whose emoji never mapped
     pins_applied: int = 0
+    merge_duplicates_suppressed: int = 0  # #239: merge messages skipped (already in parent)
 
     # Timing
     started_at: str = ""
@@ -326,6 +327,7 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         "reactions_capped": state.reactions_capped,
         "reactions_dropped": state.reactions_dropped,
         "pins_applied": state.pins_applied,
+        "merge_duplicates_suppressed": state.merge_duplicates_suppressed,
         "started_at": state.started_at,
         "completed_at": state.completed_at,
         "is_dry_run": state.is_dry_run,
@@ -406,6 +408,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             reactions_capped=data.get("reactions_capped", 0),
             reactions_dropped=data.get("reactions_dropped", 0),
             pins_applied=data.get("pins_applied", 0),
+            merge_duplicates_suppressed=data.get("merge_duplicates_suppressed", 0),
             started_at=data.get("started_at", ""),
             completed_at=data.get("completed_at", ""),
             is_dry_run=data.get("is_dry_run", False),

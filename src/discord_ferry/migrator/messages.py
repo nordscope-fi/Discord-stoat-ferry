@@ -730,6 +730,7 @@ async def _merge_threads(
                     # and a future change to the discriminator could make the difference
                     # reachable. Do not delete it on the strength of a surviving mutant.
                     _succeeded_ids.add(msg.id)
+                    state.merge_duplicates_suppressed += 1
                     logger.debug(
                         "Merge: %s already delivered to the parent channel, not re-sending",
                         msg.id,
