@@ -82,6 +82,13 @@ confident about. Return an empty findings array if the diff is clean. Every find
 verification command that distinguishes the finding being true from being false; the command will
 be run by the caller, so you never need to run it yourself.`;
 
+const DESIGN_DIRECTIVES = `Review the design or plan document. Judge feasibility, fit with the project context above,
+missing edge cases, and whether the tasks are atomic enough to plan and verify on their own.
+Report only what you are confident about, and return an empty findings array when the design is
+sound. Set file to the document path or the section name. Every finding must carry a verification
+command that distinguishes the finding being true from being false; the command will be run by the
+caller, so you never need to run it yourself.`;
+
 function parseArgs(argv) {
   const args = { mode: 'whole-branch', focus: '', title: '', model: DEFAULT_MODEL, selfTest: false };
   for (let i = 0; i < argv.length; i++) {
@@ -101,17 +108,22 @@ function parseArgs(argv) {
 }
 
 function buildPrompt(args) {
-  const label = args.mode === 'chunk' ? 'chunk review' : 'whole-branch review';
+  const labels = { chunk: 'chunk review', design: 'design review' };
+  const label = labels[args.mode] ?? 'whole-branch review';
   const titleLine = args.title ? `\nUnder review: ${args.title}` : '';
   const focusLine = args.focus ? `\nReview focus: ${args.focus}` : '';
+  const directives = args.mode === 'design' ? DESIGN_DIRECTIVES : REVIEW_DIRECTIVES;
+  const payloadLine = args.mode === 'design'
+    ? 'The design document follows below.'
+    : 'The changed code follows below.';
   return [
     `You are a code reviewer performing a ${label} for the Discord Ferry project.`,
     titleLine,
     focusLine,
     '',
-    REVIEW_DIRECTIVES,
+    directives,
     '',
-    'The changed code follows below.',
+    payloadLine,
   ].join('\n');
 }
 
@@ -213,6 +225,13 @@ function selfTest() {
   record('prompt has title', prompt.includes('chunk 1'));
   record('prompt names chunk mode', prompt.includes('chunk review'));
   record('prompt does not embed project context', !prompt.includes('core/engine.py never imports'));
+
+  const d = parseArgs(['--mode', 'design', '--focus', 'Task atomicity', '--title', 'a design doc']);
+  record('parseArgs design mode', d.mode === 'design');
+  const designPrompt = buildPrompt(d);
+  record('design prompt names design mode', designPrompt.includes('design review'));
+  record('design prompt carries design directives', designPrompt.includes('design or plan document'));
+  record('design prompt names the payload', designPrompt.includes('design document follows below'));
 
   // Schema is a bare JSON Schema (no Mistral response_format envelope).
   record('schema is unwrapped', FINDINGS_SCHEMA.type === 'object' && !('json_schema' in FINDINGS_SCHEMA));
