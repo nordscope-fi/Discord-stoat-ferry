@@ -86,6 +86,13 @@ confident about. Return an empty findings array if the diff is clean. Every find
 verification command that distinguishes the finding being true from being false; the command will
 be run by the caller, so you never need to run it yourself.`;
 
+const DESIGN_DIRECTIVES = `Review the design or plan document. Judge feasibility, fit with the project context above,
+missing edge cases, and whether the tasks are atomic enough to plan and verify on their own.
+Report only what you are confident about, and return an empty findings array when the design is
+sound. Set file to the document path or the section name. Every finding must carry a verification
+command that distinguishes the finding being true from being false; the command will be run by the
+caller, so you never need to run it yourself.`;
+
 function parseArgs(argv) {
   const args = { mode: 'whole-branch', focus: '', title: '', model: DEFAULT_MODEL, effort: DEFAULT_EFFORT, selfTest: false };
   for (let i = 0; i < argv.length; i++) {
@@ -106,9 +113,14 @@ function parseArgs(argv) {
 }
 
 function buildInstruction(args) {
-  const label = args.mode === 'chunk' ? 'chunk review' : 'whole-branch review';
+  const labels = { chunk: 'chunk review', design: 'design review' };
+  const label = labels[args.mode] ?? 'whole-branch review';
   const titleLine = args.title ? `\nUnder review: ${args.title}` : '';
   const focusLine = args.focus ? `\nReview focus: ${args.focus}` : '';
+  const directives = args.mode === 'design' ? DESIGN_DIRECTIVES : REVIEW_DIRECTIVES;
+  const payloadLine = args.mode === 'design'
+    ? 'The design document follows on stdin.'
+    : 'The changed code follows on stdin.';
   return [
     `You are a code reviewer performing a ${label} for the Discord Ferry project.`,
     '',
@@ -116,9 +128,9 @@ function buildInstruction(args) {
     titleLine,
     focusLine,
     '',
-    REVIEW_DIRECTIVES,
+    directives,
     '',
-    'The changed code follows on stdin.',
+    payloadLine,
   ].join('\n');
 }
 
@@ -220,6 +232,13 @@ function selfTest() {
   record('instruction has focus', instruction.includes('Security: token handling'));
   record('instruction has title', instruction.includes('chunk 1'));
   record('instruction names chunk mode', instruction.includes('chunk review'));
+
+  const d = parseArgs(['--mode', 'design', '--focus', 'Task atomicity', '--title', 'a design doc']);
+  record('parseArgs design mode', d.mode === 'design');
+  const designInstruction = buildInstruction(d);
+  record('design instruction names design mode', designInstruction.includes('design review'));
+  record('design instruction carries design directives', designInstruction.includes('design or plan document'));
+  record('design instruction names the payload', designInstruction.includes('design document follows on stdin'));
 
   // Schema is a bare JSON Schema (no Mistral response_format envelope).
   record('schema is unwrapped', FINDINGS_SCHEMA.type === 'object' && !('json_schema' in FINDINGS_SCHEMA));
