@@ -205,16 +205,16 @@ Bits 3, 4, 20, 21, 22, 23, 26, 27, 28, 29 sum to **1,022,361,624**.
 
 ```python
 FERRY_PERMISSIONS = (
-    8           # ManageRole       — masquerade colour
-    | 16          # ManageCustomisation — emoji
-    | 1_048_576   # ViewChannel
-    | 2_097_152   # ReadMessageHistory
-    | 4_194_304   # SendMessage
-    | 8_388_608   # ManageMessages  — pins
+    8  # ManageRole       — masquerade colour
+    | 16  # ManageCustomisation — emoji
+    | 1_048_576  # ViewChannel
+    | 2_097_152  # ReadMessageHistory
+    | 4_194_304  # SendMessage
+    | 8_388_608  # ManageMessages  — pins
     | 67_108_864  # SendEmbeds
-    | 134_217_728 # UploadFiles
-    | 268_435_456 # Masquerade
-    | 536_870_912 # React
+    | 134_217_728  # UploadFiles
+    | 268_435_456  # Masquerade
+    | 536_870_912  # React
 )
 # == 1_022_361_624
 ```
@@ -288,8 +288,12 @@ Every message send includes an `Idempotency-Key` HTTP header:
 
 ```python
 await api_send_message(
-    session, config.stoat_url, config.token, channel_id,
-    content=text, idempotency_key=f"ferry-{discord_msg_id}",
+    session,
+    config.stoat_url,
+    config.token,
+    channel_id,
+    content=text,
+    idempotency_key=f"ferry-{discord_msg_id}",
 )
 ```
 

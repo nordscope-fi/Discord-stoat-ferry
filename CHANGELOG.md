@@ -21,6 +21,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   chain the code reviews use, on every host. On the Qwen host the chain is Codex, Claude, then
   the Mistral MCP. Qwen is its own model family, so no leg of the chain is circular.
 
+### Changed
+
+- **First weekly dependency group update (Dependabot #588).** The grouped `uv` updates enabled in
+  2.34.0 ran for the first time. Dependabot moved thirteen packages, three transitive companions
+  moved with them, and two packages left the lockfile; none of the thirteen carries an open
+  security advisory. Runtime-facing: `nicegui` 3.12.0 → 3.16.0 (the GUI shell), `click`
+  8.3.3 → 8.4.2 (the CLI), `ijson` 3.5.0 → 3.5.1 (incremental parsing of the chat export),
+  `certifi` 2026.4.22 → 2026.7.22, `python-dotenv` 1.2.2 → 1.2.3, and `yarl` 1.23.0 → 1.24.5.
+  Toolchain: `ruff` 0.15.13 → 0.16.4, `mypy` 2.1.0 → 2.3.1 (with `librt` 0.11.0 → 0.15.0
+  and `ast-serialize` 0.4.0 → 0.8.0), `pytest` 9.0.3 → 9.1.1, `pytest-asyncio` 1.3.0 → 1.4.0,
+  and `aioresponses` 0.7.8 → 0.7.9. Build and docs: `pyinstaller` 6.20.0 → 6.22.2 (with
+  `pyinstaller-hooks-contrib` 2026.5 → 2026.6) and `mkdocs-material` 9.7.6 → 9.7.7. `nicegui`
+  3.16.0 dropped its `lxml` dependency, so `lxml` 6.1.0 and `lxml-html-clean` 0.4.4 left the
+  lockfile. Suite is green on the new stack: 2,338 passed.
+
+- **Ruff 0.16.4 formats Python code blocks inside markdown.** The pinned 0.15.13 accepted the
+  embedded snippets in `docs/reference/architecture.md` and `docs/reference/stoat-api-notes.md`
+  as they stood; the new ruff applies its usual rules to those blocks, and the CI format check
+  enforces the result. Both files were reflowed to match. Whitespace-only; no prose and no
+  snippet semantics changed.
+
 ### Fixed
 
 - **The drift verifier no longer demands the legacy `.vibe/mcp.toml`.** The installer renders
