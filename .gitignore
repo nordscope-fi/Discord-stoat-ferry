@@ -49,6 +49,7 @@ claude_log/
 AGENTS.md
 .codex/
 .vibe/
+.qwen/
 .agents/
 
 # Git worktrees — an unignored worktree dir commits an entire second checkout
