@@ -6,8 +6,8 @@
 //   --ci: check only tracked templates and hook parity structure (no gitignored files, CI-safe)
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { auditHookParity, HOOK_PARITY, validateHookParity } from './hook-parity.mjs';
 import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan } from './skill-topology.mjs';
@@ -185,9 +185,18 @@ function checkQwenState() {
     return;
   }
 
+  // Worktrees link .qwen/ back to the primary checkout (ADR-019 style), and
+  // the generated settings embed the root they were rendered from. Rebuild
+  // from the real root behind the link, not the session cwd, so a linked
+  // worktree compares against the file that actually exists.
+  const canonicalRoot = dirname(dirname(realpathSync(settingsPath)));
   let expected;
   try {
-    expected = buildQwenSettings({ projectRoot, home, templateDir });
+    expected = buildQwenSettings({
+      projectRoot: canonicalRoot,
+      home,
+      templateDir: join(canonicalRoot, 'config', 'agent-compat'),
+    });
   } catch (err) {
     fail(`qwen template failed to render: ${err.message}`);
     return;
