@@ -1,0 +1,154 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-session-start.mjs\"",
+            "timeout": 10000,
+            "statusMessage": "Loading Ferry session context"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/credential-guard.sh\"",
+            "timeout": 8000
+          },
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/branch-guard.sh\"",
+            "timeout": 8000
+          },
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/github-plain-english-guard.sh\"",
+            "timeout": 8000
+          },
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/destructive-git-guard.mjs\"",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "\"__PROJECT_ROOT__/.claude/hooks/plain-english-github.sh\"",
+            "timeout": 30000
+          }
+        ]
+      },
+      {
+        "matcher": "write_file|edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/write-guard.sh\"",
+            "timeout": 8000
+          },
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/docs-plain-english-guard.sh\"",
+            "timeout": 8000
+          },
+          {
+            "type": "command",
+            "command": "\"__PROJECT_ROOT__/.claude/hooks/plain-english-docs.sh\"",
+            "timeout": 30000
+          }
+        ]
+      },
+      {
+        "matcher": "read_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/read-guard.sh\"",
+            "timeout": 8000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "__QWEN_POST_TOOL_MATCHER__",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"__HOME__/.claude/hooks/qmd-live-update.sh\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-stop-guard.mjs\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "qmd": {
+      "command": "qmd",
+      "args": ["mcp"],
+      "timeout": 20000
+    },
+    "serena": {
+      "command": "serena",
+      "args": ["start-mcp-server", "--context", "vibe", "--project-from-cwd"],
+      "timeout": 30000
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "timeout": 30000
+    }
+  },
+  "fastModel": "qwen3.6-flash",
+  "agents": {
+    "builtin": {
+      "exploreModel": "fast"
+    }
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(uv *)",
+      "Bash(gh *)",
+      "Bash(node scripts/*)",
+      "Bash(plain-english *)",
+      "Bash(npx --no-install plain-english *)",
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Bash(qmd *)",
+      "Bash(serena *)",
+      "Bash(jq *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(ln *)",
+      "Skill(*)",
+      "Read(~/**)",
+      "Read(//tmp/**)",
+      "mcp__qmd",
+      "mcp__context7",
+      "mcp__serena",
+      "mcp__second-opinion__get_default_opinion",
+      "mcp__second-opinion__get_gemini_opinion",
+      "mcp__second-opinion__get_mistral_opinion",
+      "mcp__second-opinion__get_personality_opinion"
+    ]
+  }
+}
