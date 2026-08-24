@@ -202,8 +202,22 @@ function checkQwenState() {
     return;
   }
 
-  const actual = readFileSync(settingsPath, 'utf8');
-  if (actual !== JSON.stringify(expected, null, 2) + '\n') {
+  // Qwen maintains its own schema marker ($version) in the file and bumps it
+  // on startup. That key belongs to the host, not the generator, so compare
+  // without it instead of reporting drift after every launch.
+  let actual;
+  try {
+    actual = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  } catch (err) {
+    fail(`.qwen/settings.json is not valid JSON: ${err.message}`);
+    return;
+  }
+  if (typeof actual !== 'object' || actual === null || Array.isArray(actual)) {
+    fail('.qwen/settings.json is not a JSON object. Re-run ./scripts/agent-install.sh');
+    return;
+  }
+  delete actual.$version;
+  if (JSON.stringify(actual, null, 2) !== JSON.stringify(expected, null, 2)) {
     fail('drift: .qwen/settings.json does not match the template plus merged prompt hooks. Re-run ./scripts/agent-install.sh');
   }
 }
