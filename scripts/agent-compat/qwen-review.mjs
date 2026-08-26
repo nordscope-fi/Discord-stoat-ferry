@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { readReviewerField } from './proton-credential.mjs';
 import {
   buildReviewPrompt,
+  classifyReviewFailure,
+  FINDINGS_SCHEMA,
   makeReviewRecord,
   parseJsonText,
   validateFindings,
@@ -13,31 +15,238 @@ import {
 export const QWEN_MODEL = 'qwen3.8-max';
 export const QWEN_URL =
   'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions';
+export const QWEN_COMPLETION_TOKENS = 32768;
+export const QWEN_DEADLINES = Object.freeze({
+  connectionMs: 60000,
+  idleMs: 30000,
+  totalMs: 600000,
+});
+
+export function qwenRequestBody(prompt) {
+  return {
+    model: QWEN_MODEL,
+    messages: [
+      { role: 'system', content: 'Return only the requested review JSON. Do not call tools.' },
+      { role: 'user', content: prompt },
+    ],
+    stream: true,
+    enable_thinking: true,
+    reasoning_effort: 'medium',
+    max_completion_tokens: QWEN_COMPLETION_TOKENS,
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'ferry_review',
+        strict: true,
+        schema: FINDINGS_SCHEMA,
+      },
+    },
+  };
+}
+
+function reviewError(code, message = 'Qwen response was invalid') {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function deadlineError(phase) {
+  const error = new Error(`Qwen ${phase} timed out`);
+  error.code = 'ETIMEDOUT';
+  error.deadline = phase;
+  return error;
+}
+
+function withDeadline(
+  work,
+  timeoutMs,
+  phase,
+  { schedule = setTimeout, cancel = clearTimeout, onTimeout = () => {} } = {},
+) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = schedule(() => {
+      if (settled) return;
+      settled = true;
+      const error = deadlineError(phase);
+      onTimeout(error);
+      reject(error);
+    }, timeoutMs);
+    Promise.resolve(work).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cancel(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cancel(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function withAbort(work, signal, onAbort = () => {}) {
+  if (!signal) return Promise.resolve(work);
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      onAbort();
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', aborted, { once: true });
+    Promise.resolve(work).then(
+      (value) => {
+        signal.removeEventListener('abort', aborted);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', aborted);
+        reject(error);
+      },
+    );
+  });
+}
+
+function consumeQwenEvents(buffer) {
+  const events = [];
+  let remainder = buffer;
+  for (;;) {
+    const boundary = /\r?\n\r?\n/u.exec(remainder);
+    if (!boundary) break;
+    const block = remainder.slice(0, boundary.index);
+    remainder = remainder.slice(boundary.index + boundary[0].length);
+    const data = block
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+    if (data) events.push(data);
+  }
+  return { events, remainder };
+}
+
+function parseQwenEvent(data) {
+  try {
+    const event = JSON.parse(data);
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      throw reviewError('INVALID_SCHEMA');
+    }
+    return event;
+  } catch (error) {
+    if (error?.code === 'INVALID_SCHEMA') throw error;
+    throw reviewError('INVALID_SCHEMA');
+  }
+}
+
+export async function readQwenStream(body, {
+  signal = null,
+  idleTimeoutMs = QWEN_DEADLINES.idleMs,
+  schedule = setTimeout,
+  cancel = clearTimeout,
+} = {}) {
+  if (!body || typeof body.getReader !== 'function') throw reviewError('INVALID_SCHEMA');
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let sessionId = null;
+  let resolvedModel = null;
+  let content = '';
+  let finishReason = null;
+  let completed = false;
+  let idleTimer = null;
+  let idleFailure = null;
+  const refreshIdleDeadline = () => {
+    if (idleTimer !== null) cancel(idleTimer);
+    idleFailure = new Promise((resolve, reject) => {
+      idleTimer = schedule(() => {
+        const error = deadlineError('idle');
+        reject(error);
+        void reader.cancel();
+      }, idleTimeoutMs);
+    });
+  };
+
+  refreshIdleDeadline();
+  try {
+    while (!completed) {
+      const read = Promise.race([reader.read(), idleFailure]);
+      const chunk = await withAbort(read, signal, () => void reader.cancel());
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const parsed = consumeQwenEvents(buffer);
+      buffer = parsed.remainder;
+      if (parsed.events.length) refreshIdleDeadline();
+      for (const data of parsed.events) {
+        if (data === '[DONE]') {
+          completed = true;
+          break;
+        }
+        const event = parseQwenEvent(data);
+        if (typeof event.model === 'string' && event.model !== QWEN_MODEL) {
+          throw reviewError('WRONG_MODEL');
+        }
+        if (sessionId === null && typeof event.id === 'string') sessionId = event.id;
+        if (resolvedModel === null && typeof event.model === 'string') {
+          resolvedModel = event.model;
+        }
+        const choice = event.choices?.[0];
+        if (typeof choice?.delta?.content === 'string') content += choice.delta.content;
+        if (choice?.finish_reason !== null && choice?.finish_reason !== undefined) {
+          finishReason = choice.finish_reason;
+        }
+      }
+    }
+  } finally {
+    if (idleTimer !== null) cancel(idleTimer);
+  }
+  buffer += decoder.decode();
+  if (!completed || buffer.trim() || resolvedModel !== QWEN_MODEL ||
+      finishReason !== 'stop' || !content) {
+    throw reviewError('INVALID_SCHEMA');
+  }
+  return {
+    id: sessionId,
+    model: resolvedModel,
+    choices: [{ message: { role: 'assistant', content } }],
+  };
+}
 
 export async function requestQwen({
   apiKey,
   prompt,
-  timeoutMs = 240000,
+  signal = null,
+  connectionTimeoutMs = QWEN_DEADLINES.connectionMs,
+  idleTimeoutMs = QWEN_DEADLINES.idleMs,
   fetcher = fetch,
+  schedule = setTimeout,
+  cancel = clearTimeout,
 }) {
   let response;
+  const connection = new AbortController();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, connection.signal])
+    : connection.signal;
   try {
-    response = await fetcher(QWEN_URL, {
+    const fetched = fetcher(QWEN_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: QWEN_MODEL,
-        messages: [
-          { role: 'system', content: 'Return only the requested review JSON. Do not call tools.' },
-          { role: 'user', content: prompt },
-        ],
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
+      body: JSON.stringify(qwenRequestBody(prompt)),
+      signal: requestSignal,
+    });
+    response = await withDeadline(withAbort(fetched, signal), connectionTimeoutMs, 'connection', {
+      schedule,
+      cancel,
+      onTimeout: (error) => connection.abort(error),
     });
   } catch (error) {
+    if (error?.code === 'ETIMEDOUT') throw error;
     const wrapped = new Error('Qwen request failed');
     wrapped.code = error?.name === 'TimeoutError' ? 'ETIMEDOUT' : 'REQUEST_FAILED';
     throw wrapped;
@@ -47,33 +256,48 @@ export async function requestQwen({
     error.httpStatus = response.status;
     throw error;
   }
-  try {
-    return await response.json();
-  } catch {
-    throw new Error('Qwen response was not JSON');
-  }
+  return readQwenStream(response.body, { signal, idleTimeoutMs, schedule, cancel });
 }
 
 export function parseQwenResponse(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw new Error('Qwen response envelope mismatch');
+    throw reviewError('INVALID_SCHEMA');
   }
-  if (body.model !== QWEN_MODEL) throw new Error('Qwen response model mismatch');
+  if (body.model !== QWEN_MODEL) throw reviewError('WRONG_MODEL');
   const text = body.choices?.[0]?.message?.content;
-  if (typeof text !== 'string') throw new Error('Qwen response has no assistant text');
-  const result = parseJsonText(text, 'Qwen response');
-  if (!validateFindings(result)) throw new Error('Qwen findings schema mismatch');
+  if (typeof text !== 'string') throw reviewError('INVALID_SCHEMA');
+  let result;
+  try {
+    result = parseJsonText(text, 'Qwen response');
+  } catch {
+    throw reviewError('INVALID_SCHEMA');
+  }
+  if (!validateFindings(result)) throw reviewError('INVALID_SCHEMA');
   return { result, sessionId: typeof body.id === 'string' ? body.id : null };
 }
 
-function responseFailure(error) {
+function responseFailure(error, { durationMs = 0, stage = 'qwen-response' } = {}) {
+  const classification = classifyReviewFailure(error);
   const safeMessage = typeof error?.httpStatus === 'number'
     ? `Qwen request failed with HTTP ${error.httpStatus}`
-    : error?.code === 'ETIMEDOUT'
+    : classification === 'timeout'
       ? 'Qwen request timed out'
-      : 'Qwen response was invalid';
+      : stage === 'qwen-credential'
+        ? 'Qwen credential retrieval failed'
+        : 'Qwen response was invalid';
   const wrapped = new Error(safeMessage);
-  wrapped.stage = 'qwen-response';
+  wrapped.stage = stage;
+  wrapped.durationMs = durationMs;
+  wrapped.classification = classification;
+  wrapped.httpStatus = Number.isInteger(error?.httpStatus) ? error.httpStatus : null;
+  if (classification === 'timeout') wrapped.code = 'ETIMEDOUT';
+  else if (classification === 'schema') wrapped.code = 'INVALID_SCHEMA';
+  else if (classification === 'wrong-model') wrapped.code = 'WRONG_MODEL';
+  else if (classification === 'credential') wrapped.code = 'CREDENTIAL';
+  if (classification === 'timeout' &&
+      ['connection', 'idle', 'total'].includes(error?.deadline)) {
+    wrapped.deadline = error.deadline;
+  }
   return wrapped;
 }
 
@@ -83,35 +307,51 @@ export async function runQwenReview({
   slot = 'qwen',
   credential = readReviewerField,
   request = requestQwen,
+  deadlines = QWEN_DEADLINES,
+  clock = Date,
+  schedule = setTimeout,
+  cancel = clearTimeout,
 }) {
-  const apiKey = await credential({
-    itemTitle: 'QwenCloud API Key',
-    reason: 'Review Discord Ferry code with the fixed Qwen slot',
-    home,
-  });
-  const started = Date.now();
-  let body;
+  const started = clock.now();
+  const total = new AbortController();
+  let stage = 'qwen-credential';
   try {
-    body = await request({ apiKey, prompt, timeoutMs: 240000 });
+    const operation = (async () => {
+      const apiKey = await credential({
+        itemTitle: 'QwenCloud API Key',
+        reason: 'Review Discord Ferry code with the fixed Qwen slot',
+        home,
+      });
+      stage = 'qwen-response';
+      const body = await request({
+        apiKey,
+        prompt,
+        signal: total.signal,
+        connectionTimeoutMs: deadlines.connectionMs,
+        idleTimeoutMs: deadlines.idleMs,
+        schedule,
+        cancel,
+      });
+      const parsed = parseQwenResponse(body);
+      return makeReviewRecord({
+        adapter: 'qwen',
+        slot,
+        requestedModel: QWEN_MODEL,
+        resolvedModel: QWEN_MODEL,
+        sessionId: parsed.sessionId,
+        durationMs: clock.now() - started,
+        status: 'valid',
+        result: parsed.result,
+      });
+    })();
+    return await withDeadline(operation, deadlines.totalMs, 'total', {
+      schedule,
+      cancel,
+      onTimeout: (error) => total.abort(error),
+    });
   } catch (error) {
-    throw responseFailure(error);
+    throw responseFailure(error, { durationMs: clock.now() - started, stage });
   }
-  let parsed;
-  try {
-    parsed = parseQwenResponse(body);
-  } catch (error) {
-    throw responseFailure(error);
-  }
-  return makeReviewRecord({
-    adapter: 'qwen',
-    slot,
-    requestedModel: QWEN_MODEL,
-    resolvedModel: QWEN_MODEL,
-    sessionId: parsed.sessionId,
-    durationMs: Date.now() - started,
-    status: 'valid',
-    result: parsed.result,
-  });
 }
 
 function cleanBody(text = JSON.stringify({
