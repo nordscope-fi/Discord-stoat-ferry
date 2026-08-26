@@ -72,6 +72,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.35.3] - 2026-08-26
+
+### Fixed
+
+- **Slot-safety tests close their outgoing-message queues.** Two tests created full web-interface
+  clients without starting the application loop, leaving queue jobs for a later test to collect.
+  A local queue substitute keeps the real client-context assertions without starting that job.
+
 ## [2.35.2] - 2026-08-26
 
 ### Fixed
