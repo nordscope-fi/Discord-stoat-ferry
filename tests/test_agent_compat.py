@@ -349,7 +349,10 @@ def test_worktree_script_names_codex_and_vibe_links() -> None:
 
 
 def test_worktreeinclude_does_not_copy_canonical_host_directories() -> None:
-    entries = set((_canonical_repo() / ".worktreeinclude").read_text().splitlines())
+    include = _canonical_repo() / ".worktreeinclude"
+    if not include.exists():
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+    entries = set(include.read_text().splitlines())
     assert {".agents/**", ".codex/**", ".vibe/**", ".qwen/**"}.isdisjoint(entries)
 
 
@@ -364,6 +367,8 @@ def test_installer_skips_linked_host_directories() -> None:
 def test_installer_does_not_write_through_linked_host_directories(
     tmp_path: Path,
 ) -> None:
+    if not (REPO / ".claude/skills").exists():
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
@@ -1097,6 +1102,14 @@ def test_codex_setup_live_adds_live_readiness(tmp_path: Path) -> None:
 
 
 def test_codex_setup_second_run_is_byte_identical(tmp_path: Path) -> None:
+    required_snapshot_paths = [
+        REPO / "AGENTS.md",
+        REPO / ".claude/skills",
+        REPO / ".claude/scripts/new-worktree.sh",
+        _canonical_repo() / ".worktreeinclude",
+    ]
+    if not all(path.exists() for path in required_snapshot_paths):
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
