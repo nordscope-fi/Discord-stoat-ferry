@@ -127,13 +127,13 @@ function preTool() {
   const payload = { tool_name: claudeTool, tool_input: input.tool_input ?? {} };
 
   if (claudeTool === 'Bash') {
-    const routes = routesFor('PreToolUse', 'Bash');
+    const routes = routesFor('PreToolUse', 'Bash', 'vibe');
     for (const route of routes) runRoute(route, payload);
     return;
   }
 
   if (claudeTool === 'Read') {
-    const routes = routesFor('PreToolUse', 'Read');
+    const routes = routesFor('PreToolUse', 'Read', 'vibe');
     for (const route of routes) runRoute(route, payload);
     return;
   }
@@ -143,8 +143,8 @@ function preTool() {
     for (const p of paths) {
       const editPayload = { ...payload, tool_input: { ...payload.tool_input, file_path: p } };
       const routes = [
-        ...routesFor('PreToolUse', 'Write'),
-        ...routesFor('PreToolUse', 'Edit'),
+        ...routesFor('PreToolUse', 'Write', 'vibe'),
+        ...routesFor('PreToolUse', 'Edit', 'vibe'),
       ];
       const seen = new Set();
       for (const route of routes) {

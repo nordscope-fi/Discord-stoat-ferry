@@ -4,8 +4,9 @@
 // Invoked by .codex/hooks.json for session-start, pre-tool, post-tool, and stop events.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { routesFor } from './hook-parity.mjs';
 import { isDestructiveGitCommand } from './destructive-git.mjs';
 
@@ -86,13 +87,6 @@ function runRoute(route, payload) {
   }
 }
 
-function runRoutes(event, toolName, payload) {
-  const routes = routesFor(event, toolName);
-  for (const route of routes) {
-    runRoute(route, payload);
-  }
-}
-
 // --- Destructive git check (shared detection with the Qwen and Vibe guards) ---
 
 function checkDestructiveGit(payload) {
@@ -149,39 +143,43 @@ function sessionStart() {
   flushContext('SessionStart');
 }
 
-function preTool() {
-  const tool = input.tool_name ?? '';
-  const payload = { tool_name: tool, tool_input: input.tool_input ?? {} };
+export function dispatchCodexPreTool(hookInput, routeRunner = runRoute) {
+  const tool = hookInput.tool_name ?? '';
+  const payload = { tool_name: tool, tool_input: hookInput.tool_input ?? {} };
 
   if (tool === 'Bash' || tool === 'bash') {
-    runRoutes('PreToolUse', 'Bash', payload);
+    for (const route of routesFor('PreToolUse', 'Bash', 'codex')) routeRunner(route, payload);
     return;
   }
 
   if (tool === 'Read' || tool === 'read_file') {
-    runRoutes('PreToolUse', 'Read', payload);
+    for (const route of routesFor('PreToolUse', 'Read', 'codex')) routeRunner(route, payload);
     return;
   }
 
   if (tool === 'apply_patch' || tool === 'Edit' || tool === 'Write' ||
       tool === 'edit' || tool === 'write_file') {
-    const paths = editPaths(input.tool_input ?? {});
+    const paths = editPaths(hookInput.tool_input ?? {});
     for (const p of paths) {
       const editPayload = { ...payload, tool_input: { ...payload.tool_input, file_path: p } };
       const routes = [
-        ...routesFor('PreToolUse', 'apply_patch'),
-        ...routesFor('PreToolUse', 'Edit'),
-        ...routesFor('PreToolUse', 'Write'),
+        ...routesFor('PreToolUse', 'apply_patch', 'codex'),
+        ...routesFor('PreToolUse', 'Edit', 'codex'),
+        ...routesFor('PreToolUse', 'Write', 'codex'),
       ];
       const seen = new Set();
       for (const route of routes) {
         if (seen.has(route)) continue;
         seen.add(route);
-        runRoute(route, editPayload);
+        routeRunner(route, editPayload);
       }
     }
     return;
   }
+}
+
+function preTool() {
+  dispatchCodexPreTool(input);
 }
 
 function postTool() {
@@ -227,12 +225,21 @@ function flushContext(eventName) {
 
 // --- Main -----------------------------------------------------------------------
 
-switch (mode) {
-  case 'session-start': sessionStart(); break;
-  case 'pre-tool': preTool(); break;
-  case 'post-tool': postTool(); break;
-  case 'stop': stopGuard(); break;
-  default:
-    process.stderr.write(`codex-hook-adapter: unknown mode "${mode}"\n`);
-    process.exit(1);
+let invokedAsMain = false;
+if (process.argv[1]) {
+  try {
+    invokedAsMain = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch { /* an invalid entrypoint cannot be the current module */ }
+}
+
+if (invokedAsMain) {
+  switch (mode) {
+    case 'session-start': sessionStart(); break;
+    case 'pre-tool': preTool(); break;
+    case 'post-tool': postTool(); break;
+    case 'stop': stopGuard(); break;
+    default:
+      process.stderr.write(`codex-hook-adapter: unknown mode "${mode}"\n`);
+      process.exit(1);
+  }
 }

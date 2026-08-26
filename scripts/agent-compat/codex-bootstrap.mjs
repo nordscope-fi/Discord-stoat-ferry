@@ -1,0 +1,551 @@
+#!/usr/bin/env node
+
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const TOML_TRUST_PROBE = String.raw`
+import json
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit(3)
+
+import tomllib
+
+try:
+    document = tomllib.loads(sys.stdin.read())
+except tomllib.TOMLDecodeError:
+    raise SystemExit(2)
+
+projects = document.get("projects", {})
+has_project = isinstance(projects, dict) and sys.argv[1] in projects
+project = projects.get(sys.argv[1]) if has_project else None
+trusted = isinstance(project, dict) and project.get("trust_level") == "trusted"
+sys.stdout.write(json.dumps({
+    "valid": True,
+    "hasProject": has_project,
+    "trusted": trusted,
+}))
+`;
+
+const REVIEWER_AGENT = 'discord-ferry-reviewers';
+const REVIEWER_VAULT = 'PortalPilot';
+export const REVIEWER_RUNTIME_FILES = [
+  'review-contract.mjs',
+  'proton-credential.mjs',
+  'vibe-review.mjs',
+  'qwen-review.mjs',
+  'claude-review.mjs',
+  'review-ensemble.mjs',
+  'review-verification.mjs',
+];
+const REVIEWER_RULE_FILES = [
+  'review-ensemble.mjs',
+  'claude-review.mjs',
+  'review-verification.mjs',
+  'review-contract.mjs',
+];
+
+export function inspectProjectTrustToml(source, projectRoot) {
+  const options = {
+    input: source,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'ignore'],
+    maxBuffer: 2 * 1024 * 1024,
+  };
+  const candidates = [
+    join(process.cwd(), '.venv', 'bin', 'python3'),
+    join(projectRoot, '.venv', 'bin', 'python3'),
+    'python3',
+  ];
+  let result = null;
+  const statuses = [];
+  for (const candidate of [...new Set(candidates)]) {
+    if (candidate.includes('/') && !existsSync(candidate)) continue;
+    result = spawnSync(candidate, ['-c', TOML_TRUST_PROBE, projectRoot], options);
+    statuses.push(result.status);
+    if (result.status === 0 || result.status === 2) break;
+  }
+  if (result?.status !== 0 && result?.status !== 2) {
+    result = spawnSync('uv', [
+      'run', '--no-project', '--python', '>=3.11',
+      'python', '-c', TOML_TRUST_PROBE, projectRoot,
+    ], options);
+    statuses.push(result.status);
+  }
+  if (result?.status !== 0) {
+    throw new Error(
+      'Codex config TOML is invalid; normalize the existing Ferry project trust entry before ' +
+      `setup (Python statuses ${statuses.join(',') || 'unavailable'})`,
+    );
+  }
+  const report = JSON.parse(result.stdout);
+  if (report?.valid !== true || typeof report?.hasProject !== 'boolean' ||
+      typeof report?.trusted !== 'boolean') {
+    throw new Error('Codex config TOML probe returned an invalid result');
+  }
+  return report;
+}
+
+export function reconcileProjectTrust(source, projectRoot, semantic) {
+  const header = `[projects.${JSON.stringify(projectRoot)}]`;
+  const lines = source.split(/(?<=\n)/u);
+  const starts = lines.flatMap((line, index) => {
+    const match = line.match(/^\s*\[\s*projects\s*\.\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*\]\s*$/u);
+    if (!match) return [];
+    const key = match[1].startsWith('"') ? JSON.parse(match[1]) : match[1].slice(1, -1);
+    return key === projectRoot ? [index] : [];
+  });
+  if (starts.length > 1) throw new Error('duplicate Ferry project trust entries');
+  if (semantic.hasProject && starts.length === 0) {
+    throw new Error('normalize the existing Ferry project trust entry before setup');
+  }
+  if (starts.length === 0) {
+    const gap = source.length === 0 || source.endsWith('\n\n')
+      ? ''
+      : source.endsWith('\n') ? '\n' : '\n\n';
+    return `${source}${gap}${header}\ntrust_level = "trusted"\n`;
+  }
+  const start = starts[0];
+  let end = lines.findIndex((line, index) => index > start && /^\s*\[/u.test(line));
+  if (end === -1) end = lines.length;
+  const trust = lines.slice(start + 1, end)
+    .flatMap((line, index) => /^\s*trust_level\s*=/u.test(line) ? [start + 1 + index] : []);
+  if (trust.length > 1) throw new Error('duplicate trust_level keys in Ferry project entry');
+  if (trust.length === 1) lines[trust[0]] = 'trust_level = "trusted"\n';
+  else lines.splice(start + 1, 0, 'trust_level = "trusted"\n');
+  return lines.join('');
+}
+
+export function canonicalCheckoutRoot(root) {
+  const commonDir = execFileSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).trim();
+  return dirname(realpathSync(commonDir));
+}
+
+function writeAtomic(path, content, beforeRename, forcedMode = null) {
+  const parent = dirname(path);
+  mkdirSync(parent, { recursive: true });
+  const mode = forcedMode ?? (existsSync(path) ? statSync(path).mode & 0o777 : 0o600);
+  const temporary = join(parent, `.${path.split('/').at(-1)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    chmodSync(temporary, mode);
+    const staged = readFileSync(temporary, 'utf8');
+    if (staged !== content) throw new Error('staged Codex config validation failed');
+    beforeRename?.();
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+function lstatOrNull(path) {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export function reviewerRuntimeRoot(home, xdgDataHome = process.env.XDG_DATA_HOME) {
+  const dataRoot = xdgDataHome || join(home, '.local', 'share');
+  return join(dataRoot, 'discord-ferry', 'reviewer-runtime');
+}
+
+export function reviewerRuntimeSource(root) {
+  return Object.fromEntries(REVIEWER_RUNTIME_FILES.map((name) => [
+    name,
+    readFileSync(join(root, 'scripts', 'agent-compat', name)),
+  ]));
+}
+
+function runtimeManifest(files) {
+  const hashes = {};
+  const releaseHash = createHash('sha256');
+  for (const name of Object.keys(files).sort()) {
+    const bytes = Buffer.isBuffer(files[name]) ? files[name] : Buffer.from(files[name]);
+    hashes[name] = createHash('sha256').update(bytes).digest('hex');
+    releaseHash.update(name).update('\0').update(bytes).update('\0');
+  }
+  return { version: 1, release: releaseHash.digest('hex'), files: hashes };
+}
+
+function validateRuntimeRelease(releasePath, expected) {
+  const releaseStat = lstatSync(releasePath);
+  if (!releaseStat.isDirectory() || releaseStat.isSymbolicLink()) {
+    throw new Error('reviewer runtime release is not a directory');
+  }
+  const manifestPath = join(releasePath, 'manifest.json');
+  if ((statSync(manifestPath).mode & 0o222) !== 0) {
+    throw new Error('reviewer runtime manifest is writable');
+  }
+  const actual = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error('reviewer runtime manifest mismatch');
+  }
+  for (const [name, expectedHash] of Object.entries(expected.files)) {
+    const path = join(releasePath, name);
+    const stat = statSync(path);
+    if (!stat.isFile()) throw new Error('reviewer runtime entry is not a file');
+    if ((stat.mode & 0o222) !== 0) throw new Error('reviewer runtime file is writable');
+    const hash = createHash('sha256').update(readFileSync(path)).digest('hex');
+    if (hash !== expectedHash) throw new Error('reviewer runtime file hash mismatch');
+  }
+}
+
+export function renderReviewerRules(currentPath) {
+  return `${REVIEWER_RULE_FILES.map((name) =>
+    `prefix_rule(pattern=${JSON.stringify(['node', join(currentPath, name)])}, decision="allow")`
+  ).join('\n')}\n`;
+}
+
+export function verifyReviewerRuntime({
+  home,
+  root,
+  files = reviewerRuntimeSource(root),
+  xdgDataHome = process.env.XDG_DATA_HOME,
+  part = 'all',
+}) {
+  const runtimeRoot = reviewerRuntimeRoot(home, xdgDataHome);
+  const currentPath = join(runtimeRoot, 'current');
+  const currentStat = lstatOrNull(currentPath);
+  if (!currentStat?.isSymbolicLink()) throw new Error('reviewer runtime current link is missing');
+  const releasePath = realpathSync(currentPath);
+  const releasesPath = realpathSync(join(runtimeRoot, 'releases'));
+  if (dirname(releasePath) !== releasesPath) {
+    throw new Error('reviewer runtime current link leaves releases');
+  }
+  const manifest = runtimeManifest(files);
+  if (releasePath !== join(releasesPath, manifest.release)) {
+    throw new Error('reviewer runtime release is stale');
+  }
+  if (part !== 'rules') validateRuntimeRelease(releasePath, manifest);
+  const rulesPath = join(home, '.codex', 'rules', 'ferry-reviewers.rules');
+  if (part !== 'runtime') {
+    const rules = readFileSync(rulesPath, 'utf8');
+    if (rules !== renderReviewerRules(currentPath)) {
+      throw new Error('reviewer command rules mismatch');
+    }
+    if ((statSync(rulesPath).mode & 0o777) !== 0o600) {
+      throw new Error('reviewer command rules mode mismatch');
+    }
+  }
+  return { release: manifest.release, files: Object.keys(manifest.files).length };
+}
+
+export function installReviewerRuntime({
+  home,
+  root = null,
+  files = root ? reviewerRuntimeSource(root) : null,
+  dryRun = false,
+  beforeActivate = null,
+  xdgDataHome = process.env.XDG_DATA_HOME,
+}) {
+  if (!home || !files) throw new Error('reviewer runtime install requires home and files');
+  if (Object.keys(files).sort().join('\n') !== [...REVIEWER_RUNTIME_FILES].sort().join('\n')) {
+    throw new Error('reviewer runtime source list mismatch');
+  }
+  const runtimeRoot = reviewerRuntimeRoot(home, xdgDataHome);
+  const releasesPath = join(runtimeRoot, 'releases');
+  const currentPath = join(runtimeRoot, 'current');
+  const rulesPath = join(home, '.codex', 'rules', 'ferry-reviewers.rules');
+  const manifest = runtimeManifest(files);
+  const releasePath = join(releasesPath, manifest.release);
+  const rules = renderReviewerRules(currentPath);
+  const currentStat = lstatOrNull(currentPath);
+  if (currentStat && !currentStat.isSymbolicLink()) {
+    throw new Error('reviewer runtime current entry is not a symlink');
+  }
+  const active = currentStat ? realpathSync(currentPath) : null;
+  const existingRules = existsSync(rulesPath) ? readFileSync(rulesPath, 'utf8') : null;
+  if (dryRun) {
+    return {
+      release: manifest.release,
+      currentPath,
+      rulesPath,
+      changed: active !== releasePath || existingRules !== rules,
+      dryRun: true,
+    };
+  }
+
+  mkdirSync(releasesPath, { recursive: true, mode: 0o700 });
+  const releasesStat = lstatSync(releasesPath);
+  if (!releasesStat.isDirectory() || releasesStat.isSymbolicLink()) {
+    throw new Error('reviewer runtime releases entry is not a directory');
+  }
+  if (!existsSync(releasePath)) {
+    const staged = join(releasesPath, `.${manifest.release}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      mkdirSync(staged, { mode: 0o700 });
+      for (const name of REVIEWER_RUNTIME_FILES) {
+        const bytes = Buffer.isBuffer(files[name]) ? files[name] : Buffer.from(files[name]);
+        writeFileSync(join(staged, name), bytes, { mode: 0o400, flag: 'wx' });
+      }
+      writeFileSync(join(staged, 'manifest.json'), `${JSON.stringify(manifest)}\n`, {
+        mode: 0o400,
+        flag: 'wx',
+      });
+      validateRuntimeRelease(staged, manifest);
+      chmodSync(staged, 0o500);
+      renameSync(staged, releasePath);
+    } catch (error) {
+      rmSync(staged, { recursive: true, force: true });
+      throw error;
+    }
+  } else validateRuntimeRelease(releasePath, manifest);
+
+  if (active !== releasePath) {
+    const stagedLink = join(runtimeRoot, `.current.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      symlinkSync(join('releases', manifest.release), stagedLink);
+      beforeActivate?.();
+      renameSync(stagedLink, currentPath);
+    } catch (error) {
+      rmSync(stagedLink, { force: true });
+      throw error;
+    }
+  }
+  validateRuntimeRelease(realpathSync(currentPath), manifest);
+  if (existingRules !== rules) writeAtomic(rulesPath, rules, null, 0o600);
+  chmodSync(rulesPath, 0o600);
+  verifyReviewerRuntime({ home, root, files, xdgDataHome });
+  return {
+    release: manifest.release,
+    currentPath,
+    rulesPath,
+    changed: active !== releasePath || existingRules !== rules,
+    dryRun: false,
+  };
+}
+
+export function parseAgentToken(stdout) {
+  let envelope;
+  try {
+    envelope = JSON.parse(stdout);
+  } catch {
+    throw new Error('Proton agent command returned an unrecognized token envelope');
+  }
+  const prefix = 'PROTON_PASS_PERSONAL_ACCESS_TOKEN=';
+  const matches = [];
+  const visit = (value) => {
+    if (typeof value === 'string') {
+      if (value.startsWith(prefix)) matches.push(value.slice(prefix.length));
+      else if (/^pst_[^\s]{32,}$/u.test(value)) matches.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const child of Object.values(value)) visit(child);
+    }
+  };
+  visit(envelope);
+  const tokens = [...new Set(matches)];
+  if (tokens.length !== 1) {
+    throw new Error('Proton agent command returned an unrecognized token envelope');
+  }
+  const value = tokens[0];
+  if (!/^pst_[^\s]{32,}$/u.test(value)) {
+    throw new Error('Proton agent command returned an invalid token value');
+  }
+  return value;
+}
+
+function runPassCli(passCli, args) {
+  const result = spawnSync(passCli, args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      PROTON_PASS_AGENT_REASON: 'Configure Discord Ferry reviewer access',
+    },
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(`pass-cli command failed: ${args.slice(0, 2).join(' ')}`);
+  }
+  return result.stdout;
+}
+
+function parseValueFreeList(stdout, label, envelopeKey) {
+  try {
+    const value = JSON.parse(stdout);
+    if (Array.isArray(value)) return value;
+    if (value && Array.isArray(value[envelopeKey])) return value[envelopeKey];
+    throw new Error('not a supported list');
+  } catch {
+    throw new Error(`pass-cli ${label} returned an invalid JSON list`);
+  }
+}
+
+export async function provisionReviewerAgent({ home, passCli }) {
+  if (!home || !passCli) throw new Error('reviewer agent setup requires home and pass-cli');
+  const help = runPassCli(passCli, ['agent', 'create', '--help']);
+  if (!/\bNAME\b/u.test(help) || !help.includes('--expiration') ||
+      !/\b3m\b/u.test(help) || !help.includes('--vault')) {
+    throw new Error('installed pass-cli does not support the required scoped agent command');
+  }
+
+  const vaults = parseValueFreeList(
+    runPassCli(passCli, ['vault', 'list', '--output', 'json']),
+    'vault list',
+    'vaults',
+  );
+  if (vaults.filter((vault) => vault?.name === REVIEWER_VAULT).length !== 1) {
+    throw new Error('pass-cli must expose exactly one PortalPilot vault');
+  }
+
+  const agents = parseValueFreeList(
+    runPassCli(passCli, ['agent', 'list', '--output', 'json']),
+    'agent list',
+    'agents',
+  );
+  const matchingAgents = agents.filter((agent) => agent?.name === REVIEWER_AGENT);
+  if (matchingAgents.length > 1) {
+    throw new Error('multiple discord-ferry-reviewers agents exist; remove duplicates before setup');
+  }
+  const agentExists = matchingAgents.length === 1;
+  const tokenPath = join(home, '.config', 'discord-ferry', 'reviewer-agent.pat');
+  const tokenExists = existsSync(tokenPath);
+  const expireTime = Number(matchingAgents[0]?.expire_time);
+  const agentExpired = agentExists && Number.isFinite(expireTime)
+    && expireTime <= Math.floor(Date.now() / 1000);
+
+  if (agentExists && tokenExists && !agentExpired) return { created: false, renewed: false };
+  if (agentExists !== tokenExists) {
+    throw new Error(
+      'reviewer agent state is incomplete; run: pass-cli agent renew --expiration 3m ' +
+      '--output json discord-ferry-reviewers',
+    );
+  }
+
+  if (agentExpired) {
+    const renewed = runPassCli(passCli, [
+      'agent', 'renew', '--expiration', '3m', '--output', 'json', REVIEWER_AGENT,
+    ]);
+    const token = parseAgentToken(renewed);
+    writeAtomic(tokenPath, token, null);
+    return { created: false, renewed: true };
+  }
+
+  const created = runPassCli(passCli, [
+    'agent', 'create', REVIEWER_AGENT, '--expiration', '3m', '--vault', REVIEWER_VAULT,
+  ]);
+  const token = parseAgentToken(created);
+  writeAtomic(tokenPath, token, null);
+  return { created: true, renewed: false };
+}
+
+function resolveInstalledPassCli(home) {
+  const installed = join(home, '.local', 'bin', 'pass-cli');
+  if (!existsSync(installed)) {
+    throw new Error('pass-cli is not installed at ~/.local/bin/pass-cli');
+  }
+  return realpathSync(installed);
+}
+
+export async function runBootstrap({
+  home,
+  root,
+  dryRun = false,
+  proton = async () => {},
+  beforeRename = null,
+  canonicalRoot = null,
+  runtime = installReviewerRuntime,
+}) {
+  if (!home || !root) throw new Error('bootstrap requires home and root');
+  const ownedRoot = resolve(canonicalRoot ?? canonicalCheckoutRoot(root));
+  const configPath = join(home, '.codex', 'config.toml');
+  const source = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+  const semantic = inspectProjectTrustToml(source, ownedRoot);
+  const reconciled = reconcileProjectTrust(source, ownedRoot, semantic);
+
+  if (!dryRun && reconciled !== source) {
+    inspectProjectTrustToml(reconciled, ownedRoot);
+    writeAtomic(configPath, reconciled, beforeRename);
+    inspectProjectTrustToml(readFileSync(configPath, 'utf8'), ownedRoot);
+  }
+  const runtimeReport = await runtime({ home, root: resolve(root), dryRun });
+  if (!dryRun) await proton({ home, root, canonicalRoot: ownedRoot });
+  return { changed: reconciled !== source, canonicalRoot: ownedRoot, runtime: runtimeReport };
+}
+
+function selfTest() {
+  const root = '/tmp/ferry-bootstrap-self-test';
+  const source = 'model = "personal"\n';
+  const first = reconcileProjectTrust(source, root, { valid: true, hasProject: false });
+  const second = reconcileProjectTrust(first, root, { valid: true, hasProject: true });
+  if (first !== second || !first.includes(`[projects.${JSON.stringify(root)}]`)) {
+    throw new Error('project trust reconciliation is not stable');
+  }
+  process.stdout.write('codex-bootstrap self-test: all checks passed\n');
+}
+
+function option(args, name) {
+  const index = args.indexOf(name);
+  return index === -1 ? null : args[index + 1];
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes('--self-test')) {
+    selfTest();
+    return;
+  }
+  const known = new Set(['--home', '--root', '--dry-run', '--json']);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (!known.has(argument)) throw new Error(`unknown argument: ${argument}`);
+    if (argument === '--home' || argument === '--root') index += 1;
+  }
+  const home = option(args, '--home') ?? process.env.HOME;
+  const root = option(args, '--root') ?? process.cwd();
+  const report = await runBootstrap({
+    home,
+    root,
+    dryRun: args.includes('--dry-run'),
+    proton: ({ home: bootstrapHome }) => provisionReviewerAgent({
+      home: bootstrapHome,
+      passCli: resolveInstalledPassCli(bootstrapHome),
+    }),
+  });
+  if (args.includes('--json')) process.stdout.write(`${JSON.stringify(report)}\n`);
+  else process.stdout.write(`Codex trust ready for ${report.canonicalRoot}\n`);
+}
+
+let invokedAsMain = false;
+if (process.argv[1]) {
+  try {
+    invokedAsMain = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch { /* an invalid entrypoint cannot be the current module */ }
+}
+
+if (invokedAsMain) {
+  main().catch((error) => {
+    process.stderr.write(`codex-bootstrap: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}
