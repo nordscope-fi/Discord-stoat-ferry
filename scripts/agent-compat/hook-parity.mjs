@@ -31,19 +31,24 @@ const QWEN_TOOL_MAP = Object.freeze({
 
 // --- Entry factories ------------------------------------------------------------
 
-function projectCommand(id, event, matcher, commandId, disposition, codexTools, route, control) {
+function projectCommand(
+  id, event, matcher, commandId, disposition, codexTools, route, control, nativeHosts = [],
+) {
   return Object.freeze({
     id, source: 'project', event, matcher, handlerType: 'command', commandId,
     sha256: null, disposition, codexTools: Object.freeze(codexTools),
-    route, control: control ?? null, evidence: null,
+    route, control: control ?? null, evidence: null, nativeHosts: Object.freeze(nativeHosts),
   });
 }
 
-function userCommand(id, event, matcher, commandId, sha256Hash, disposition, codexTools, route, control) {
+function userCommand(
+  id, event, matcher, commandId, sha256Hash, disposition, codexTools, route, control,
+  nativeHosts = [],
+) {
   return Object.freeze({
     id, source: 'user', event, matcher, handlerType: 'command', commandId,
     sha256: sha256Hash, disposition, codexTools: Object.freeze(codexTools),
-    route, control: control ?? null, evidence: null,
+    route, control: control ?? null, evidence: null, nativeHosts: Object.freeze(nativeHosts),
   });
 }
 
@@ -108,12 +113,12 @@ const RAW_ENTRIES = [
   // Project hooks (from .claude/settings.json)
   projectCommand('project.plain-english-docs', 'PreToolUse', 'Write|Edit|MultiEdit',
     'plain-english-docs.sh', 'compensated', ['apply_patch', 'Edit', 'Write'], 'docs',
-    'writing style guard for markdown edits'),
+    'writing style guard for markdown edits', ['codex', 'vibe']),
   projectPrompt('project.plain-english-docs-prompt', 'PreToolUse', 'Write|Edit|MultiEdit',
     'LLM judge for writing style on markdown'),
   projectCommand('project.plain-english-github', 'PreToolUse', 'Bash',
     'plain-english-github.sh', 'compensated', ['Bash'], 'github-docs',
-    'writing style guard for git/gh commands'),
+    'writing style guard for git/gh commands', ['codex', 'vibe']),
   projectPrompt('project.plain-english-github-prompt', 'PreToolUse', 'Bash',
     'LLM judge for writing style on git/gh'),
   projectCommand('project.plain-english-chat-stop', 'Stop', null,
@@ -146,11 +151,13 @@ const RAW_ENTRIES = [
   userCommand('user.branch', 'PreToolUse', 'Bash',
     'branch-guard.sh', null, 'ported', ['Bash'], 'branch', null),
   userCommand('user.docs-command', 'PreToolUse', 'Write|Edit|MultiEdit',
-    'docs-plain-english-guard.sh', null, 'ported', ['apply_patch', 'Edit', 'Write'], 'docs', null),
+    'docs-plain-english-guard.sh', null, 'ported', ['apply_patch', 'Edit', 'Write'], 'docs', null,
+    ['codex', 'vibe']),
   userPrompt('user.docs-prompt', 'PreToolUse', 'Write|Edit|MultiEdit',
     'LLM judge for docs plain english'),
   userCommand('user.github-command', 'PreToolUse', 'Bash',
-    'github-plain-english-guard.sh', null, 'ported', ['Bash'], 'github-docs', null),
+    'github-plain-english-guard.sh', null, 'ported', ['Bash'], 'github-docs', null,
+    ['codex', 'vibe']),
   userPrompt('user.github-prompt', 'PreToolUse', 'Bash',
     'LLM judge for github plain english'),
   userCommand('user.unfinished', 'Stop', null,
@@ -166,12 +173,13 @@ export const HOOK_PARITY = Object.freeze(RAW_ENTRIES.map(e => Object.freeze(deri
 
 // --- Query helpers --------------------------------------------------------------
 
-export function routesFor(event, toolName, entries = HOOK_PARITY) {
+export function routesFor(event, toolName, host, entries = HOOK_PARITY) {
   const routes = new Set();
   for (const e of entries) {
     if (e.event !== event) continue;
     if (e.disposition !== 'ported' && e.disposition !== 'compensated') continue;
     if (!e.route) continue;
+    if (e.nativeHosts?.includes(host)) continue;
     if (e.codexTools.length > 0 && !e.codexTools.includes(toolName)) continue;
     routes.add(e.route);
   }
@@ -256,6 +264,9 @@ export function validateHookParity(entries = HOOK_PARITY) {
     }
     if (!['ported', 'compensated', 'unsupported'].includes(e.qwenDisposition)) {
       issues.push(`${e.id}: invalid qwenDisposition "${e.qwenDisposition}"`);
+    }
+    if (e.nativeHosts && !e.nativeHosts.every(host => ['codex', 'vibe'].includes(host))) {
+      issues.push(`${e.id}: invalid native host`);
     }
     if (e.disposition === 'ported' && !e.route && e.codexTools.length > 0) {
       issues.push(`${e.id}: ported with codexTools but no route`);

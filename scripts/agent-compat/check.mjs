@@ -6,26 +6,66 @@
 //   --ci: check only tracked templates and hook parity structure (no gitignored files, CI-safe)
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { auditHookParity, HOOK_PARITY, validateHookParity } from './hook-parity.mjs';
+import { pathToFileURL } from 'node:url';
+import {
+  auditHookParity,
+  codexPostToolMatcher,
+  HOOK_PARITY,
+  validateHookParity,
+} from './hook-parity.mjs';
+import {
+  canonicalCheckoutRoot,
+  DIRECT_CHAT_COMMAND,
+  removeUnusedIssueChannel,
+  transformCodexChatHooks,
+} from './plain-english-chat-hook.mjs';
 import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan } from './skill-topology.mjs';
 
-const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
-const templateDir = join(projectRoot, 'config', 'agent-compat');
+const sourceRoot = resolve(execFileSync(
+  'git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' },
+).trim());
+const projectRoot = canonicalCheckoutRoot(sourceRoot);
+const templateDir = join(sourceRoot, 'config', 'agent-compat');
 const home = process.env.HOME;
 
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
 const generatedOnly = args.includes('--generated-only');
 const ci = args.includes('--ci');
+const focusedIndex = args.indexOf('--check-codex-hooks');
+const focusedHookArgument = focusedIndex === -1 ? null : args[focusedIndex + 1];
+const focusedHookPath = focusedHookArgument?.startsWith('--') ? null : focusedHookArgument;
+const worktreeIndex = args.indexOf('--check-worktree-contract');
+const worktreeScriptPath = worktreeIndex === -1 ? null : args[worktreeIndex + 1];
+const worktreeIncludePath = worktreeIndex === -1 ? null : args[worktreeIndex + 2];
 
 const failures = [];
 const warnings = [];
 
 function fail(msg) { failures.push(msg); }
 function warn(msg) { warnings.push(msg); }
+
+if (focusedIndex !== -1 && !focusedHookPath) {
+  fail('--check-codex-hooks requires a path');
+}
+if (worktreeIndex !== -1 && (!worktreeScriptPath || !worktreeIncludePath)) {
+  fail('--check-worktree-contract requires a script and include path');
+}
 
 function render(templateName, replacements = {}) {
   let content = readFileSync(join(templateDir, templateName), 'utf8');
@@ -98,6 +138,82 @@ function plainEnglishUpToDate(agent) {
   }
 }
 
+export function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function assertTwoChatWrappers(document) {
+  const all = ['Stop', 'SubagentStop'].flatMap((event) =>
+    (document.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? []));
+  const wrappers = all.filter((hook) => hook.command?.includes('plain-english-chat-hook.mjs'));
+  const direct = all.filter((hook) => hook.command === DIRECT_CHAT_COMMAND);
+  if (wrappers.length !== 2 || wrappers.some((hook) => hook.timeout !== 60) || direct.length) {
+    fail('expected exactly two 60-second Ferry chat wrappers and no direct chat hook');
+  }
+}
+
+export function checkCodexHooks(actualPath) {
+  const stage = mkdtempSync(join(tmpdir(), 'ferry-codex-hooks-'));
+  try {
+    mkdirSync(join(stage, '.codex'), { recursive: true });
+    writeFileSync(join(stage, 'AGENTS.md'), readFileSync(join(projectRoot, 'AGENTS.md')));
+    writeFileSync(
+      join(stage, '.codex', 'hooks.json'),
+      render('codex-hooks.json', { '__POST_TOOL_MATCHER__': codexPostToolMatcher() }),
+    );
+    try {
+      execFileSync('plain-english', ['init', '--agent', 'codex', '--root', stage], {
+        stdio: 'pipe',
+      });
+    } catch (err) {
+      fail(`plain-English prerequisite failed during staged Codex hook generation: ${err.message}`);
+      return;
+    }
+    const expected = JSON.parse(readFileSync(join(stage, '.codex', 'hooks.json'), 'utf8'));
+    removeUnusedIssueChannel(expected);
+    try {
+      transformCodexChatHooks(expected, canonicalCheckoutRoot(projectRoot));
+    } catch (err) {
+      fail(`Codex chat-hook transform failed: ${err.message}`);
+      return;
+    }
+    const actual = JSON.parse(readFileSync(actualPath, 'utf8'));
+    assertTwoChatWrappers(actual);
+    if (canonicalJson(actual) !== canonicalJson(expected)) {
+      fail('Codex hooks differ from staged plain-English plus Ferry transformation');
+    }
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+export function checkWorktreeContract(scriptPath, includePath) {
+  let script;
+  let entries;
+  try {
+    script = readFileSync(scriptPath, 'utf8');
+    entries = new Set(readFileSync(includePath, 'utf8').split(/\r?\n/u).filter(Boolean));
+  } catch (err) {
+    fail(`worktree contract could not be read: ${err.message}`);
+    return;
+  }
+  const copiedHosts = ['.agents/**', '.codex/**', '.vibe/**', '.qwen/**']
+    .filter((entry) => entries.has(entry));
+  const required = [
+    'for host_dir in .agents .codex .vibe .qwen; do',
+    'ln -s "../../$host_dir" "$WT/$host_dir"',
+    'for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents .codex .vibe .qwen; do',
+  ];
+  if (copiedHosts.length > 0 || required.some((line) => !script.includes(line))) {
+    fail('worktree contract must use four canonical host links and copy none of their state');
+  }
+}
+
 // --- Check: Instructions --------------------------------------------------------
 
 function checkInstructions() {
@@ -133,7 +249,7 @@ function checkCodexState() {
 
   fileMatches(join(codexDir, 'config.toml'), render('codex-config.toml'));
   ferryBlocksPresent(join(codexDir, 'hooks.json'), 'codex-hook-adapter.mjs');
-  plainEnglishUpToDate('codex');
+  checkCodexHooks(join(codexDir, 'hooks.json'));
 
   const expectedRoles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
   const agentsDir = join(codexDir, 'agents');
@@ -195,7 +311,7 @@ function checkQwenState() {
     expected = buildQwenSettings({
       projectRoot: canonicalRoot,
       home,
-      templateDir: join(canonicalRoot, 'config', 'agent-compat'),
+      templateDir,
     });
   } catch (err) {
     fail(`qwen template failed to render: ${err.message}`);
@@ -217,8 +333,22 @@ function checkQwenState() {
     return;
   }
   delete actual.$version;
-  if (JSON.stringify(actual, null, 2) !== JSON.stringify(expected, null, 2)) {
-    fail('drift: .qwen/settings.json does not match the template plus merged prompt hooks. Re-run ./scripts/agent-install.sh');
+  const actualCanonical = canonicalJson(actual);
+  const expectedCanonical = canonicalJson(expected);
+  if (actualCanonical !== expectedCanonical) {
+    const limit = Math.min(actualCanonical.length, expectedCanonical.length);
+    let firstDifference = limit;
+    for (let index = 0; index < limit; index += 1) {
+      if (actualCanonical[index] !== expectedCanonical[index]) {
+        firstDifference = index;
+        break;
+      }
+    }
+    fail(
+      'drift: .qwen/settings.json does not match the template plus merged prompt hooks ' +
+      `(first difference ${firstDifference}; lengths ${actualCanonical.length}/` +
+      `${expectedCanonical.length}). Re-run ./scripts/agent-install.sh`,
+    );
   }
 }
 
@@ -318,14 +448,14 @@ function checkHookParity() {
 
 function checkConfigSafety() {
   const generatedFiles = [
-    join(projectRoot, '.codex', 'config.toml'),
-    join(projectRoot, '.codex', 'hooks.json'),
-    join(projectRoot, '.vibe', 'hooks.toml'),
-    join(projectRoot, '.vibe', 'config.toml'),
-    join(projectRoot, '.qwen', 'settings.json'),
+    { host: 'codex', path: join(projectRoot, '.codex', 'config.toml') },
+    { host: 'codex', path: join(projectRoot, '.codex', 'hooks.json') },
+    { host: 'vibe', path: join(projectRoot, '.vibe', 'hooks.toml') },
+    { host: 'vibe', path: join(projectRoot, '.vibe', 'config.toml') },
+    { host: 'qwen', path: join(projectRoot, '.qwen', 'settings.json') },
   ];
 
-  for (const filePath of generatedFiles) {
+  for (const { path: filePath } of generatedFiles) {
     if (!existsSync(filePath)) continue;
     const content = readFileSync(filePath, 'utf8');
     if (content.includes('__PROJECT_ROOT__') || content.includes('__HOME__') ||
@@ -333,6 +463,31 @@ function checkConfigSafety() {
       fail(`unresolved placeholder in ${filePath}`);
     }
   }
+  const violations = generatedHostSecretViolations(generatedFiles
+    .filter(({ path }) => existsSync(path))
+    .map(({ host, path }) => ({ host, content: readFileSync(path, 'utf8') })));
+  for (const host of violations) {
+    fail(`generated ${host} state contains an inline credential. Run ./scripts/agent-install.sh`);
+  }
+}
+
+const SECRET_SHAPE = /(?:sk-[A-Za-z0-9_-]{16,}|pst_[A-Za-z0-9_-]{32,}|AKIA[A-Z0-9]{16})/u;
+
+export function generatedHostSecretViolations(files) {
+  const violations = new Set();
+  for (const { host, content } of files) {
+    if (!['codex', 'vibe', 'qwen'].includes(host) || typeof content !== 'string') continue;
+    if (SECRET_SHAPE.test(content)) violations.add(host);
+    if (host === 'qwen') {
+      try {
+        const settings = JSON.parse(content);
+        if (Object.hasOwn(settings, 'env')) violations.add(host);
+      } catch {
+        // The Qwen state validator reports malformed JSON separately.
+      }
+    }
+  }
+  return [...violations].sort();
 }
 
 // --- Check: Templates (CI mode) -------------------------------------------------
@@ -390,35 +545,58 @@ function checkTemplates() {
 
 // --- Main -----------------------------------------------------------------------
 
-if (ci) {
-  checkTemplates();
-} else {
-  if (!generatedOnly) {
-    checkInstructions();
+function main() {
+  if (worktreeIndex !== -1) {
+    if (worktreeScriptPath && worktreeIncludePath) {
+      checkWorktreeContract(resolve(worktreeScriptPath), resolve(worktreeIncludePath));
+    }
+  } else if (focusedIndex !== -1) {
+    if (focusedHookPath) checkCodexHooks(resolve(focusedHookPath));
+  } else if (ci) {
+    checkTemplates();
+  } else {
+    if (!generatedOnly) {
+      checkInstructions();
+    }
+
+    checkCodexState();
+    checkVibeState();
+    checkQwenState();
+    checkSkills();
+    const snapshotRoot = canonicalCheckoutRoot(projectRoot);
+    checkWorktreeContract(
+      join(snapshotRoot, '.claude', 'scripts', 'new-worktree.sh'),
+      join(snapshotRoot, '.worktreeinclude'),
+    );
+
+    if (!generatedOnly) {
+      checkHookParity();
+    }
+
+    checkConfigSafety();
   }
 
-  checkCodexState();
-  checkVibeState();
-  checkQwenState();
-  checkSkills();
-
-  if (!generatedOnly) {
-    checkHookParity();
+  if (warnings.length > 0) {
+    console.log(`\nWarnings (${warnings.length}):`);
+    for (const w of warnings) console.log(`  ⚠ ${w}`);
   }
 
-  checkConfigSafety();
+  if (failures.length > 0) {
+    console.log(`\nFailures (${failures.length}):`);
+    for (const f of failures) console.log(`  ✗ ${f}`);
+    process.exit(1);
+  } else {
+    console.log(`\n✓ All checks passed${warnings.length > 0 ? ` (${warnings.length} warnings)` : ''}`);
+  }
 }
 
-// Report
-if (warnings.length > 0) {
-  console.log(`\nWarnings (${warnings.length}):`);
-  for (const w of warnings) console.log(`  ⚠ ${w}`);
+let invokedAsMain = false;
+if (process.argv[1]) {
+  try {
+    invokedAsMain = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch { /* an invalid entrypoint cannot be the current module */ }
 }
 
-if (failures.length > 0) {
-  console.log(`\nFailures (${failures.length}):`);
-  for (const f of failures) console.log(`  ✗ ${f}`);
-  process.exit(1);
-} else {
-  console.log(`\n✓ All checks passed${warnings.length > 0 ? ` (${warnings.length} warnings)` : ''}`);
+if (invokedAsMain) {
+  main();
 }

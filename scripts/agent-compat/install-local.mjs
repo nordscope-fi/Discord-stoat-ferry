@@ -8,11 +8,19 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { codexPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
+import {
+  canonicalCheckoutRoot,
+  removeUnusedIssueChannel,
+  transformCodexChatHooks,
+} from './plain-english-chat-hook.mjs';
 import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan, applySkillPlan } from './skill-topology.mjs';
 
-const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
-const templateDir = join(projectRoot, 'config', 'agent-compat');
+const sourceRoot = resolve(execFileSync(
+  'git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' },
+).trim());
+const projectRoot = canonicalCheckoutRoot(sourceRoot);
+const templateDir = join(sourceRoot, 'config', 'agent-compat');
 const home = process.env.HOME;
 
 // --- Helpers --------------------------------------------------------------------
@@ -47,6 +55,10 @@ function plainEnglishAvailable() {
   return result.status === 0;
 }
 
+function hostDirIsLinked(path) {
+  return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
+}
+
 function runPlainEnglishInit(agent) {
   try {
     execFileSync('plain-english', ['init', `--agent`, agent, '--root', projectRoot], {
@@ -55,23 +67,14 @@ function runPlainEnglishInit(agent) {
     });
     console.log(`  plain-english init --agent ${agent}: merged lint hooks`);
   } catch (err) {
-    console.error(`  plain-english init --agent ${agent} failed: ${err.message}`);
-    console.error('  Run `npm install -g plain-english` and re-run ./scripts/agent-install.sh');
+    throw new Error(
+      `plain-english init --agent ${agent} failed; install it and re-run ` +
+      `./scripts/agent-install.sh (${err.message})`,
+    );
   }
 }
 
-function stripIssueChannel() {
-  const codexPath = join(projectRoot, '.codex', 'hooks.json');
-  if (existsSync(codexPath)) {
-    const raw = JSON.parse(readFileSync(codexPath, 'utf8'));
-    if (raw.hooks?.PreToolUse) {
-      raw.hooks.PreToolUse = raw.hooks.PreToolUse.filter(
-        group => !group.matcher?.includes('mcp__linear__')
-      );
-      writeFileSync(codexPath, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
-    }
-  }
-
+function stripVibeIssueChannel() {
   const vibePath = join(projectRoot, '.vibe', 'hooks.toml');
   if (existsSync(vibePath)) {
     const content = readFileSync(vibePath, 'utf8');
@@ -88,6 +91,7 @@ function stripIssueChannel() {
 async function main() {
   console.log(`Discord Ferry agent-compat installer`);
   console.log(`Project root: ${projectRoot}\n`);
+  if (sourceRoot !== projectRoot) console.log(`Templates: ${sourceRoot}\n`);
 
   // 1. Validate templates exist
   const requiredTemplates = [
@@ -109,48 +113,69 @@ async function main() {
     for (const e of skillPlan.errors) console.error(`  ${e}`);
     process.exit(1);
   }
+  const agentsDir = join(projectRoot, '.agents');
+  const agentsLinked = hostDirIsLinked(agentsDir);
 
   // 3. Generate .codex/
   console.log('Generating .codex/ ...');
   const codexDir = join(projectRoot, '.codex');
-  const codexAgentsDir = join(codexDir, 'agents');
-  mkdirSync(codexAgentsDir, { recursive: true });
+  const codexLinked = hostDirIsLinked(codexDir);
+  if (codexLinked) {
+    console.log('  .codex/ is linked to another checkout; skipped (the canonical root owns it)');
+  } else {
+    const codexAgentsDir = join(codexDir, 'agents');
+    const codexBinDir = join(codexDir, 'bin');
+    mkdirSync(codexAgentsDir, { recursive: true });
+    mkdirSync(codexBinDir, { recursive: true });
 
-  const postToolMatcher = codexPostToolMatcher();
-  writeFileSync(join(codexDir, 'config.toml'), render('codex-config.toml'), { mode: 0o600 });
-  writeFileSync(join(codexDir, 'hooks.json'), render('codex-hooks.json', {
-    '__POST_TOOL_MATCHER__': postToolMatcher,
-  }), { mode: 0o600 });
+    const postToolMatcher = codexPostToolMatcher();
+    writeFileSync(join(codexDir, 'config.toml'), render('codex-config.toml'), { mode: 0o600 });
+    writeFileSync(join(codexDir, 'hooks.json'), render('codex-hooks.json', {
+      '__POST_TOOL_MATCHER__': postToolMatcher,
+    }), { mode: 0o600 });
 
-  const roleFiles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
-  const agentTemplateDir = join(templateDir, 'agents');
-  for (const role of roleFiles) {
-    const templatePath = join(agentTemplateDir, role);
-    if (existsSync(templatePath)) {
-      writeFileSync(join(codexAgentsDir, role), readFileSync(templatePath), { mode: 0o600 });
+    const roleFiles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
+    const agentTemplateDir = join(templateDir, 'agents');
+    for (const role of roleFiles) {
+      const templatePath = join(agentTemplateDir, role);
+      if (existsSync(templatePath)) {
+        writeFileSync(join(codexAgentsDir, role), readFileSync(templatePath), { mode: 0o600 });
+      }
     }
+    reconcileDirectory(codexAgentsDir, roleFiles);
+    const chatWrapper = 'plain-english-chat-hook.mjs';
+    writeFileSync(
+      join(codexBinDir, chatWrapper),
+      readFileSync(join(sourceRoot, 'scripts', 'agent-compat', chatWrapper)),
+      { mode: 0o700 },
+    );
+    reconcileDirectory(codexBinDir, [chatWrapper]);
+    console.log('  config.toml, hooks.json, agents/*.toml, bin/plain-english-chat-hook.mjs');
   }
-  reconcileDirectory(codexAgentsDir, roleFiles);
-  console.log('  config.toml, hooks.json, agents/*.toml');
 
   // 4. Generate .vibe/
   console.log('Generating .vibe/ ...');
   const vibeDir = join(projectRoot, '.vibe');
-  mkdirSync(vibeDir, { recursive: true });
+  const vibeLinked = hostDirIsLinked(vibeDir);
+  if (vibeLinked) {
+    console.log('  .vibe/ is linked to another checkout; skipped (the canonical root owns it)');
+  } else {
+    mkdirSync(vibeDir, { recursive: true });
 
-  const vibePostMatcher = vibePostToolMatcher();
-  writeFileSync(join(vibeDir, 'hooks.toml'), render('vibe-hooks.toml', {
-    '__VIBE_POST_TOOL_MATCHER__': vibePostMatcher,
-  }), { mode: 0o600 });
-  // Vibe reads MCP servers from .vibe/config.toml, not a separate mcp.toml.
-  // Older installer runs wrote mcp.toml, which Vibe ignores; remove the stale file.
-  writeFileSync(join(vibeDir, 'config.toml'), render('vibe-mcp.toml'), { mode: 0o600 });
-  const legacyMcp = join(vibeDir, 'mcp.toml');
-  if (existsSync(legacyMcp)) {
-    unlinkSync(legacyMcp);
-    console.log('  removed legacy: mcp.toml');
+    const vibePostMatcher = vibePostToolMatcher();
+    writeFileSync(join(vibeDir, 'hooks.toml'), render('vibe-hooks.toml', {
+      '__VIBE_POST_TOOL_MATCHER__': vibePostMatcher,
+    }), { mode: 0o600 });
+    // Vibe reads MCP servers from .vibe/config.toml, not a separate mcp.toml.
+    // Older installer runs wrote mcp.toml, which Vibe ignores; remove the stale file.
+    writeFileSync(join(vibeDir, 'config.toml'), render('vibe-mcp.toml'), { mode: 0o600 });
+    const legacyMcp = join(vibeDir, 'mcp.toml');
+    if (existsSync(legacyMcp)) {
+      unlinkSync(legacyMcp);
+      console.log('  removed legacy: mcp.toml');
+    }
+    console.log('  hooks.toml, config.toml (mcp servers)');
   }
-  console.log('  hooks.toml, config.toml (mcp servers)');
 
   // 4a. Generate .qwen/
   // Qwen speaks the Claude hook envelope, so the template registers the guard
@@ -163,8 +188,8 @@ async function main() {
   // Worktrees link .qwen/ back to the checkout that owns it. Writing through
   // the link would embed this worktree's root in settings the canonical root
   // then fails to match, so the owner keeps generating and the link follows.
-  const qwenDirStat = lstatSync(qwenDir, { throwIfNoEntry: false });
-  if (qwenDirStat?.isSymbolicLink()) {
+  const qwenLinked = hostDirIsLinked(qwenDir);
+  if (qwenLinked) {
     console.log(`  .qwen/ is linked to another checkout; skipped (the canonical root owns it)`);
   } else {
     mkdirSync(qwenDir, { recursive: true });
@@ -183,6 +208,7 @@ async function main() {
     } else {
       console.log('  settings.json (no prompt hooks found in .claude/ to merge)');
     }
+    console.log('  Qwen review credentials are retrieved from Proton by qwen-review.mjs');
   }
 
   // 4b. Merge plain-english lint hooks into both hook files.
@@ -192,54 +218,38 @@ async function main() {
   // plain-english has no qwen agent profile, so its shims are registered by the
   // template and its judges arrive through the prompt merge above.
   console.log('Merging plain-english lint hooks ...');
-  if (plainEnglishAvailable()) {
-    if (!existsSync(join(projectRoot, 'AGENTS.md'))) {
-      // plain-english init creates a stub AGENTS.md when the file is missing,
-      // which would mask the real instruction contract. Refuse rather than
-      // generate a stub; the instruction layer comes from claude-setup.
-      console.log('  AGENTS.md missing: skipping plain-english merge so no stub is created.');
-      console.log('  Restore the instruction layer from claude-setup, then re-run.');
-    } else {
-      runPlainEnglishInit('codex');
-      runPlainEnglishInit('vibe');
-      stripIssueChannel();
-      console.log('  stripped issue channel (Linear MCP not used in this repo)');
-    }
-  } else {
-    console.log('  plain-english not found; skipping lint hook merge');
-    console.log('  Install it (npm install -g plain-english) and re-run to get lint hooks');
+  if (!plainEnglishAvailable()) {
+    throw new Error('plain-english is required; install it and re-run ./scripts/agent-install.sh');
   }
+  if (!existsSync(join(projectRoot, 'AGENTS.md'))) {
+    throw new Error('AGENTS.md is required before plain-english hooks can be generated');
+  }
+  if (!codexLinked) runPlainEnglishInit('codex');
+  if (!vibeLinked) runPlainEnglishInit('vibe');
+  if (!vibeLinked) stripVibeIssueChannel();
+  if (!codexLinked) {
+    const codexHooksPath = join(projectRoot, '.codex', 'hooks.json');
+    const codexHooks = JSON.parse(readFileSync(codexHooksPath, 'utf8'));
+    removeUnusedIssueChannel(codexHooks);
+    transformCodexChatHooks(codexHooks, canonicalCheckoutRoot(projectRoot));
+    writeFileSync(codexHooksPath, `${JSON.stringify(codexHooks, null, 2)}\n`, { mode: 0o600 });
+  }
+  console.log('  installed local Ferry chat wrappers and preserved linked host owners');
 
   // 5. Bridge skills
   console.log('Bridging skills ...');
-  const bridged = applySkillPlan(projectRoot, skillPlan);
   const totalSkills = skillPlan.records.filter(r => r.type === 'claude-owned').length;
-  console.log(`  ${totalSkills} skills, ${bridged} operations applied`);
+  if (agentsLinked) {
+    console.log('  .agents/ is linked to another checkout; skipped (the canonical root owns it)');
+  } else {
+    const bridged = applySkillPlan(projectRoot, skillPlan);
+    console.log(`  ${totalSkills} skills, ${bridged} operations applied`);
+  }
 
   // 6. Summary
   console.log('\nDone. Generated files are gitignored.\n');
-  console.log('Manual steps remaining:');
-  console.log('');
-  console.log('  Codex:');
-  console.log('    1. Add a trust entry in ~/.codex/config.toml:');
-  console.log(`       [projects."${projectRoot}"]`);
-  console.log('       trust_level = "trusted"');
-  console.log('    2. Enable multi-agent (for role files):');
-  console.log('       [features]');
-  console.log('       multi_agent = true');
-  console.log('    3. Restart Codex CLI');
-  console.log('');
-  console.log('  Vibe:');
-  console.log('    1. Set MISTRAL_API_KEY (env var or ~/.vibe/config.toml)');
-  console.log('    2. Set the active model in ~/.vibe/config.toml (active_model = "<model>")');
-  console.log('    3. Restart Vibe CLI');
-  console.log('');
-  console.log('  Qwen:');
-  console.log('    1. Add MISTRAL_API_KEY to the env block of ~/.qwen/settings.json');
-  console.log('       so the second-opinion MCP registers get_mistral_opinion');
-  console.log('    2. Restart Qwen Code');
-  console.log('');
-  console.log('  Verify: ./scripts/agent-check.sh');
+  console.log('Machine-wide trust and reviewer access are managed by scripts/codex-setup.sh.');
+  console.log('Run scripts/codex-setup.sh --live when paid runtime probes are required.');
 }
 
 main().catch(err => {

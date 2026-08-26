@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Codex setup is repeat-safe and self-checking.** One command now installs scoped trust,
+  reviewer access, command rules, linked-worktree state and static readiness checks. Paid live
+  checks remain explicit. An expired reviewer credential is renewed on the next setup run.
+
+- **Code review uses fixed Vibe and Qwen providers.** Gates dispatch `zai-glm-5-2` and
+  `qwen3.8-max`, validate their result schema, and verify accepted findings. Provider outages are
+  advisory, while confirmed Critical findings block.
+
+- **Plans receive a fresh Qwen review before approval.** Each revision starts a new
+  `qwen3.8-max` session, and the approval record is tied to the exact plan input. Opus 5 remains
+  available only as an explicit medium-effort review.
+
 - **Qwen Code becomes the fourth parity host.** The agent-compat generator now renders
   `.qwen/settings.json` from `config/agent-compat/qwen-settings.json`: the Ferry guard hooks
   registered directly (Qwen speaks the Claude hook envelope), the qmd, serena and context7 MCP
@@ -43,6 +55,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   snippet semantics changed.
 
 ### Fixed
+
+- **Codex chat hooks now have a 60-second outer budget.** The plain-English judge can finish its
+  normal check, while generated-state checks still detect hook drift.
+
+- **Generated Qwen settings contain no hosted key.** Model entries name an environment variable,
+  and reviewer credentials come from Proton Pass at call time. Generated host files reject inline
+  credential shapes.
+
+- **Review verification stays within the checkout.** Read-only finding commands now resolve real
+  file targets and reject links that point outside the project.
 
 - **The drift verifier no longer demands the legacy `.vibe/mcp.toml`.** The installer renders
   Vibe's MCP servers into `.vibe/config.toml` and removes the old file, but `check.mjs` kept
