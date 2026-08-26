@@ -9,10 +9,10 @@ Every API that resolves ``ui.context.client`` (``ui.notify``, ``ui.navigate.to``
 That killed the one-click GUI export on every platform from v2.6.14 to v2.11.0,
 silently, because the exception went to a logger with no handler.
 
-These tests are deliberately fixture-free. NiceGUI's ``user`` fixture replaces
+These tests deliberately avoid NiceGUI's ``user`` fixture. It replaces
 ``ui.notify`` with ``UserNotify`` (which appends to a list) and ``ui.navigate``
 with ``UserNavigate`` (which reads ``Client.page_routes``); **neither touches
-``context.client``**, so the fixture cannot prove anything here. Using it would
+``context.client``**, so that fixture cannot prove anything here. Using it would
 reproduce the original sin of this bug: a test that passes without exercising
 what it claims to.
 """
@@ -24,6 +24,7 @@ import asyncio
 import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 from nicegui import context, core, ui
@@ -60,6 +61,12 @@ def script_mode_off() -> Iterator[None]:
         core.script_mode = previous
 
 
+@pytest.fixture
+def outbox_without_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep client slot behavior without starting an unrelated outbox job."""
+    monkeypatch.setattr("nicegui.client.Outbox", lambda _client: Mock())
+
+
 async def test_bare_background_task_cannot_resolve_the_client(
     script_mode_off: None,
 ) -> None:
@@ -89,6 +96,7 @@ async def test_bare_background_task_cannot_resolve_the_client(
 
 async def test_with_client_restores_the_slot_in_a_background_task(
     script_mode_off: None,
+    outbox_without_loop: None,
 ) -> None:
     """SC-123-8b: ``with client:`` is what makes the fix work.
 
@@ -111,6 +119,7 @@ async def test_with_client_restores_the_slot_in_a_background_task(
 
 async def test_slot_stack_is_pruned_when_the_task_is_cancelled(
     script_mode_off: None,
+    outbox_without_loop: None,
 ) -> None:
     """SC-123-8c: a cancelled task must not leave its stack behind.
 
