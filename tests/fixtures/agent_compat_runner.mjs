@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -43,11 +44,14 @@ import {
 import {
   evaluatePlanGate,
   makeReviewRecord,
+  planFindingDigest,
   reviewInputDigest,
   safeChildFailure,
 } from '../../scripts/agent-compat/review-contract.mjs';
 import {
+  claimPlanReviewAttempt,
   parseArgs as parseReviewArgs,
+  runBudgetedPlanReview,
   runEnsemble,
   runPlanReview,
 } from '../../scripts/agent-compat/review-ensemble.mjs';
@@ -1024,17 +1028,284 @@ switch (mode) {
     if (!decision.ready) process.exitCode = 1;
     break;
   }
+  case 'plan-budget': {
+    const tmpIndex = process.argv.indexOf('--tmp');
+    const tmp = tmpIndex === -1 ? null : process.argv[tmpIndex + 1];
+    if (!tmp) throw new Error('plan-budget requires --tmp');
+    const ledgerPath = join(tmp, 'plan-review-ledger.json');
+    const planId = 'docs/plans/fixture.md';
+    const inputSha256 = reviewInputDigest('fixture');
+    let qwenCalls = 0;
+    let opusCalls = 0;
+    const adapters = {
+      qwen: async () => {
+        qwenCalls += 1;
+        if (argument === 'failure-counts') {
+          const error = new Error('timeout');
+          error.code = 'ETIMEDOUT';
+          throw error;
+        }
+        return makeReviewRecord({
+          adapter: 'qwen-api',
+          slot: 'plan-qwen',
+          requestedModel: 'qwen3.8-max',
+          resolvedModel: 'qwen3.8-max',
+          sessionId: `qwen-${qwenCalls}`,
+          durationMs: 1,
+          status: 'valid',
+          result: { findings: [], summary: 'clean', confidence: 'high' },
+        });
+      },
+      opus: async () => {
+        opusCalls += 1;
+        return makeReviewRecord({
+          adapter: 'claude',
+          slot: 'plan-opus',
+          requestedModel: 'opus',
+          resolvedModel: 'claude-opus-5',
+          sessionId: `opus-${opusCalls}`,
+          durationMs: 1,
+          status: 'valid',
+          result: { findings: [], summary: 'clean', confidence: 'high' },
+        });
+      },
+    };
+    const run = (selectedProvider = 'qwen') => runBudgetedPlanReview({
+      request: { prompt: 'fixture' },
+      adapters,
+      inputSha256,
+      selectedProvider,
+      planId,
+      ledgerPath,
+      root: tmp,
+    });
+    const rounds = [];
+    let rejected = null;
+    if (argument === 'started-counts') {
+      rounds.push(claimPlanReviewAttempt({
+        inputSha256,
+        selectedProvider: 'qwen',
+        planId,
+        ledgerPath,
+        root: tmp,
+      }).round);
+    } else {
+      rounds.push((await run()).review_round);
+    }
+    try {
+      rounds.push((await run(argument === 'provider-lock' ? 'opus' : 'qwen')).review_round);
+    } catch (error) {
+      rejected = error.message;
+    }
+    if (argument !== 'provider-lock') {
+      try {
+        await run();
+      } catch (error) {
+        rejected = error.message;
+      }
+    }
+    writeJson({
+      rounds,
+      qwen_calls: qwenCalls,
+      opus_calls: opusCalls,
+      rejected,
+      ledger: JSON.parse(readFileSync(ledgerPath, 'utf8')),
+    });
+    break;
+  }
+  case 'plan-budget-safety': {
+    const tmpIndex = process.argv.indexOf('--tmp');
+    const tmp = tmpIndex === -1 ? null : process.argv[tmpIndex + 1];
+    if (!tmp) throw new Error('plan-budget-safety requires --tmp');
+    const checkout = join(tmp, 'checkout');
+    const outside = join(tmp, 'outside');
+    mkdirSync(checkout, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const planId = 'docs/plans/fixture.md';
+    const inputSha256 = reviewInputDigest('fixture');
+    if (argument === 'symlink-escape') {
+      symlinkSync(outside, join(checkout, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+      let rejected = null;
+      try {
+        claimPlanReviewAttempt({
+          inputSha256,
+          selectedProvider: 'qwen',
+          planId,
+          ledgerPath: 'linked/review.json',
+          root: checkout,
+        });
+      } catch (error) {
+        rejected = error.message;
+      }
+      writeJson({
+        rejected,
+        outside_ledger_exists: existsSync(join(outside, 'review.json')),
+      });
+      break;
+    }
+    let qwenCalls = 0;
+    const releases = [];
+    const adapters = {
+      qwen: async () => {
+        const call = ++qwenCalls;
+        await new Promise((resolveCall) => releases.push(resolveCall));
+        return makeReviewRecord({
+          adapter: 'qwen-api',
+          slot: 'plan-qwen',
+          requestedModel: 'qwen3.8-max',
+          resolvedModel: 'qwen3.8-max',
+          sessionId: `qwen-${call}`,
+          durationMs: 1,
+          status: 'valid',
+          result: { findings: [], summary: 'clean', confidence: 'high' },
+        });
+      },
+      opus: async () => null,
+    };
+    const options = {
+      request: { prompt: 'fixture' },
+      adapters,
+      inputSha256,
+      selectedProvider: 'qwen',
+      planId,
+      ledgerPath: join(checkout, 'review.json'),
+      root: checkout,
+    };
+    const first = runBudgetedPlanReview(options);
+    const second = runBudgetedPlanReview(options);
+    releases[1]();
+    await second;
+    releases[0]();
+    const outcomes = await Promise.allSettled([first, second]);
+    writeJson({
+      outcomes: outcomes.map((outcome) => outcome.status),
+      attempts: JSON.parse(readFileSync(options.ledgerPath, 'utf8')).attempts,
+    });
+    break;
+  }
+  case 'plan-budget-gate': {
+    const inputSha256 = reviewInputDigest('current plan');
+    const planId = 'docs/plans/fixture.md';
+    const finding = {
+      severity: 'important',
+      category: 'correctness',
+      file: 'docs/plans/fixture.md',
+      line: null,
+      description: 'The plan keeps the review loop open.',
+      suggestion: 'Cap the review count.',
+      verification: {
+        command: 'rg -n -- review docs/plans/fixture.md',
+        confirms_if: 'the unbounded instruction is present',
+        refutes_if: 'the instruction is absent',
+      },
+    };
+    const validRecord = makeReviewRecord({
+      adapter: 'qwen-api',
+      slot: 'plan-qwen',
+      requestedModel: 'qwen3.8-max',
+      resolvedModel: 'qwen3.8-max',
+      sessionId: 'qwen-round-2',
+      durationMs: 1,
+      status: 'valid',
+      result: { findings: [finding], summary: 'blocked', confidence: 'high' },
+    });
+    const failedRecord = {
+      ...makeReviewRecord({
+        adapter: 'qwen-api',
+        slot: 'plan-qwen',
+        requestedModel: 'qwen3.8-max',
+        sessionId: null,
+        durationMs: 4,
+        status: 'timed_out',
+      }),
+      failure_class: 'timeout',
+      failure_stage: 'total-timeout',
+      http_status: null,
+    };
+    const selectedRecord = argument === 'failure-advisory' ? failedRecord : validRecord;
+    const round = argument === 'failure-advisory' ? 1 : 2;
+    const route = {
+      policy: 'ferry-bounded-plan-v4',
+      plan_id: planId,
+      selected_provider: 'qwen',
+      review_round: round,
+      review_budget: 2,
+      budget_remaining: 2 - round,
+      attempts: [selectedRecord],
+      accepted: selectedRecord.status === 'valid' ? selectedRecord : null,
+      input_sha256: inputSha256,
+      automatic_opus_calls: 0,
+      owner_selected_opus_calls: 0,
+    };
+    const toLedgerAttempt = (record, attemptRound, digest) => ({
+      round: attemptRound,
+      input_sha256: digest,
+      status: record.status,
+      slot: record.slot,
+      requested_model: record.requested_model,
+      resolved_model: record.resolved_model,
+      session_id: record.session_id,
+      failure_class: record.failure_class ?? null,
+      record_sha256: createHash('sha256').update(JSON.stringify(record)).digest('hex'),
+    });
+    const ledger = {
+      policy: 'ferry-plan-review-budget-v1',
+      plan_id: planId,
+      selected_provider: 'qwen',
+      attempts: round === 1
+        ? [toLedgerAttempt(selectedRecord, 1, inputSha256)]
+        : [
+            toLedgerAttempt(validRecord, 1, 'b'.repeat(64)),
+            toLedgerAttempt(selectedRecord, 2, inputSha256),
+          ],
+    };
+    let ownerDecision = null;
+    if (argument === 'accepted-risk' || argument === 'stale-risk') {
+      ownerDecision = {
+        decision: 'accept_recorded_risk',
+        plan_id: planId,
+        input_sha256: argument === 'stale-risk' ? 'c'.repeat(64) : inputSha256,
+        review_round: 2,
+        finding_sha256: planFindingDigest([finding]),
+      };
+    }
+    if (argument === 'altered-route') {
+      route.accepted.findings[0].description = 'altered after the ledger was written';
+    }
+    const decision = evaluatePlanGate(
+      route,
+      selectedRecord.status === 'valid' ? ['CONFIRMED'] : [],
+      inputSha256,
+      { ledger, ownerDecision },
+    );
+    writeJson(decision);
+    break;
+  }
   case 'plan-args': {
+    const bounded = [
+      '--plan-id',
+      'docs/plans/fixture.md',
+      '--plan-ledger',
+      'docs/plans/.review/fixture-ledger.json',
+    ];
     const variants = {
-      default: ['--plan'],
-      opus: ['--plan', '--plan-provider', 'opus'],
-      invalid: ['--plan', '--plan-provider', 'other'],
+      default: ['--plan', ...bounded],
+      opus: ['--plan', '--plan-provider', 'opus', ...bounded],
+      invalid: ['--plan', '--plan-provider', 'other', ...bounded],
+      'missing-id': ['--plan', '--plan-ledger', 'docs/plans/.review/fixture-ledger.json'],
+      'missing-ledger': ['--plan', '--plan-id', 'docs/plans/fixture.md'],
       'without-plan-qwen': ['--plan-provider', 'qwen'],
       'without-plan-opus': ['--plan-provider', 'opus'],
     };
     try {
       const parsed = parseReviewArgs(variants[argument] ?? []);
-      writeJson({ ok: true, plan: parsed.plan, plan_provider: parsed.planProvider });
+      writeJson({
+        ok: true,
+        plan: parsed.plan,
+        plan_provider: parsed.planProvider,
+        plan_id: parsed.planId,
+        plan_ledger: parsed.planLedger,
+      });
     } catch (error) {
       writeJson({ ok: false, message: error.message });
       process.exitCode = 1;
