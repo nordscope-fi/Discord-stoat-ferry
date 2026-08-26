@@ -1,12 +1,24 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   buildReviewPrompt,
   classifyReviewFailure,
   makeReviewRecord,
   reviewInputDigest,
+  reviewRecordDigest,
   validateFindings,
 } from './review-contract.mjs';
 import { runClaudeReview } from './claude-review.mjs';
@@ -43,6 +55,151 @@ const PLAN_PROVIDERS = Object.freeze({
     call: 'opus',
   },
 });
+const PLAN_REVIEW_BUDGET = 2;
+const PLAN_LEDGER_POLICY = 'ferry-plan-review-budget-v1';
+const INPUT_DIGEST = /^[a-f0-9]{64}$/u;
+
+function pathStaysInside(root, target) {
+  const offset = relative(root, target);
+  return offset === '' || (!offset.startsWith('..') && !isAbsolute(offset));
+}
+
+function checkedPlanId(planId) {
+  if (typeof planId !== 'string' || !planId.trim() || /[\r\n]/u.test(planId)) {
+    throw new Error('plan review requires a plan identity');
+  }
+  const portable = planId.replaceAll('\\', '/');
+  if (portable.startsWith('/') || /^[A-Za-z]:/u.test(portable) ||
+      portable.split('/').includes('..')) {
+    throw new Error('plan identity must stay within the checkout');
+  }
+  return portable;
+}
+
+function checkedLedgerPath(root, ledgerPath) {
+  if (typeof ledgerPath !== 'string' || !ledgerPath.trim()) {
+    throw new Error('plan review requires a ledger path');
+  }
+  const checkout = realpathSync(root);
+  const target = resolve(checkout, ledgerPath);
+  if (!pathStaysInside(checkout, target)) {
+    throw new Error('plan review ledger must stay within the checkout');
+  }
+  let existing = existsSync(target) ? target : dirname(target);
+  while (!existsSync(existing)) existing = dirname(existing);
+  if (!pathStaysInside(checkout, realpathSync(existing))) {
+    throw new Error('plan review ledger must stay within the checkout');
+  }
+  return target;
+}
+
+function parsePlanLedger(source) {
+  let ledger;
+  try {
+    ledger = JSON.parse(source);
+  } catch {
+    throw new Error('invalid plan review ledger');
+  }
+  const attempts = ledger?.attempts;
+  const valid = ledger?.policy === PLAN_LEDGER_POLICY
+    && typeof ledger.plan_id === 'string'
+    && ['qwen', 'opus'].includes(ledger.selected_provider)
+    && Array.isArray(attempts)
+    && attempts.length <= PLAN_REVIEW_BUDGET
+    && attempts.every((attempt, index) =>
+      attempt?.round === index + 1
+        && INPUT_DIGEST.test(attempt.input_sha256 ?? '')
+        && ['started', 'valid', 'failed', 'timed_out'].includes(attempt.status)
+        && (attempt.status === 'started' || INPUT_DIGEST.test(attempt.record_sha256 ?? '')));
+  if (!valid) throw new Error('invalid plan review ledger');
+  return ledger;
+}
+
+function writePlanLedger(ledgerPath, ledger) {
+  const temporary = `${ledgerPath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(ledger)}\n`, { flag: 'wx', mode: 0o600 });
+    renameSync(temporary, ledgerPath);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function withPlanLedgerLock(ledgerPath, action) {
+  mkdirSync(dirname(ledgerPath), { recursive: true });
+  const lockPath = `${ledgerPath}.lock`;
+  let descriptor;
+  try {
+    descriptor = openSync(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if (error?.code === 'EEXIST') throw new Error('plan review ledger is busy');
+    throw error;
+  }
+  try {
+    return action();
+  } finally {
+    closeSync(descriptor);
+    unlinkSync(lockPath);
+  }
+}
+
+export function claimPlanReviewAttempt({
+  inputSha256,
+  selectedProvider,
+  planId,
+  ledgerPath,
+  root = process.cwd(),
+}) {
+  if (!INPUT_DIGEST.test(inputSha256 ?? '')) {
+    throw new Error('plan review requires an input digest');
+  }
+  if (!PLAN_PROVIDERS[selectedProvider]) throw new Error('plan provider must be qwen or opus');
+  const checkedId = checkedPlanId(planId);
+  const checkedPath = checkedLedgerPath(root, ledgerPath);
+  return withPlanLedgerLock(checkedPath, () => {
+    const ledger = existsSync(checkedPath)
+      ? parsePlanLedger(readFileSync(checkedPath, 'utf8'))
+      : {
+          policy: PLAN_LEDGER_POLICY,
+          plan_id: checkedId,
+          selected_provider: selectedProvider,
+          attempts: [],
+        };
+    if (ledger.plan_id !== checkedId) throw new Error('plan review ledger belongs to another plan');
+    if (ledger.selected_provider !== selectedProvider) {
+      throw new Error(`plan review provider is locked to ${ledger.selected_provider}`);
+    }
+    if (ledger.attempts.length >= PLAN_REVIEW_BUDGET) {
+      throw new Error('plan review budget exhausted');
+    }
+    const round = ledger.attempts.length + 1;
+    ledger.attempts.push({ round, input_sha256: inputSha256, status: 'started' });
+    writePlanLedger(checkedPath, ledger);
+    return { round, ledger_path: checkedPath };
+  });
+}
+
+function completePlanReviewAttempt({ ledgerPath, root, round, inputSha256, record }) {
+  const checkedPath = checkedLedgerPath(root, ledgerPath);
+  withPlanLedgerLock(checkedPath, () => {
+    const ledger = parsePlanLedger(readFileSync(checkedPath, 'utf8'));
+    const attempt = ledger.attempts.find((candidate) => candidate.round === round);
+    if (attempt?.round !== round || attempt.input_sha256 !== inputSha256 ||
+        attempt.status !== 'started') {
+      throw new Error('plan review ledger attempt mismatch');
+    }
+    Object.assign(attempt, {
+      status: record.status,
+      slot: record.slot,
+      requested_model: record.requested_model,
+      resolved_model: record.resolved_model,
+      session_id: record.session_id,
+      failure_class: record.failure_class ?? null,
+      record_sha256: reviewRecordDigest(record),
+    });
+    writePlanLedger(checkedPath, ledger);
+  });
+}
 
 function validProviderRecord(record, provider) {
   const resolvedModel = provider.resolvedModel ?? provider.requestedModel;
@@ -150,11 +307,47 @@ export async function runPlanReview({
   };
 }
 
+export async function runBudgetedPlanReview({
+  request,
+  adapters,
+  inputSha256,
+  selectedProvider = 'qwen',
+  planId,
+  ledgerPath,
+  root = process.cwd(),
+}) {
+  const claim = claimPlanReviewAttempt({
+    inputSha256,
+    selectedProvider,
+    planId,
+    ledgerPath,
+    root,
+  });
+  const route = await runPlanReview({ request, adapters, inputSha256, selectedProvider });
+  completePlanReviewAttempt({
+    ledgerPath,
+    root,
+    round: claim.round,
+    inputSha256,
+    record: route.attempts[0],
+  });
+  return {
+    ...route,
+    policy: 'ferry-bounded-plan-v4',
+    plan_id: checkedPlanId(planId),
+    review_round: claim.round,
+    review_budget: PLAN_REVIEW_BUDGET,
+    budget_remaining: PLAN_REVIEW_BUDGET - claim.round,
+  };
+}
+
 export function parseArgs(argv) {
   const args = {
     selfTest: false,
     plan: false,
     planProvider: 'qwen',
+    planId: '',
+    planLedger: '',
     mode: 'chunk',
     title: '',
     focus: '',
@@ -169,6 +362,8 @@ export function parseArgs(argv) {
       planProviderProvided = true;
       args.planProvider = argv[++index] ?? '';
     }
+    else if (argument === '--plan-id') args.planId = argv[++index] ?? '';
+    else if (argument === '--plan-ledger') args.planLedger = argv[++index] ?? '';
     else if (['--mode', '--title', '--focus'].includes(argument)) {
       args[argument.slice(2)] = argv[++index] ?? '';
     } else throw new Error(`unknown argument: ${argument}`);
@@ -181,6 +376,12 @@ export function parseArgs(argv) {
   }
   if (!args.plan && planProviderProvided) {
     throw new Error('--plan-provider requires --plan');
+  }
+  if (args.plan && (!args.planId || !args.planLedger)) {
+    throw new Error('--plan requires --plan-id and --plan-ledger');
+  }
+  if (!args.plan && (args.planId || args.planLedger)) {
+    throw new Error('--plan-id and --plan-ledger require --plan');
   }
   return args;
 }
@@ -293,10 +494,12 @@ async function main() {
     focus: args.focus,
   })}\n\n${payload}`;
   const report = args.plan
-    ? await runPlanReview({
+    ? await runBudgetedPlanReview({
         request: { prompt, home: process.env.HOME },
         inputSha256: reviewInputDigest(payload),
         selectedProvider: args.planProvider,
+        planId: args.planId,
+        ledgerPath: args.planLedger,
         adapters: { qwen: runQwenReview, opus: runClaudeReview },
       })
     : await runEnsemble(

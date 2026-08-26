@@ -46,6 +46,11 @@ def test_adr_027_records_the_consequential_defaults() -> None:
     assert "`plan-opus`" in text
     assert "never starts Opus automatically" in text
     assert "never starts the other provider" in normalized
+    assert "at most two" in normalized
+    assert "before provider dispatch" in normalized
+    assert "selected provider stays fixed" in normalized
+    assert "provider failure is advisory" in normalized
+    assert "owner decision" in normalized
     assert "no allow rule targets the writable checkout" in normalized
 
 
@@ -115,7 +120,9 @@ def test_agents_names_tested_mcp_calls_and_review_quorum() -> None:
     assert "Serena overview: call `get_symbols_overview`" in text
     assert "Context7 documentation: call `resolve-library-id`" in text
     assert "provider failures are recorded" in normalized
-    assert "requires a fresh qwen3.8-max review" in text
+    assert "at most two external plan-review attempts" in text
+    assert "provider failure is advisory" in normalized
+    assert "selected provider stays fixed" in normalized
     assert "Opus 5 is an explicit owner-selected route" in text
 
 
@@ -1910,6 +1917,8 @@ def test_writing_plans_requires_qwen_before_user_approval() -> None:
     normalized = " ".join(text.split()).lower()
     assert text.count('review-ensemble.mjs" --plan') == 2
     assert "FERRY_REVIEWER_RUNTIME" in text
+    assert "--plan-id" in text
+    assert "--plan-ledger" in text
     assert "qwen3.8-max" in text
     assert "--plan-provider opus" in text
     assert "claude-opus-5" in text
@@ -1918,6 +1927,11 @@ def test_writing_plans_requires_qwen_before_user_approval() -> None:
     assert "never starts the other provider" in normalized
     assert "failure class, stage, http status" in normalized
     assert "duration" in normalized
+    assert "two total attempts" in normalized
+    assert "selected provider stays fixed" in normalized
+    assert "provider failure is advisory" in normalized
+    assert "owner decision" in normalized
+    assert "run a fresh qwen review" not in normalized
     assert "run every accepted finding's verification command" in normalized
     assert text.index("## Independent plan review") < text.index(
         "After the plan is saved and the user approves it"
@@ -2011,6 +2025,182 @@ def test_plan_route_rejects_altered_or_mismatched_evidence(fixture: str) -> None
     assert json.loads(result.stdout)["ready"] is False
 
 
+def test_plan_budget_rejects_a_third_attempt_before_calling_a_reviewer(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget",
+        "third-blocked",
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["rounds"] == [1, 2]
+    assert report["qwen_calls"] == 2
+    assert report["opus_calls"] == 0
+    assert report["rejected"] == "plan review budget exhausted"
+    assert len(report["ledger"]["attempts"]) == 2
+
+
+def test_plan_budget_locks_the_first_selected_reviewer(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget",
+        "provider-lock",
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["rounds"] == [1]
+    assert report["qwen_calls"] == 1
+    assert report["opus_calls"] == 0
+    assert report["rejected"] == "plan review provider is locked to qwen"
+
+
+@pytest.mark.parametrize("fixture", ["failure-counts", "started-counts"])
+def test_plan_budget_counts_failed_or_interrupted_attempts(
+    fixture: str,
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget",
+        fixture,
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["rounds"] == [1, 2]
+    assert report["rejected"] == "plan review budget exhausted"
+    assert len(report["ledger"]["attempts"]) == 2
+
+
+def test_plan_budget_rejects_a_ledger_under_a_linked_external_directory(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-safety",
+        "symlink-escape",
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report == {
+        "rejected": "plan review ledger must stay within the checkout",
+        "outside_ledger_exists": False,
+    }
+
+
+def test_plan_budget_completes_overlapping_attempts_by_round(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-safety",
+        "overlapping",
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["outcomes"] == ["fulfilled", "fulfilled"]
+    assert [attempt["status"] for attempt in report["attempts"]] == ["valid", "valid"]
+
+
+def test_plan_gate_treats_a_failed_selected_reviewer_as_advisory() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "failure-advisory",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ready"] is True
+    assert report["decision_required"] is False
+    assert report["warning"] == {
+        "failure_class": "timeout",
+        "failure_stage": "total-timeout",
+        "http_status": None,
+        "duration_ms": 4,
+    }
+
+
+def test_plan_gate_requires_an_owner_decision_after_a_second_blocker() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "second-blocker",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ready"] is False
+    assert report["decision_required"] is True
+    assert report["reason"] == "owner decision required after final plan review"
+
+
+def test_plan_gate_accepts_risk_bound_to_the_current_plan_and_findings() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "accepted-risk",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ready"] is True
+    assert report["owner_decision"] == "accept_recorded_risk"
+
+
+def test_plan_gate_rejects_a_stale_owner_decision() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "stale-risk",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ready"] is False
+    assert report["decision_required"] is True
+
+
+def test_plan_gate_rejects_route_evidence_altered_after_ledger_write() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "altered-route",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report == {
+        "ready": False,
+        "reason": "invalid plan review ledger",
+        "minor_findings": [],
+    }
+
+
 @pytest.mark.parametrize(
     ("fixture", "provider"),
     [("default", "qwen"), ("opus", "opus")],
@@ -2031,12 +2221,20 @@ def test_plan_provider_argument_requires_plan_mode(
         "ok": True,
         "plan": True,
         "plan_provider": provider,
+        "plan_id": "docs/plans/fixture.md",
+        "plan_ledger": "docs/plans/.review/fixture-ledger.json",
     }
 
 
 @pytest.mark.parametrize(
     "fixture",
-    ["invalid", "without-plan-qwen", "without-plan-opus"],
+    [
+        "invalid",
+        "missing-id",
+        "missing-ledger",
+        "without-plan-qwen",
+        "without-plan-opus",
+    ],
 )
 def test_plan_provider_argument_rejects_invalid_context(fixture: str) -> None:
     result = _run(

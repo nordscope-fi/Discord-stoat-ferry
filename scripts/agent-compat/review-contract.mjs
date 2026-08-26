@@ -267,10 +267,98 @@ export function reviewInputDigest(input) {
   return createHash('sha256').update(input).digest('hex');
 }
 
-export function evaluatePlanGate(route, verdicts, expectedInputSha256) {
+export function planFindingDigest(findings) {
+  return createHash('sha256').update(JSON.stringify(findings)).digest('hex');
+}
+
+export function reviewRecordDigest(record) {
+  return createHash('sha256').update(JSON.stringify(record)).digest('hex');
+}
+
+function validPlanLedger(route, ledger) {
+  if (!ledger || route?.policy !== 'ferry-bounded-plan-v4') return false;
+  const attempts = ledger.attempts;
+  const round = route.review_round;
+  if (ledger.policy !== 'ferry-plan-review-budget-v1'
+      || ledger.plan_id !== route.plan_id
+      || ledger.selected_provider !== route.selected_provider
+      || !Array.isArray(attempts)
+      || attempts.length !== round
+      || ![1, 2].includes(round)
+      || route.review_budget !== 2
+      || route.budget_remaining !== 2 - round) {
+    return false;
+  }
+  const record = route.attempts?.[0];
+  const latest = attempts.at(-1);
+  return latest?.round === round
+    && latest.input_sha256 === route.input_sha256
+    && latest.status === record?.status
+    && latest.slot === record?.slot
+    && latest.requested_model === record?.requested_model
+    && latest.resolved_model === record?.resolved_model
+    && latest.session_id === record?.session_id
+    && latest.failure_class === (record?.failure_class ?? null)
+    && latest.record_sha256 === reviewRecordDigest(record);
+}
+
+function validFailedPlanRecord(route, record) {
+  const selectedSlot = PLAN_SLOTS.get(route?.selected_provider);
+  const expectedRequestedModel = PLAN_REQUESTED_MODELS.get(selectedSlot);
+  return route?.accepted === null
+    && Array.isArray(route.attempts)
+    && route.attempts.length === 1
+    && route.attempts[0] === record
+    && ['failed', 'timed_out'].includes(record?.status)
+    && record.slot === selectedSlot
+    && record.requested_model === expectedRequestedModel
+    && record.resolved_model === null
+    && record.session_id === null
+    && record.substitution_for === null
+    && record.substitution_reason === null
+    && FAILURE_CLASSES.has(record.failure_class)
+    && route.automatic_opus_calls === 0
+    && route.owner_selected_opus_calls === (route.selected_provider === 'opus' ? 1 : 0);
+}
+
+function matchesOwnerDecision(ownerDecision, route, blocking) {
+  return ownerDecision?.decision === 'accept_recorded_risk'
+    && ownerDecision.plan_id === route.plan_id
+    && ownerDecision.input_sha256 === route.input_sha256
+    && ownerDecision.review_round === 2
+    && ownerDecision.finding_sha256 === planFindingDigest(blocking);
+}
+
+export function evaluatePlanGate(
+  route,
+  verdicts,
+  expectedInputSha256,
+  { ledger = null, ownerDecision = null } = {},
+) {
   if (!/^[a-f0-9]{64}$/u.test(expectedInputSha256 ?? '') ||
       route?.input_sha256 !== expectedInputSha256) {
     return { ready: false, reason: 'plan review input mismatch', minor_findings: [] };
+  }
+  const bounded = route?.policy === 'ferry-bounded-plan-v4';
+  if (bounded && !validPlanLedger(route, ledger)) {
+    return { ready: false, reason: 'invalid plan review ledger', minor_findings: [] };
+  }
+  const attempt = Array.isArray(route?.attempts) && route.attempts.length === 1
+    ? route.attempts[0]
+    : null;
+  if (bounded && validFailedPlanRecord(route, attempt)) {
+    return {
+      ready: true,
+      reason: null,
+      minor_findings: [],
+      decision_required: false,
+      warning: {
+        failure_class: attempt.failure_class,
+        failure_stage: attempt.failure_stage ?? null,
+        http_status: attempt.http_status ?? null,
+        duration_ms: attempt.duration_ms,
+      },
+    };
   }
   const record = route?.accepted;
   if (!validateFindings({
@@ -315,12 +403,38 @@ export function evaluatePlanGate(route, verdicts, expectedInputSha256) {
     ['critical', 'important'].includes(finding.severity) && verdicts[index] === 'CONFIRMED');
   const minor = record.findings.filter((finding, index) =>
     finding.severity === 'minor' && verdicts[index] === 'CONFIRMED');
+  if (blocking.length && bounded && route.review_round === 2) {
+    if (matchesOwnerDecision(ownerDecision, route, blocking)) {
+      return {
+        ready: true,
+        reason: null,
+        minor_findings: minor,
+        accepted_slot: record.slot,
+        accepted_model: record.resolved_model,
+        decision_required: false,
+        owner_decision: 'accept_recorded_risk',
+      };
+    }
+    return {
+      ready: false,
+      reason: 'owner decision required after final plan review',
+      minor_findings: minor,
+      decision_required: true,
+      decision_binding: {
+        plan_id: route.plan_id,
+        input_sha256: route.input_sha256,
+        review_round: 2,
+        finding_sha256: planFindingDigest(blocking),
+      },
+    };
+  }
   return {
     ready: blocking.length === 0,
     reason: blocking.length ? 'confirmed blocking plan findings' : null,
     minor_findings: minor,
     accepted_slot: record.slot,
     accepted_model: record.resolved_model,
+    ...(bounded ? { decision_required: false, warning: null } : {}),
   };
 }
 
@@ -505,7 +619,7 @@ function main() {
     if (!decision.ready) process.exitCode = 1;
     return;
   }
-  if (args.length === 4 && args[0] === '--evaluate-plan-files') {
+  if ([5, 6].includes(args.length) && args[0] === '--evaluate-plan-files') {
     const root = realpathSync(process.cwd());
     const paths = args.slice(1).map((path) => resolve(root, path));
     if (paths.some((path) => {
@@ -524,9 +638,15 @@ function main() {
     }
     let route;
     let verdicts;
+    let ledger;
+    let ownerDecision = null;
     try {
       route = parseJsonText(readFileSync(paths[0], 'utf8'), 'plan route');
       verdicts = parseJsonText(readFileSync(paths[1], 'utf8'), 'plan verdicts');
+      ledger = parseJsonText(readFileSync(paths[3], 'utf8'), 'plan ledger');
+      if (paths[4]) {
+        ownerDecision = parseJsonText(readFileSync(paths[4], 'utf8'), 'owner decision');
+      }
     } catch (error) {
       process.stderr.write(`review-contract: ${safeChildFailure('plan gate', error)}\n`);
       process.exit(1);
@@ -536,6 +656,7 @@ function main() {
       route,
       verdicts,
       reviewInputDigest(readFileSync(paths[2])),
+      { ledger, ownerDecision },
     );
     process.stdout.write(`${JSON.stringify(decision)}\n`);
     if (!decision.ready) process.exitCode = 1;

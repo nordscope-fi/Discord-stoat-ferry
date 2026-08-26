@@ -16,9 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `qwen3.8-max`, validate their result schema, and verify accepted findings. Provider outages are
   advisory, while confirmed Critical findings block.
 
-- **Plans receive a fresh Qwen review before approval.** Each revision starts a new
-  `qwen3.8-max` session, and the approval record is tied to the exact plan input. Opus 5 remains
-  available only as an explicit medium-effort review.
+- **Plan review stops after two calls.** A per-plan ledger counts attempts before dispatch and
+  keeps the first selected provider fixed. Qwen remains the default, while Opus 5 requires an
+  explicit owner choice. Provider failure is advisory. A second confirmed blocker requires the
+  owner to accept the recorded risk or return to design.
 
 - **Qwen Code becomes the fourth parity host.** The agent-compat generator now renders
   `.qwen/settings.json` from `config/agent-compat/qwen-settings.json`: the Ferry guard hooks
@@ -70,6 +71,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Vibe's MCP servers into `.vibe/config.toml` and removes the old file, but `check.mjs` kept
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
+
+## [2.35.2] - 2026-08-26
+
+### Fixed
+
+- **Implementation-plan reviews can no longer repeat without a limit.** One plan gets at most two
+  external calls across revisions. Failed and interrupted calls count, a provider switch is
+  rejected, and a third attempt stops before contacting a model. Approval after a second confirmed
+  blocker is tied to the exact plan and findings. Ledger paths reject linked directories outside
+  the checkout, and overlapping calls complete the round they claimed. Closes #659.
 
 ## [2.35.1] - 2026-08-26
 
