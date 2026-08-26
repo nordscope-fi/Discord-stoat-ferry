@@ -90,7 +90,7 @@ const VALID_SEVERITIES = new Set(FINDINGS_SCHEMA.properties.findings.items.prope
 const VALID_CATEGORIES = new Set(FINDINGS_SCHEMA.properties.findings.items.properties.category.enum);
 const VALID_CONFIDENCES = new Set(FINDINGS_SCHEMA.properties.confidence.enum);
 const VALID_STATUSES = new Set(['valid', 'failed', 'timed_out']);
-const FALLBACK_REASONS = new Set([
+const SUBSTITUTION_REASONS = new Set([
   'credential',
   'timeout',
   'schema',
@@ -98,8 +98,23 @@ const FALLBACK_REASONS = new Set([
   'child-exit',
   'unknown',
 ]);
+const FAILURE_CLASSES = new Set([
+  ...SUBSTITUTION_REASONS,
+  'rate-limit',
+  'provider',
+  'request',
+]);
 const PLAN_MODELS = new Map([
   ['plan-qwen', 'qwen3.8-max'],
+  ['plan-opus', 'claude-opus-5'],
+]);
+const PLAN_REQUESTED_MODELS = new Map([
+  ['plan-qwen', 'qwen3.8-max'],
+  ['plan-opus', 'opus'],
+]);
+const PLAN_SLOTS = new Map([
+  ['qwen', 'plan-qwen'],
+  ['opus', 'plan-opus'],
 ]);
 const FINDING_KEYS = new Set([
   'severity',
@@ -183,13 +198,18 @@ export function buildReviewPrompt({
 
 export function classifyReviewFailure(error) {
   const declared = error?.reviewFailure ?? error?.classification;
-  if (FALLBACK_REASONS.has(declared)) return declared;
+  if (FAILURE_CLASSES.has(declared)) return declared;
   if (error?.name === 'TimeoutError' || error?.code === 'ETIMEDOUT') return 'timeout';
   if (error?.name === 'SyntaxError' || error?.code === 'INVALID_SCHEMA') return 'schema';
   if (error?.code === 'WRONG_MODEL') return 'wrong-model';
-  if (error?.code === 'CREDENTIAL' || error?.status === 401 || error?.status === 403) {
+  if (error?.code === 'CREDENTIAL' || error?.httpStatus === 401 || error?.httpStatus === 403) {
     return 'credential';
   }
+  if (error?.httpStatus === 429) return 'rate-limit';
+  if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 500 && error.httpStatus <= 599) {
+    return 'provider';
+  }
+  if (Number.isInteger(error?.httpStatus)) return 'request';
   if (error?.code === 'ENOENT' || typeof error?.status === 'number' || error?.signal) {
     return 'child-exit';
   }
@@ -221,7 +241,7 @@ export function makeReviewRecord({
   if (status === 'valid' && !validateFindings(result)) {
     throw new Error('valid review record requires schema-valid findings');
   }
-  if (substitutionFor !== null && !FALLBACK_REASONS.has(substitutionReason)) {
+  if (substitutionFor !== null && !SUBSTITUTION_REASONS.has(substitutionReason)) {
     throw new Error('substitution requires a structural reason');
   }
   if (substitutionFor === null && substitutionReason !== null) {
@@ -261,13 +281,24 @@ export function evaluatePlanGate(route, verdicts, expectedInputSha256) {
     return { ready: false, reason: 'invalid plan review record', minor_findings: [] };
   }
   const expectedModel = PLAN_MODELS.get(record?.slot);
+  const expectedRequestedModel = PLAN_REQUESTED_MODELS.get(record?.slot);
   const attempts = Array.isArray(route?.attempts) ? route.attempts : [];
-  const validPrimary = record?.slot === 'plan-qwen'
+  const selectedSlot = PLAN_SLOTS.get(route?.selected_provider);
+  const validPrimary = record?.slot === selectedSlot
     && attempts.length === 1
+    && attempts[0]?.slot === record.slot
+    && attempts[0]?.requested_model === record.requested_model
+    && attempts[0]?.resolved_model === record.resolved_model
     && attempts[0]?.session_id === record.session_id
-    && record.substitution_for === null;
+    && attempts[0]?.substitution_for === null
+    && attempts[0]?.substitution_reason === null
+    && record.substitution_for === null
+    && record.substitution_reason === null
+    && route.automatic_opus_calls === 0
+    && route.owner_selected_opus_calls === (route.selected_provider === 'opus' ? 1 : 0);
   if (
     record?.status !== 'valid'
+    || record.requested_model !== expectedRequestedModel
     || record.resolved_model !== expectedModel
     || !validPrimary
   ) {
@@ -392,11 +423,15 @@ function selfTest() {
   record('record requires substitution reason', missingReason);
 
   const planDigest = reviewInputDigest('current plan');
-  const primaryRoute = {
-    accepted: validQwen,
-    attempts: [validQwen],
+  const routeFor = (selectedProvider, accepted, attempts = [accepted]) => ({
+    selected_provider: selectedProvider,
+    accepted,
+    attempts,
     input_sha256: planDigest,
-  };
+    automatic_opus_calls: 0,
+    owner_selected_opus_calls: selectedProvider === 'opus' ? 1 : 0,
+  });
+  const primaryRoute = routeFor('qwen', validQwen);
   record('plan primary route passes clean result',
     evaluatePlanGate(primaryRoute, [], planDigest).ready);
   const blockingResult = {
@@ -407,19 +442,24 @@ function selfTest() {
     resolvedModel: 'qwen3.8-max', sessionId: 'qwen-2', durationMs: 1,
     status: 'valid', result: blockingResult,
   });
-  record('plan primary route blocks confirmed finding', !evaluatePlanGate({
-    accepted: blockingQwen, attempts: [blockingQwen], input_sha256: planDigest,
-  }, ['CONFIRMED'], planDigest).ready);
-  record('plan route blocks missing verdict', !evaluatePlanGate({
-    accepted: blockingQwen, attempts: [blockingQwen], input_sha256: planDigest,
-  }, [], planDigest).ready);
-  record('plan rejects Opus as the automatic route', !evaluatePlanGate({
-    accepted: validOpus, attempts: [validOpus], input_sha256: planDigest,
-  }, [], planDigest).ready);
-  record('plan rejects substituted Qwen', !evaluatePlanGate({
-    accepted: { ...validQwen, substitution_for: 'plan-opus', substitution_reason: 'timeout' },
-    attempts: [timedOutOpus, validQwen], input_sha256: planDigest,
-  }, [], planDigest).ready);
+  record('plan primary route blocks confirmed finding', !evaluatePlanGate(
+    routeFor('qwen', blockingQwen), ['CONFIRMED'], planDigest,
+  ).ready);
+  record('plan route blocks missing verdict', !evaluatePlanGate(
+    routeFor('qwen', blockingQwen), [], planDigest,
+  ).ready);
+  record('plan accepts owner-selected Opus',
+    evaluatePlanGate(routeFor('opus', validOpus), [], planDigest).ready);
+  record('plan rejects Opus under Qwen selection', !evaluatePlanGate(
+    routeFor('qwen', validOpus), [], planDigest,
+  ).ready);
+  record('plan rejects substituted Qwen', !evaluatePlanGate(
+    routeFor('qwen', {
+      ...validQwen,
+      substitution_for: 'plan-opus',
+      substitution_reason: 'timeout',
+    }, [timedOutOpus, validQwen]), [], planDigest,
+  ).ready);
   record('failure classifier identifies every structural class', [
     classifyReviewFailure({ code: 'CREDENTIAL' }),
     classifyReviewFailure({ name: 'TimeoutError' }),

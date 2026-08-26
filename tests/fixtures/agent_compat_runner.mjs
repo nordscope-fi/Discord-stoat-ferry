@@ -47,6 +47,7 @@ import {
   safeChildFailure,
 } from '../../scripts/agent-compat/review-contract.mjs';
 import {
+  parseArgs as parseReviewArgs,
   runEnsemble,
   runPlanReview,
 } from '../../scripts/agent-compat/review-ensemble.mjs';
@@ -59,7 +60,11 @@ import {
 } from '../../scripts/agent-compat/review-verification.mjs';
 import { readReviewerField } from '../../scripts/agent-compat/proton-credential.mjs';
 import { runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
-import { runQwenReview } from '../../scripts/agent-compat/qwen-review.mjs';
+import {
+  parseQwenResponse,
+  requestQwen,
+  runQwenReview,
+} from '../../scripts/agent-compat/qwen-review.mjs';
 import { runClaudeReview } from '../../scripts/agent-compat/claude-review.mjs';
 import {
   advertisesSelfTest,
@@ -475,6 +480,279 @@ switch (mode) {
     }
     break;
   }
+  case 'qwen-request-contract': {
+    let request = null;
+    await requestQwen({
+      apiKey: 'fixture-api-key',
+      prompt: 'fixture prompt',
+      fetcher: async (url, options) => {
+        request = {
+          url,
+          authorization: options.headers.Authorization,
+          body: JSON.parse(options.body),
+        };
+        const content = JSON.stringify({
+          findings: [],
+          summary: 'clean',
+          confidence: 'high',
+        });
+        const stream = [
+          `data: ${JSON.stringify({
+            id: 'fixture-review',
+            model: 'qwen3.8-max',
+            choices: [{ delta: { content }, finish_reason: null }],
+          })}\n\n`,
+          `data: ${JSON.stringify({
+            id: 'fixture-review',
+            model: 'qwen3.8-max',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          })}\n\n`,
+          'data: [DONE]\n\n',
+        ].join('');
+        return {
+          ok: true,
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(stream));
+              controller.close();
+            },
+          }),
+        };
+      },
+    });
+    writeJson({
+      url: request.url,
+      authorization_is_bearer: request.authorization === 'Bearer fixture-api-key',
+      request: {
+        model: request.body.model,
+        stream: request.body.stream ?? null,
+        enable_thinking: request.body.enable_thinking ?? null,
+        reasoning_effort: request.body.reasoning_effort ?? null,
+        max_completion_tokens: request.body.max_completion_tokens ?? null,
+        response_format_type: request.body.response_format?.type ?? null,
+        schema_name: request.body.response_format?.json_schema?.name ?? null,
+        strict: request.body.response_format?.json_schema?.strict ?? null,
+        schema: request.body.response_format?.json_schema?.schema ?? null,
+      },
+    });
+    break;
+  }
+  case 'qwen-stream': {
+    const review = JSON.stringify({
+      findings: [],
+      summary: 'clean café',
+      confidence: 'high',
+    });
+    const events = [
+      `data: ${JSON.stringify({
+        id: 'stream-session',
+        model: 'qwen3.8-max',
+        choices: [{ delta: { reasoning_content: 'private reasoning' }, finish_reason: null }],
+      })}\r\n\r\n`,
+      `data: ${JSON.stringify({
+        id: 'stream-session',
+        model: 'qwen3.8-max',
+        choices: [{ delta: { content: review.slice(0, 23) }, finish_reason: null }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'stream-session',
+        model: 'qwen3.8-max',
+        choices: [{ delta: { content: review.slice(23) }, finish_reason: null }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'stream-session',
+        model: 'qwen3.8-max',
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    if (argument === 'missing-done') events.pop();
+    if (argument === 'length') {
+      events[3] = `data: ${JSON.stringify({
+        id: 'stream-session',
+        model: 'qwen3.8-max',
+        choices: [{ delta: {}, finish_reason: 'length' }],
+      })}\n\n`;
+    }
+    if (argument === 'missing-content') events.splice(1, 2);
+    if (argument === 'invalid-event') events[0] = 'data: {\n\n';
+    if (argument === 'wrong-then-right') {
+      events.unshift(`data: ${JSON.stringify({
+        id: 'wrong-session',
+        model: 'other',
+        choices: [{ delta: {}, finish_reason: null }],
+      })}\n\n`);
+    }
+    const raw = events.join('');
+    const bytes = new TextEncoder().encode(raw);
+    const body = new ReadableStream({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    });
+    try {
+      const response = await requestQwen({
+        apiKey: 'fixture-api-key',
+        prompt: 'fixture prompt',
+        fetcher: async () => ({ ok: true, status: 200, body }),
+      });
+      const parsed = parseQwenResponse(response);
+      writeJson({
+        ok: true,
+        session_id: parsed.sessionId,
+        result: parsed.result,
+      });
+    } catch (error) {
+      writeJson({ ok: false, code: error.code ?? null, message: error.message });
+    }
+    break;
+  }
+  case 'qwen-deadline': {
+    const clean = JSON.stringify({ findings: [], summary: 'clean', confidence: 'high' });
+    const event = (delta, finishReason = null) => `data: ${JSON.stringify({
+      id: 'deadline-session',
+      model: 'qwen3.8-max',
+      choices: [{ delta, finish_reason: finishReason }],
+    })}\n\n`;
+    const streamResponse = (kind) => {
+      let cancelled = false;
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            if (kind === 'partial-event') {
+              const bytes = new TextEncoder().encode(event({ reasoning_content: 'unfinished' }));
+              const emit = (index) => {
+                if (cancelled) return;
+                controller.enqueue(Uint8Array.of(bytes[index]));
+                if (index + 1 < bytes.length) setTimeout(() => emit(index + 1), 2);
+              };
+              emit(0);
+              return;
+            }
+          if (kind === 'idle' || kind === 'total-stream') {
+            controller.enqueue(new TextEncoder().encode(event({ reasoning_content: 'started' })));
+            return;
+          }
+          const chunks = [
+            event({ reasoning_content: 'working' }),
+            event({ content: clean }),
+            event({}, 'stop'),
+            'data: [DONE]\n\n',
+          ];
+          chunks.forEach((chunk, index) => setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode(chunk));
+            if (index === chunks.length - 1) controller.close();
+          }, index * 2));
+          },
+          cancel() { cancelled = true; },
+        }),
+      };
+    };
+    const fetcher = async (url, options) => {
+      if (argument === 'connection') {
+        return new Promise((resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(options.signal.reason), {
+            once: true,
+          });
+        });
+      }
+      return streamResponse(argument);
+    };
+    const review = runQwenReview({
+      prompt: 'fixture prompt',
+      home: process.cwd(),
+      credential: argument === 'total-credential'
+        ? async () => new Promise(() => {})
+        : async () => 'fixture-api-key',
+      request: (options) => requestQwen({ ...options, fetcher }),
+      deadlines: {
+        connectionMs: 5,
+        idleMs: argument === 'total-stream' ? 100 : 5,
+        totalMs: argument === 'total-credential' || argument === 'total-stream' ? 10 : 100,
+      },
+    });
+    const outcome = await Promise.race([
+      review.then((record) => ({ ok: true, record }), (error) => ({
+        ok: false,
+        code: error.code ?? null,
+        deadline: error.deadline ?? null,
+        duration_ms: error.durationMs ?? null,
+      })),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, stuck: true }), 100)),
+    ]);
+    writeJson(outcome);
+    break;
+  }
+  case 'qwen-failure-record': {
+    const clean = JSON.stringify({ findings: [], summary: 'clean', confidence: 'high' });
+    let tick = 100;
+    const clock = { now: () => {
+      tick += 25;
+      return tick;
+    } };
+    const credential = async () => {
+      if (argument !== 'credential') return 'fixture-api-key';
+      const error = new Error('FERRY_SECRET_CANARY');
+      error.code = 'CREDENTIAL';
+      error.stderr = 'FERRY_SECRET_CANARY';
+      throw error;
+    };
+    const request = async () => {
+      if (argument === 'wrong-model') {
+        return {
+          id: 'wrong-model-session',
+          model: 'other',
+          choices: [{ message: { content: clean } }],
+        };
+      }
+      if (argument === 'schema') {
+        return {
+          id: 'schema-session',
+          model: 'qwen3.8-max',
+          choices: [{ message: { content: '{"findings":[]}' } }],
+        };
+      }
+      const error = new Error('FERRY_SECRET_CANARY');
+      error.responseBody = 'FERRY_SECRET_CANARY';
+      error.stdout = 'FERRY_SECRET_CANARY';
+      error.stderr = 'FERRY_SECRET_CANARY';
+      if (argument === 'timeout') {
+        error.code = 'ETIMEDOUT';
+        error.deadline = 'idle';
+      } else if (argument.startsWith('http-')) {
+        error.httpStatus = Number(argument.slice(5));
+      }
+      throw error;
+    };
+    const qwen = (options) => runQwenReview({
+      ...options,
+      home: process.cwd(),
+      credential,
+      request,
+      clock,
+    });
+    const vibe = async ({ slot }) => makeReviewRecord({
+      adapter: 'vibe',
+      slot,
+      requestedModel: 'zai-glm-5-2',
+      resolvedModel: 'zai-glm-5-2',
+      sessionId: 'vibe-session',
+      durationMs: 1,
+      status: 'valid',
+      result: { findings: [], summary: 'clean', confidence: 'high' },
+    });
+    const advisory = await runEnsemble({ prompt: 'fixture' }, { vibe, qwen });
+    const plan = await runPlanReview({
+      request: { prompt: 'fixture' },
+      adapters: { qwen },
+      inputSha256: reviewInputDigest('fixture'),
+    });
+    writeJson({ advisory: advisory.slots.qwen, plan: plan.attempts[0] });
+    break;
+  }
   case 'claude-review': {
     if (argument !== 'canary-child-error') throw new Error('invalid Claude fixture');
     try {
@@ -675,9 +953,24 @@ switch (mode) {
   case 'plan-route': {
     let qwenCalls = 0;
     let opusCalls = 0;
+    let opusRecord = null;
+    const recordFor = (provider) => makeReviewRecord({
+      adapter: provider === 'qwen' ? 'qwen-api' : 'claude',
+      slot: provider === 'qwen' ? 'plan-qwen' : 'plan-opus',
+      requestedModel: provider === 'qwen' ? 'qwen3.8-max' : 'opus',
+      resolvedModel: provider === 'qwen' ? 'qwen3.8-max' : 'claude-opus-5',
+      sessionId: `plan-${provider}-session`,
+      durationMs: 1,
+      status: 'valid',
+      result: { findings: [], summary: 'clean', confidence: 'high' },
+    });
+    const selectedProvider = argument.startsWith('opus') || argument === 'unselected-opus'
+      ? 'opus'
+      : 'qwen';
     const route = await runPlanReview({
       request: { prompt: 'fixture' },
       inputSha256: reviewInputDigest('fixture'),
+      selectedProvider,
       adapters: {
         qwen: async () => {
           qwenCalls += 1;
@@ -686,29 +979,66 @@ switch (mode) {
             error.code = 'CREDENTIAL';
             throw error;
           }
-          return makeReviewRecord({
-            adapter: 'qwen-api',
-            slot: 'plan-qwen',
-            requestedModel: 'qwen3.8-max',
-            resolvedModel: 'qwen3.8-max',
-            sessionId: 'plan-qwen-session',
-            durationMs: 1,
-            status: 'valid',
-            result: { findings: [], summary: 'clean', confidence: 'high' },
-          });
+          if (argument === 'wrong-selected-model') {
+            return { ...recordFor('qwen'), resolved_model: 'other' };
+          }
+          return recordFor('qwen');
         },
-        opus: async () => { opusCalls += 1; },
+        opus: async (options) => {
+          opusCalls += 1;
+          opusRecord = options.record ?? null;
+          if (argument === 'opus-fails') {
+            const error = new Error('FERRY_SECRET_CANARY');
+            error.code = 'ENOENT';
+            throw error;
+          }
+          if (argument === 'opus-schema') {
+            return { ...recordFor('opus'), confidence: 'certain' };
+          }
+          return recordFor('opus');
+        },
       },
     });
+    if (argument === 'unselected-opus') route.selected_provider = 'qwen';
+    if (argument === 'mixed-attempts') route.attempts.push(recordFor('opus'));
+    if (argument === 'substituted' && route.accepted) {
+      route.accepted.substitution_for = 'plan-opus';
+      route.accepted.substitution_reason = 'timeout';
+    }
+    if (argument === 'wrong-requested-model' && route.accepted) {
+      route.accepted.requested_model = 'other';
+    }
     const decision = evaluatePlanGate(route, [], reviewInputDigest('fixture'));
     writeJson({
       attempt_slots: route.attempts.map((record) => record.slot),
       qwen_calls: qwenCalls,
       opus_calls: opusCalls,
+      opus_record: opusRecord,
+      selected_provider: route.selected_provider ?? null,
       accepted_model: route.accepted?.resolved_model ?? null,
+      failure_class: route.attempts[0]?.failure_class ?? null,
+      automatic_opus_calls: route.automatic_opus_calls,
+      owner_selected_opus_calls: route.owner_selected_opus_calls ?? null,
       ready: decision.ready,
     });
     if (!decision.ready) process.exitCode = 1;
+    break;
+  }
+  case 'plan-args': {
+    const variants = {
+      default: ['--plan'],
+      opus: ['--plan', '--plan-provider', 'opus'],
+      invalid: ['--plan', '--plan-provider', 'other'],
+      'without-plan-qwen': ['--plan-provider', 'qwen'],
+      'without-plan-opus': ['--plan-provider', 'opus'],
+    };
+    try {
+      const parsed = parseReviewArgs(variants[argument] ?? []);
+      writeJson({ ok: true, plan: parsed.plan, plan_provider: parsed.planProvider });
+    } catch (error) {
+      writeJson({ ok: false, message: error.message });
+      process.exitCode = 1;
+    }
     break;
   }
   case 'plan-stale-route': {

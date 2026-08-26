@@ -71,6 +71,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.35.1] - 2026-08-26
+
+### Fixed
+
+- **Qwen plan reviews now finish through a bounded streamed request or report a specific
+  failure.** The reviewer requests strict structured output, allows the measured reasoning time,
+  and distinguishes connection, idle, and total timeouts from credentials, provider responses,
+  rate limits, request errors, wrong models, and invalid schemas. Qwen remains the default plan
+  reviewer. An owner can select the separate medium-effort Opus route, but a provider failure
+  never starts another paid model. Closes #650.
+
 ## [2.35.0] - 2026-08-23
 
 ### Added

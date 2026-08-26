@@ -9,6 +9,7 @@ import {
   reviewInputDigest,
   validateFindings,
 } from './review-contract.mjs';
+import { runClaudeReview } from './claude-review.mjs';
 import { runQwenReview } from './qwen-review.mjs';
 import { runVibeReview } from './vibe-review.mjs';
 
@@ -27,11 +28,28 @@ const PROVIDERS = [
   },
 ];
 
+const PLAN_PROVIDERS = Object.freeze({
+  qwen: {
+    slot: 'plan-qwen',
+    adapter: 'qwen-api',
+    requestedModel: 'qwen3.8-max',
+    call: 'qwen',
+  },
+  opus: {
+    slot: 'plan-opus',
+    adapter: 'claude',
+    requestedModel: 'opus',
+    resolvedModel: 'claude-opus-5',
+    call: 'opus',
+  },
+});
+
 function validProviderRecord(record, provider) {
+  const resolvedModel = provider.resolvedModel ?? provider.requestedModel;
   return record?.status === 'valid'
     && record.slot === provider.slot
     && record.requested_model === provider.requestedModel
-    && record.resolved_model === provider.requestedModel
+    && record.resolved_model === resolvedModel
     && record.substitution_for === null
     && validateFindings({
       findings: record.findings,
@@ -40,8 +58,24 @@ function validProviderRecord(record, provider) {
     });
 }
 
+async function attemptProvider(provider, request, adapters) {
+  try {
+    const result = await adapters[provider.call]({
+      ...request,
+      slot: provider.slot,
+      ...(provider.call === 'opus' ? { record: true } : {}),
+    });
+    return validProviderRecord(result, provider)
+      ? result
+      : failedProviderRecord(provider, fulfilledFailure(result, provider));
+  } catch (error) {
+    return failedProviderRecord(provider, error);
+  }
+}
+
 function fulfilledFailure(record, provider) {
-  if (record?.resolved_model && record.resolved_model !== provider.requestedModel) {
+  const resolvedModel = provider.resolvedModel ?? provider.requestedModel;
+  if (record?.resolved_model && record.resolved_model !== resolvedModel) {
     return { code: 'WRONG_MODEL' };
   }
   if (record?.status === 'timed_out') return { code: 'ETIMEDOUT' };
@@ -50,18 +84,19 @@ function fulfilledFailure(record, provider) {
 }
 
 function failedProviderRecord(provider, error) {
+  const failureClass = classifyReviewFailure(error);
   return {
     ...makeReviewRecord({
       adapter: provider.adapter,
       slot: provider.slot,
       requestedModel: provider.requestedModel,
       sessionId: null,
-      durationMs: 0,
-      status: error?.code === 'ETIMEDOUT' || error?.name === 'TimeoutError'
-        ? 'timed_out'
-        : 'failed',
+      durationMs: Number.isFinite(error?.durationMs) ? error.durationMs : 0,
+      status: failureClass === 'timeout' ? 'timed_out' : 'failed',
     }),
-    failure_class: classifyReviewFailure(error),
+    failure_class: failureClass,
+    failure_stage: typeof error?.stage === 'string' ? error.stage : null,
+    http_status: Number.isInteger(error?.httpStatus) ? error.httpStatus : null,
   };
 }
 
@@ -92,47 +127,60 @@ export async function runEnsemble(request, adapters) {
   };
 }
 
-export async function runPlanReview({ request, adapters, inputSha256 }) {
+export async function runPlanReview({
+  request,
+  adapters,
+  inputSha256,
+  selectedProvider = 'qwen',
+}) {
   if (!/^[a-f0-9]{64}$/u.test(inputSha256 ?? '')) {
     throw new Error('plan review requires an input digest');
   }
-  const provider = {
-    slot: 'plan-qwen',
-    adapter: 'qwen-api',
-    requestedModel: 'qwen3.8-max',
-    call: 'qwen',
-  };
-  let record;
-  try {
-    const result = await adapters.qwen({ ...request, slot: provider.slot });
-    record = validProviderRecord(result, provider)
-      ? result
-      : failedProviderRecord(provider, fulfilledFailure(result, provider));
-  } catch (error) {
-    record = failedProviderRecord(provider, error);
-  }
+  const provider = PLAN_PROVIDERS[selectedProvider];
+  if (!provider) throw new Error('plan provider must be qwen or opus');
+  const record = await attemptProvider(provider, request, adapters);
   return {
-    policy: 'ferry-qwen-plan-v2',
+    policy: 'ferry-selected-plan-v3',
+    selected_provider: selectedProvider,
     attempts: [record],
     accepted: record.status === 'valid' ? record : null,
     input_sha256: inputSha256,
     automatic_opus_calls: 0,
+    owner_selected_opus_calls: selectedProvider === 'opus' ? 1 : 0,
   };
 }
 
-function parseArgs(argv) {
-  const args = { selfTest: false, plan: false, mode: 'chunk', title: '', focus: '' };
+export function parseArgs(argv) {
+  const args = {
+    selfTest: false,
+    plan: false,
+    planProvider: 'qwen',
+    mode: 'chunk',
+    title: '',
+    focus: '',
+  };
+  let planProviderProvided = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--self-test') args.selfTest = true;
     else if (argument === '--plan') args.plan = true;
     else if (argument === '--json') continue;
+    else if (argument === '--plan-provider') {
+      planProviderProvided = true;
+      args.planProvider = argv[++index] ?? '';
+    }
     else if (['--mode', '--title', '--focus'].includes(argument)) {
       args[argument.slice(2)] = argv[++index] ?? '';
     } else throw new Error(`unknown argument: ${argument}`);
   }
   if (!['chunk', 'whole-branch'].includes(args.mode)) {
     throw new Error('mode must be chunk or whole-branch');
+  }
+  if (args.planProvider !== 'qwen' && args.planProvider !== 'opus') {
+    throw new Error('plan provider must be qwen or opus');
+  }
+  if (!args.plan && planProviderProvided) {
+    throw new Error('--plan-provider requires --plan');
   }
   return args;
 }
@@ -207,7 +255,24 @@ async function selfTest() {
     }) },
   });
   record('plan route uses Qwen only',
-    plan.accepted?.slot === 'plan-qwen' && plan.automatic_opus_calls === 0);
+    plan.accepted?.slot === 'plan-qwen'
+      && plan.automatic_opus_calls === 0
+      && plan.owner_selected_opus_calls === 0);
+
+  const opusPlan = await runPlanReview({
+    request: { prompt: 'fixture' },
+    inputSha256: reviewInputDigest('fixture'),
+    selectedProvider: 'opus',
+    adapters: { opus: async () => makeReviewRecord({
+      adapter: 'claude', slot: 'plan-opus', requestedModel: 'opus',
+      resolvedModel: 'claude-opus-5', sessionId: 'opus-plan-session', durationMs: 1,
+      status: 'valid', result: { findings: [], summary: 'clean', confidence: 'high' },
+    }) },
+  });
+  record('owner-selected plan route uses Opus only',
+    opusPlan.accepted?.slot === 'plan-opus'
+      && opusPlan.automatic_opus_calls === 0
+      && opusPlan.owner_selected_opus_calls === 1);
 
   const failed = checks.filter((check) => !check.ok);
   for (const check of checks) {
@@ -231,7 +296,8 @@ async function main() {
     ? await runPlanReview({
         request: { prompt, home: process.env.HOME },
         inputSha256: reviewInputDigest(payload),
-        adapters: { qwen: runQwenReview },
+        selectedProvider: args.planProvider,
+        adapters: { qwen: runQwenReview, opus: runClaudeReview },
       })
     : await runEnsemble(
         { prompt, home: process.env.HOME },

@@ -37,7 +37,15 @@ def test_adr_027_records_the_consequential_defaults() -> None:
     assert "Plain-English is a required setup prerequisite" in text
     assert "Every `$df-writing-plans` result" in text
     assert "qwen3.8-max" in text
+    assert "medium reasoning effort" in normalized
+    assert "32,768 completion tokens" in normalized
+    assert "60-second connection deadline" in normalized
+    assert "30-second idle deadline" in normalized
+    assert "600-second total deadline" in normalized
+    assert "`selected_provider`" in text
+    assert "`plan-opus`" in text
     assert "never starts Opus automatically" in text
+    assert "never starts the other provider" in normalized
     assert "no allow rule targets the writable checkout" in normalized
 
 
@@ -1296,6 +1304,224 @@ def test_qwen_review_uses_direct_api_and_requires_exact_model() -> None:
     assert "qwen-ferry" not in result.stderr
 
 
+def test_qwen_review_sends_explicit_stream_contract() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-request-contract",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["url"].endswith("/chat/completions")
+    assert report["authorization_is_bearer"] is True
+    assert report["request"] == {
+        "model": "qwen3.8-max",
+        "stream": True,
+        "enable_thinking": True,
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 32768,
+        "response_format_type": "json_schema",
+        "schema_name": "ferry_review",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "severity": {
+                                "type": "string",
+                                "enum": ["critical", "important", "minor"],
+                            },
+                            "category": {
+                                "type": "string",
+                                "enum": [
+                                    "security",
+                                    "correctness",
+                                    "performance",
+                                    "maintainability",
+                                ],
+                            },
+                            "file": {"type": "string"},
+                            "line": {"type": ["integer", "null"]},
+                            "description": {"type": "string"},
+                            "suggestion": {"type": "string"},
+                            "verification": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "command": {"type": "string"},
+                                    "confirms_if": {"type": "string"},
+                                    "refutes_if": {"type": "string"},
+                                },
+                                "required": [
+                                    "command",
+                                    "confirms_if",
+                                    "refutes_if",
+                                ],
+                            },
+                        },
+                        "required": [
+                            "severity",
+                            "category",
+                            "file",
+                            "line",
+                            "description",
+                            "suggestion",
+                            "verification",
+                        ],
+                    },
+                },
+                "summary": {"type": "string"},
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                },
+            },
+            "required": ["findings", "summary", "confidence"],
+        },
+    }
+
+
+def test_qwen_review_reassembles_split_stream_without_reasoning_content() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-stream",
+        "valid-split",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "ok": True,
+        "session_id": "stream-session",
+        "result": {
+            "findings": [],
+            "summary": "clean café",
+            "confidence": "high",
+        },
+    }
+    assert "private reasoning" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("fixture", "code"),
+    [
+        ("missing-done", "INVALID_SCHEMA"),
+        ("length", "INVALID_SCHEMA"),
+        ("missing-content", "INVALID_SCHEMA"),
+        ("invalid-event", "INVALID_SCHEMA"),
+        ("wrong-then-right", "WRONG_MODEL"),
+    ],
+)
+def test_qwen_review_rejects_invalid_stream_completion(
+    fixture: str,
+    code: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-stream",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["code"] == code
+
+
+@pytest.mark.parametrize(
+    ("fixture", "deadline"),
+    [
+        ("connection", "connection"),
+        ("idle", "idle"),
+        ("partial-event", "idle"),
+        ("total-credential", "total"),
+        ("total-stream", "total"),
+    ],
+)
+def test_qwen_review_classifies_each_deadline(
+    fixture: str,
+    deadline: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-deadline",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report.get("stuck") is not True
+    assert report["code"] == "ETIMEDOUT"
+    assert report["deadline"] == deadline
+    assert report["duration_ms"] >= 0
+
+
+def test_qwen_review_progress_completes_inside_idle_deadline() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-deadline",
+        "progress",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] is True
+    assert report["record"]["status"] == "valid"
+    assert report["record"]["session_id"] == "deadline-session"
+
+
+@pytest.mark.parametrize(
+    ("fixture", "status", "failure_class", "stage", "http_status"),
+    [
+        ("timeout", "timed_out", "timeout", "qwen-response", None),
+        ("credential", "failed", "credential", "qwen-credential", None),
+        ("wrong-model", "failed", "wrong-model", "qwen-response", None),
+        ("schema", "failed", "schema", "qwen-response", None),
+        ("http-401", "failed", "credential", "qwen-response", 401),
+        ("http-403", "failed", "credential", "qwen-response", 403),
+        ("http-429", "failed", "rate-limit", "qwen-response", 429),
+        ("http-400", "failed", "request", "qwen-response", 400),
+        ("http-500", "failed", "provider", "qwen-response", 500),
+        ("http-502", "failed", "provider", "qwen-response", 502),
+        ("unknown", "failed", "unknown", "qwen-response", None),
+    ],
+)
+def test_qwen_failure_record_keeps_safe_diagnostics(
+    fixture: str,
+    status: str,
+    failure_class: str,
+    stage: str,
+    http_status: int | None,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-failure-record",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    for route in (report["advisory"], report["plan"]):
+        assert route["status"] == status
+        assert route["failure_class"] == failure_class
+        assert route["failure_stage"] == stage
+        assert route["http_status"] == http_status
+        assert route["duration_ms"] == 25
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
 def test_qwen_review_redacts_an_injected_response_and_error() -> None:
     result = _run(
         "node",
@@ -1682,47 +1908,146 @@ def test_writing_plans_requires_qwen_before_user_approval() -> None:
         pytest.skip("snapshot-backed instruction layer is absent in CI")
     text = skill.read_text()
     normalized = " ".join(text.split()).lower()
-    assert 'review-ensemble.mjs" --plan' in text
+    assert text.count('review-ensemble.mjs" --plan') == 2
     assert "FERRY_REVIEWER_RUNTIME" in text
     assert "qwen3.8-max" in text
-    assert "claude-opus-5" not in text
-    assert "qwen failure blocks the plan gate" in normalized
+    assert "--plan-provider opus" in text
+    assert "claude-opus-5" in text
+    assert "medium effort" in normalized
+    assert "only the owner may choose" in normalized
+    assert "never starts the other provider" in normalized
+    assert "failure class, stage, http status" in normalized
+    assert "duration" in normalized
     assert "run every accepted finding's verification command" in normalized
     assert text.index("## Independent plan review") < text.index(
         "After the plan is saved and the user approves it"
     )
 
 
-def test_plan_route_uses_qwen_without_opus() -> None:
+@pytest.mark.parametrize(
+    ("fixture", "slot", "qwen_calls", "opus_calls", "model", "owner_calls"),
+    [
+        ("qwen-valid", "plan-qwen", 1, 0, "qwen3.8-max", 0),
+        ("opus-valid", "plan-opus", 0, 1, "claude-opus-5", 1),
+    ],
+)
+def test_plan_route_uses_only_selected_provider(
+    fixture: str,
+    slot: str,
+    qwen_calls: int,
+    opus_calls: int,
+    model: str,
+    owner_calls: int,
+) -> None:
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
         "plan-route",
-        "qwen-valid",
+        fixture,
         "--json",
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["attempt_slots"] == ["plan-qwen"]
-    assert report["qwen_calls"] == 1
-    assert report["opus_calls"] == 0
-    assert report["accepted_model"] == "qwen3.8-max"
+    assert report["attempt_slots"] == [slot]
+    assert report["qwen_calls"] == qwen_calls
+    assert report["opus_calls"] == opus_calls
+    assert report["accepted_model"] == model
+    assert report["automatic_opus_calls"] == 0
+    assert report["owner_selected_opus_calls"] == owner_calls
+    assert report["opus_record"] == (True if fixture == "opus-valid" else None)
 
 
-def test_plan_route_qwen_failure_blocks_without_opus() -> None:
+@pytest.mark.parametrize(
+    ("fixture", "slot", "qwen_calls", "opus_calls", "failure_class"),
+    [
+        ("qwen-fails", "plan-qwen", 1, 0, "credential"),
+        ("opus-fails", "plan-opus", 0, 1, "child-exit"),
+        ("opus-schema", "plan-opus", 0, 1, "schema"),
+    ],
+)
+def test_plan_route_failure_blocks_without_calling_unselected_provider(
+    fixture: str,
+    slot: str,
+    qwen_calls: int,
+    opus_calls: int,
+    failure_class: str,
+) -> None:
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
         "plan-route",
-        "qwen-fails",
+        fixture,
         "--json",
     )
     assert result.returncode == 1
     report = json.loads(result.stdout)
-    assert report["attempt_slots"] == ["plan-qwen"]
-    assert report["qwen_calls"] == 1
-    assert report["opus_calls"] == 0
+    assert report["attempt_slots"] == [slot]
+    assert report["qwen_calls"] == qwen_calls
+    assert report["opus_calls"] == opus_calls
+    assert report["automatic_opus_calls"] == 0
+    assert report["failure_class"] == failure_class
     assert report["ready"] is False
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "unselected-opus",
+        "mixed-attempts",
+        "substituted",
+        "wrong-selected-model",
+        "wrong-requested-model",
+    ],
+)
+def test_plan_route_rejects_altered_or_mismatched_evidence(fixture: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-route",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("fixture", "provider"),
+    [("default", "qwen"), ("opus", "opus")],
+)
+def test_plan_provider_argument_requires_plan_mode(
+    fixture: str,
+    provider: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-args",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "ok": True,
+        "plan": True,
+        "plan_provider": provider,
+    }
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["invalid", "without-plan-qwen", "without-plan-opus"],
+)
+def test_plan_provider_argument_rejects_invalid_context(fixture: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-args",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["ok"] is False
 
 
 def test_plan_revision_gets_a_fresh_qwen_review_before_approval() -> None:
