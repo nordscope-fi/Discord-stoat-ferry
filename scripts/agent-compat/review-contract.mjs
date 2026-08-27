@@ -4,6 +4,21 @@ import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  authorizeVerificationCommand,
+  verificationExitAllowed,
+} from './review-verification.mjs';
+
+export const VERIFICATION_OUTCOME_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    exit_code: { type: 'integer', enum: [0, 1] },
+    stdout_contains: { type: ['string', 'null'] },
+    stdout_excludes: { type: ['string', 'null'] },
+  },
+  required: ['exit_code', 'stdout_contains', 'stdout_excludes'],
+};
 
 export const FINDINGS_SCHEMA = {
   type: 'object',
@@ -29,8 +44,8 @@ export const FINDINGS_SCHEMA = {
             additionalProperties: false,
             properties: {
               command: { type: 'string' },
-              confirms_if: { type: 'string' },
-              refutes_if: { type: 'string' },
+              confirms_if: VERIFICATION_OUTCOME_SCHEMA,
+              refutes_if: VERIFICATION_OUTCOME_SCHEMA,
             },
             required: ['command', 'confirms_if', 'refutes_if'],
           },
@@ -83,8 +98,12 @@ const OUTPUT_DIRECTIVES = `Return only one JSON object with exactly these top-le
 confidence. confidence is high, medium, or low. findings is an array. Every finding has severity,
 category, file, line, description, suggestion, and verification. severity is critical, important,
 or minor. category is security, correctness, performance, or maintainability. line is an integer or
-null. verification has command, confirms_if, and refutes_if. Use an empty findings array for a clean
-review, but always include summary and confidence.`;
+null. verification has command, confirms_if, and refutes_if. confirms_if and refutes_if cannot both
+match one result. Give them different exit_code values, or make one require the exact substring that
+the other excludes. Each object has exactly exit_code, stdout_contains, and stdout_excludes.
+exit_code is 0 or 1. Each stdout field is null or a non-empty exact substring. Use an empty findings
+array for a clean review, but always include summary and confidence. Exit code 1 is valid only for
+rg and git grep commands.`;
 
 const VALID_SEVERITIES = new Set(FINDINGS_SCHEMA.properties.findings.items.properties.severity.enum);
 const VALID_CATEGORIES = new Set(FINDINGS_SCHEMA.properties.findings.items.properties.category.enum);
@@ -126,6 +145,11 @@ const FINDING_KEYS = new Set([
   'verification',
 ]);
 const VERIFICATION_KEYS = new Set(['command', 'confirms_if', 'refutes_if']);
+const VERIFICATION_OUTCOME_KEYS = new Set([
+  'exit_code',
+  'stdout_contains',
+  'stdout_excludes',
+]);
 const RESULT_KEYS = new Set(['findings', 'summary', 'confidence']);
 
 function hasExactKeys(value, expected) {
@@ -133,7 +157,32 @@ function hasExactKeys(value, expected) {
   return keys.length === expected.size && keys.every((key) => expected.has(key));
 }
 
-export function validateFindings(result) {
+function validVerificationOutcome(outcome) {
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
+  if (!hasExactKeys(outcome, VERIFICATION_OUTCOME_KEYS)) return false;
+  if (!Number.isInteger(outcome.exit_code) || ![0, 1].includes(outcome.exit_code)) return false;
+  for (const key of ['stdout_contains', 'stdout_excludes']) {
+    const value = outcome[key];
+    if (value !== null && (typeof value !== 'string' || !value.trim())) return false;
+  }
+  return true;
+}
+
+function outcomesAreExclusive(first, second) {
+  if (first.exit_code !== second.exit_code) return true;
+  const firstConflicts = first.stdout_contains !== null
+    && second.stdout_excludes !== null
+    && first.stdout_contains.includes(second.stdout_excludes);
+  const secondConflicts = second.stdout_contains !== null
+    && first.stdout_excludes !== null
+    && second.stdout_contains.includes(first.stdout_excludes);
+  return firstConflicts || secondConflicts;
+}
+
+export function validateFindings(result, {
+  root = null,
+  authorize = authorizeVerificationCommand,
+} = {}) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
   if (!hasExactKeys(result, RESULT_KEYS)) return false;
   if (typeof result.summary !== 'string' || !VALID_CONFIDENCES.has(result.confidence)) return false;
@@ -152,9 +201,20 @@ export function validateFindings(result) {
       return false;
     }
     if (!hasExactKeys(verification, VERIFICATION_KEYS)) return false;
-    for (const key of VERIFICATION_KEYS) {
-      if (typeof verification[key] !== 'string' || !verification[key].trim()) return false;
+    if (typeof verification.command !== 'string' || !verification.command.trim()) return false;
+    if (!validVerificationOutcome(verification.confirms_if)) return false;
+    if (!validVerificationOutcome(verification.refutes_if)) return false;
+    const verificationArgv = verification.command.trim().split(/\s+/u);
+    if (!verificationExitAllowed(verificationArgv, verification.confirms_if.exit_code)) {
+      return false;
     }
+    if (!verificationExitAllowed(verificationArgv, verification.refutes_if.exit_code)) {
+      return false;
+    }
+    if (!outcomesAreExclusive(verification.confirms_if, verification.refutes_if)) {
+      return false;
+    }
+    if (root !== null && !authorize(verification.command, { root }).authorized) return false;
   }
   return true;
 }
@@ -236,10 +296,13 @@ export function makeReviewRecord({
   durationMs,
   status,
   result = null,
+  root = process.cwd(),
 }) {
   if (!VALID_STATUSES.has(status)) throw new Error(`invalid review status: ${status}`);
-  if (status === 'valid' && !validateFindings(result)) {
-    throw new Error('valid review record requires schema-valid findings');
+  if (status === 'valid' && !validateFindings(result, { root })) {
+    const error = new Error('valid review record requires authorized schema-valid findings');
+    error.code = 'INVALID_SCHEMA';
+    throw error;
   }
   if (substitutionFor !== null && !SUBSTITUTION_REASONS.has(substitutionReason)) {
     throw new Error('substitution requires a structural reason');
@@ -447,9 +510,17 @@ function sampleFinding(severity = 'minor', category = 'correctness') {
     description: 'description',
     suggestion: 'suggestion',
     verification: {
-      command: 'true',
-      confirms_if: 'the condition is present',
-      refutes_if: 'the condition is absent',
+      command: 'git status --short',
+      confirms_if: {
+        exit_code: 0,
+        stdout_contains: 'the condition is present',
+        stdout_excludes: null,
+      },
+      refutes_if: {
+        exit_code: 0,
+        stdout_contains: null,
+        stdout_excludes: 'the condition is present',
+      },
     },
   };
 }

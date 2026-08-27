@@ -162,9 +162,17 @@ function selfTest() {
       description: 'description',
       suggestion: 'suggestion',
       verification: {
-        command: 'true',
-        confirms_if: 'present',
-        refutes_if: 'absent',
+        command: 'git status --short',
+        confirms_if: {
+          exit_code: 0,
+          stdout_contains: 'present',
+          stdout_excludes: null,
+        },
+        refutes_if: {
+          exit_code: 0,
+          stdout_contains: null,
+          stdout_excludes: 'present',
+        },
       },
     }],
   };

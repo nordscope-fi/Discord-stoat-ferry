@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { isAbsolute, relative, resolve } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const SHELL_SYNTAX = /[;&|<>`$\\\n\r'"(){}]/u;
@@ -23,6 +23,15 @@ const SIMPLE_FLAGS = new Map([
   ['wc', new Set(['-c', '-l', '-w'])],
   ['ls', new Set(['-a', '-l', '-la', '-al'])],
 ]);
+const VERIFICATION_FAILURE_CLASSES = new Set([
+  'approval-denied',
+  'child-exit',
+  'signal',
+  'timeout',
+  'unknown',
+]);
+const VERIFICATION_ARTIFACT_DIRECTORY = ['docs', 'plans', '.review', 'verification'];
+const MAX_VERIFICATION_ARTIFACT_BYTES = 2_097_152;
 
 function denied(reason) {
   return { authorized: false, argv: [], reason };
@@ -46,6 +55,41 @@ function pathsStayInside(root, paths) {
     const offset = relative(canonicalRoot, target);
     return offset === '' || (!offset.startsWith('..') && !isAbsolute(offset));
   });
+}
+
+function pathStaysInside(root, target) {
+  const offset = relative(root, target);
+  return offset === '' || (!offset.startsWith('..') && !isAbsolute(offset));
+}
+
+export function readVerificationArtifact(file, { root = process.cwd() } = {}) {
+  if (typeof file !== 'string' || !file.trim()) throw new Error('artifact path is required');
+  const canonicalRoot = realpathSync(resolve(root));
+  const artifactDirectory = resolve(canonicalRoot, ...VERIFICATION_ARTIFACT_DIRECTORY);
+  const canonicalArtifactDirectory = realpathSync(artifactDirectory);
+  if (!pathStaysInside(canonicalRoot, canonicalArtifactDirectory)) {
+    throw new Error('artifact directory leaves the checkout');
+  }
+  const lexicalTarget = isAbsolute(file) ? resolve(file) : resolve(canonicalRoot, file);
+  if (!pathStaysInside(artifactDirectory, lexicalTarget)) {
+    throw new Error('artifact path leaves its dedicated directory');
+  }
+  const metadata = lstatSync(lexicalTarget);
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error('artifact must be a regular non-linked file');
+  }
+  if (metadata.size > MAX_VERIFICATION_ARTIFACT_BYTES) {
+    throw new Error('artifact exceeds 2097152 bytes');
+  }
+  const canonicalTarget = realpathSync(lexicalTarget);
+  if (!pathStaysInside(canonicalArtifactDirectory, canonicalTarget)) {
+    throw new Error('artifact path leaves its dedicated directory');
+  }
+  try {
+    return JSON.parse(readFileSync(canonicalTarget, 'utf8'));
+  } catch {
+    throw new Error('artifact contains invalid JSON');
+  }
 }
 
 function optionsBeforeSeparator(
@@ -73,7 +117,7 @@ function optionsBeforeSeparator(
   return true;
 }
 
-export function authorizeVerificationCommand(command, { root = process.cwd() } = {}) {
+export function parseVerificationCommand(command) {
   if (typeof command !== 'string' || !command.trim() || command.length > 2000) {
     return denied('command is empty or too long');
   }
@@ -87,15 +131,13 @@ export function authorizeVerificationCommand(command, { root = process.cwd() } =
 
   if (executable === 'rg') {
     const separator = argv.indexOf('--');
-    if (separator === -1 || separator < 1 || argv.length < separator + 2) {
+    if (separator === -1 || separator < 1 || argv.length < separator + 3) {
       return denied('rg requires -- before its pattern and paths');
     }
     if (argv.slice(1, separator).some((value) => !RG_FLAGS.has(value))) {
       return denied('rg flag is not allowed');
     }
-    if (!pathsStayInside(root, argv.slice(separator + 2))) {
-      return denied('path leaves the checkout');
-    }
+    return { authorized: true, argv, paths: argv.slice(separator + 2) };
   } else if (executable === 'git') {
     const subcommand = argv[1];
     const allowed = GIT_SUBCOMMAND_FLAGS.get(subcommand);
@@ -105,28 +147,38 @@ export function authorizeVerificationCommand(command, { root = process.cwd() } =
       return denied('Git flag or operand is not allowed');
     }
     const separator = argv.indexOf('--', 2);
-    if (subcommand === 'grep' && separator === -1) {
+    if (subcommand === 'grep' && (separator === -1 || argv.length < separator + 3)) {
       return denied('git grep requires -- before its pattern and paths');
     }
+    const safeArgv = ['diff', 'show'].includes(subcommand)
+      ? [argv[0], subcommand, '--no-ext-diff', '--no-textconv', ...argv.slice(2)]
+      : argv;
     if (separator !== -1) {
       const pathStart = subcommand === 'grep' ? separator + 2 : separator + 1;
-      if (!pathsStayInside(root, argv.slice(pathStart))) return denied('path leaves the checkout');
+      if (argv.length === pathStart) return denied('Git path is missing');
+      return { authorized: true, argv: safeArgv, paths: argv.slice(pathStart) };
     }
+    return { authorized: true, argv: safeArgv, paths: [] };
   } else {
     const separator = argv.indexOf('--');
-    if (separator === -1) return denied(`${executable} requires -- before paths`);
+    if (separator === -1 || argv.length === separator + 1) {
+      return denied(`${executable} requires -- before paths`);
+    }
     const flagsWithValues = new Set(['-n']);
     if (!optionsBeforeSeparator(argv, 1, SIMPLE_FLAGS.get(executable), flagsWithValues)) {
       return denied(`${executable} flag is not allowed`);
     }
-    if (!pathsStayInside(root, argv.slice(separator + 1))) {
-      return denied('path leaves the checkout');
-    }
+    return { authorized: true, argv, paths: argv.slice(separator + 1) };
   }
+}
 
+export function authorizeVerificationCommand(command, { root = process.cwd() } = {}) {
+  const parsed = parseVerificationCommand(command);
+  if (!parsed.authorized) return parsed;
+  if (!pathsStayInside(root, parsed.paths)) return denied('path leaves the checkout');
   return {
     authorized: true,
-    argv,
+    argv: parsed.argv,
     cwd: resolve(root),
     env: {
       PATH: process.env.PATH ?? '',
@@ -135,6 +187,9 @@ export function authorizeVerificationCommand(command, { root = process.cwd() } =
       GIT_EXTERNAL_DIFF: '',
       GIT_PAGER: 'cat',
       GIT_OPTIONAL_LOCKS: '0',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.fsmonitor',
+      GIT_CONFIG_VALUE_0: 'false',
     },
   };
 }
@@ -152,10 +207,48 @@ export function contextTier({ fullTokens, expandedTokens, perFileTokens, limit }
   return 'split-hunks';
 }
 
-export function classifyVerification(finding, output) {
-  const text = typeof output === 'string' ? output : output?.stdout ?? '';
-  const confirms = text.includes(finding.verification.confirms_if);
-  const refutes = text.includes(finding.verification.refutes_if);
+function exactKeys(value, keys) {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && actual.every((key) => keys.includes(key));
+}
+
+function validVerificationResult(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  if (result.status === 'completed') {
+    return exactKeys(result, ['status', 'exit_code', 'stdout', 'stderr'])
+      && Number.isInteger(result.exit_code)
+      && typeof result.stdout === 'string'
+      && typeof result.stderr === 'string';
+  }
+  return result.status === 'failed'
+    && exactKeys(result, ['status', 'failure_class'])
+    && VERIFICATION_FAILURE_CLASSES.has(result.failure_class);
+}
+
+function failedVerification(error) {
+  if (error?.name === 'TimeoutError' || error?.code === 'ETIMEDOUT') {
+    return { status: 'failed', failure_class: 'timeout' };
+  }
+  if (error?.signal) return { status: 'failed', failure_class: 'signal' };
+  return { status: 'failed', failure_class: 'child-exit' };
+}
+
+function outcomeMatches(outcome, result) {
+  return result.exit_code === outcome.exit_code
+    && (outcome.stdout_contains === null || result.stdout.includes(outcome.stdout_contains))
+    && (outcome.stdout_excludes === null || !result.stdout.includes(outcome.stdout_excludes));
+}
+
+export function verificationExitAllowed(argv, exitCode) {
+  const search = argv[0] === 'rg' || (argv[0] === 'git' && argv[1] === 'grep');
+  return exitCode === 0 || (search && exitCode === 1);
+}
+
+export function classifyVerification(finding, result, authorization) {
+  if (!validVerificationResult(result) || result.status !== 'completed') return 'INCONCLUSIVE';
+  if (!verificationExitAllowed(authorization.argv, result.exit_code)) return 'INCONCLUSIVE';
+  const confirms = outcomeMatches(finding.verification.confirms_if, result);
+  const refutes = outcomeMatches(finding.verification.refutes_if, result);
   if (confirms === refutes) return 'INCONCLUSIVE';
   return confirms ? 'CONFIRMED' : 'REFUTED';
 }
@@ -170,19 +263,27 @@ export async function verifyFindings(findings, {
   for (const finding of findings) {
     const authorization = authorize(finding.verification.command, { root });
     if (!authorization.authorized) {
-      records.push({ finding, authorization, argv: [], verdict: 'INCONCLUSIVE', output: '' });
+      records.push({
+        finding,
+        authorization,
+        argv: [],
+        verdict: 'INCONCLUSIVE',
+        result: { status: 'failed', failure_class: 'approval-denied' },
+      });
       continue;
     }
-    let output = '';
+    let result = { status: 'failed', failure_class: 'unknown' };
     let verdict = 'INCONCLUSIVE';
     try {
-      const result = await run(authorization, finding);
-      output = typeof result === 'string' ? result : result?.stdout ?? '';
-      verdict = classifyVerification(finding, output);
-    } catch {
-      // A failed verification cannot prove or refute the finding.
+      const value = await run(authorization, finding);
+      result = validVerificationResult(value)
+        ? value
+        : { status: 'failed', failure_class: 'unknown' };
+      verdict = classifyVerification(finding, result, authorization);
+    } catch (error) {
+      result = failedVerification(error);
     }
-    records.push({ finding, authorization, argv: authorization.argv, verdict, output });
+    records.push({ finding, authorization, argv: authorization.argv, verdict, result });
   }
   return {
     records,
@@ -196,16 +297,18 @@ export async function reverifyAfterFix(records, { run } = {}) {
   if (typeof run !== 'function') throw new Error('verification runner is required');
   const results = [];
   for (const record of records.filter((candidate) => candidate.verdict === 'CONFIRMED')) {
-    let output = '';
+    let result = { status: 'failed', failure_class: 'unknown' };
     let verdict = 'INCONCLUSIVE';
     try {
       const value = await run(record.authorization, record.finding);
-      output = typeof value === 'string' ? value : value?.stdout ?? '';
-      verdict = classifyVerification(record.finding, output);
-    } catch {
-      // A failed second run leaves the gate unresolved.
+      result = validVerificationResult(value)
+        ? value
+        : { status: 'failed', failure_class: 'unknown' };
+      verdict = classifyVerification(record.finding, result, record.authorization);
+    } catch (error) {
+      result = failedVerification(error);
     }
-    results.push({ ...record, verdict, output });
+    results.push({ ...record, verdict, result });
   }
   return {
     records: results,
@@ -248,10 +351,10 @@ function option(argv, name) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) return selfTest();
-  if (argv.includes('--authorize-command')) {
-    const report = authorizeVerificationCommand(option(argv, '--authorize-command'), {
-      root: option(argv, '--root') ?? process.cwd(),
-    });
+  if (argv.includes('--authorize-finding')) {
+    const root = option(argv, '--root') ?? process.cwd();
+    const finding = readVerificationArtifact(option(argv, '--authorize-finding'), { root });
+    const report = authorizeVerificationCommand(finding?.verification?.command, { root });
     process.stdout.write(`${JSON.stringify(report)}\n`);
     process.exitCode = report.authorized ? 0 : 1;
     return;
@@ -271,10 +374,15 @@ async function main() {
     process.stdout.write(`${JSON.stringify({ tier: result })}\n`);
     return;
   }
-  if (argv.includes('--classify-results')) {
-    const finding = JSON.parse(option(argv, '--finding'));
-    const output = option(argv, '--output') ?? '';
-    process.stdout.write(`${JSON.stringify({ verdict: classifyVerification(finding, output) })}\n`);
+  if (argv.includes('--classify-files')) {
+    const root = option(argv, '--root') ?? process.cwd();
+    const finding = readVerificationArtifact(option(argv, '--finding-file'), { root });
+    const result = readVerificationArtifact(option(argv, '--result-file'), { root });
+    const authorization = authorizeVerificationCommand(finding?.verification?.command, { root });
+    const verdict = authorization.authorized
+      ? classifyVerification(finding, result, authorization)
+      : 'INCONCLUSIVE';
+    process.stdout.write(`${JSON.stringify({ verdict })}\n`);
     return;
   }
   throw new Error('choose a safe review-verification mode');

@@ -1171,6 +1171,57 @@ def test_review_contract_entrypoint_runs_through_a_symlink(tmp_path: Path) -> No
     assert "review-contract self-test: all checks passed" in result.stderr
 
 
+def test_review_contract_requires_distinct_structured_verification_outcomes() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-schema",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "structured": True,
+        "prose": False,
+        "identical": False,
+        "overlapping": False,
+        "exclusive_same_exit": True,
+        "unreachable_non_search_exit": False,
+        "empty_text": False,
+        "invalid_exit": False,
+    }
+
+
+def test_provider_records_require_root_authorized_verification_commands(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-provider-authorization",
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "accepted": {
+            "safe": True,
+            "shell": False,
+            "python": False,
+            "missing": False,
+            "outside": False,
+            "linked": False,
+        },
+        "ensemble_status": "failed",
+        "ensemble_failure": "schema",
+        "plan_status": "failed",
+        "plan_failure": "schema",
+        "plan_accepted": False,
+    }
+
+
 def test_plan_gate_rejects_a_malformed_accepted_finding() -> None:
     input_sha256 = "a" * 64
     finding = {
@@ -1182,8 +1233,16 @@ def test_plan_gate_rejects_a_malformed_accepted_finding() -> None:
         "suggestion": "fix",
         "verification": {
             "command": "true",
-            "confirms_if": "present",
-            "refutes_if": "absent",
+            "confirms_if": {
+                "exit_code": 0,
+                "stdout_contains": "present",
+                "stdout_excludes": None,
+            },
+            "refutes_if": {
+                "exit_code": 1,
+                "stdout_contains": None,
+                "stdout_excludes": None,
+            },
         },
     }
     accepted = {
@@ -1363,8 +1422,40 @@ def test_qwen_review_sends_explicit_stream_contract() -> None:
                                 "additionalProperties": False,
                                 "properties": {
                                     "command": {"type": "string"},
-                                    "confirms_if": {"type": "string"},
-                                    "refutes_if": {"type": "string"},
+                                    "confirms_if": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "properties": {
+                                            "exit_code": {
+                                                "type": "integer",
+                                                "enum": [0, 1],
+                                            },
+                                            "stdout_contains": {"type": ["string", "null"]},
+                                            "stdout_excludes": {"type": ["string", "null"]},
+                                        },
+                                        "required": [
+                                            "exit_code",
+                                            "stdout_contains",
+                                            "stdout_excludes",
+                                        ],
+                                    },
+                                    "refutes_if": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "properties": {
+                                            "exit_code": {
+                                                "type": "integer",
+                                                "enum": [0, 1],
+                                            },
+                                            "stdout_contains": {"type": ["string", "null"]},
+                                            "stdout_excludes": {"type": ["string", "null"]},
+                                        },
+                                        "required": [
+                                            "exit_code",
+                                            "stdout_contains",
+                                            "stdout_excludes",
+                                        ],
+                                    },
                                 },
                                 "required": [
                                     "command",
@@ -1641,6 +1732,77 @@ def test_review_verification_runs_every_approved_finding_command() -> None:
     assert report["actionable"] == ["finding-a"]
 
 
+def test_review_verification_classifies_structured_results() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-classification",
+        "structured",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    records = json.loads(result.stdout)
+    assert {record["name"]: record["verdict"] for record in records} == {
+        "rg-match": "CONFIRMED",
+        "rg-no-match": "REFUTED",
+        "non-search-nonzero": "INCONCLUSIVE",
+        "search-error": "INCONCLUSIVE",
+        "timeout": "INCONCLUSIVE",
+        "signal": "INCONCLUSIVE",
+        "approval-denied": "INCONCLUSIVE",
+        "stderr-only": "INCONCLUSIVE",
+        "both-match": "INCONCLUSIVE",
+        "neither-match": "INCONCLUSIVE",
+    }
+    by_name = {record["name"]: record for record in records}
+    assert by_name["stderr-only"]["result"]["stderr"] == "needle"
+    assert by_name["timeout"]["result"] == {
+        "status": "failed",
+        "failure_class": "timeout",
+    }
+    assert by_name["approval-denied"]["result"] == {
+        "status": "failed",
+        "failure_class": "approval-denied",
+    }
+
+
+def test_review_verification_uses_bounded_checkout_artifacts(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-artifacts",
+        "bounded",
+        "--tmp",
+        str(tmp_path),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["authorization_status"] == 0
+    assert report["authorization"]["authorized"] is True
+    assert report["authorization"]["argv"] == [
+        "rg",
+        "-n",
+        "--",
+        "needle",
+        "src/inside.txt",
+    ]
+    assert report["classification_status"] == 0
+    assert report["classification"] == {"verdict": "CONFIRMED"}
+    assert report["exact_limit_status"] == 0
+    assert report["rejected"] == {
+        "linked": True,
+        "linked_directory": True,
+        "outside": True,
+        "malformed": True,
+        "directory": True,
+        "oversized": True,
+    }
+    assert report["raw_modes_rejected"] is True
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -1691,6 +1853,90 @@ def test_review_verification_default_authorizer_accepts_direct_read_only_argv() 
         "canonicalCheckoutRoot",
         "scripts/agent-compat",
     ]
+
+
+def test_review_verification_disables_repository_git_text_converters(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    marker = root / "textconv-ran"
+    converter = root / "textconv"
+    converter.write_text(f'#!/bin/sh\ntouch {marker}\ncat "$1"\n')
+    converter.chmod(0o755)
+    (root / ".gitattributes").write_text("*.probe diff=probe\n")
+    target = root / "target.probe"
+    target.write_text("before\n")
+
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=root, check=True)
+    subprocess.run(["git", "config", "diff.probe.textconv", str(converter)], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+    target.write_text("after\n")
+
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-authorize",
+        "--command",
+        "git diff -- target.probe",
+        "--root",
+        str(root),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    completed = subprocess.run(
+        report["argv"],
+        cwd=report["cwd"],
+        env=report["env"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert marker.exists() is False
+
+
+def test_review_verification_disables_repository_git_file_monitors(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    marker = root / "fsmonitor-ran"
+    monitor = root / "fsmonitor"
+    monitor.write_text(f"#!/bin/sh\ntouch {marker}\nprintf 'version 2\\n'\n")
+    monitor.chmod(0o755)
+
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "core.fsmonitor", str(monitor)], cwd=root, check=True)
+
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-authorize",
+        "--command",
+        "git status --short",
+        "--root",
+        str(root),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    completed = subprocess.run(
+        report["argv"],
+        cwd=report["cwd"],
+        env=report["env"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert marker.exists() is False
 
 
 def test_review_verification_rejects_a_symlink_target_outside_root(tmp_path: Path) -> None:
