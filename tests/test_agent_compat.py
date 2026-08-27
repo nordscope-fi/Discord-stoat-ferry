@@ -33,6 +33,9 @@ def test_adr_027_records_the_consequential_defaults() -> None:
     normalized = " ".join(text.split()).lower()
     assert "dispatch fixed `mistral-vibe` and `qwen` slots" in text
     assert "reviewer availability does not block" in normalized
+    assert "codex requests escalated execution on the first attempt" in normalized
+    assert "2,097,152 bytes" in text
+    assert "only stdout participates" in normalized
     assert "60-second outer timeout" in text
     assert "Plain-English is a required setup prerequisite" in text
     assert "Every `$df-writing-plans` result" in text
@@ -117,6 +120,10 @@ def test_agents_names_tested_mcp_calls_and_review_quorum() -> None:
     text = agents.read_text()
     normalized = " ".join(text.split()).lower()
     assert "qmd health: call `status` with `{}`" in text
+    assert "codex requests escalated execution on the first attempt" in normalized
+    assert "never tries the workspace sandbox first" in normalized
+    assert "never runs a separate credential login" in normalized
+    assert "verdict evaluation stay in the workspace sandbox" in normalized
     assert "Serena overview: call `get_symbols_overview`" in text
     assert "Context7 documentation: call `resolve-library-id`" in text
     assert "provider failures are recorded" in normalized
@@ -853,6 +860,7 @@ def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -
         ("missing-client", "reviewer-clients"),
         ("misdistributed-hook", "hooks"),
         ("commented-model", "project-config"),
+        ("missing-review-boundary", "instructions"),
     ],
 )
 def test_static_readiness_scopes_each_missing_prerequisite(
@@ -2129,8 +2137,10 @@ def test_chunk_review_uses_the_two_provider_ensemble() -> None:
     assert "node scripts/agent-compat/review-verification.mjs" not in text
     assert 'review-verification.mjs" --gate --threshold 10' in text
     assert 'review-verification.mjs" --context-tier' in text
-    assert 'review-verification.mjs" --authorize-command' in text
-    assert 'review-verification.mjs" --classify-results' in text
+    assert 'review-verification.mjs" --authorize-finding' in text
+    assert 'review-verification.mjs" --classify-files' in text
+    assert "require_escalated" in text
+    assert "never try the workspace sandbox first" in normalized
     assert "provider availability does not block the chunk" in normalized
     assert "confirmed critical finding blocks the chunk" in normalized
     assert "automatic opus" not in normalized
@@ -2147,8 +2157,10 @@ def test_ship_uses_the_same_two_provider_ensemble() -> None:
     assert "node scripts/agent-compat/review-ensemble.mjs" not in text
     assert "node scripts/agent-compat/review-verification.mjs" not in text
     assert 'review-verification.mjs" --gate --threshold 20' in text
-    assert 'review-verification.mjs" --authorize-command' in text
-    assert 'review-verification.mjs" --classify-results' in text
+    assert 'review-verification.mjs" --authorize-finding' in text
+    assert 'review-verification.mjs" --classify-files' in text
+    assert "require_escalated" in text
+    assert "never try the workspace sandbox first" in normalized
     assert "provider availability does not block shipping" in normalized
     assert "confirmed critical finding blocks shipping" in normalized
     assert "automatic opus" not in normalized
@@ -2178,10 +2190,26 @@ def test_writing_plans_requires_qwen_before_user_approval() -> None:
     assert "provider failure is advisory" in normalized
     assert "owner decision" in normalized
     assert "run a fresh qwen review" not in normalized
-    assert "run every accepted finding's verification command" in normalized
+    assert 'review-verification.mjs" --authorize-finding' in text
+    assert 'review-verification.mjs" --classify-files' in text
+    assert "require_escalated" in text
+    assert "never try it in the workspace sandbox first" in normalized
     assert text.index("## Independent plan review") < text.index(
         "After the plan is saved and the user approves it"
     )
+
+
+def test_critique_separates_provider_collection_from_local_verification() -> None:
+    skill = REPO / ".claude/skills/df-critique/SKILL.md"
+    if not skill.exists():
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+    text = skill.read_text()
+    normalized = " ".join(text.split()).lower()
+    assert "require_escalated" in text
+    assert "never try the workspace sandbox first" in normalized
+    assert "--authorize-finding" in text
+    assert "--classify-files" in text
+    assert "2,097,152 bytes" in text
 
 
 @pytest.mark.parametrize(
