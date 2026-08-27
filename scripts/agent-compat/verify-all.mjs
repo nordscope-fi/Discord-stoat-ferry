@@ -54,10 +54,11 @@ function safeFiles(root, files) {
 
 function layerCommands(markdownFiles, helperFiles) {
   const documentation = [
+    [process.execPath, ['scripts/agent-compat/plain-english-contract.mjs', '--check']],
     ['./scripts/assert-doc-refs.sh', []],
   ];
   if (markdownFiles.length) {
-    documentation.push(['npx', ['--no-install', 'plain-english', 'lint', ...markdownFiles]]);
+    documentation.push(['plain-english', ['lint', ...markdownFiles]]);
   }
   return [
     {
