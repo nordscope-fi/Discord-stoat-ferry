@@ -246,11 +246,15 @@ export function checkPlainEnglishState({
   runInit = runPlainEnglishInit,
   compareCodex = compareCodexArtifacts,
   compareVibe = compareVibeArtifacts,
+  instructions = null,
 } = {}) {
   const stage = mkdtempSync(join(stageParent, 'ferry-plain-english-'));
   try {
     execFileSync('git', ['init', '-q', stage], { stdio: 'pipe' });
-    writeFileSync(join(stage, 'AGENTS.md'), readFileSync(join(projectRoot, 'AGENTS.md')));
+    writeFileSync(
+      join(stage, 'AGENTS.md'),
+      instructions ?? readFileSync(join(projectRoot, 'AGENTS.md')),
+    );
     renderStagedFerryHosts(stage);
     if (!runInit(stage, 'codex', { timeoutMs: 30_000 })) return false;
     if (includeVibe && !runInit(stage, 'vibe', { timeoutMs: 30_000 })) return false;
