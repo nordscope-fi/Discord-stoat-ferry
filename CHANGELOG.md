@@ -72,6 +72,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.35.6] - 2026-08-27
+
+### Fixed
+
+- **Agent compatibility now accepts the validated plain-English 1.0.0 release.** Ferry keeps one
+  exact generated-host prerequisite and retains the native Codex and Vibe artifact, timeout,
+  cleanup, and process-tree checks introduced for 0.24.1. Closes #692.
+
 ## [2.35.5] - 2026-08-27
 
 ### Fixed
