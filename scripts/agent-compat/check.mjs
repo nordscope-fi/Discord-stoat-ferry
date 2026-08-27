@@ -26,13 +26,16 @@ import {
   codexPostToolMatcher,
   HOOK_PARITY,
   validateHookParity,
+  vibePostToolMatcher,
 } from './hook-parity.mjs';
 import {
+  CODEX_CHAT_COMMAND,
   canonicalCheckoutRoot,
-  DIRECT_CHAT_COMMAND,
+  normalizeCodexChatHooks,
   removeUnusedIssueChannel,
-  transformCodexChatHooks,
-} from './plain-english-chat-hook.mjs';
+  requirePlainEnglish,
+  stripVibeIssueChannel,
+} from './plain-english-contract.mjs';
 import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan } from './skill-topology.mjs';
 
@@ -99,45 +102,6 @@ function ferryBlocksPresent(generatedPath, adapterScript) {
   }
 }
 
-function plainEnglishAvailable() {
-  const result = spawnSync('plain-english', ['--version'], { encoding: 'utf8', stdio: 'pipe' });
-  return result.status === 0;
-}
-
-function plainEnglishUpToDate(agent) {
-  if (!plainEnglishAvailable()) {
-    warn(`plain-english not installed; skipping lint-hook sync check for ${agent}`);
-    return;
-  }
-  let output;
-  try {
-    output = execFileSync('plain-english', ['init', '--agent', agent, '--dry-run', '--root', projectRoot], {
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
-  } catch (err) {
-    warn(`plain-english init --dry-run failed for ${agent}: ${err.message}`);
-    return;
-  }
-  const lines = output.split('\n');
-  const pending = lines.filter(line => {
-    if (line.includes('Nothing was written') || line.includes('After installing')) return false;
-    if (/added:\s+(?!none\b)/.test(line)) {
-      return !line.includes('mcp__linear__') && !line.includes('_save_(issue|comment)');
-    }
-    const createMatch = line.match(/^\s+create\s+(.+)/);
-    if (createMatch) {
-      const filePath = createMatch[1].trim();
-      return !existsSync(join(projectRoot, filePath));
-    }
-    if (/^\s+delete\s/.test(line)) return true;
-    return false;
-  });
-  if (pending.length > 0) {
-    fail(`plain-english lint hooks out of sync for ${agent}. Re-run ./scripts/agent-install.sh:\n${pending.map(l => l.trim()).join('\n')}`);
-  }
-}
-
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -147,49 +111,165 @@ export function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
-export function assertTwoChatWrappers(document) {
-  const all = ['Stop', 'SubagentStop'].flatMap((event) =>
-    (document.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? []));
-  const wrappers = all.filter((hook) => hook.command?.includes('plain-english-chat-hook.mjs'));
-  const direct = all.filter((hook) => hook.command === DIRECT_CHAT_COMMAND);
-  if (wrappers.length !== 2 || wrappers.some((hook) => hook.timeout !== 60) || direct.length) {
-    fail('expected exactly two 60-second Ferry chat wrappers and no direct chat hook');
+function fileMode(path) {
+  return statSync(path).mode & 0o777;
+}
+
+function sameFile(stagePath, actualPath) {
+  return existsSync(actualPath) &&
+    readFileSync(stagePath).equals(readFileSync(actualPath)) &&
+    fileMode(stagePath) === fileMode(actualPath);
+}
+
+export function runPlainEnglishInit(
+  stage,
+  agent,
+  { run = spawnSync, timeoutMs = 30_000 } = {},
+) {
+  const result = run(
+    'plain-english', ['init', '--agent', agent, '--root', stage],
+    { encoding: 'utf8', stdio: 'pipe', timeout: timeoutMs, killSignal: 'SIGTERM' },
+  );
+  if (result.error?.code === 'ETIMEDOUT') {
+    fail(`plain-English ${agent} init exceeded ${timeoutMs}ms`);
+    return false;
+  }
+  if (result.error || result.status !== 0) {
+    const detail = result.stderr || result.error?.message || `exit ${result.status}`;
+    fail(`plain-English ${agent} init failed: ${detail}`);
+    return false;
+  }
+  return true;
+}
+
+function renderStagedFerryHosts(stage) {
+  mkdirSync(join(stage, '.codex'), { recursive: true });
+  mkdirSync(join(stage, '.vibe'), { recursive: true });
+  writeFileSync(
+    join(stage, '.codex', 'hooks.json'),
+    render('codex-hooks.json', { '__POST_TOOL_MATCHER__': codexPostToolMatcher() }),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    join(stage, '.vibe', 'hooks.toml'),
+    render('vibe-hooks.toml', { '__VIBE_POST_TOOL_MATCHER__': vibePostToolMatcher() }),
+    { mode: 0o600 },
+  );
+}
+
+function normalizeStagedHosts(stage) {
+  const codexPath = join(stage, '.codex', 'hooks.json');
+  const codex = JSON.parse(readFileSync(codexPath, 'utf8'));
+  removeUnusedIssueChannel(codex);
+  normalizeCodexChatHooks(codex);
+  writeFileSync(codexPath, `${JSON.stringify(codex, null, 2)}\n`, { mode: 0o600 });
+
+  const vibePath = join(stage, '.vibe', 'hooks.toml');
+  writeFileSync(vibePath, stripVibeIssueChannel(readFileSync(vibePath, 'utf8')), {
+    mode: 0o600,
+  });
+}
+
+function validActualCodexChatHooks(document) {
+  for (const event of ['Stop', 'SubagentStop']) {
+    const matches = (document.hooks?.[event] ?? [])
+      .flatMap((group) => group.hooks ?? [])
+      .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+    if (matches.length !== 1) {
+      fail(`expected one native plain-English chat hook for ${event}; found ${matches.length}`);
+      return false;
+    }
+    if (matches[0].timeout !== 60) {
+      fail(`unexpected native plain-English chat timeout for ${event}: ${matches[0].timeout}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+function compareCodexArtifacts(stage, actualHooksPath) {
+  const actualRoot = dirname(dirname(actualHooksPath));
+  const actual = JSON.parse(readFileSync(actualHooksPath, 'utf8'));
+  if (!validActualCodexChatHooks(actual)) return;
+  const expected = JSON.parse(readFileSync(join(stage, '.codex', 'hooks.json'), 'utf8'));
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    fail('Codex hooks differ from staged plain-English output');
+    return;
+  }
+  const expectedLauncher = join(stage, '.codex', 'hooks', 'plain-english.mjs');
+  const actualLauncher = join(actualRoot, '.codex', 'hooks', 'plain-english.mjs');
+  if (!existsSync(actualLauncher)) {
+    fail('missing native Codex plain-English launcher');
+  } else if (!sameFile(expectedLauncher, actualLauncher)) {
+    fail('Codex plain-English launcher differs from staged output');
+  }
+  if (existsSync(join(actualRoot, '.codex', 'bin', 'plain-english-chat-hook.mjs'))) {
+    fail('stale Ferry plain-English wrapper remains');
+  }
+}
+
+function compareVibeArtifacts(stage, actualRoot = projectRoot) {
+  const expectedHooks = join(stage, '.vibe', 'hooks.toml');
+  const actualHooks = join(actualRoot, '.vibe', 'hooks.toml');
+  if (!sameFile(expectedHooks, actualHooks)) {
+    fail('Vibe hooks differ from staged plain-English output');
+    return;
+  }
+  const expectedDir = join(stage, '.vibe', 'hooks');
+  const actualDir = join(actualRoot, '.vibe', 'hooks');
+  const expectedNames = readdirSync(expectedDir)
+    .filter((name) => name.startsWith('plain-english'))
+    .sort();
+  const actualNames = existsSync(actualDir)
+    ? readdirSync(actualDir).filter((name) => name.startsWith('plain-english')).sort()
+    : [];
+  for (const name of expectedNames) {
+    if (!actualNames.includes(name)) {
+      fail(`missing Vibe plain-English artifact: ${name}`);
+      return;
+    }
+    if (!sameFile(join(expectedDir, name), join(actualDir, name))) {
+      fail(`Vibe plain-English artifact differs: ${name}`);
+      return;
+    }
+  }
+  const unexpected = actualNames.filter((name) => !expectedNames.includes(name));
+  if (unexpected.length > 0) {
+    fail(`unexpected Vibe plain-English artifact: ${unexpected[0]}`);
+  }
+}
+
+export function checkPlainEnglishState({
+  codexHooksPath = join(projectRoot, '.codex', 'hooks.json'),
+  includeVibe = true,
+  stageParent = tmpdir(),
+  runInit = runPlainEnglishInit,
+  compareCodex = compareCodexArtifacts,
+  compareVibe = compareVibeArtifacts,
+} = {}) {
+  const stage = mkdtempSync(join(stageParent, 'ferry-plain-english-'));
+  try {
+    execFileSync('git', ['init', '-q', stage], { stdio: 'pipe' });
+    writeFileSync(join(stage, 'AGENTS.md'), readFileSync(join(projectRoot, 'AGENTS.md')));
+    renderStagedFerryHosts(stage);
+    if (!runInit(stage, 'codex', { timeoutMs: 30_000 })) return false;
+    if (includeVibe && !runInit(stage, 'vibe', { timeoutMs: 30_000 })) return false;
+    try {
+      normalizeStagedHosts(stage);
+    } catch (err) {
+      fail(`plain-English staged host normalization failed: ${err.message}`);
+      return false;
+    }
+    compareCodex(stage, codexHooksPath);
+    if (includeVibe) compareVibe(stage, dirname(dirname(codexHooksPath)));
+    return true;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
   }
 }
 
 export function checkCodexHooks(actualPath) {
-  const stage = mkdtempSync(join(tmpdir(), 'ferry-codex-hooks-'));
-  try {
-    mkdirSync(join(stage, '.codex'), { recursive: true });
-    writeFileSync(join(stage, 'AGENTS.md'), readFileSync(join(projectRoot, 'AGENTS.md')));
-    writeFileSync(
-      join(stage, '.codex', 'hooks.json'),
-      render('codex-hooks.json', { '__POST_TOOL_MATCHER__': codexPostToolMatcher() }),
-    );
-    try {
-      execFileSync('plain-english', ['init', '--agent', 'codex', '--root', stage], {
-        stdio: 'pipe',
-      });
-    } catch (err) {
-      fail(`plain-English prerequisite failed during staged Codex hook generation: ${err.message}`);
-      return;
-    }
-    const expected = JSON.parse(readFileSync(join(stage, '.codex', 'hooks.json'), 'utf8'));
-    removeUnusedIssueChannel(expected);
-    try {
-      transformCodexChatHooks(expected, canonicalCheckoutRoot(projectRoot));
-    } catch (err) {
-      fail(`Codex chat-hook transform failed: ${err.message}`);
-      return;
-    }
-    const actual = JSON.parse(readFileSync(actualPath, 'utf8'));
-    assertTwoChatWrappers(actual);
-    if (canonicalJson(actual) !== canonicalJson(expected)) {
-      fail('Codex hooks differ from staged plain-English plus Ferry transformation');
-    }
-  } finally {
-    rmSync(stage, { recursive: true, force: true });
-  }
+  return checkPlainEnglishState({ codexHooksPath: actualPath, includeVibe: false });
 }
 
 export function checkWorktreeContract(scriptPath, includePath) {
@@ -249,7 +329,6 @@ function checkCodexState() {
 
   fileMatches(join(codexDir, 'config.toml'), render('codex-config.toml'));
   ferryBlocksPresent(join(codexDir, 'hooks.json'), 'codex-hook-adapter.mjs');
-  checkCodexHooks(join(codexDir, 'hooks.json'));
 
   const expectedRoles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
   const agentsDir = join(codexDir, 'agents');
@@ -282,7 +361,6 @@ function checkVibeState() {
   }
 
   ferryBlocksPresent(join(vibeDir, 'hooks.toml'), 'vibe-hook-adapter.mjs');
-  plainEnglishUpToDate('vibe');
   // Vibe reads MCP servers from .vibe/config.toml; the installer renders the
   // vibe-mcp.toml template there and removes any legacy mcp.toml.
   fileMatches(join(vibeDir, 'config.toml'), render('vibe-mcp.toml'));
@@ -546,7 +624,18 @@ function checkTemplates() {
 // --- Main -----------------------------------------------------------------------
 
 function main() {
-  if (worktreeIndex !== -1) {
+  const plainEnglishRequired = worktreeIndex === -1 && (focusedIndex !== -1 || !ci);
+  if (failures.length === 0 && plainEnglishRequired) {
+    try {
+      requirePlainEnglish();
+    } catch (err) {
+      fail(err.message);
+    }
+  }
+
+  if (failures.length > 0) {
+    // Argument and prerequisite failures take precedence over generated-state work.
+  } else if (worktreeIndex !== -1) {
     if (worktreeScriptPath && worktreeIncludePath) {
       checkWorktreeContract(resolve(worktreeScriptPath), resolve(worktreeIncludePath));
     }
@@ -561,6 +650,7 @@ function main() {
 
     checkCodexState();
     checkVibeState();
+    checkPlainEnglishState();
     checkQwenState();
     checkSkills();
     const snapshotRoot = canonicalCheckoutRoot(projectRoot);

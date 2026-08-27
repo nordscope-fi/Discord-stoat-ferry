@@ -4,15 +4,17 @@
 // creates .agents/skills/ symlinks via the skill topology bridger.
 // Run: ./scripts/agent-install.sh (or: node scripts/agent-compat/install-local.mjs)
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { codexPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
 import {
   canonicalCheckoutRoot,
+  normalizeCodexChatHooks,
   removeUnusedIssueChannel,
-  transformCodexChatHooks,
-} from './plain-english-chat-hook.mjs';
+  requirePlainEnglish,
+  stripVibeIssueChannel,
+} from './plain-english-contract.mjs';
 import { buildQwenSettings } from './qwen-settings-build.mjs';
 import { buildSkillPlan, applySkillPlan } from './skill-topology.mjs';
 
@@ -50,11 +52,6 @@ function reconcileDirectory(dirPath, expectedNames) {
   }
 }
 
-function plainEnglishAvailable() {
-  const result = spawnSync('plain-english', ['--version'], { encoding: 'utf8', stdio: 'pipe' });
-  return result.status === 0;
-}
-
 function hostDirIsLinked(path) {
   return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
 }
@@ -71,18 +68,6 @@ function runPlainEnglishInit(agent) {
       `plain-english init --agent ${agent} failed; install it and re-run ` +
       `./scripts/agent-install.sh (${err.message})`,
     );
-  }
-}
-
-function stripVibeIssueChannel() {
-  const vibePath = join(projectRoot, '.vibe', 'hooks.toml');
-  if (existsSync(vibePath)) {
-    const content = readFileSync(vibePath, 'utf8');
-    const blocks = content.split(/(?=\[\[hooks\]\])/);
-    const filtered = blocks.filter(block =>
-      !block.includes('plain-english-issue') && !block.includes('_save_(issue|comment)')
-    );
-    writeFileSync(vibePath, filtered.join('').replace(/\n{3,}/g, '\n\n'), { mode: 0o600 });
   }
 }
 
@@ -115,6 +100,10 @@ async function main() {
   }
   const agentsDir = join(projectRoot, '.agents');
   const agentsLinked = hostDirIsLinked(agentsDir);
+  if (!existsSync(join(projectRoot, 'AGENTS.md'))) {
+    throw new Error('AGENTS.md is required before plain-English hooks can be generated');
+  }
+  requirePlainEnglish();
 
   // 3. Generate .codex/
   console.log('Generating .codex/ ...');
@@ -124,9 +113,7 @@ async function main() {
     console.log('  .codex/ is linked to another checkout; skipped (the canonical root owns it)');
   } else {
     const codexAgentsDir = join(codexDir, 'agents');
-    const codexBinDir = join(codexDir, 'bin');
     mkdirSync(codexAgentsDir, { recursive: true });
-    mkdirSync(codexBinDir, { recursive: true });
 
     const postToolMatcher = codexPostToolMatcher();
     writeFileSync(join(codexDir, 'config.toml'), render('codex-config.toml'), { mode: 0o600 });
@@ -143,14 +130,12 @@ async function main() {
       }
     }
     reconcileDirectory(codexAgentsDir, roleFiles);
-    const chatWrapper = 'plain-english-chat-hook.mjs';
-    writeFileSync(
-      join(codexBinDir, chatWrapper),
-      readFileSync(join(sourceRoot, 'scripts', 'agent-compat', chatWrapper)),
-      { mode: 0o700 },
-    );
-    reconcileDirectory(codexBinDir, [chatWrapper]);
-    console.log('  config.toml, hooks.json, agents/*.toml, bin/plain-english-chat-hook.mjs');
+    const staleChatWrapper = join(codexDir, 'bin', 'plain-english-chat-hook.mjs');
+    if (existsSync(staleChatWrapper)) {
+      unlinkSync(staleChatWrapper);
+      console.log('  removed replaced: bin/plain-english-chat-hook.mjs');
+    }
+    console.log('  config.toml, hooks.json, agents/*.toml');
   }
 
   // 4. Generate .vibe/
@@ -218,23 +203,21 @@ async function main() {
   // plain-english has no qwen agent profile, so its shims are registered by the
   // template and its judges arrive through the prompt merge above.
   console.log('Merging plain-english lint hooks ...');
-  if (!plainEnglishAvailable()) {
-    throw new Error('plain-english is required; install it and re-run ./scripts/agent-install.sh');
-  }
-  if (!existsSync(join(projectRoot, 'AGENTS.md'))) {
-    throw new Error('AGENTS.md is required before plain-english hooks can be generated');
-  }
   if (!codexLinked) runPlainEnglishInit('codex');
   if (!vibeLinked) runPlainEnglishInit('vibe');
-  if (!vibeLinked) stripVibeIssueChannel();
+  if (!vibeLinked) {
+    const vibeHooksPath = join(projectRoot, '.vibe', 'hooks.toml');
+    const content = readFileSync(vibeHooksPath, 'utf8');
+    writeFileSync(vibeHooksPath, stripVibeIssueChannel(content), { mode: 0o600 });
+  }
   if (!codexLinked) {
     const codexHooksPath = join(projectRoot, '.codex', 'hooks.json');
     const codexHooks = JSON.parse(readFileSync(codexHooksPath, 'utf8'));
     removeUnusedIssueChannel(codexHooks);
-    transformCodexChatHooks(codexHooks, canonicalCheckoutRoot(projectRoot));
+    normalizeCodexChatHooks(codexHooks);
     writeFileSync(codexHooksPath, `${JSON.stringify(codexHooks, null, 2)}\n`, { mode: 0o600 });
   }
-  console.log('  installed local Ferry chat wrappers and preserved linked host owners');
+  console.log('  installed native plain-English launchers and preserved linked host owners');
 
   // 5. Bridge skills
   console.log('Bridging skills ...');

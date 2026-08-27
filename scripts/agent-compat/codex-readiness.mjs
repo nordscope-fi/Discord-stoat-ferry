@@ -11,6 +11,7 @@ import {
   verifyReviewerRuntime,
 } from './codex-bootstrap.mjs';
 import { buildReviewPrompt } from './review-contract.mjs';
+import { CODEX_CHAT_COMMAND } from './plain-english-contract.mjs';
 import { runQwenReview } from './qwen-review.mjs';
 import { runVibeReview } from './vibe-review.mjs';
 
@@ -132,11 +133,11 @@ async function checkRecord({ id, className, remediation, reason, now }, check) {
   }
 }
 
-function countChatWrappers(document) {
+function hasNativeChatHooks(document) {
   return ['Stop', 'SubagentStop'].every((event) => {
-    const wrappers = (document.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? [])
-      .filter((hook) => hook.command?.includes('plain-english-chat-hook.mjs'));
-    return wrappers.length === 1 && wrappers[0].timeout === 60;
+    const native = (document.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? [])
+      .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+    return native.length === 1 && native[0].timeout === 60;
   });
 }
 
@@ -303,13 +304,13 @@ function runAdapter(root, mode, payload, command) {
 
 function stopEvidence(root, event, command) {
   const hooks = JSON.parse(readFileSync(join(root, '.codex', 'hooks.json'), 'utf8'));
-  const wrappers = (hooks.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? [])
-    .filter((hook) => hook.command?.includes('plain-english-chat-hook.mjs'));
-  if (wrappers.length !== 1 || wrappers[0].timeout !== 60) {
-    throw new Error('Stop wrapper contract mismatch');
+  const native = (hooks.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? [])
+    .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+  if (native.length !== 1 || native[0].timeout !== 60) {
+    throw new Error('native Stop hook contract mismatch');
   }
   const started = performance.now();
-  const result = command('/bin/sh', ['-c', wrappers[0].command], {
+  const result = command('/bin/sh', ['-c', native[0].command], {
     cwd: root,
     input: JSON.stringify({
       last_assistant_message: 'Task status: verification passed. No action is required.',
@@ -318,7 +319,7 @@ function stopEvidence(root, event, command) {
   });
   return {
     status: result.status === 0 ? 'ok' : 'failed',
-    timeout_seconds: wrappers[0].timeout,
+    timeout_seconds: native[0].timeout,
     duration_ms: performance.now() - started,
   };
 }
@@ -472,14 +473,14 @@ export async function runStaticReadiness({
   await add({
     id: 'hooks',
     className: 'hooks',
-    reason: 'Codex hooks are missing the two 60-second Ferry chat wrappers',
+    reason: 'Codex hooks are missing the two 60-second native plain-English chat hooks',
     remediation: 'Run ./scripts/agent-install.sh to regenerate Codex hooks.',
   }, () => {
     const source = requireText(files, join(projectRoot, '.codex', 'hooks.json'), 'Codex hooks');
     let document;
     try { document = JSON.parse(source); } catch { throw new Error('hooks invalid'); }
-    if (!countChatWrappers(document)) throw new Error('chat wrappers missing');
-    return { chat_wrappers: 2, timeout_seconds: 60 };
+    if (!hasNativeChatHooks(document)) throw new Error('native chat hooks missing');
+    return { native_chat_hooks: 2, timeout_seconds: 60 };
   });
 
   await add({
@@ -790,7 +791,7 @@ export async function runWorktreeReadiness({
       id,
       className: 'hooks',
       reason: `${id} did not finish inside its 60-second outer budget`,
-      remediation: 'Regenerate the 60-second Ferry chat wrappers.',
+      remediation: 'Regenerate the 60-second native plain-English chat hooks.',
     }, () => {
       const details = evidence?.hooks?.[key];
       if (details?.status !== 'ok' || details?.timeout_seconds !== 60 ||

@@ -30,17 +30,19 @@ import {
   runWorktreeReadiness,
 } from '../../scripts/agent-compat/codex-readiness.mjs';
 import {
-  assertTwoChatWrappers,
-  canonicalJson,
+  checkPlainEnglishState,
   generatedHostSecretViolations,
+  runPlainEnglishInit,
 } from '../../scripts/agent-compat/check.mjs';
 import { routesFor } from '../../scripts/agent-compat/hook-parity.mjs';
 import {
+  CODEX_CHAT_COMMAND,
   canonicalCheckoutRoot,
-  DIRECT_CHAT_COMMAND,
+  normalizeCodexChatHooks,
+  plainEnglishFailure,
+  probePlainEnglish,
   removeUnusedIssueChannel,
-  transformCodexChatHooks,
-} from '../../scripts/agent-compat/plain-english-chat-hook.mjs';
+} from '../../scripts/agent-compat/plain-english-contract.mjs';
 import {
   evaluatePlanGate,
   makeReviewRecord,
@@ -121,10 +123,10 @@ function preToolTiming(policy) {
   });
 }
 
-function directChatDocument(command) {
+function nativeChatDocument(command, timeout = 10) {
   const group = () => ({
     matcher: '*',
-    hooks: [{ type: 'command', command, timeout: 10 }],
+    hooks: [{ type: 'command', command, timeout }],
   });
   return {
     hooks: {
@@ -135,28 +137,80 @@ function directChatDocument(command) {
   };
 }
 
+function plainEnglishContract(fixture) {
+  const results = {
+    accepted: { status: 0, stdout: '0.24.1\n', stderr: '' },
+    missing: { status: null, stdout: '', stderr: '', error: { code: 'ENOENT' } },
+    empty: { status: 0, stdout: '', stderr: '' },
+    prefixed: { status: 0, stdout: 'plain-english 0.24.1\n', stderr: '' },
+    old: { status: 0, stdout: '0.24.0\n', stderr: '' },
+    'near-miss': { status: 0, stdout: '0.24.10\n', stderr: '' },
+    prerelease: { status: 0, stdout: '0.24.1-beta.1\n', stderr: '' },
+  };
+  if (!Object.hasOwn(results, fixture)) throw new Error(`unknown version fixture: ${fixture}`);
+  const result = probePlainEnglish({ run: () => results[fixture] });
+  writeJson({ ...result, message: result.status === 'accepted' ? null : plainEnglishFailure(result) });
+}
+
 function hookRegeneration(shape) {
-  const command = shape === 'current'
-    ? DIRECT_CHAT_COMMAND
-    : `${DIRECT_CHAT_COMMAND} --changed`;
+  const command = shape === 'altered-command'
+    ? `${CODEX_CHAT_COMMAND} --changed`
+    : CODEX_CHAT_COMMAND;
+  const timeout = shape === 'timeout-30' ? 30 : 10;
   const runsIndex = process.argv.indexOf('--runs');
   const runs = runsIndex === -1 ? 1 : Number(process.argv[runsIndex + 1]);
+  const document = nativeChatDocument(command, timeout);
+  removeUnusedIssueChannel(document);
   let previous = null;
-  let document;
   for (let index = 0; index < runs; index += 1) {
-    document = directChatDocument(command);
-    removeUnusedIssueChannel(document);
-    transformCodexChatHooks(document, '/canonical/ferry');
-    assertTwoChatWrappers(document);
-    const current = canonicalJson(document);
+    normalizeCodexChatHooks(document);
+    const current = JSON.stringify(document);
     if (previous !== null && current !== previous) throw new Error('hook regeneration drifted');
     previous = current;
   }
-  const wrappers = ['Stop', 'SubagentStop'].flatMap((event) =>
+  const hooks = ['Stop', 'SubagentStop'].flatMap((event) =>
     document.hooks[event].flatMap((group) => group.hooks));
   writeJson({
-    wrapper_count: wrappers.length,
-    timeouts: wrappers.map((hook) => hook.timeout),
+    hook_count: hooks.length,
+    timeouts: hooks.map((hook) => hook.timeout),
+  });
+}
+
+function stagedPlainEnglishTimeout(targetAgent) {
+  const baseIndex = process.argv.indexOf('--base');
+  const base = baseIndex === -1 ? null : process.argv[baseIndex + 1];
+  if (!base) throw new Error('--base is required');
+  const calls = [];
+  let timeoutMs = null;
+  let killSignal = null;
+  let comparisons = 0;
+  checkPlainEnglishState({
+    stageParent: base,
+    runInit(stage, agent, options) {
+      calls.push(agent);
+      if (agent !== targetAgent) return true;
+      return runPlainEnglishInit(stage, agent, {
+        timeoutMs: options.timeoutMs,
+        run(command, args, spawnOptions) {
+          timeoutMs = spawnOptions.timeout;
+          killSignal = spawnOptions.killSignal;
+          return { status: null, stdout: '', stderr: '', error: { code: 'ETIMEDOUT' } };
+        },
+      });
+    },
+    compareCodex() {
+      comparisons += 1;
+    },
+    compareVibe() {
+      comparisons += 1;
+    },
+  });
+  writeJson({
+    calls,
+    timeout_ms: timeoutMs,
+    kill_signal: killSignal,
+    comparisons,
+    stage_removed: readdirSync(base).length === 0,
   });
 }
 
@@ -176,6 +230,12 @@ function directorySnapshot(root) {
   return JSON.stringify(records);
 }
 
+function installPlainEnglishFixture(source, fakeBin) {
+  const command = join(fakeBin, 'plain-english');
+  cpSync(join(source, 'tests', 'fixtures', 'plain_english_cli_fixture.cjs'), command);
+  chmodSync(command, 0o755);
+}
+
 function installLinkedHosts() {
   const baseIndex = process.argv.indexOf('--base');
   const base = baseIndex === -1 ? null : process.argv[baseIndex + 1];
@@ -184,9 +244,12 @@ function installLinkedHosts() {
   const primary = join(base, 'primary');
   const checkout = join(base, 'checkout');
   const home = join(base, 'home');
+  const fakeBin = join(base, 'bin');
   mkdirSync(primary, { recursive: true });
   mkdirSync(checkout, { recursive: true });
   mkdirSync(home, { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  installPlainEnglishFixture(repo, fakeBin);
   const init = spawnSync('git', ['init', '-q', checkout], { encoding: 'utf8' });
   if (init.status !== 0) throw new Error(init.stderr);
   cpSync(join(repo, 'config'), join(checkout, 'config'), { recursive: true });
@@ -213,7 +276,12 @@ function installLinkedHosts() {
     [join(repo, 'scripts', 'agent-compat', 'install-local.mjs')],
     {
       cwd: checkout,
-      env: { ...process.env, HOME: home },
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        FERRY_PLAIN_ENGLISH_VERSION: '0.24.1',
+      },
       encoding: 'utf8',
     },
   );
@@ -289,6 +357,7 @@ case "$1" in
 esac
 `);
   chmodSync(fakeNode, 0o755);
+  installPlainEnglishFixture(source, fakeBin);
   const rules = join(home, '.codex', 'rules');
   mkdirSync(rules, { recursive: true });
   writeFileSync(
@@ -300,6 +369,7 @@ esac
     HOME: home,
     CODEX_HOME: join(home, '.codex'),
     PATH: `${fakeBin}:${process.env.PATH}`,
+    FERRY_PLAIN_ENGLISH_VERSION: '0.24.1',
   };
   const run = () => spawnSync('bash', [join(root, 'scripts', 'codex-setup.sh')], {
     cwd: root,
@@ -346,6 +416,9 @@ switch (mode) {
   case 'pre-tool-timing':
     preToolTiming(argument);
     break;
+  case 'plain-english-contract':
+    plainEnglishContract(argument);
+    break;
   case 'canonical-checkout-root': {
     const rootIndex = process.argv.indexOf('--root');
     if (rootIndex < 0 || !process.argv[rootIndex + 1]) {
@@ -356,6 +429,9 @@ switch (mode) {
   }
   case 'hook-regeneration':
     hookRegeneration(argument);
+    break;
+  case 'plain-english-staged-timeout':
+    stagedPlainEnglishTimeout(argument);
     break;
   case 'install-linked-hosts':
     installLinkedHosts();
@@ -1853,6 +1929,9 @@ switch (mode) {
       '[mcp_servers.serena]',
       ...(fixture === 'missing-tool-server' ? [] : ['[mcp_servers.context7]']),
     ].join('\n');
+    const hookCommand = fixture === 'stale-wrapper'
+      ? 'plain-english-chat-hook.mjs'
+      : CODEX_CHAT_COMMAND;
     const hooks = fixture === 'missing-hook'
       ? { hooks: { Stop: [], SubagentStop: [] } }
       : fixture === 'misdistributed-hook'
@@ -1860,8 +1939,8 @@ switch (mode) {
             hooks: {
               Stop: [{
                 hooks: [
-                  { command: 'plain-english-chat-hook.mjs', timeout: 60 },
-                  { command: 'plain-english-chat-hook.mjs', timeout: 60 },
+                  { command: CODEX_CHAT_COMMAND, timeout: 60 },
+                  { command: CODEX_CHAT_COMMAND, timeout: 60 },
                 ],
               }],
               SubagentStop: [],
@@ -1869,8 +1948,8 @@ switch (mode) {
           }
         : {
           hooks: {
-            Stop: [{ hooks: [{ command: 'plain-english-chat-hook.mjs', timeout: 60 }] }],
-            SubagentStop: [{ hooks: [{ command: 'plain-english-chat-hook.mjs', timeout: 60 }] }],
+            Stop: [{ hooks: [{ command: hookCommand, timeout: 60 }] }],
+            SubagentStop: [{ hooks: [{ command: hookCommand, timeout: 60 }] }],
           },
         };
     const trust = fixture === 'single-quoted-trust'
@@ -2083,19 +2162,26 @@ switch (mode) {
     const fixture = argument;
     const commands = [];
     const failedLayer = fixture.startsWith('fail-') ? fixture.slice(5) : null;
+    const failDocumentationPrerequisite = fixture === 'documentation-prerequisite-fails';
     const report = await runVerificationLayers({
       root: process.cwd(),
       markdownFiles: ['CHANGELOG.md'],
       helperFiles: ['scripts/agent-compat/review-contract.mjs'],
       run: async (command, args, options) => {
         commands.push([command, ...args]);
-        return { status: options.layer === failedLayer ? 1 : 0 };
+        const isDocumentationPrerequisite = command === process.execPath &&
+          args[0] === 'scripts/agent-compat/plain-english-contract.mjs';
+        return {
+          status: options.layer === failedLayer ||
+            (failDocumentationPrerequisite && isDocumentationPrerequisite) ? 1 : 0,
+        };
       },
       now: () => 0,
     });
     writeJson({
       ...report,
       commands,
+      documentation_start: 5,
       self_test_detection: {
         helper: advertisesSelfTest("function selfTest() {}\nif (args.includes('--self-test')) {}"),
         aggregate: advertisesSelfTest("commands.push(['file', '--self-test'])"),

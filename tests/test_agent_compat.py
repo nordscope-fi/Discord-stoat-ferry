@@ -12,6 +12,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 NODE = shutil.which("node")
+NODE_EXECUTABLE = str(Path(NODE).resolve()) if NODE else None
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -22,6 +23,64 @@ def _canonical_repo() -> Path:
     result = _run("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
     assert result.returncode == 0, result.stderr
     return Path(result.stdout.strip()).resolve().parent
+
+
+def _write_plain_english_fixture(fake_bin: Path) -> Path:
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    command = fake_bin / "plain-english"
+    shutil.copy2(REPO / "tests/fixtures/plain_english_cli_fixture.cjs", command)
+    command.chmod(0o755)
+    return command
+
+
+def _installer_checkout(
+    tmp_path: Path, *, version: str = "0.24.1", command: bool = True
+) -> tuple[Path, Path, dict[str, str]]:
+    root = tmp_path / "repo"
+    user_home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    root.mkdir()
+    user_home.mkdir()
+    fake_bin.mkdir()
+    assert NODE is not None
+    (fake_bin / "node").symlink_to(NODE)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    shutil.copytree(REPO / "config/agent-compat", root / "config/agent-compat")
+    shutil.copytree(REPO / "scripts/agent-compat", root / "scripts/agent-compat")
+    shutil.copytree(REPO / ".claude/skills", root / ".claude/skills", symlinks=True)
+    shutil.copytree(REPO / ".agents/skills", root / ".agents/skills", symlinks=True)
+    (root / ".claude/scripts").mkdir(parents=True)
+    shutil.copy2(
+        REPO / ".claude/scripts/new-worktree.sh",
+        root / ".claude/scripts/new-worktree.sh",
+    )
+    shutil.copy2(_canonical_repo() / ".worktreeinclude", root / ".worktreeinclude")
+    shutil.copy2(REPO / "AGENTS.md", root / "AGENTS.md")
+    if command:
+        _write_plain_english_fixture(fake_bin)
+    env = {
+        **os.environ,
+        "HOME": str(user_home),
+        "CODEX_HOME": str(user_home / ".codex"),
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "FERRY_PLAIN_ENGLISH_VERSION": version,
+    }
+    return root, user_home, env
+
+
+def _generated_host_snapshot(root: Path) -> dict[str, tuple[int, bytes] | None]:
+    records: dict[str, tuple[int, bytes] | None] = {}
+    for host in (".agents", ".codex", ".vibe", ".qwen"):
+        directory = root / host
+        if not directory.exists():
+            records[host] = None
+            continue
+        for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+            records[str(path.relative_to(root))] = (
+                path.stat().st_mode & 0o777,
+                path.read_bytes(),
+            )
+    return records
 
 
 def test_adr_027_records_the_consequential_defaults() -> None:
@@ -57,6 +116,28 @@ def test_adr_027_records_the_consequential_defaults() -> None:
     assert "no allow rule targets the writable checkout" in normalized
 
 
+def test_adr_028_records_the_plain_english_host_contract() -> None:
+    if not (REPO / "AGENTS.md").exists():
+        pytest.skip("snapshot instruction layer is absent")
+    contract = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plain-english-contract",
+        "accepted",
+        "--json",
+    )
+    assert contract.returncode == 0, contract.stderr
+    expected = json.loads(contract.stdout)["expected"]
+    adr = REPO / "docs/architecture/adr/028-pin-plain-english-host-contract.md"
+    text = adr.read_text()
+    changelog = (REPO / "CHANGELOG.md").read_text()
+    assert f"plain-English {expected}" in text
+    assert f"plain-english@{expected}" in text
+    assert f"plain-English {expected}" in changelog
+    assert "CI-only" in text
+    assert "linked-worktree" in text
+
+
 def test_codex_template_pins_runtime_and_live_servers() -> None:
     text = (REPO / "config/agent-compat/codex-config.toml").read_text()
     assert 'model = "gpt-5.6-sol"' in text
@@ -75,18 +156,9 @@ def test_installer_renders_project_pins_with_conflicting_global_defaults(
 ) -> None:
     if not (REPO / "AGENTS.md").exists():
         pytest.skip("snapshot instruction layer is absent")
-    root = tmp_path / "repo"
-    user_home = tmp_path / "home"
+    root, user_home, env = _installer_checkout(tmp_path)
     codex_home = user_home / ".codex"
-    root.mkdir()
     codex_home.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    shutil.copytree(REPO / "config/agent-compat", root / "config/agent-compat")
-    shutil.copytree(REPO / "scripts/agent-compat", root / "scripts/agent-compat")
-    shutil.copy2(REPO / "scripts/agent-install.sh", root / "scripts/agent-install.sh")
-    shutil.copytree(REPO / ".claude/skills", root / ".claude/skills", symlinks=True)
-    shutil.copytree(REPO / ".agents/skills", root / ".agents/skills", symlinks=True)
-    shutil.copy2(REPO / "AGENTS.md", root / "AGENTS.md")
     global_config = (
         'model = "personal-model"\nmodel_reasoning_effort = "low"\n'
         'approval_policy = "never"\nsandbox_mode = "read-only"\n'
@@ -95,7 +167,6 @@ def test_installer_renders_project_pins_with_conflicting_global_defaults(
     ).encode()
     global_path = codex_home / "config.toml"
     global_path.write_bytes(global_config)
-    env = {**os.environ, "HOME": str(user_home), "CODEX_HOME": str(codex_home)}
     installed = subprocess.run(
         ["node", "scripts/agent-compat/install-local.mjs"],
         cwd=root,
@@ -111,6 +182,107 @@ def test_installer_renders_project_pins_with_conflicting_global_defaults(
     assert 'model_reasoning_effort = "high"' in rendered
     assert 'sandbox_mode = "workspace-write"' in rendered
     assert 'web_search = "disabled"' in rendered
+
+
+@pytest.mark.parametrize(
+    ("version", "command"),
+    [("0.24.0", True), ("plain-english 0.24.1", True), ("0.24.1", False)],
+)
+def test_installer_rejects_unsupported_plain_english_before_writes(
+    tmp_path: Path, version: str, command: bool
+) -> None:
+    root, _, env = _installer_checkout(tmp_path, version=version, command=command)
+    before = _generated_host_snapshot(root)
+    result = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert _generated_host_snapshot(root) == before
+    assert "expected 0.24.1" in result.stderr
+    assert "npm install -g plain-english@0.24.1" in result.stderr
+
+
+def test_installer_keeps_native_plain_english_artifacts(tmp_path: Path) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    result = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (root / ".codex/hooks/plain-english.mjs").exists()
+    assert (root / ".vibe/hooks/plain-english.mjs").exists()
+    assert (root / ".vibe/hooks/plain-english-docs.prompt.md").exists()
+    assert not (root / ".codex/bin/plain-english-chat-hook.mjs").exists()
+    assert "npx" not in (root / ".codex/hooks.json").read_text()
+    assert "npm exec" not in (root / ".vibe/hooks.toml").read_text()
+
+
+def test_installer_second_run_preserves_native_bytes_and_modes(tmp_path: Path) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    first = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    first_snapshot = _generated_host_snapshot(root)
+    second = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert _generated_host_snapshot(root) == first_snapshot
+
+
+def test_native_plain_english_launcher_terminates_its_process_tree(tmp_path: Path) -> None:
+    assert NODE is not None
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    cli_pid = tmp_path / "cli.pid"
+    child_pid = tmp_path / "child.pid"
+    launcher = subprocess.Popen(
+        [NODE, str(root / ".codex/hooks/plain-english.mjs"), "hook", "chat", "--agent", "codex"],
+        cwd=root,
+        env={
+            **env,
+            "FERRY_PLAIN_ENGLISH_CLI_PID": str(cli_pid),
+            "FERRY_PLAIN_ENGLISH_CHILD_PID": str(child_pid),
+        },
+    )
+    for _ in range(100):
+        if cli_pid.exists() and child_pid.exists():
+            break
+        time.sleep(0.02)
+    descendant_pids = [int(cli_pid.read_text()), int(child_pid.read_text())]
+    launcher.send_signal(signal.SIGTERM)
+    assert launcher.wait(timeout=5) == -signal.SIGTERM
+    for pid in descendant_pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 def test_agents_names_tested_mcp_calls_and_review_quorum() -> None:
@@ -172,106 +344,52 @@ def test_codex_patch_policy_finishes_inside_the_outer_budget() -> None:
     assert report["duration_ms"] < 2000
 
 
-def test_plain_english_chat_wrapper_preserves_streams_and_exit(tmp_path: Path) -> None:
-    assert NODE is not None
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_npx = fake_bin / "npx"
-    fake_npx.write_text("#!/bin/sh\nread value\nprintf 'wrapped:%s\\n' \"$value\"\nexit 7\n")
-    fake_npx.chmod(0o755)
-    env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
-    result = subprocess.run(
-        [NODE, str(REPO / "scripts/agent-compat/plain-english-chat-hook.mjs")],
-        input="payload\n",
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
-    assert result.returncode == 7
-    assert result.stdout == "wrapped:payload\n"
-
-
-def test_plain_english_chat_wrapper_terminates_its_child_group(tmp_path: Path) -> None:
-    assert NODE is not None
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_npx = fake_bin / "npx"
-    child_pid = tmp_path / "child.pid"
-    fake_npx.write_text('#!/bin/sh\nsleep 60 &\nprintf "%s" "$!" > "$FERRY_CHILD_PID"\nwait\n')
-    fake_npx.chmod(0o755)
-    wrapper = subprocess.Popen(
-        [NODE, str(REPO / "scripts/agent-compat/plain-english-chat-hook.mjs")],
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "FERRY_CHILD_PID": str(child_pid)},
-    )
-    for _ in range(50):
-        if child_pid.exists():
-            break
-        time.sleep(0.02)
-    pid = int(child_pid.read_text())
-    wrapper.send_signal(signal.SIGTERM)
-    wrapper.wait(timeout=5)
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-
-
-def test_plain_english_chat_wrapper_self_test() -> None:
-    assert NODE is not None
-    result = subprocess.run(
-        [
-            NODE,
-            str(REPO / "scripts/agent-compat/plain-english-chat-hook.mjs"),
-            "--self-test",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "all checks passed" in result.stderr
-
-
-def test_codex_chat_transform_requires_and_replaces_both_events(tmp_path: Path) -> None:
-    fixture = tmp_path / "hooks.json"
-    fixture.write_text(
-        '{"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command",'
-        '"command":"npx --no-install plain-english hook chat --agent codex",'
-        '"timeout":10}]}],"SubagentStop":[{"matcher":"*","hooks":'
-        '[{"type":"command","command":"npx --no-install plain-english hook chat '
-        '--agent codex","timeout":10}]}]}}'
-    )
+@pytest.mark.parametrize(
+    ("fixture", "status"),
+    [
+        ("accepted", "accepted"),
+        ("missing", "missing"),
+        ("empty", "malformed"),
+        ("prefixed", "malformed"),
+        ("old", "mismatched"),
+        ("near-miss", "mismatched"),
+        ("prerelease", "mismatched"),
+    ],
+)
+def test_plain_english_contract_classifies_exact_version_output(fixture: str, status: str) -> None:
     result = _run(
         "node",
-        "scripts/agent-compat/plain-english-chat-hook.mjs",
-        "--transform",
-        str(fixture),
-        str(REPO),
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plain-english-contract",
+        fixture,
+        "--json",
     )
     assert result.returncode == 0, result.stderr
-    transformed = json.loads(fixture.read_text())
-    hooks = [
-        hook
-        for event in ("Stop", "SubagentStop")
-        for group in transformed["hooks"][event]
-        for hook in group["hooks"]
-        if "plain-english-chat-hook.mjs" in hook["command"]
-    ]
-    assert len(hooks) == 2
-    assert all(hook["timeout"] == 60 for hook in hooks)
+    assert json.loads(result.stdout)["status"] == status
 
 
-def test_codex_chat_transform_rejects_a_missing_event(tmp_path: Path) -> None:
-    fixture = tmp_path / "hooks.json"
-    fixture.write_text('{"hooks":{"Stop":[]}}')
-    result = _run(
+def test_plain_english_contract_reports_actionable_failure() -> None:
+    mismatch = _run(
         "node",
-        "scripts/agent-compat/plain-english-chat-hook.mjs",
-        "--transform",
-        str(fixture),
-        str(REPO),
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plain-english-contract",
+        "old",
+        "--json",
     )
-    assert result.returncode == 1
-    assert "expected one direct chat hook for Stop" in result.stderr
+    missing = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plain-english-contract",
+        "missing",
+        "--json",
+    )
+    mismatch_report = json.loads(mismatch.stdout)
+    missing_report = json.loads(missing.stdout)
+    assert mismatch_report["expected"] == "0.24.1"
+    assert mismatch_report["detected"] == "0.24.0"
+    assert "npm install -g plain-english@0.24.1" in mismatch_report["message"]
+    assert missing_report["detected"] is None
+    assert "no version detected" in missing_report["message"]
 
 
 def test_codex_chat_transform_root_collapses_a_symlinked_checkout(
@@ -294,45 +412,219 @@ def test_codex_chat_transform_root_collapses_a_symlinked_checkout(
     assert Path(json.loads(result.stdout)["root"]) == primary.resolve()
 
 
-def test_agent_check_accepts_the_ferry_chat_transform() -> None:
-    if not (REPO / ".codex/hooks.json").exists():
-        pytest.skip("generated Codex state is absent in CI")
-    result = _run("node", "scripts/agent-compat/check.mjs", "--generated-only")
+def test_agent_check_accepts_native_plain_english_state(tmp_path: Path) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    result = subprocess.run(
+        [NODE, "scripts/agent-compat/check.mjs", "--generated-only"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_installer_stages_chat_wrapper_in_the_canonical_owner() -> None:
-    generated = _canonical_repo() / ".codex/bin/plain-english-chat-hook.mjs"
-    if not (_canonical_repo() / ".codex/hooks.json").exists():
-        pytest.skip("generated Codex state is absent in CI")
-    assert (
-        generated.read_bytes()
-        == (REPO / "scripts/agent-compat/plain-english-chat-hook.mjs").read_bytes()
+@pytest.mark.parametrize(
+    ("mode", "requires_tool"),
+    [
+        ("default", True),
+        ("generated-only", True),
+        ("focused-codex", True),
+        ("ci-focused-codex", True),
+        ("ci-only", False),
+        ("worktree-only", False),
+    ],
+)
+def test_agent_check_gates_only_generated_state_modes_on_the_exact_version(
+    tmp_path: Path, mode: str, requires_tool: bool
+) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    assert installed.returncode == 0, installed.stderr
+    marker = tmp_path / "init-called.jsonl"
+    env = {
+        **env,
+        "FERRY_PLAIN_ENGLISH_VERSION": "0.24.0",
+        "FERRY_PLAIN_ENGLISH_INIT_MARKER": str(marker),
+    }
+    arguments = {
+        "default": [],
+        "generated-only": ["--generated-only"],
+        "focused-codex": ["--check-codex-hooks", str(root / ".codex/hooks.json")],
+        "ci-focused-codex": [
+            "--ci",
+            "--check-codex-hooks",
+            str(root / ".codex/hooks.json"),
+        ],
+        "ci-only": ["--ci"],
+        "worktree-only": [
+            "--check-worktree-contract",
+            str(root / ".claude/scripts/new-worktree.sh"),
+            str(root / ".worktreeinclude"),
+        ],
+    }[mode]
+    result = subprocess.run(
+        [NODE, "scripts/agent-compat/check.mjs", *arguments],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert not marker.exists(), result.stdout + result.stderr
+    if requires_tool:
+        assert result.returncode == 1
+        assert "plain-English mismatched: expected 0.24.1" in result.stdout + result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_agent_check_rejects_a_ten_second_chat_wrapper(tmp_path: Path) -> None:
-    hooks = REPO / ".codex/hooks.json"
-    if not hooks.exists():
-        pytest.skip("generated Codex state is absent in CI")
+def _alter_plain_english_state(root: Path, fixture: str) -> None:
+    if fixture in {"codex-command", "duplicate-codex-hook", "codex-timeout"}:
+        hooks_path = root / ".codex/hooks.json"
+        document = json.loads(hooks_path.read_text())
+        native = [
+            hook
+            for event in ("Stop", "SubagentStop")
+            for group in document["hooks"][event]
+            for hook in group["hooks"]
+            if ".codex/hooks/plain-english.mjs" in hook["command"]
+        ]
+        if fixture == "codex-command":
+            native[0]["command"] += " --changed"
+        elif fixture == "duplicate-codex-hook":
+            document["hooks"]["Stop"][0]["hooks"].append(dict(native[0]))
+        else:
+            native[0]["timeout"] = 10
+        hooks_path.write_text(f"{json.dumps(document, indent=2)}\n")
+    elif fixture == "missing-codex-launcher":
+        (root / ".codex/hooks/plain-english.mjs").unlink()
+    elif fixture == "changed-vibe-prompt":
+        (root / ".vibe/hooks/plain-english-docs.prompt.md").write_text("changed\n")
+    elif fixture == "stale-ferry-wrapper":
+        wrapper = root / ".codex/bin/plain-english-chat-hook.mjs"
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
+        wrapper.write_text("stale\n")
+    elif fixture == "missing-vibe-launcher":
+        (root / ".vibe/hooks/plain-english.mjs").unlink()
+    else:
+        raise AssertionError(f"unknown fixture: {fixture}")
+
+
+@pytest.mark.parametrize(
+    ("fixture", "failure"),
+    [
+        ("codex-command", "expected one native plain-English chat hook for Stop"),
+        ("duplicate-codex-hook", "expected one native plain-English chat hook for Stop"),
+        ("codex-timeout", "unexpected native plain-English chat timeout for Stop: 10"),
+        ("missing-codex-launcher", "missing native Codex plain-English launcher"),
+        ("changed-vibe-prompt", "Vibe plain-English artifact differs"),
+        ("stale-ferry-wrapper", "stale Ferry plain-English wrapper remains"),
+        ("missing-vibe-launcher", "missing Vibe plain-English artifact"),
+    ],
+)
+def test_agent_check_rejects_native_plain_english_drift(
+    tmp_path: Path, fixture: str, failure: str
+) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    _alter_plain_english_state(root, fixture)
+    result = subprocess.run(
+        [NODE, "scripts/agent-compat/check.mjs", "--generated-only"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert failure in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("agent", ["codex", "vibe"])
+def test_staged_plain_english_timeout_is_bounded_and_cleans_up(tmp_path: Path, agent: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plain-english-staged-timeout",
+        agent,
+        "--base",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["calls"] == (["codex"] if agent == "codex" else ["codex", "vibe"])
+    assert report["timeout_ms"] == 30_000
+    assert report["kill_signal"] == "SIGTERM"
+    assert report["comparisons"] == 0
+    assert report["stage_removed"] is True
+
+
+def test_agent_check_rejects_a_ten_second_native_chat_hook(tmp_path: Path) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    hooks = root / ".codex/hooks.json"
     document = json.loads(hooks.read_text())
-    wrappers = [
+    native = [
         hook
         for event in ("Stop", "SubagentStop")
         for group in document["hooks"][event]
         for hook in group["hooks"]
-        if "plain-english-chat-hook.mjs" in hook["command"]
+        if ".codex/hooks/plain-english.mjs" in hook["command"]
     ]
-    assert len(wrappers) == 2
-    wrappers[0]["timeout"] = 10
+    assert len(native) == 2
+    native[0]["timeout"] = 10
     probe = tmp_path / "hooks.json"
     probe.write_text(json.dumps(document))
-    result = _run("node", "scripts/agent-compat/check.mjs", "--check-codex-hooks", str(probe))
+    result = subprocess.run(
+        [NODE, "scripts/agent-compat/check.mjs", "--check-codex-hooks", str(probe)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert result.returncode == 1
-    assert "exactly two 60-second Ferry chat wrappers" in result.stdout + result.stderr
+    assert "unexpected native plain-English chat timeout for Stop: 10" in (
+        result.stdout + result.stderr
+    )
 
 
-def test_hook_regeneration_is_stable_and_rejects_upstream_shape_drift() -> None:
+def test_native_codex_chat_normalization_is_repeat_safe() -> None:
     stable = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
@@ -344,8 +636,11 @@ def test_hook_regeneration_is_stable_and_rejects_upstream_shape_drift() -> None:
     )
     assert stable.returncode == 0, stable.stderr
     report = json.loads(stable.stdout)
-    assert report["wrapper_count"] == 2
+    assert report["hook_count"] == 2
     assert report["timeouts"] == [60, 60]
+
+
+def test_native_codex_chat_normalization_rejects_upstream_shape_drift() -> None:
     altered = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
@@ -354,7 +649,19 @@ def test_hook_regeneration_is_stable_and_rejects_upstream_shape_drift() -> None:
         "--json",
     )
     assert altered.returncode == 1
-    assert "expected one direct chat hook" in altered.stderr
+    assert "expected one native plain-English chat hook for Stop" in altered.stderr
+
+
+def test_native_codex_chat_normalization_rejects_unknown_timeout() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "hook-regeneration",
+        "timeout-30",
+        "--json",
+    )
+    assert result.returncode == 1
+    assert "unexpected plain-English chat timeout for Stop: 30" in result.stderr
 
 
 def test_worktree_script_names_codex_and_vibe_links() -> None:
@@ -829,6 +1136,11 @@ def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> No
         set(record) == {"id", "class", "status", "duration_ms", "remediation", "details"}
         for record in report["records"]
     )
+    records = {record["id"]: record for record in report["records"]}
+    assert records["hooks"]["details"] == {
+        "native_chat_hooks": 2,
+        "timeout_seconds": 60,
+    }
 
 
 def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -> None:
@@ -859,6 +1171,7 @@ def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -
         ("missing-tool-server", "mcp-registration"),
         ("missing-client", "reviewer-clients"),
         ("misdistributed-hook", "hooks"),
+        ("stale-wrapper", "hooks"),
         ("commented-model", "project-config"),
         ("missing-review-boundary", "instructions"),
     ],
@@ -2560,7 +2873,32 @@ def test_complete_verification_runs_every_layer_in_order() -> None:
         ["uv", "run", "ruff", "check", "."],
         ["uv", "run", "ruff", "format", "--check", "."],
     ]
+    documentation = report["commands"][report["documentation_start"] :]
+    assert documentation[0] == [
+        NODE_EXECUTABLE,
+        "scripts/agent-compat/plain-english-contract.mjs",
+        "--check",
+    ]
+    assert ["plain-english", "lint", "CHANGELOG.md"] in documentation
+    assert not any(command[0] == "npx" for command in documentation)
     assert report["self_test_detection"] == {"helper": True, "aggregate": False}
+
+
+def test_complete_verification_stops_before_lint_when_the_contract_fails() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "verify-all",
+        "documentation-prerequisite-fails",
+        "--json",
+    )
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["failed_layer"] == "documentation"
+    documentation = report["commands"][report["documentation_start"] :]
+    assert documentation == [
+        [NODE_EXECUTABLE, "scripts/agent-compat/plain-english-contract.mjs", "--check"]
+    ]
 
 
 @pytest.mark.parametrize(
