@@ -201,7 +201,7 @@ function completePlanReviewAttempt({ ledgerPath, root, round, inputSha256, recor
   });
 }
 
-function validProviderRecord(record, provider) {
+function validProviderRecord(record, provider, root = process.cwd()) {
   const resolvedModel = provider.resolvedModel ?? provider.requestedModel;
   return record?.status === 'valid'
     && record.slot === provider.slot
@@ -212,7 +212,7 @@ function validProviderRecord(record, provider) {
       findings: record.findings,
       summary: record.summary,
       confidence: record.confidence,
-    });
+    }, { root });
 }
 
 async function attemptProvider(provider, request, adapters) {
@@ -222,7 +222,7 @@ async function attemptProvider(provider, request, adapters) {
       slot: provider.slot,
       ...(provider.call === 'opus' ? { record: true } : {}),
     });
-    return validProviderRecord(result, provider)
+    return validProviderRecord(result, provider, request.root ?? process.cwd())
       ? result
       : failedProviderRecord(provider, fulfilledFailure(result, provider));
   } catch (error) {
@@ -264,7 +264,8 @@ export async function runEnsemble(request, adapters) {
   for (let index = 0; index < PROVIDERS.length; index += 1) {
     const provider = PROVIDERS[index];
     const outcome = outcomes[index];
-    if (outcome.status === 'fulfilled' && validProviderRecord(outcome.value, provider)) {
+    if (outcome.status === 'fulfilled'
+        && validProviderRecord(outcome.value, provider, request.root ?? process.cwd())) {
       slots[provider.slot] = outcome.value;
       continue;
     }

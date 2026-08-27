@@ -47,6 +47,7 @@ import {
   planFindingDigest,
   reviewInputDigest,
   safeChildFailure,
+  validateFindings,
 } from '../../scripts/agent-compat/review-contract.mjs';
 import {
   claimPlanReviewAttempt,
@@ -372,6 +373,166 @@ switch (mode) {
     };
     writeJson({ stage: 'child-exit', error: safeChildFailure('fixture', error) });
     process.exitCode = 1;
+    break;
+  }
+  case 'review-schema': {
+    const outcome = (exitCode, contains = null, excludes = null) => ({
+      exit_code: exitCode,
+      stdout_contains: contains,
+      stdout_excludes: excludes,
+    });
+    const finding = {
+      severity: 'important',
+      category: 'correctness',
+      file: 'scripts/agent-compat/review-contract.mjs',
+      line: null,
+      description: 'fixture finding',
+      suggestion: 'fixture suggestion',
+      verification: {
+        command: 'rg -n -- finding scripts/agent-compat/review-contract.mjs',
+        confirms_if: outcome(0, 'finding'),
+        refutes_if: outcome(1),
+      },
+    };
+    const valid = (candidate) => validateFindings({
+      findings: [candidate], summary: 'fixture', confidence: 'high',
+    });
+    writeJson({
+      structured: valid(finding),
+      prose: valid({
+        ...finding,
+        verification: {
+          ...finding.verification,
+          confirms_if: 'present',
+          refutes_if: 'absent',
+        },
+      }),
+      identical: valid({
+        ...finding,
+        verification: { ...finding.verification, refutes_if: outcome(0, 'finding') },
+      }),
+      overlapping: valid({
+        ...finding,
+        verification: {
+          ...finding.verification,
+          confirms_if: outcome(0),
+          refutes_if: outcome(0, null, 'absent'),
+        },
+      }),
+      exclusive_same_exit: valid({
+        ...finding,
+        verification: {
+          ...finding.verification,
+          confirms_if: outcome(0, 'finding'),
+          refutes_if: outcome(0, null, 'finding'),
+        },
+      }),
+      unreachable_non_search_exit: valid({
+        ...finding,
+        verification: {
+          command: 'git status --short',
+          confirms_if: outcome(0),
+          refutes_if: outcome(1),
+        },
+      }),
+      empty_text: valid({
+        ...finding,
+        verification: { ...finding.verification, confirms_if: outcome(0, '') },
+      }),
+      invalid_exit: valid({
+        ...finding,
+        verification: { ...finding.verification, confirms_if: outcome(2) },
+      }),
+    });
+    break;
+  }
+  case 'review-provider-authorization': {
+    const tmpIndex = process.argv.indexOf('--tmp');
+    const tmp = tmpIndex === -1 ? null : process.argv[tmpIndex + 1];
+    if (!tmp) throw new Error('review-provider-authorization requires --tmp');
+    const checkout = join(tmp, 'checkout');
+    const source = join(checkout, 'src');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, 'inside.txt'), 'needle\n');
+    const outside = join(tmp, 'outside.txt');
+    writeFileSync(outside, 'needle\n');
+    symlinkSync(outside, join(source, 'linked.txt'));
+    const outcome = (exitCode) => ({
+      exit_code: exitCode,
+      stdout_contains: null,
+      stdout_excludes: null,
+    });
+    const recordFor = (command, slot = 'plan-qwen') => makeReviewRecord({
+      adapter: 'qwen-api',
+      slot,
+      requestedModel: 'qwen3.8-max',
+      resolvedModel: 'qwen3.8-max',
+      sessionId: 'authorization-fixture',
+      durationMs: 1,
+      status: 'valid',
+      root: checkout,
+      result: {
+        findings: [{
+          severity: 'important',
+          category: 'correctness',
+          file: 'src/inside.txt',
+          line: null,
+          description: 'fixture finding',
+          suggestion: 'fixture suggestion',
+          verification: {
+            command,
+            confirms_if: outcome(0),
+            refutes_if: outcome(1),
+          },
+        }],
+        summary: 'fixture',
+        confidence: 'high',
+      },
+    });
+    const commands = {
+      safe: 'rg -n -- needle src/inside.txt',
+      shell: 'rg -n -- needle src/inside.txt | sh',
+      python: 'python -c print(1)',
+      missing: 'rg -n -- needle src/missing.txt',
+      outside: `rg -n -- needle ${outside}`,
+      linked: 'rg -n -- needle src/linked.txt',
+    };
+    const accepted = {};
+    for (const [name, command] of Object.entries(commands)) {
+      try {
+        recordFor(command);
+        accepted[name] = true;
+      } catch (error) {
+        accepted[name] = false;
+      }
+    }
+    const unsafe = commands.shell;
+    const qwen = async ({ slot }) => recordFor(unsafe, slot);
+    const vibe = async ({ slot }) => makeReviewRecord({
+      adapter: 'vibe',
+      slot,
+      requestedModel: 'zai-glm-5-2',
+      resolvedModel: 'zai-glm-5-2',
+      sessionId: 'clean-vibe',
+      durationMs: 1,
+      status: 'valid',
+      root: checkout,
+      result: { findings: [], summary: 'clean', confidence: 'high' },
+    });
+    const ensemble = await runEnsemble({ prompt: 'fixture' }, { vibe, qwen });
+    const plan = await runPlanReview({
+      request: { prompt: 'fixture' },
+      adapters: { qwen },
+      inputSha256: reviewInputDigest('authorization fixture'),
+    });
+    writeJson({
+      accepted,
+      ensemble_status: ensemble.slots.qwen.status,
+      ensemble_failure: ensemble.slots.qwen.failure_class,
+      plan_status: plan.attempts[0].status,
+      plan_failure: plan.attempts[0].failure_class,
+      plan_accepted: plan.accepted !== null,
+    });
     break;
   }
   case 'proton-field': {
@@ -826,8 +987,16 @@ switch (mode) {
       description: `finding-${name}`,
       verification: {
         command: `verify-${name}`,
-        confirms_if: `CONFIRM-${name}`,
-        refutes_if: `REFUTE-${name}`,
+        confirms_if: {
+          exit_code: 0,
+          stdout_contains: `CONFIRM-${name}`,
+          stdout_excludes: null,
+        },
+        refutes_if: {
+          exit_code: 0,
+          stdout_contains: `REFUTE-${name}`,
+          stdout_excludes: null,
+        },
       },
     }));
     const outputs = new Map([
@@ -839,10 +1008,200 @@ switch (mode) {
       authorize: (command) => ({ authorized: true, argv: [command] }),
       run: async ({ argv }) => {
         commandsRun.push(argv[0]);
-        return outputs.get(argv[0]);
+        return {
+          status: 'completed',
+          exit_code: 0,
+          stdout: outputs.get(argv[0]),
+          stderr: '',
+        };
       },
     });
     writeJson({ ...report, commands_run: commandsRun });
+    break;
+  }
+  case 'review-classification': {
+    if (argument !== 'structured') throw new Error('invalid classification fixture');
+    const outcome = (exitCode, contains = null, excludes = null) => ({
+      exit_code: exitCode,
+      stdout_contains: contains,
+      stdout_excludes: excludes,
+    });
+    const cases = [
+      {
+        name: 'rg-match',
+        command: 'rg -n -- needle scripts/agent-compat',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(1),
+        result: { status: 'completed', exit_code: 0, stdout: 'needle', stderr: '' },
+      },
+      {
+        name: 'rg-no-match',
+        command: 'rg -n -- needle scripts/agent-compat',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(1),
+        result: { status: 'completed', exit_code: 1, stdout: '', stderr: '' },
+      },
+      {
+        name: 'non-search-nonzero',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(1, 'needle'),
+        refutes: outcome(0, null, 'needle'),
+        result: { status: 'completed', exit_code: 1, stdout: 'needle', stderr: '' },
+      },
+      {
+        name: 'search-error',
+        command: 'git grep -n -- needle scripts/agent-compat',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(1),
+        result: { status: 'completed', exit_code: 2, stdout: 'needle', stderr: '' },
+      },
+      {
+        name: 'timeout',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(0, null, 'needle'),
+        result: { status: 'failed', failure_class: 'timeout' },
+      },
+      {
+        name: 'signal',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(0, null, 'needle'),
+        result: { status: 'failed', failure_class: 'signal' },
+      },
+      {
+        name: 'approval-denied',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(0, null, 'needle'),
+        result: { status: 'completed', exit_code: 0, stdout: 'needle', stderr: '' },
+        denied: true,
+      },
+      {
+        name: 'stderr-only',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(1),
+        result: { status: 'completed', exit_code: 0, stdout: '', stderr: 'needle' },
+      },
+      {
+        name: 'both-match',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(0, null, 'missing'),
+        result: { status: 'completed', exit_code: 0, stdout: 'needle', stderr: '' },
+      },
+      {
+        name: 'neither-match',
+        command: 'head -- pyproject.toml',
+        confirms: outcome(0, 'needle'),
+        refutes: outcome(1),
+        result: { status: 'completed', exit_code: 0, stdout: 'other', stderr: '' },
+      },
+    ];
+    const records = [];
+    for (const candidate of cases) {
+      const finding = {
+        description: candidate.name,
+        verification: {
+          command: candidate.command,
+          confirms_if: candidate.confirms,
+          refutes_if: candidate.refutes,
+        },
+      };
+      const report = await verifyFindings([finding], {
+        authorize: () => candidate.denied
+          ? { authorized: false, argv: [], reason: 'approval denied' }
+          : { authorized: true, argv: candidate.command.split(' ') },
+        run: async () => candidate.result,
+      });
+      records.push({
+        name: candidate.name,
+        verdict: report.records[0].verdict,
+        result: report.records[0].result,
+      });
+    }
+    writeJson(records);
+    break;
+  }
+  case 'review-artifacts': {
+    if (argument !== 'bounded') throw new Error('invalid artifact fixture');
+    const tmpIndex = process.argv.indexOf('--tmp');
+    const tmp = tmpIndex === -1 ? null : process.argv[tmpIndex + 1];
+    if (!tmp) throw new Error('review-artifacts requires --tmp');
+    const checkout = join(tmp, 'checkout');
+    const artifacts = join(checkout, 'docs', 'plans', '.review', 'verification');
+    mkdirSync(artifacts, { recursive: true });
+    mkdirSync(join(artifacts, 'directory.json'));
+    const finding = {
+      description: 'artifact fixture',
+      verification: {
+        command: 'rg -n -- needle src/inside.txt',
+        confirms_if: {
+          exit_code: 0,
+          stdout_contains: 'needle',
+          stdout_excludes: null,
+        },
+        refutes_if: {
+          exit_code: 1,
+          stdout_contains: null,
+          stdout_excludes: null,
+        },
+      },
+    };
+    mkdirSync(join(checkout, 'src'));
+    writeFileSync(join(checkout, 'src', 'inside.txt'), 'needle\n');
+    const findingFile = join(artifacts, 'finding.json');
+    const resultFile = join(artifacts, 'result.json');
+    writeFileSync(findingFile, JSON.stringify(finding));
+    writeFileSync(resultFile, JSON.stringify({
+      status: 'completed', exit_code: 0, stdout: 'needle', stderr: 'advisory',
+    }));
+    const malformed = join(artifacts, 'malformed.json');
+    writeFileSync(malformed, '{');
+    const oversized = join(artifacts, 'oversized.json');
+    writeFileSync(oversized, 'x'.repeat(2_097_153));
+    const exact = join(artifacts, 'exact.json');
+    const findingJson = JSON.stringify(finding);
+    writeFileSync(exact, findingJson + ' '.repeat(2_097_152 - findingJson.length));
+    const outside = join(tmp, 'outside.json');
+    writeFileSync(outside, JSON.stringify(finding));
+    symlinkSync(outside, join(artifacts, 'linked.json'));
+    const outsideDirectory = join(tmp, 'outside-directory');
+    mkdirSync(outsideDirectory);
+    writeFileSync(join(outsideDirectory, 'finding.json'), JSON.stringify(finding));
+    symlinkSync(outsideDirectory, join(artifacts, 'linked-directory'));
+    const verifier = join(process.cwd(), 'scripts', 'agent-compat', 'review-verification.mjs');
+    const invoke = (...args) => spawnSync('node', [verifier, ...args, '--root', checkout], {
+      encoding: 'utf8',
+    });
+    const authorization = invoke('--authorize-finding', findingFile);
+    const classification = invoke(
+      '--classify-files', '--finding-file', findingFile, '--result-file', resultFile,
+    );
+    const exactResult = invoke('--authorize-finding', exact);
+    const rejected = {};
+    for (const [name, file] of Object.entries({
+      linked: join(artifacts, 'linked.json'),
+      linked_directory: join(artifacts, 'linked-directory', 'finding.json'),
+      outside,
+      malformed,
+      directory: join(artifacts, 'directory.json'),
+      oversized,
+    })) {
+      rejected[name] = invoke('--authorize-finding', file).status !== 0;
+    }
+    const rawAuthorize = invoke('--authorize-command', finding.verification.command);
+    const rawClassify = invoke('--classify-results', '--finding', JSON.stringify(finding));
+    writeJson({
+      authorization_status: authorization.status,
+      authorization: authorization.status === 0 ? JSON.parse(authorization.stdout) : null,
+      classification_status: classification.status,
+      classification: classification.status === 0 ? JSON.parse(classification.stdout) : null,
+      exact_limit_status: exactResult.status,
+      rejected,
+      raw_modes_rejected: rawAuthorize.status !== 0 && rawClassify.status !== 0,
+    });
     break;
   }
   case 'review-authorize': {
@@ -902,14 +1261,22 @@ switch (mode) {
         description: slot,
         verification: {
           command,
-          confirms_if: 'CONFIRMED',
-          refutes_if: 'REFUTED',
+          confirms_if: {
+            exit_code: 0,
+            stdout_contains: 'CONFIRMED',
+            stdout_excludes: null,
+          },
+          refutes_if: {
+            exit_code: 0,
+            stdout_contains: 'REFUTED',
+            stdout_excludes: null,
+          },
         },
       }], {
         authorize: (value) => ({ authorized: true, argv: [value] }),
         run: async ({ argv }) => {
           commandsRun.push(argv[0]);
-          return 'REFUTED';
+          return { status: 'completed', exit_code: 0, stdout: 'REFUTED', stderr: '' };
         },
       });
       slots[slot] = report;
@@ -927,8 +1294,16 @@ switch (mode) {
       description: 'fixed finding',
       verification: {
         command: 'verify-fixed-finding',
-        confirms_if: 'CONFIRMED',
-        refutes_if: 'REFUTED',
+        confirms_if: {
+          exit_code: 0,
+          stdout_contains: 'CONFIRMED',
+          stdout_excludes: null,
+        },
+        refutes_if: {
+          exit_code: 0,
+          stdout_contains: 'REFUTED',
+          stdout_excludes: null,
+        },
       },
     };
     const authorize = (command) => ({ authorized: true, argv: [command] });
@@ -936,13 +1311,13 @@ switch (mode) {
       authorize,
       run: async ({ argv }) => {
         commandsRun.push(argv[0]);
-        return 'CONFIRMED';
+        return { status: 'completed', exit_code: 0, stdout: 'CONFIRMED', stderr: '' };
       },
     });
     const second = await reverifyAfterFix(first.records, {
       run: async ({ argv }) => {
         commandsRun.push(argv[0]);
-        return 'REFUTED';
+        return { status: 'completed', exit_code: 0, stdout: 'REFUTED', stderr: '' };
       },
     });
     writeJson({
@@ -1194,9 +1569,17 @@ switch (mode) {
       description: 'The plan keeps the review loop open.',
       suggestion: 'Cap the review count.',
       verification: {
-        command: 'rg -n -- review docs/plans/fixture.md',
-        confirms_if: 'the unbounded instruction is present',
-        refutes_if: 'the instruction is absent',
+        command: 'rg -n -- review scripts/agent-compat/review-contract.mjs',
+        confirms_if: {
+          exit_code: 0,
+          stdout_contains: 'the unbounded instruction is present',
+          stdout_excludes: null,
+        },
+        refutes_if: {
+          exit_code: 1,
+          stdout_contains: null,
+          stdout_excludes: null,
+        },
       },
     };
     const validRecord = makeReviewRecord({
@@ -1355,9 +1738,17 @@ switch (mode) {
               description: 'finding',
               suggestion: 'revise',
               verification: {
-                command: 'rg -n -- finding docs/plan.md',
-                confirms_if: 'present',
-                refutes_if: 'absent',
+                command: 'rg -n -- finding scripts/agent-compat/review-contract.mjs',
+                confirms_if: {
+                  exit_code: 0,
+                  stdout_contains: 'present',
+                  stdout_excludes: null,
+                },
+                refutes_if: {
+                  exit_code: 1,
+                  stdout_contains: null,
+                  stdout_excludes: null,
+                },
               },
             };
             return makeReviewRecord({
