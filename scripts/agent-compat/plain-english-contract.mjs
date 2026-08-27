@@ -5,8 +5,8 @@ import { realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const EXPECTED_PLAIN_ENGLISH_VERSION = '0.24.1';
-export const PLAIN_ENGLISH_RECOVERY = 'npm install -g plain-english@0.24.1';
+export const EXPECTED_PLAIN_ENGLISH_VERSION = '1.0.0';
+export const PLAIN_ENGLISH_RECOVERY = 'npm install -g plain-english@1.0.0';
 export const CODEX_CHAT_COMMAND =
   'node "$(git rev-parse --show-toplevel)/.codex/hooks/plain-english.mjs" ' +
   'hook chat --agent codex';

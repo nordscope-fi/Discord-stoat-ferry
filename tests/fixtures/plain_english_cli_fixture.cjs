@@ -6,7 +6,7 @@ const { spawn } = require('node:child_process');
 
 const args = process.argv.slice(2);
 if (args[0] === '--version') {
-  process.stdout.write(`${process.env.FERRY_PLAIN_ENGLISH_VERSION || '0.24.1'}\n`);
+  process.stdout.write(`${process.env.FERRY_PLAIN_ENGLISH_VERSION || '1.0.0'}\n`);
   process.exit(0);
 }
 

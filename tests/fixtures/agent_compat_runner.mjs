@@ -139,13 +139,14 @@ function nativeChatDocument(command, timeout = 10) {
 
 function plainEnglishContract(fixture) {
   const results = {
-    accepted: { status: 0, stdout: '0.24.1\n', stderr: '' },
+    accepted: { status: 0, stdout: '1.0.0\n', stderr: '' },
     missing: { status: null, stdout: '', stderr: '', error: { code: 'ENOENT' } },
+    failed: { status: 1, stdout: '', stderr: 'failed' },
     empty: { status: 0, stdout: '', stderr: '' },
-    prefixed: { status: 0, stdout: 'plain-english 0.24.1\n', stderr: '' },
-    old: { status: 0, stdout: '0.24.0\n', stderr: '' },
-    'near-miss': { status: 0, stdout: '0.24.10\n', stderr: '' },
-    prerelease: { status: 0, stdout: '0.24.1-beta.1\n', stderr: '' },
+    prefixed: { status: 0, stdout: 'plain-english 1.0.0\n', stderr: '' },
+    old: { status: 0, stdout: '0.24.1\n', stderr: '' },
+    'near-miss': { status: 0, stdout: '1.0.1\n', stderr: '' },
+    prerelease: { status: 0, stdout: '1.0.0-beta.1\n', stderr: '' },
   };
   if (!Object.hasOwn(results, fixture)) throw new Error(`unknown version fixture: ${fixture}`);
   const result = probePlainEnglish({ run: () => results[fixture] });
@@ -281,7 +282,7 @@ function installLinkedHosts() {
         ...process.env,
         HOME: home,
         PATH: `${fakeBin}:${process.env.PATH}`,
-        FERRY_PLAIN_ENGLISH_VERSION: '0.24.1',
+        FERRY_PLAIN_ENGLISH_VERSION: '1.0.0',
       },
       encoding: 'utf8',
     },
@@ -370,7 +371,7 @@ esac
     HOME: home,
     CODEX_HOME: join(home, '.codex'),
     PATH: `${fakeBin}:${process.env.PATH}`,
-    FERRY_PLAIN_ENGLISH_VERSION: '0.24.1',
+    FERRY_PLAIN_ENGLISH_VERSION: '1.0.0',
   };
   const run = () => spawnSync('bash', [join(root, 'scripts', 'codex-setup.sh')], {
     cwd: root,
