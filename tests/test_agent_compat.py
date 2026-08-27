@@ -34,7 +34,7 @@ def _write_plain_english_fixture(fake_bin: Path) -> Path:
 
 
 def _installer_checkout(
-    tmp_path: Path, *, version: str = "0.24.1", command: bool = True
+    tmp_path: Path, *, version: str = "1.0.0", command: bool = True
 ) -> tuple[Path, Path, dict[str, str]]:
     root = tmp_path / "repo"
     user_home = tmp_path / "home"
@@ -192,7 +192,7 @@ def test_installer_renders_project_pins_with_conflicting_global_defaults(
 
 @pytest.mark.parametrize(
     ("version", "command"),
-    [("0.24.0", True), ("plain-english 0.24.1", True), ("0.24.1", False)],
+    [("0.24.1", True), ("plain-english 1.0.0", True), ("1.0.0", False)],
 )
 def test_installer_rejects_unsupported_plain_english_before_writes(
     tmp_path: Path, version: str, command: bool
@@ -209,8 +209,8 @@ def test_installer_rejects_unsupported_plain_english_before_writes(
     )
     assert result.returncode == 1
     assert _generated_host_snapshot(root) == before
-    assert "expected 0.24.1" in result.stderr
-    assert "npm install -g plain-english@0.24.1" in result.stderr
+    assert "expected 1.0.0" in result.stderr
+    assert "npm install -g plain-english@1.0.0" in result.stderr
 
 
 def test_installer_keeps_native_plain_english_artifacts(tmp_path: Path) -> None:
@@ -355,6 +355,7 @@ def test_codex_patch_policy_finishes_inside_the_outer_budget() -> None:
     [
         ("accepted", "accepted"),
         ("missing", "missing"),
+        ("failed", "malformed"),
         ("empty", "malformed"),
         ("prefixed", "malformed"),
         ("old", "mismatched"),
@@ -391,9 +392,9 @@ def test_plain_english_contract_reports_actionable_failure() -> None:
     )
     mismatch_report = json.loads(mismatch.stdout)
     missing_report = json.loads(missing.stdout)
-    assert mismatch_report["expected"] == "0.24.1"
-    assert mismatch_report["detected"] == "0.24.0"
-    assert "npm install -g plain-english@0.24.1" in mismatch_report["message"]
+    assert mismatch_report["expected"] == "1.0.0"
+    assert mismatch_report["detected"] == "0.24.1"
+    assert "npm install -g plain-english@1.0.0" in mismatch_report["message"]
     assert missing_report["detected"] is None
     assert "no version detected" in missing_report["message"]
 
@@ -467,7 +468,7 @@ def test_agent_check_gates_only_generated_state_modes_on_the_exact_version(
     marker = tmp_path / "init-called.jsonl"
     env = {
         **env,
-        "FERRY_PLAIN_ENGLISH_VERSION": "0.24.0",
+        "FERRY_PLAIN_ENGLISH_VERSION": "0.24.1",
         "FERRY_PLAIN_ENGLISH_INIT_MARKER": str(marker),
     }
     arguments = {
@@ -497,7 +498,7 @@ def test_agent_check_gates_only_generated_state_modes_on_the_exact_version(
     assert not marker.exists(), result.stdout + result.stderr
     if requires_tool:
         assert result.returncode == 1
-        assert "plain-English mismatched: expected 0.24.1" in result.stdout + result.stderr
+        assert "plain-English mismatched: expected 1.0.0" in result.stdout + result.stderr
     else:
         assert result.returncode == 0, result.stdout + result.stderr
 
