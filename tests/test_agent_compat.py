@@ -47,15 +47,21 @@ def _installer_checkout(
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     shutil.copytree(REPO / "config/agent-compat", root / "config/agent-compat")
     shutil.copytree(REPO / "scripts/agent-compat", root / "scripts/agent-compat")
-    shutil.copytree(REPO / ".claude/skills", root / ".claude/skills", symlinks=True)
-    shutil.copytree(REPO / ".agents/skills", root / ".agents/skills", symlinks=True)
-    (root / ".claude/scripts").mkdir(parents=True)
-    shutil.copy2(
-        REPO / ".claude/scripts/new-worktree.sh",
-        root / ".claude/scripts/new-worktree.sh",
+    fixture_skill = root / ".claude/skills/fixture-skill/SKILL.md"
+    fixture_skill.parent.mkdir(parents=True)
+    fixture_skill.write_text("# Fixture skill\n")
+    worktree_script = root / ".claude/scripts/new-worktree.sh"
+    worktree_script.parent.mkdir(parents=True)
+    worktree_script.write_text(
+        "for host_dir in .agents .codex .vibe .qwen; do\n"
+        'ln -s "../../$host_dir" "$WT/$host_dir"\n'
+        "done\n"
+        "for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents "
+        ".codex .vibe .qwen; do\n"
+        "done\n"
     )
-    shutil.copy2(_canonical_repo() / ".worktreeinclude", root / ".worktreeinclude")
-    shutil.copy2(REPO / "AGENTS.md", root / "AGENTS.md")
+    (root / ".worktreeinclude").write_text("\n")
+    (root / "AGENTS.md").write_text("# Fixture instructions\n")
     if command:
         _write_plain_english_fixture(fake_bin)
     env = {

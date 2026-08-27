@@ -186,6 +186,7 @@ function stagedPlainEnglishTimeout(targetAgent) {
   let comparisons = 0;
   checkPlainEnglishState({
     stageParent: base,
+    instructions: '# Fixture instructions\n',
     runInit(stage, agent, options) {
       calls.push(agent);
       if (agent !== targetAgent) return true;
