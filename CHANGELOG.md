@@ -72,6 +72,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.35.4] - 2026-08-27
+
+### Fixed
+
+- **Review findings now cross a decidable local verification boundary.** Provider records require
+  authorized direct commands and mutually exclusive structured outcomes. Finding data moves
+  through bounded project files, while command checks and verdicts stay in the workspace sandbox.
+  Git checks disable repository-configured external tools. Closes #665.
+
 ## [2.35.3] - 2026-08-26
 
 ### Fixed
