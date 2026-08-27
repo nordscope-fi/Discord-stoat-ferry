@@ -144,6 +144,17 @@ function hasActiveLine(source, expected) {
   return source.split(/\r?\n/u).some((line) => line.trim() === expected);
 }
 
+function hasReviewBoundary(source) {
+  const normalized = source.split(/\s+/u).join(' ').toLowerCase();
+  return [
+    'live provider collection uses',
+    'codex requests escalated execution on the first attempt',
+    'never tries the workspace sandbox first',
+    'never runs a separate credential login',
+    'verdict evaluation stay in the workspace sandbox',
+  ].every((text) => normalized.includes(text));
+}
+
 function parseRole(path) {
   const source = readFileSync(path, 'utf8');
   const model = source.match(/^model\s*=\s*"([^"]+)"/mu)?.[1] ?? null;
@@ -436,8 +447,10 @@ export async function runStaticReadiness({
     remediation: 'Restore AGENTS.md from the instruction snapshot.',
   }, () => {
     const source = requireText(files, join(projectRoot, 'AGENTS.md'), 'instructions');
-    if (!source.includes('Host Compatibility')) throw new Error('contract missing');
-    return { shared_contract: true };
+    if (!source.includes('Host Compatibility') || !hasReviewBoundary(source)) {
+      throw new Error('contract missing');
+    }
+    return { shared_contract: true, review_boundary: true };
   });
 
   await add({

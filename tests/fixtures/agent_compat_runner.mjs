@@ -1876,10 +1876,20 @@ switch (mode) {
     const trust = fixture === 'single-quoted-trust'
       ? `[projects.'${root}']\ntrust_level = "trusted"\n`
       : `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`;
+    const instructions = fixture === 'missing-review-boundary'
+      ? '# Host Compatibility\n'
+      : [
+          '# Host Compatibility',
+          'Live provider collection uses the active host credential and network route.',
+          'Codex requests escalated execution on the first attempt.',
+          'It never tries the workspace sandbox first and never runs a separate credential login.',
+          'Local authorization, command execution, classification, and verdict evaluation stay',
+          'in the workspace sandbox.',
+        ].join('\n');
     const entries = new Map([
       [`${root}/.codex/config.toml`, projectConfig],
       [`${home}/.codex/config.toml`, trust],
-      [`${root}/AGENTS.md`, '# Host Compatibility\n'],
+      [`${root}/AGENTS.md`, instructions],
       [`${root}/.codex/hooks.json`, JSON.stringify(hooks)],
       [`${root}/.claude/skills/df-start/SKILL.md`, '# start\n'],
       [`${root}/.agents/skills/df-start/SKILL.md`, '# start\n'],
