@@ -10,11 +10,13 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   readlinkSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { dispatchCodexPreTool } from '../../scripts/agent-compat/codex-hook-adapter.mjs';
 import {
@@ -2185,6 +2187,162 @@ switch (mode) {
     const violations = generatedHostSecretViolations(files);
     writeJson({ violations });
     if (violations.length) process.exitCode = 1;
+    break;
+  }
+  case 'worktree-manifest-isolation': {
+    const fixtureArgs = process.argv.slice(3);
+    const baseIndex = fixtureArgs.indexOf('--base');
+    const base = baseIndex === -1 ? null : fixtureArgs[baseIndex + 1];
+    if (!base) throw new Error('--base is required');
+
+    const source = process.cwd();
+    const root = join(base, 'primary');
+    const first = join(root, '.worktrees', 'manifest-first');
+    const second = join(root, '.worktrees', 'manifest-second');
+    const helper = join(root, '.claude', 'scripts', 'new-worktree.sh');
+    const run = (command, args, cwd = root) => {
+      const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
+      if (result.status !== 0) {
+        throw new Error(`${command} ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+      }
+      return result.stdout.trim();
+    };
+    const localManifest = (checkout) => {
+      const path = join(checkout, 'docs', 'plans', 'change-manifest.md');
+      return existsSync(path) ? path : null;
+    };
+
+    mkdirSync(root, { recursive: true });
+    run('git', ['init', '-q', '-b', 'main', root], base);
+    cpSync(join(source, '.gitignore'), join(root, '.gitignore'));
+    writeFileSync(join(root, 'seed.txt'), 'fixture\n');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'README.md'), '# Fixture docs\n');
+    run('git', ['add', '.gitignore', 'seed.txt', 'docs/README.md']);
+    run('git', [
+      '-c', 'user.name=Ferry Fixture',
+      '-c', 'user.email=ferry-fixture@example.invalid',
+      '-c', 'commit.gpgsign=false',
+      'commit', '-q', '-m', 'seed',
+    ]);
+
+    mkdirSync(join(root, '.claude', 'scripts'), { recursive: true });
+    mkdirSync(join(root, '.claude', 'rules'), { recursive: true });
+    mkdirSync(join(root, '.claude', 'skills', 'df-ship'), { recursive: true });
+    mkdirSync(join(root, 'docs', 'architecture', 'adr'), { recursive: true });
+    for (const host of ['.agents', '.codex', '.vibe', '.qwen']) {
+      mkdirSync(join(root, host), { recursive: true });
+      writeFileSync(join(root, host, 'fixture.txt'), `${host}\n`);
+    }
+    cpSync(join(source, '.claude', 'scripts', 'new-worktree.sh'), helper);
+    chmodSync(helper, 0o755);
+    writeFileSync(join(root, 'CLAUDE.md'), '# Original writer\n');
+    writeFileSync(join(root, 'AGENTS.md'), '# Original writer\n');
+    writeFileSync(join(root, '.claude', 'rules', 'fixture.md'), '# Shared rule\n');
+    writeFileSync(
+      join(root, '.claude', 'skills', 'df-ship', 'SKILL.md'),
+      '# Original reader\n',
+    );
+    writeFileSync(join(root, 'docs', 'architecture', 'adr', 'fixture.md'), '# Shared ADR\n');
+
+    const worktrees = [];
+    let report;
+    try {
+      run(helper, ['manifest-first', 'main']);
+      worktrees.push(first);
+      const firstGitDirBefore = run('git', ['rev-parse', '--absolute-git-dir'], first);
+
+      const writer = [
+        'During the build, run `mkdir -p docs/plans`, then write',
+        '`docs/plans/change-manifest.md`.',
+      ].join('\n');
+      writeFileSync(join(root, 'CLAUDE.md'), `${writer}\n`);
+      writeFileSync(join(root, 'AGENTS.md'), `${writer}\n`);
+      writeFileSync(
+        join(root, '.claude', 'skills', 'df-ship', 'SKILL.md'),
+        'head -1 docs/plans/change-manifest.md\n',
+      );
+
+      run(helper, ['manifest-second', 'main']);
+      worktrees.push(second);
+
+      const primaryPlans = join(root, 'docs', 'plans');
+      const firstPlans = join(first, 'docs', 'plans');
+      const secondPlans = join(second, 'docs', 'plans');
+      mkdirSync(primaryPlans, { recursive: true });
+      mkdirSync(firstPlans, { recursive: true });
+      mkdirSync(firstPlans, { recursive: true });
+      mkdirSync(secondPlans, { recursive: true });
+      mkdirSync(secondPlans, { recursive: true });
+
+      const primaryManifest = join(primaryPlans, 'change-manifest.md');
+      const firstManifest = join(firstPlans, 'change-manifest.md');
+      const secondManifest = join(secondPlans, 'change-manifest.md');
+      writeFileSync(primaryManifest, '# Primary manifest\n');
+      writeFileSync(firstManifest, '# First manifest\n');
+      writeFileSync(secondManifest, '# Second manifest\n');
+      writeFileSync(join(root, '.claude', 'change-manifest.md'), '# Legacy manifest\n');
+
+      const firstBefore = readFileSync(firstManifest);
+      const primaryBefore = readFileSync(primaryManifest);
+      const instructionsBefore = directorySnapshot(join(root, '.claude'));
+      writeFileSync(secondManifest, '# Second manifest rewritten\n');
+
+      unlinkSync(firstManifest);
+      const legacyIgnored = localManifest(first) === null &&
+        existsSync(join(first, '.claude', 'change-manifest.md'));
+      writeFileSync(firstManifest, firstBefore);
+
+      const sharedLinks = [
+        join(first, 'CLAUDE.md'),
+        join(first, 'AGENTS.md'),
+        join(first, '.claude'),
+        join(first, '.agents'),
+        join(first, '.codex'),
+        join(first, '.vibe'),
+        join(first, '.qwen'),
+        join(first, 'docs', 'architecture'),
+      ];
+      const statuses = [root, first, second].map((path) =>
+        run('git', ['status', '--porcelain'], path));
+      const firstGitDirAfter = run('git', ['rev-parse', '--absolute-git-dir'], first);
+
+      report = {
+        distinct_paths: new Set([
+          realpathSync(primaryManifest),
+          realpathSync(firstManifest),
+          realpathSync(secondManifest),
+        ]).size === 3,
+        first_unchanged_after_second_write:
+          readFileSync(firstManifest).equals(firstBefore) &&
+          readFileSync(secondManifest, 'utf8') === '# Second manifest rewritten\n',
+        primary_unchanged:
+          readFileSync(primaryManifest).equals(primaryBefore) &&
+          directorySnapshot(join(root, '.claude')) === instructionsBefore,
+        legacy_ignored: legacyIgnored,
+        parent_created_twice: existsSync(firstPlans) && existsSync(secondPlans),
+        statuses_clean: statuses.every((status) => status === ''),
+        shared_instruction_links:
+          sharedLinks.every((path) => lstatSync(path).isSymbolicLink()) &&
+          readFileSync(join(first, '.claude', 'rules', 'fixture.md'), 'utf8') === '# Shared rule\n' &&
+          realpathSync(join(first, 'docs', 'architecture')) ===
+            resolve(root, 'docs', 'architecture'),
+        existing_worktree_reused:
+          firstGitDirAfter === firstGitDirBefore &&
+          run('git', ['branch', '--show-current'], first) === 'manifest-first',
+      };
+    } finally {
+      for (const worktree of worktrees.reverse()) {
+        const removed = spawnSync('git', ['worktree', 'remove', '--force', worktree], {
+          cwd: root,
+          encoding: 'utf8',
+        });
+        if (removed.status !== 0) {
+          throw new Error(`git worktree remove failed: ${removed.stderr || removed.stdout}`);
+        }
+      }
+    }
+    writeJson(report);
     break;
   }
   case 'verify-all': {
