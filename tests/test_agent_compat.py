@@ -920,6 +920,29 @@ def test_agent_check_rejects_an_incomplete_linked_host_contract(
     assert "four canonical host links" in result.stdout + result.stderr
 
 
+def test_linked_worktrees_keep_change_manifests_independent(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "worktree-manifest-isolation",
+        "--base",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report == {
+        "distinct_paths": True,
+        "first_unchanged_after_second_write": True,
+        "primary_unchanged": True,
+        "legacy_ignored": True,
+        "parent_created_twice": True,
+        "statuses_clean": True,
+        "shared_instruction_links": True,
+        "existing_worktree_reused": True,
+    }
+
+
 def test_codex_bootstrap_preserves_unowned_global_state(tmp_path: Path) -> None:
     home = tmp_path / "home"
     codex = home / ".codex"
