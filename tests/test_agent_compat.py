@@ -61,7 +61,18 @@ def _installer_checkout(
         "done\n"
     )
     (root / ".worktreeinclude").write_text("\n")
-    (root / "AGENTS.md").write_text("# Fixture instructions\n")
+    writer = "During the build, run `mkdir -p docs/plans`, then write "
+    writer += "`docs/plans/change-manifest.md`.\n"
+    (root / "AGENTS.md").write_text(f"# Host Compatibility\n{writer}")
+    (root / "CLAUDE.md").write_text(writer)
+    ship_skill = root / ".claude/skills/df-ship/SKILL.md"
+    ship_skill.parent.mkdir(parents=True)
+    ship_skill.write_text(
+        "head -1 docs/plans/change-manifest.md\n"
+        "If the manifest names this branch or this change, use it.\n"
+        "If no manifest exists, grep the codebase pattern.\n"
+        "If `docs/plans/change-manifest.md` exists, include it as manifest context.\n"
+    )
     if command:
         _write_plain_english_fixture(fake_bin)
     env = {
@@ -72,6 +83,36 @@ def _installer_checkout(
         "FERRY_PLAIN_ENGLISH_VERSION": version,
     }
     return root, user_home, env
+
+
+def _worktree_contract_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path, Path]:
+    script = tmp_path / "new-worktree.sh"
+    script.write_text(
+        "for host_dir in .agents .codex .vibe .qwen; do\n"
+        'ln -s "../../$host_dir" "$WT/$host_dir"\n'
+        "done\n"
+        "for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents "
+        ".codex .vibe .qwen; do\n"
+        "done\n"
+    )
+    include = tmp_path / ".worktreeinclude"
+    include.write_text("CLAUDE.md\n.claude/**\ndocs/architecture/**\n")
+    writer = "During the build, run `mkdir -p docs/plans`, then write "
+    writer += "`docs/plans/change-manifest.md`.\n"
+    agents = tmp_path / "AGENTS.md"
+    claude = tmp_path / "CLAUDE.md"
+    agents.write_text(writer)
+    claude.write_text(writer)
+    ship = tmp_path / "df-ship.md"
+    ship.write_text(
+        "head -1 docs/plans/change-manifest.md\n"
+        "If the manifest names this branch or this change, use it.\n"
+        "If no manifest exists, grep the codebase pattern.\n"
+        "If `docs/plans/change-manifest.md` exists, include it as manifest context.\n"
+    )
+    return script, include, agents, claude, ship
 
 
 def _generated_host_snapshot(root: Path) -> dict[str, tuple[int, bytes] | None]:
@@ -485,6 +526,9 @@ def test_agent_check_gates_only_generated_state_modes_on_the_exact_version(
             "--check-worktree-contract",
             str(root / ".claude/scripts/new-worktree.sh"),
             str(root / ".worktreeinclude"),
+            str(root / "AGENTS.md"),
+            str(root / "CLAUDE.md"),
+            str(root / ".claude/skills/df-ship/SKILL.md"),
         ],
     }[mode]
     result = subprocess.run(
@@ -806,6 +850,50 @@ def test_focused_codex_hook_check_stops_when_path_is_missing() -> None:
     assert "Warnings" not in result.stdout
 
 
+def test_agent_check_requires_every_worktree_contract_path(tmp_path: Path) -> None:
+    script, include, _, _, _ = _worktree_contract_fixture(tmp_path)
+    result = _run(
+        "node",
+        "scripts/agent-compat/check.mjs",
+        "--check-worktree-contract",
+        str(script),
+        str(include),
+    )
+    assert result.returncode == 1
+    assert (
+        "requires script, include, AGENTS.md, CLAUDE.md, and ship skill paths"
+        in result.stdout + result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("agents", "writer contract is invalid in AGENTS.md"),
+        ("claude", "writer contract is invalid in CLAUDE.md"),
+        ("ship", "reader contract is invalid in df-ship"),
+    ],
+)
+def test_agent_check_rejects_shared_worktree_manifest_contract(
+    tmp_path: Path, source: str, expected: str
+) -> None:
+    script, include, agents, claude, ship = _worktree_contract_fixture(tmp_path)
+    changed = {"agents": agents, "claude": claude, "ship": ship}[source]
+    changed.write_text("use .claude/change-manifest.md\n")
+    result = _run(
+        "node",
+        "scripts/agent-compat/check.mjs",
+        "--check-worktree-contract",
+        str(script),
+        str(include),
+        str(agents),
+        str(claude),
+        str(ship),
+    )
+    assert result.returncode == 1
+    assert expected in result.stdout + result.stderr
+
+
 def test_agent_check_rejects_an_incomplete_linked_host_contract(
     tmp_path: Path,
 ) -> None:
@@ -815,12 +903,18 @@ def test_agent_check_rejects_an_incomplete_linked_host_contract(
     broken_script.write_text("for host_dir in .agents .qwen; do\n  :\ndone\n")
     include = tmp_path / ".worktreeinclude"
     include.write_text("CLAUDE.md\n")
+    contract_root = tmp_path / "contract"
+    contract_root.mkdir()
+    _, _, agents, claude, ship = _worktree_contract_fixture(contract_root)
     result = _run(
         "node",
         "scripts/agent-compat/check.mjs",
         "--check-worktree-contract",
         str(broken_script),
         str(include),
+        str(agents),
+        str(claude),
+        str(ship),
     )
     assert result.returncode == 1
     assert "four canonical host links" in result.stdout + result.stderr
@@ -1148,6 +1242,10 @@ def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> No
         "native_chat_hooks": 2,
         "timeout_seconds": 60,
     }
+    assert records["worktree-parity"]["details"] == {
+        "canonical_hosts": 4,
+        "manifest_contract_sources": 3,
+    }
 
 
 def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -> None:
@@ -1447,6 +1545,7 @@ def test_codex_setup_live_adds_live_readiness(tmp_path: Path) -> None:
 def test_codex_setup_second_run_is_byte_identical(tmp_path: Path) -> None:
     required_snapshot_paths = [
         REPO / "AGENTS.md",
+        REPO / "CLAUDE.md",
         REPO / ".claude/skills",
         REPO / ".claude/scripts/new-worktree.sh",
         _canonical_repo() / ".worktreeinclude",

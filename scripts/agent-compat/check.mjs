@@ -56,6 +56,9 @@ const focusedHookPath = focusedHookArgument?.startsWith('--') ? null : focusedHo
 const worktreeIndex = args.indexOf('--check-worktree-contract');
 const worktreeScriptPath = worktreeIndex === -1 ? null : args[worktreeIndex + 1];
 const worktreeIncludePath = worktreeIndex === -1 ? null : args[worktreeIndex + 2];
+const worktreeAgentsPath = worktreeIndex === -1 ? null : args[worktreeIndex + 3];
+const worktreeClaudePath = worktreeIndex === -1 ? null : args[worktreeIndex + 4];
+const worktreeShipSkillPath = worktreeIndex === -1 ? null : args[worktreeIndex + 5];
 
 const failures = [];
 const warnings = [];
@@ -66,8 +69,16 @@ function warn(msg) { warnings.push(msg); }
 if (focusedIndex !== -1 && !focusedHookPath) {
   fail('--check-codex-hooks requires a path');
 }
-if (worktreeIndex !== -1 && (!worktreeScriptPath || !worktreeIncludePath)) {
-  fail('--check-worktree-contract requires a script and include path');
+if (worktreeIndex !== -1 && [
+  worktreeScriptPath,
+  worktreeIncludePath,
+  worktreeAgentsPath,
+  worktreeClaudePath,
+  worktreeShipSkillPath,
+].some(path => !path || path.startsWith('--'))) {
+  fail(
+    '--check-worktree-contract requires script, include, AGENTS.md, CLAUDE.md, and ship skill paths',
+  );
 }
 
 function render(templateName, replacements = {}) {
@@ -276,12 +287,24 @@ export function checkCodexHooks(actualPath) {
   return checkPlainEnglishState({ codexHooksPath: actualPath, includeVibe: false });
 }
 
-export function checkWorktreeContract(scriptPath, includePath) {
+export function checkWorktreeContract(
+  scriptPath,
+  includePath,
+  agentsPath,
+  claudePath,
+  shipSkillPath,
+) {
   let script;
   let entries;
+  let agents;
+  let claude;
+  let shipSkill;
   try {
     script = readFileSync(scriptPath, 'utf8');
     entries = new Set(readFileSync(includePath, 'utf8').split(/\r?\n/u).filter(Boolean));
+    agents = readFileSync(agentsPath, 'utf8');
+    claude = readFileSync(claudePath, 'utf8');
+    shipSkill = readFileSync(shipSkillPath, 'utf8');
   } catch (err) {
     fail(`worktree contract could not be read: ${err.message}`);
     return;
@@ -295,6 +318,25 @@ export function checkWorktreeContract(scriptPath, includePath) {
   ];
   if (copiedHosts.length > 0 || required.some((line) => !script.includes(line))) {
     fail('worktree contract must use four canonical host links and copy none of their state');
+  }
+
+  const localManifest = 'docs/plans/change-manifest.md';
+  const sharedManifest = '.claude/change-manifest.md';
+  for (const [name, source] of [['AGENTS.md', agents], ['CLAUDE.md', claude]]) {
+    if (!source.includes('mkdir -p docs/plans') || !source.includes(localManifest)
+        || source.includes(sharedManifest)) {
+      fail(`worktree manifest writer contract is invalid in ${name}`);
+    }
+  }
+  const shipRequirements = [
+    `head -1 ${localManifest}`,
+    'If the manifest names this branch or this change',
+    'If no manifest exists',
+    `If \`${localManifest}\` exists`,
+  ];
+  if (shipRequirements.some((line) => !shipSkill.includes(line))
+      || shipSkill.includes(sharedManifest)) {
+    fail('worktree manifest reader contract is invalid in df-ship');
   }
 }
 
@@ -640,8 +682,15 @@ function main() {
   if (failures.length > 0) {
     // Argument and prerequisite failures take precedence over generated-state work.
   } else if (worktreeIndex !== -1) {
-    if (worktreeScriptPath && worktreeIncludePath) {
-      checkWorktreeContract(resolve(worktreeScriptPath), resolve(worktreeIncludePath));
+    if (worktreeScriptPath && worktreeIncludePath && worktreeAgentsPath
+        && worktreeClaudePath && worktreeShipSkillPath) {
+      checkWorktreeContract(
+        resolve(worktreeScriptPath),
+        resolve(worktreeIncludePath),
+        resolve(worktreeAgentsPath),
+        resolve(worktreeClaudePath),
+        resolve(worktreeShipSkillPath),
+      );
     }
   } else if (focusedIndex !== -1) {
     if (focusedHookPath) checkCodexHooks(resolve(focusedHookPath));
@@ -661,6 +710,9 @@ function main() {
     checkWorktreeContract(
       join(snapshotRoot, '.claude', 'scripts', 'new-worktree.sh'),
       join(snapshotRoot, '.worktreeinclude'),
+      join(snapshotRoot, 'AGENTS.md'),
+      join(snapshotRoot, 'CLAUDE.md'),
+      join(snapshotRoot, '.claude', 'skills', 'df-ship', 'SKILL.md'),
     );
 
     if (!generatedOnly) {
