@@ -317,6 +317,7 @@ function setupRepeatReal() {
   cpSync(join(source, 'config'), join(root, 'config'), { recursive: true });
   cpSync(join(source, 'scripts'), join(root, 'scripts'), { recursive: true });
   cpSync(join(source, 'AGENTS.md'), join(root, 'AGENTS.md'));
+  cpSync(join(source, 'CLAUDE.md'), join(root, 'CLAUDE.md'));
   cpSync(join(source, '.claude', 'skills'), join(root, '.claude', 'skills'), {
     recursive: true,
     dereference: true,
@@ -1966,16 +1967,30 @@ switch (mode) {
           'It never tries the workspace sandbox first and never runs a separate credential login.',
           'Local authorization, command execution, classification, and verdict evaluation stay',
           'in the workspace sandbox.',
+          'During the build, run `mkdir -p docs/plans`, then write',
+          '`docs/plans/change-manifest.md`.',
         ].join('\n');
+    const manifestWriter = [
+      'During the build, run `mkdir -p docs/plans`, then write',
+      '`docs/plans/change-manifest.md`.',
+    ].join('\n');
+    const manifestReader = [
+      'head -1 docs/plans/change-manifest.md',
+      'If the manifest names this branch or this change, use it.',
+      'If no manifest exists, grep the codebase pattern.',
+      'If `docs/plans/change-manifest.md` exists, include it as manifest context.',
+    ].join('\n');
     const entries = new Map([
       [`${root}/.codex/config.toml`, projectConfig],
       [`${home}/.codex/config.toml`, trust],
       [`${root}/AGENTS.md`, instructions],
+      [`${root}/CLAUDE.md`, manifestWriter],
       [`${root}/.codex/hooks.json`, JSON.stringify(hooks)],
       [`${root}/.claude/skills/df-start/SKILL.md`, '# start\n'],
       [`${root}/.agents/skills/df-start/SKILL.md`, '# start\n'],
       [`${root}/.worktreeinclude`, 'CLAUDE.md\n'],
       [`${root}/.claude/scripts/new-worktree.sh`, '#!/bin/sh\n'],
+      [`${root}/.claude/skills/df-ship/SKILL.md`, manifestReader],
     ]);
     const roles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
     for (const role of roles) entries.set(`${root}/.codex/agents/${role}`, 'model = "test"\n');
@@ -1998,7 +2013,19 @@ switch (mode) {
           return [];
         },
       },
-      command: (name) => {
+      command: (name, args = []) => {
+        if (name === process.execPath && args.includes('--check-worktree-contract')) {
+          const expected = [
+            join(root, 'scripts', 'agent-compat', 'check.mjs'),
+            '--check-worktree-contract',
+            join(root, '.claude', 'scripts', 'new-worktree.sh'),
+            join(root, '.worktreeinclude'),
+            join(root, 'AGENTS.md'),
+            join(root, 'CLAUDE.md'),
+            join(root, '.claude', 'skills', 'df-ship', 'SKILL.md'),
+          ];
+          return { status: JSON.stringify(args) === JSON.stringify(expected) ? 0 : 1, stdout: '' };
+        }
         if (fixture === 'missing-codex' && name === 'codex') return { status: 1, stdout: '' };
         if (fixture === 'missing-client' && name === 'qwen') return { status: 1, stdout: '' };
         return { status: 0, stdout: `${name} fixture-version` };

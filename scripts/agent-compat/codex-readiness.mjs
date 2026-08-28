@@ -521,9 +521,12 @@ export async function runStaticReadiness({
       '--check-worktree-contract',
       join(ownedRoot, '.claude', 'scripts', 'new-worktree.sh'),
       join(ownedRoot, '.worktreeinclude'),
+      join(ownedRoot, 'AGENTS.md'),
+      join(ownedRoot, 'CLAUDE.md'),
+      join(ownedRoot, '.claude', 'skills', 'df-ship', 'SKILL.md'),
     ], { cwd: projectRoot });
     if (result.status !== 0) throw new Error('worktree check failed');
-    return { canonical_hosts: 4 };
+    return { canonical_hosts: 4, manifest_contract_sources: 3 };
   });
 
   await add({
