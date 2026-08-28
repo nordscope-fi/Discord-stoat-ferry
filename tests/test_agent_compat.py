@@ -921,6 +921,8 @@ def test_agent_check_rejects_an_incomplete_linked_host_contract(
 
 
 def test_linked_worktrees_keep_change_manifests_independent(tmp_path: Path) -> None:
+    if not (REPO / ".claude/scripts/new-worktree.sh").exists():
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
