@@ -63,10 +63,12 @@ for doc in $DOCS; do
     # /df-ship after merge. CLAUDE.md cites the convention, not a file that
     # survives a ship, so a missing manifest is not drift. Without this, the
     # guard fails locally after every ship until the next build recreates it.
-    [ "$clean" = ".claude/change-manifest.md" ] && continue
+    [ "$clean" = "docs/plans/change-manifest.md" ] && continue
     seg="${clean%%/*}"
     [ -e "$seg" ] || continue          # first segment must be a real top-level entry
-    is_excluded "$clean" && continue
+    if [ "$clean" != ".claude/change-manifest.md" ] && is_excluded "$clean"; then
+      continue
+    fi
     if [ ! -e "$clean" ]; then
       echo "  MISSING: $clean  (cited in $doc)" >&2
       FAILURES=$((FAILURES + 1))

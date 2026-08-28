@@ -458,6 +458,30 @@ def test_doc_refs_refuses_when_it_finds_no_input_documents(tmp_path: Path) -> No
     assert "Checking nothing is not passing" in result.stderr
 
 
+def test_doc_refs_exempts_the_checkout_local_change_manifest(tmp_path: Path) -> None:
+    """The branch-owned manifest is absent before a build and after a ship."""
+    _init_repo(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("See `docs/plans/change-manifest.md`.\n")
+
+    result = _run(DOC_REFS, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_doc_refs_does_not_exempt_the_legacy_shared_manifest(tmp_path: Path) -> None:
+    """The old shared path must no longer receive transient-file treatment."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text(".claude/\n")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("See `.claude/change-manifest.md`.\n")
+
+    result = _run(DOC_REFS, tmp_path)
+
+    assert result.returncode == 1
+    assert ".claude/change-manifest.md" in result.stderr
+
+
 def test_sweep_still_fires_from_a_subdirectory(tmp_path: Path) -> None:
     """The sweep scopes its diff with `-- .`, so cwd could silently narrow it."""
     repo = _repo_with_change(tmp_path, "This is future work, tracked separately.\n")
