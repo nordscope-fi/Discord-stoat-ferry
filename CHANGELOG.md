@@ -72,6 +72,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.35.7] - 2026-08-28
+
+### Fixed
+
+- **Linked worktrees keep branch-owned ship manifests separate.** Build instructions write the
+  manifest under each checkout's ignored plans directory. Focused checks and Codex readiness reject
+  writer or reader instructions that return to shared state. Closes #678.
+
 ## [2.35.6] - 2026-08-27
 
 ### Fixed
