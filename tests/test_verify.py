@@ -10,6 +10,8 @@ against what they guarded.
 
 from __future__ import annotations
 
+import ast
+import pathlib
 import re
 
 import aiohttp
@@ -18,6 +20,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.errors import CheckError
 from discord_ferry.migrator.verify import (
+    STATUSES,
     CheckReport,
     CheckResult,
     RepairOutcome,
@@ -1905,27 +1908,146 @@ def test_the_kind_vocabulary_lists_both_rename_kinds() -> None:
     assert "emoji_renamed" in doc
 
 
-def test_every_emitted_kind_is_documented_and_a_literal() -> None:
-    """The kind vocabulary is a contract, and `kind: str` does not enforce it.
+_CHECK_REPORT_SCHEMAS = {
+    1: {
+        "document": {
+            "schema_version": "int",
+            "results": "list",
+            "counts": "dict",
+        },
+        "result": {
+            "name": {"str"},
+            "status": {"str"},
+            "kind": {"str"},
+            "detail": {"str"},
+            "discord_id": {"NoneType", "str"},
+            "stoat_id": {"NoneType", "str"},
+            "expected": {"NoneType", "str"},
+            "found": {"NoneType", "str"},
+        },
+        "counts": {
+            "ok": "int",
+            "warn": "int",
+            "fail": "int",
+            "unverifiable": "int",
+        },
+        "statuses": {"ok", "warn", "fail", "unverifiable"},
+        "kinds": {
+            "category_missing",
+            "category_present",
+            "category_title_mismatch",
+            "category_title_unknown",
+            "channel_empty",
+            "channel_missing",
+            "channel_not_visible",
+            "channel_present",
+            "channel_renamed",
+            "check_error",
+            "emoji_missing",
+            "emoji_present",
+            "emoji_renamed",
+            "nothing_expected",
+            "role_missing",
+            "role_present",
+            "role_renamed",
+            "tail_absent",
+            "tail_and_after_absent",
+            "tail_not_recorded",
+            "tail_present",
+            "tail_window_exhausted",
+        },
+    }
+}
 
-    Two failures this catches, and neither is hypothetical:
 
-    Adding a kind without documenting it. The CheckResult docstring is the only
-    durable record of this vocabulary, because docs/plans is gitignored, and the
-    batch-10 repair tool dispatches on it. An undocumented kind is a contract
-    change nobody can see.
+def _literal_kind_values(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        return _literal_kind_values(node.body) | _literal_kind_values(node.orelse)
+    raise AssertionError(f"nonliteral kind expression: {ast.unparse(node)}")
 
-    Interpolating external text into a kind. Today every one is a string literal,
-    either at the call site or returned from _classify_tail. Nothing in the type
-    prevents `kind=f"channel_{something}"`, and the --json serialiser does not
-    strip `kind` precisely because it is internal. That argument holds only while
-    this test does.
-    """
-    import pathlib
-    import re
 
-    from discord_ferry.migrator.verify import CheckResult
+def _call_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        return f"{node.func.value.id}.{node.func.attr}"
+    return ast.unparse(node.func)
 
+
+def _calls_by_function(tree: ast.AST) -> list[tuple[str, ast.Call]]:
+    calls: list[tuple[str, ast.Call]] = []
+
+    class Visitor(ast.NodeVisitor):
+        function = ""
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            previous = self.function
+            self.function = node.name
+            self.generic_visit(node)
+            self.function = previous
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            previous = self.function
+            self.function = node.name
+            self.generic_visit(node)
+            self.function = previous
+
+        def visit_Call(self, node: ast.Call) -> None:
+            calls.append((self.function, node))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return calls
+
+
+def _emitted_check_kinds() -> set[str]:
+    source_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "src"
+        / "discord_ferry"
+        / "migrator"
+        / "verify.py"
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    kinds: set[str] = set()
+    allowed_forwarding = {
+        ("add", "CheckResult"),
+        ("_one_tail", "CheckResult"),
+    }
+    forwarding: set[tuple[str, str]] = set()
+    for function, node in _calls_by_function(tree):
+        for keyword in node.keywords:
+            if keyword.arg != "kind":
+                continue
+            site = (function, _call_name(node))
+            if isinstance(keyword.value, ast.Name) and keyword.value.id == "kind":
+                assert site in allowed_forwarding, f"unexpected forwarded kind at {site}"
+                forwarding.add(site)
+            else:
+                kinds.update(_literal_kind_values(keyword.value))
+    assert forwarding == allowed_forwarding
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+            parts = node.value.elts
+            if (
+                len(parts) == 3
+                and isinstance(parts[0], ast.Constant)
+                and parts[0].value in STATUSES
+            ):
+                kinds.update(_literal_kind_values(parts[1]))
+    return kinds
+
+
+def test_every_emitted_kind_is_documented_and_versioned() -> None:
+    """Every literal kind belongs to both the durable docs and the current schema."""
+    documented = set(re.findall(r"``([a-z_]+)``", CheckResult.__doc__ or ""))
+    emitted = _emitted_check_kinds()
+    expected = _CHECK_REPORT_SCHEMAS[1]["kinds"]
+
+    assert emitted == expected
+    assert emitted <= documented
     source = (
         pathlib.Path(__file__).resolve().parent.parent
         / "src"
@@ -1933,28 +2055,21 @@ def test_every_emitted_kind_is_documented_and_a_literal() -> None:
         / "migrator"
         / "verify.py"
     ).read_text(encoding="utf-8")
+    assert re.search(r"kind=f['\"]", source) is None
 
-    # Literals assigned at a call site, plus literals returned by the classifier
-    # as the middle element of its (status, kind, detail) tuple.
-    at_call_site = set(re.findall(r'kind="([a-z_]+)"', source))
-    classifier = set(re.findall(r'^\s+"([a-z_]+)",$', source, re.M))
-    documented = set(re.findall(r"``([a-z_]+)``", CheckResult.__doc__ or ""))
 
-    emitted = (at_call_site | classifier) & documented
-    assert len(emitted) >= 15, f"only found {len(emitted)} kinds; the regex has drifted"
+def test_kind_scanner_rejects_nonliteral_value_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A variable branch cannot add a kind that the version oracle misses."""
+    source = """
+def emit(present, new_kind):
+    result(kind=("role_present" if present else new_kind))
+"""
+    monkeypatch.setattr(pathlib.Path, "read_text", lambda *args, **kwargs: source)
 
-    undocumented = at_call_site - documented
-    assert undocumented == set(), (
-        f"kind(s) emitted but absent from the CheckResult docstring: {sorted(undocumented)}. "
-        "That docstring is the only durable record of this vocabulary."
-    )
-
-    # No kind is ever built by interpolation, which is what lets the --json
-    # serialiser leave `kind` unstripped.
-    assert re.search(r"kind=f['\"]", source) is None, (
-        "a kind is being built by interpolation. The --json serialiser does not "
-        "strip `kind`, on the argument that it is always an internal literal."
-    )
+    with pytest.raises(AssertionError, match="nonliteral kind expression"):
+        _emitted_check_kinds()
 
 
 # ---------------------------------------------------------------------------
@@ -1966,18 +2081,53 @@ class TestCheckReportToDict:
     """CheckReport.to_dict() serialization and sanitization."""
 
     def test_to_dict_shape_matches_existing_contract(self) -> None:
-        """Output shape is {"results": [...], "counts": {...}}."""
+        """Output shape carries the schema version, results, and counts."""
+        report = CheckReport()
+        report.add(name="general", status="ok", kind="channel_present", detail="found")
+        document = report.to_dict()
+        assert set(document) == {"schema_version", "results", "counts"}
+        assert document["schema_version"] == 1
+        assert len(document["results"]) == 1
+        assert document["counts"]["ok"] == 1
+
+    def test_schema_version_covers_the_complete_contract(self) -> None:
+        """Version 1 pins fields, types, counts, statuses, and every emitted kind."""
         report = CheckReport()
         report.add(
-            name="general",
-            status="ok",
-            kind="channel_present",
-            detail="found",
+            name="channel:d-100",
+            status="warn",
+            kind="channel_renamed",
+            detail="renamed",
+            discord_id="d-100",
+            stoat_id="01JSTOATCH00000000000AAA",
+            expected="general",
+            found="renamed-here",
         )
-        d = report.to_dict()
-        assert set(d.keys()) == {"results", "counts"}
-        assert len(d["results"]) == 1
-        assert d["counts"]["ok"] == 1
+        report.add(name="role:d-200", status="ok", kind="role_present", detail="found")
+
+        document = report.to_dict()
+        rows = document["results"]
+        actual = {
+            "document": {key: type(value).__name__ for key, value in document.items()},
+            "result": {key: {type(row[key]).__name__ for row in rows} for key in rows[0]},
+            "counts": {key: type(value).__name__ for key, value in document["counts"].items()},
+            "statuses": set(STATUSES),
+            "kinds": _emitted_check_kinds(),
+        }
+        version = document["schema_version"]
+
+        assert version in _CHECK_REPORT_SCHEMAS
+        assert actual == _CHECK_REPORT_SCHEMAS[version]
+
+    def test_ordinary_result_values_do_not_change_the_schema_version(self) -> None:
+        """Data changes within the same contract retain version 1."""
+        first = CheckReport()
+        first.add(name="first", status="ok", kind="channel_present", detail="one")
+        second = CheckReport()
+        second.add(name="second", status="fail", kind="channel_missing", detail="two")
+
+        assert first.to_dict()["schema_version"] == 1
+        assert second.to_dict()["schema_version"] == 1
 
     def test_to_dict_strips_control_characters(self) -> None:
         """Free-text fields have C0/C1 control characters removed."""

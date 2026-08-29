@@ -72,6 +72,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.36.0] - 2026-08-29
+
+### Added
+
+- **Check report JSON identifies contract version 1.** The standalone check document, saved
+  validation results, and repair's completed post-check now carry one integer from the shared
+  serializer. A versioned oracle covers fields, nullable types, nested counts, statuses, and every
+  emitted kind, so contract drift requires an explicit increment. Closes #303.
+
 ## [2.35.7] - 2026-08-28
 
 ### Fixed

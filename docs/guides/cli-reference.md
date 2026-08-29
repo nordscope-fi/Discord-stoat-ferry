@@ -459,6 +459,16 @@ From 2.17.0 Ferry records which thread strategy a migration ran under, so Check 
 
 A `warn` on its own does not fail the command, because nothing has been lost. Use the exit code in a script, and `--json` when you want the individual results rather than a pass or fail.
 
+### How scripts identify the JSON contract
+
+With `--json`, the top-level object contains `"schema_version": 1`. Scripts should reject a
+version they do not recognise instead of guessing whether its fields and result vocabulary still
+mean the same thing.
+
+The integer increases when a top-level or result field, data type, status, kind, or meaning
+changes. Adding a field or vocabulary value counts even when older consumers could ignore it.
+Ordinary result values and free-form `detail` text do not change the contract.
+
 ### What Check cannot tell you
 
 Check reads the most recent 100 messages in each channel and confirms the last one Ferry recorded sending is still among them. That is cheap enough to run on any server, and it is honest about what it misses:
