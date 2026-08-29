@@ -161,3 +161,9 @@ We welcome contributions! See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 ## License
 
 MIT
+
+---
+
+## Sponsor
+
+If Discord Ferry has helped you, [sponsor Peter's open-source work](https://github.com/sponsors/nordscope-fi).
