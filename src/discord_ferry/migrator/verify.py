@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session
@@ -69,6 +69,11 @@ CheckStatus = Literal["ok", "warn", "fail", "unverifiable"]
 #: The tail check emits no ``warn`` at all, which
 #: ``test_the_tail_check_never_emits_warn`` pins across every tail scenario.
 STATUSES: tuple[CheckStatus, ...] = get_args(CheckStatus)
+
+#: Machine-readable ``CheckReport`` contract version. Increment for any field,
+#: data type, status, kind, or meaning change. Ordinary result values and free-form
+#: detail text do not change the contract.
+CHECK_REPORT_SCHEMA_VERSION: Final[int] = 1
 
 
 def _strip_control(text: str) -> str:
@@ -233,6 +238,7 @@ class CheckReport:
     def to_dict(self) -> dict[str, Any]:
         """Sanitized, JSON-ready dict matching the ``ferry check --json`` contract."""
         return {
+            "schema_version": CHECK_REPORT_SCHEMA_VERSION,
             "results": [
                 {
                     "name": _strip_control(r.name),

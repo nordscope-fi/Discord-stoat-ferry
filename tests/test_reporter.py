@@ -556,22 +556,19 @@ def test_report_includes_validation_results(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     state = MigrationState(
         validation_results={
-            "channels_expected": 5,
-            "channels_found": 5,
-            "roles_expected": 2,
-            "roles_found": 2,
-            "failed_messages": 0,
-            "passed": True,
+            "schema_version": 1,
+            "results": [],
+            "counts": {"ok": 0, "warn": 0, "fail": 0, "unverifiable": 0},
+            "has_failures": False,
         }
     )
     exports = [_make_export()]
 
     report = generate_report(config, state, exports)
 
-    assert "validation" in report
-    assert report["validation"]["passed"] is True
-    assert report["validation"]["channels_expected"] == 5
-    assert report["validation"]["channels_found"] == 5
+    assert report["validation"] == state.validation_results
+    assert report["validation"]["schema_version"] == 1
+    assert "schema_version" not in report
 
 
 def test_report_no_validation_when_empty(tmp_path: Path) -> None:

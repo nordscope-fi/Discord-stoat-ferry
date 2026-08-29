@@ -33,7 +33,7 @@ from discord_ferry.parser.models import (
     DCEGuild,
     DCEMessage,
 )
-from discord_ferry.state import FailedMessage, MigrationState
+from discord_ferry.state import FailedMessage, MigrationState, load_state
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -1192,9 +1192,12 @@ async def test_validation_calls_run_check(tmp_path: Path) -> None:
     val_events = [e for e in events if e.phase == "validate_migration"]
     assert any(e.status == "started" for e in val_events)
     assert any(e.status == "completed" for e in val_events)
+    assert state.validation_results["schema_version"] == 1
     assert state.validation_results["has_failures"] is False
     assert len(state.validation_results["results"]) == 1
     assert state.validation_results["counts"]["ok"] == 1
+    saved = load_state(tmp_path)
+    assert saved.validation_results["schema_version"] == 1
 
 
 async def test_validation_reports_failures(tmp_path: Path) -> None:
