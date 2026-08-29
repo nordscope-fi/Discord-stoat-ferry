@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Discord Ferry now links to Peter Sterkenburg's GitHub Sponsors profile.** The final README
+  section gives readers a direct path to support Peter's open-source work.
+
 - **Codex setup is repeat-safe and self-checking.** One command now installs scoped trust,
   reviewer access, command rules, linked-worktree state and static readiness checks. Paid live
   checks remain explicit. An expired reviewer credential is renewed on the next setup run.
