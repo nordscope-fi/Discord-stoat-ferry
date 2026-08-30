@@ -40,7 +40,8 @@ This page covers the most common problems encountered during migration, their ca
 
 !!! warning "Content missing from a migration you already ran?"
     If the migration finished cleanly and content is missing anyway, the cause may be a Ferry bug
-    rather than anything in this page. Five silent ones were fixed between v2.8.2 and v2.10.0.
+    rather than anything in this page. Five bugs that lost content without a warning were fixed
+    between v2.8.2 and v2.10.0.
     See [Was my earlier migration affected?](earlier-migrations.md).
 
 ### Attachment file missing
@@ -51,7 +52,7 @@ This page covers the most common problems encountered during migration, their ca
 | **Cause** | DiscordChatExporter did not download the media files. This happens when the export was created without the `--media` flag, or when Discord CDN links had already expired before export. |
 | **Solution** | Re-export from DiscordChatExporter with the `--media` flag. Discord CDN links expire within approximately 24 hours of the original export, so export and migrate promptly. |
 
-### No valid DCE JSON files found
+### No valid DiscordChatExporter (DCE) JSON files found
 
 | | |
 |---|---|
@@ -268,20 +269,22 @@ $env:SSL_CERT_FILE = "C:\path\to\your-ca-bundle.pem"
 ferry migrate --export-dir ...
 ```
 
-`SSL_CERT_FILE` is a standard OpenSSL variable, not a Ferry-specific one, so it works the same way on every platform. Ferry does not replace its own trust with the bundle you point it at: it adds the bundle's roots on top of the OS certificate store and the roots Ferry ships with, so this only widens what Ferry can verify.
+`SSL_CERT_FILE` is a standard variable used by the encryption library called OpenSSL, not a Ferry-specific
+one, so it works the same way on every platform. Ferry keeps the operating system certificate store
+and the roots it ships with, then adds the bundle's roots.
 
 Run `ferry tls-check` to see what Ferry can currently verify. See the [CLI reference](cli-reference.md#ferry-tls-check) for what each line means.
 
-If it is specifically the DiscordChatExporter download that fails, you can place the binary yourself instead of letting Ferry download it:
+If the Discord server export tool, DiscordChatExporter, is the download that fails, you can place the binary yourself instead of letting Ferry download it:
 
 1. Download the Windows archive (`DiscordChatExporter.Cli.win-x64.zip`, or the matching archive for your OS) from the [DiscordChatExporter releases page](https://github.com/Tyrrrz/DiscordChatExporter/releases), then extract it.
-2. Place the extracted `DiscordChatExporter.Cli.exe` at `%USERPROFILE%\.discord-ferry\bin\dce\2.47.3\DiscordChatExporter.Cli.exe`. The version folder name must be exactly `2.47.3`. Ferry looks there first, and if a binary already exists, it uses that binary without downloading anything.
+2. Place the extracted `DiscordChatExporter.Cli.exe` at `%USERPROFILE%\.discord-ferry\bin\dce\2.48\DiscordChatExporter.Cli.exe`. The version folder name must be exactly `2.48`. Ferry looks there first, and if a binary already exists, it uses that binary without downloading anything.
 
 !!! warning "This skips a safety check"
     Ferry normally verifies the SHA-256 hash of the DCE binary it downloads. Placing a binary in this folder yourself bypasses that check entirely, because the download step that computes the hash never runs. Only do this with a binary you got directly from the official releases page above.
 
 !!! info "DCE still makes its own certificate checks"
-    DiscordChatExporter is a separate .NET program. It makes its own HTTPS calls against the Windows certificate store, independent of Ferry's. If the root store itself is the problem, exporting from Discord can still fail with a certificate error after the DCE download succeeds, or after you place the binary manually. That is the same underlying cause reappearing, not a new bug.
+    DiscordChatExporter is a separate self-contained program. It makes its own HTTPS calls against the Windows certificate store, independent of Ferry's. If the root store itself is the problem, exporting from Discord can still fail with a certificate error after the DCE download succeeds, or after you place the binary manually. That is the same underlying cause reappearing, not a new bug.
 
 ---
 
@@ -299,7 +302,12 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 
 `proxy-source` is a single value, not one per scheme. If you have `HTTP_PROXY` set in the environment and HTTPS falling back to the system, `tls-check` reports one source for both, and it is the one HTTPS resolved from. Read `proxy-http` and `proxy-https` to see the two addresses; when they differ, at least one of them came from the other source.
 
-`FERRY_DISABLE_PROXY=1` turns off every proxy Ferry would otherwise use, environment variable or system fallback, for every scheme. `NO_PROXY` is narrower: it exempts individual hosts (a comma-separated list, for example `NO_PROXY=stoat.internal,localhost`) while leaving the rest of the configuration in place. A third switch comes from Python's standard library rather than Ferry itself: setting the matching lowercase variable to an empty string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy without touching `https_proxy`.
+`FERRY_DISABLE_PROXY=1` turns off every proxy Ferry would otherwise use, whether it came from an
+environment variable or the operating system. `NO_PROXY` exempts individual hosts, for example
+`NO_PROXY=stoat.internal,localhost`, while leaving the rest of the configuration in place. A third
+switch comes from Python's standard library: setting the matching lowercase variable to an empty
+string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy without touching
+`https_proxy`.
 
 !!! tip "A TLS-inspecting proxy needs two settings, not one"
     A corporate proxy that inspects HTTPS traffic presents its own certificate in place of the real one. Routing through the proxy only solves half of that: Ferry also needs `SSL_CERT_FILE` pointed at a bundle that includes the proxy's certificate authority, the same mechanism described in [Certificate Errors](#certificate-errors) above. Without it, Ferry reaches the proxy and then fails to verify what the proxy hands back.
@@ -313,7 +321,10 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 | **Solution** | Clear the proxy at its source instead: on Windows, **Settings → Network & internet → Proxy**; on macOS, **System Settings → Network → (your connection) → Details → Proxies**. Once the system entry is gone, both Ferry and DCE stop using it. |
 
 !!! info "The proxy scan runs once per process"
-    Ferry reads the proxy configuration when it starts and keeps that answer for the rest of the run. Connecting to a VPN, or changing networks partway through a migration, does not change what Ferry uses. Restart Ferry after a network change if a stale proxy setting seems to be involved.
+    Ferry reads the proxy configuration when it starts and keeps that answer for the rest of the
+    run. Connecting through a virtual private network, or changing networks partway through a
+    migration, does not change what Ferry uses. Restart Ferry after a network change if a stale
+    proxy setting seems to be involved.
 
 ### `ferry tls-check` reports a proxy the GUI does not use
 
@@ -331,7 +342,7 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 | **Cause** | When Ferry resolves a proxy from the system settings and that proxy needs a username and password, Ferry authenticates itself but cannot hand the credential to DiscordChatExporter. A password sitting in a child process's environment is readable by other processes on some systems, so Ferry withholds it and DCE receives only the proxy address. |
 | **Solution** | Set `HTTPS_PROXY` yourself with the credential in the URL (`https://user:pass@host:port`) if that trade-off is acceptable. DCE inherits a variable you set directly; it only misses the one Ferry resolved on your behalf. |
 
-### SOCKS proxies are not supported
+### The proxy protocol called SOCKS is not supported
 
 | | |
 |---|---|
@@ -365,7 +376,7 @@ Ferry reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` the way most command-line
 
 ---
 
-## CDN and Attachment Issues
+## Content Delivery Network (CDN) and Attachment Issues
 
 ### Expired CDN URLs
 

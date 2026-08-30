@@ -1,6 +1,6 @@
 # GUI Walkthrough
 
-This guide walks through every screen of the Discord Ferry web interface. Ferry runs a small local web server when you launch it — no data ever leaves your machine.
+This guide walks through every screen of the Discord Ferry web interface. Ferry runs a small local web server when you launch it, no data ever leaves your machine.
 
 !!! info "Launching the GUI"
     On **Windows**, double-click the downloaded `Ferry-windows-x86_64.exe`. On **macOS**, open **Ferry.app** (see [Installation](../getting-started/install.md) if macOS blocks it the first time). On **Linux**, run `ferry-gui` in a terminal.
@@ -15,29 +15,29 @@ This guide walks through every screen of the Discord Ferry web interface. Ferry 
 
 ## Setup Screen
 
-The first screen collects the information Ferry needs before it can begin. Ferry has two modes — **1-Click Migration** (default) and **Offline mode**.
+The first screen collects the information Ferry needs before it can begin. Ferry has two modes, **1-Click Migration** (default) and **Offline mode**.
 
 <!-- screenshot: setup screen with all fields visible -->
 
 ### 1-Click Migration (default)
 
-In this mode, Ferry downloads and runs DiscordChatExporter for you automatically.
+In this mode, Ferry downloads and runs the Discord server export tool, DiscordChatExporter (DCE), for you automatically.
 
-**Discord token** — paste your Discord user token (masked input). Click "How to find these?" for step-by-step instructions.
+**Discord token**, paste your Discord user token (masked input). Click "How to find these?" for step-by-step instructions.
 
-**Discord server ID** — paste the server ID (right-click the server name in Discord > Copy Server ID).
+**Discord server ID**, paste the server ID (right-click the server name in Discord > Copy Server ID).
 
-**ToS disclaimer** — check the checkbox to acknowledge that using a user token may violate Discord's Terms of Service.
+**Terms of Service disclaimer**, check the checkbox to acknowledge that using a user token may violate Discord's Terms of Service.
 
-**Stoat API URL** — select Official (`https://api.stoat.chat`) or enter your self-hosted domain.
+**Stoat API URL**, select Official (`https://api.stoat.chat`) or enter your self-hosted domain.
 
-**Stoat user token** — paste the token you copied from your browser's developer tools (masked input). See [how to find it](../getting-started/setup-stoat.md#2-get-your-stoat-user-token). No bot or app creation needed — this is a key your browser already has.
+**Stoat user token**, paste the token you copied from your browser's developer tools (masked input). See [how to find it](../getting-started/setup-stoat.md#2-get-your-stoat-user-token). No bot or app creation needed, this is a key your browser already has.
 
 ### Offline Mode ("I already have exports")
 
 Toggle **"I already have exports"** to switch to offline mode. The Discord token and server ID fields are replaced with:
 
-**Export folder** — paste or browse to your DiscordChatExporter export folder. The folder should contain one or more `.json` files and a `media/` subfolder.
+**Export folder**, paste or browse to your DCE export folder. The folder should contain one or more `.json` files and a `media/` subfolder.
 
 !!! warning "Media folder required"
     If you exported without the `--media` flag, attachments will not migrate. Re-export with `--media` before continuing.
@@ -64,7 +64,7 @@ Below these, three labelled groups hold the tuning settings (since v2.7.0):
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| Concurrent channels | 3 | Channels migrated in parallel. Raise only on self-hosted instances — the GUI warns if you raise it while targeting the official service. |
+| Concurrent channels | 3 | Channels migrated in parallel. Raise only on self-hosted instances, the GUI warns if you raise it while targeting the official service. |
 | Concurrent API requests | 5 | Total concurrent API calls across all channel workers. Same self-hosted caveat. |
 
 **Content**
@@ -118,9 +118,9 @@ The server name and export date from the DCE export appear at the top of the scr
 Any issues found during parsing are listed. Amber entries are informational. A red entry needs your acknowledgement before the migration can start. Common warnings:
 
 - **Mentions written as plain text** (red). One entry per channel, carrying a count: those messages have mentions written as plain text instead of raw IDs, so they will arrive as text, with no link back to the user. See [Mentions written as plain text](troubleshooting.md#mentions-written-as-plain-text) for what to do about it.
-- **Attachment files missing** — one or more attachment files were not found locally. Those files will be skipped.
-- **Channel limit may be exceeded** — the combined channel and thread count exceeds 200.
-- **Emoji limit will be reached** — the server has more than 100 custom emoji. Only the first 100 will be migrated.
+- **Attachment files missing**, one or more attachment files were not found locally. Those files will be skipped.
+- **Channel limit may be exceeded**, the combined channel and thread count exceeds 200.
+- **Emoji limit will be reached**, the server has more than 100 custom emoji. Only the first 100 will be migrated.
 
 !!! info "Warnings and acknowledgement"
     Amber warnings need no action, and the migration proceeds with them. When the mentions warning
@@ -131,7 +131,7 @@ Any issues found during parsing are listed. Amber entries are informational. A r
     A hard failure such as "No valid DCE JSON files found" stops the screen before the status is
     drawn, so it never appears as a colour here.
 
-### ETA Estimate
+### Estimated Time Remaining (ETA)
 
 Based on your message count and the rate limit you chose, Ferry shows an estimated duration. Long migrations should be left to run overnight.
 
@@ -155,22 +155,22 @@ This screen appears only when you use 1-Click Migration. Ferry downloads and run
 
 Ferry runs through three steps automatically:
 
-1. **Token validation** — confirms your Discord token works via the Discord API.
-2. **DCE download** — if DiscordChatExporter is not cached locally, Ferry downloads the correct version for your operating system.
-3. **Channel export** — DCE exports all channels, threads, and media from your Discord server. Progress is shown per-channel.
+1. **Token validation**, confirms your Discord token works via the Discord API.
+2. **DCE download**, if DiscordChatExporter is not cached locally, Ferry downloads the correct version for your operating system.
+3. **Channel export**, DCE exports all channels, threads, and media from your Discord server. Progress is shown per-channel.
 
 ### Cached Exports
 
 If Ferry detects cached export files from a previous run, it shows a summary (file count and total size) and offers two choices:
 
-- **Use Cached** — skip re-exporting and go straight to validation.
-- **Re-export** — discard cached files and export fresh.
+- **Use Cached**, skip re-exporting and go straight to validation.
+- **Re-export**, discard cached files and export fresh.
 
 This is useful when resuming after a crash or when you want to re-run the migration without re-downloading everything.
 
-### .NET Runtime
+### DCE Runtime
 
-DCE requires the .NET 8 runtime on macOS and Linux. If Ferry detects it is missing, it shows an error with a download link. Windows users are not affected — the Windows DCE build is self-contained.
+Ferry downloads a self-contained DCE 2.48 command-line archive for the current operating system and processor. No separate Microsoft software runtime is required.
 
 When the export completes, Ferry automatically moves to the Validate screen.
 
@@ -199,14 +199,14 @@ The dialog displays a summary table:
 
 If potential issues are detected, they appear below the summary:
 
-- **No Discord token provided** — permissions and NSFW flags will not be migrated (these require the Discord API)
-- **Channel limit may be exceeded** — combined channel and thread count is close to or over 200
-- **Emoji limit may be exceeded** — more than 100 custom emoji detected
+- **No Discord token provided**, permissions and not-safe-for-work (NSFW) flags will not be migrated (these require the Discord API)
+- **Channel limit may be exceeded**, combined channel and thread count is close to or over 200
+- **Emoji limit may be exceeded**, more than 100 custom emoji detected
 
 ### Actions
 
-- **Proceed** — start creating the server on Stoat
-- **Cancel** — return to the Validate screen without creating anything
+- **Proceed**, start creating the server on Stoat
+- **Cancel**, return to the Validate screen without creating anything
 
 !!! info "Why review before creating?"
     Server creation on Stoat is not easily undone. The review step lets you verify the scope of the migration before Ferry contacts the Stoat server. This is especially useful for large servers where mistakes are costly.
@@ -223,32 +223,32 @@ The main migration screen. Ferry works through 13 sequential phases.
 
 The 13 phases are shown in order, with a checkmark as each completes:
 
-1. **Export** — run DiscordChatExporter (skipped in offline mode)
-2. **Validate** — confirm export is readable
-3. **Connect** — verify Stoat credentials
-4. **Server** — create or connect to the target server
-5. **Roles** — create all server roles, then apply Discord permissions (translated to Stoat equivalents)
-6. **Categories** — create channel categories
-7. **Channels** — create all channels with NSFW flags, then apply per-channel permission overrides
-8. **Emoji** — upload custom emoji
-9. **Avatars** — pre-fetch every author's avatar and upload it to Stoat once, so message sends never wait on avatar I/O (skip with **Skip avatar pre-flight** under Advanced Options, or `--skip-avatars` on the CLI)
-10. **Messages** — send all messages
-11. **Reactions** — add message reactions (or, in the default `text` mode, no-op because reaction summaries were appended during Messages)
-12. **Pins** — pin messages
-13. **Report** — write summary report with post-migration checklist
+1. **Export**, run DiscordChatExporter (skipped in offline mode)
+2. **Validate**, confirm export is readable
+3. **Connect**, verify Stoat credentials
+4. **Server**, create or connect to the target server
+5. **Roles**, create all server roles, then apply Discord permissions (translated to Stoat equivalents)
+6. **Categories**, create channel categories
+7. **Channels**, create all channels with NSFW flags, then apply per-channel permission overrides
+8. **Emoji**, upload custom emoji
+9. **Avatars**, pre-fetch every author's avatar and upload it to Stoat once, so message sends never wait on avatar I/O (skip with **Skip avatar pre-flight** under Advanced Options, or `--skip-avatars` on the CLI)
+10. **Messages**, send all messages
+11. **Reactions**, add message reactions (or, in the default `text` mode, no-op because reaction summaries were appended during Messages)
+12. **Pins**, pin messages
+13. **Report**, write summary report with post-migration checklist
 
 ### Progress Bar
 
-During the **Messages** phase, a per-channel progress bar shows how many messages have been sent in the current channel and how many remain. In v2.0.0+, up to 3 channels are processed concurrently by default — the progress bar reflects the active channel workers simultaneously.
+During the **Messages** phase, a per-channel progress bar shows how many messages have been sent in the current channel and how many remain. In v2.0.0+, up to 3 channels are processed concurrently by default, the progress bar reflects the active channel workers simultaneously.
 
 ### Running Totals
 
 A live counter in the top-right area shows:
 
-- **Messages sent** — total messages delivered to Stoat
-- **Attachments uploaded** — files successfully uploaded to Stoat's file storage
-- **Errors** — messages or items that could not be migrated
-- **Warnings** — non-fatal issues logged
+- **Messages sent**, total messages delivered to Stoat
+- **Attachments uploaded**, files successfully uploaded to Stoat's file storage
+- **Errors**, messages or items that could not be migrated
+- **Warnings**, non-fatal issues logged
 
 ### Live Log Stream
 
@@ -267,34 +267,40 @@ Click **Pause** to temporarily stop the migration after the current message fini
 Click **Cancel** to stop the migration entirely. Ferry saves its state to disk before stopping. To continue later, re-launch Ferry with the same export folder. On the Migrate screen, Ferry will detect the previous migration state and offer a **Resume** or **Start Fresh** choice (or use `--resume` on the CLI).
 
 !!! info "Stale resume flag"
-    A resume flag written by a previous run can outlive its state file — for example if the
+    A resume flag written by a previous run can outlive its state file, for example if the
     output folder was deleted or moved. From v2.19.7 the GUI clears that flag on the spot and
     surfaces a specific error naming the missing state file, so the migration wizard opens
     fresh instead of failing with a generic `StateError`. Nothing on the server changes.
 
 !!! warning "Do not close the browser tab during migration"
-    Closing the tab while migration is running does not stop Ferry — it continues in the background. However, you will lose visibility into progress. Leave the tab open, or use the CLI if you need a more robust background process.
+    Closing the tab while migration is running does not stop Ferry, it continues in the background. However, you will lose visibility into progress. Leave the tab open, or use the CLI if you need a more robust background process.
 
 ---
 
 ## Completion Screen
 
-When all phases finish, the Completion screen shows a card with the error count and — when a Discord token was used — a native-fidelity line showing how many slowmode settings, voice user limits, and role icons were applied.
+When all phases finish, the Completion screen shows a card with the error count. When a Discord
+token was used, it also shows how many slowmode settings, voice user limits, and role icons were
+applied.
 
 <!-- screenshot: completion screen with summary card -->
 
-For the full statistics (message counts, attachments, and the **fidelity score** — a 0–100 measure of migration quality), click **Open Report**. Two report files are saved to the `ferry-output/` folder:
+For the full statistics (message counts, attachments, and the **fidelity score**, a 0–100 measure of migration quality), click **Open Report**. Two report files are saved to the `ferry-output/` folder:
 
-- `migration_report.md` — a human-readable summary you can share with your community
-- `migration_report.json` — a machine-readable report with full error details and ID mappings
+- `migration_report.md`, a human-readable summary you can share with your community
+- `migration_report.json`, a machine-readable report with full error details and ID mappings
 
 ### Rollback this migration
 
-If you want to undo the migration, click **Rollback this migration**. Ferry shows a confirmation dialog with the counts of channels, roles, custom emoji, and Ferry-owned categories it will delete from the Stoat target server. Any **untracked Ferry-suspect** channels — channels present on the Stoat server but missing from Ferry's state file, likely orphans from a previous crashed migration — are listed separately so you can opt in to each one individually before proceeding.
+If you want to undo the migration, click **Rollback this migration**. Ferry shows a confirmation
+dialog with the counts of channels, roles, custom emoji, and Ferry-owned categories it will delete
+from the Stoat target server. Channels present on Stoat but missing from Ferry's state file are
+listed as **untracked Ferry-suspect** channels. They may be remnants of a previous crashed
+migration. You can select each one before proceeding.
 
-Rollback is idempotent — if it's interrupted, just click the button again and it picks up where it left off. The migration's `state.json` and entity maps are preserved as a forensic audit trail; deletions are tracked in a separate `rollback_progress.rolled_back_ids` field.
+Rollback is idempotent, if it's interrupted, just click the button again and it picks up where it left off. The migration's `state.json` and entity maps are preserved as a forensic audit trail; deletions are tracked in a separate `rollback_progress.rolled_back_ids` field.
 
 !!! note "What rollback does not delete"
-    Uploaded attachments, avatars, and emoji images remain on Stoat's Autumn file store — Autumn has no public DELETE endpoint. The rollback summary reports the orphan count. The Stoat server itself is never deleted; rollback only removes what Ferry created inside it.
+    Uploaded attachments, avatars, and emoji images remain on Stoat's Autumn file store, Autumn has no public DELETE endpoint. The rollback summary reports the orphan count. The Stoat server itself is never deleted; rollback only removes what Ferry created inside it.
 
-The same operation is available on the CLI as `ferry rollback --output-dir <path>` — see the [CLI reference](cli-reference.md#ferry-rollback) for full options.
+The same operation is available on the CLI as `ferry rollback --output-dir <path>`, see the [CLI reference](cli-reference.md#ferry-rollback) for full options.

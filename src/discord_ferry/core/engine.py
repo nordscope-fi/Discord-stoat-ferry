@@ -22,9 +22,8 @@ from discord_ferry.discord import (
     load_discord_metadata,
     save_discord_metadata,
 )
-from discord_ferry.errors import DotNetMissingError, DuplicateSendError, MigrationError
+from discord_ferry.errors import DuplicateSendError, MigrationError
 from discord_ferry.exporter import (
-    detect_dotnet,
     download_dce,
     get_dce_path,
     run_dce_export,
@@ -408,18 +407,6 @@ async def run_migration(
     if not config.skip_export:
         on_event(MigrationEvent(phase="export", status="started", message="Starting export..."))
         await validate_discord_token(config.discord_token or "")
-        on_event(
-            MigrationEvent(
-                phase="export",
-                status="progress",
-                message="Verifying .NET 8 runtime...",
-            )
-        )
-        if not detect_dotnet():
-            raise DotNetMissingError(
-                "DCE requires .NET 8 runtime. "
-                "Install from https://dotnet.microsoft.com/download/dotnet/8.0"
-            )
         dce_path = get_dce_path()
         if dce_path is None:
             dce_path = await download_dce(on_event, skip_verify=config.skip_dce_verify)

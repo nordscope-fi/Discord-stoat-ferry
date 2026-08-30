@@ -1,0 +1,10 @@
+{
+  "evidenceClass": "source-derived",
+  "dceVersion": "2.48",
+  "sourceTag": "2.48",
+  "sourceCommit": "905489b01b5523719082275c34c232fc47f827c6",
+  "sourceFile": "DiscordChatExporter.Core/Exporting/JsonMessageWriter.cs",
+  "sourceUrl": "https://github.com/Tyrrrz/DiscordChatExporter/blob/2.48/DiscordChatExporter.Core/Exporting/JsonMessageWriter.cs",
+  "reviewedDate": "2026-08-30",
+  "content": "Invented values arranged to exercise every JSON path written by the pinned source file."
+}

@@ -42,8 +42,7 @@
       "reactions": [],
       "mentions": [],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000011",
@@ -73,8 +72,7 @@
         "channelId": "222222222222222222",
         "guildId": "111111111111111111"
       },
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000012",
@@ -100,8 +98,7 @@
       "reactions": [],
       "mentions": [],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000013",
@@ -131,8 +128,7 @@
         "channelId": "222222222222222222",
         "guildId": "111111111111111111"
       },
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000014",
@@ -158,8 +154,7 @@
       "reactions": [],
       "mentions": [],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000015",
@@ -192,8 +187,7 @@
       "reactions": [],
       "mentions": [],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000016",
@@ -226,8 +220,7 @@
       "reactions": [],
       "mentions": [],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     }
   ],
   "messageCount": 7

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 
 @dataclass
@@ -88,6 +87,15 @@ class DCEForwardedMessage:
 
 
 @dataclass
+class DCEInteraction:
+    """Application command interaction attached to a Discord message."""
+
+    id: str
+    name: str
+    user: DCEAuthor
+
+
+@dataclass
 class DCEMessage:
     """Parsed Discord message."""
 
@@ -103,8 +111,9 @@ class DCEMessage:
     stickers: list[dict[str, str]] = field(default_factory=list)
     reactions: list[DCEReaction] = field(default_factory=list)
     mentions: list[dict[str, str]] = field(default_factory=list)
+    inline_emojis: list[DCEEmoji] = field(default_factory=list)
+    interaction: DCEInteraction | None = None
     reference: DCEReference | None = None
-    poll: dict[str, Any] | None = None
     forwarded_message: DCEForwardedMessage | None = None
 
 

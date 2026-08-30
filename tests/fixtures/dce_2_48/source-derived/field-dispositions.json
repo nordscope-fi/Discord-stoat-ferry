@@ -1,0 +1,1068 @@
+{
+  "schemaVersion": 1,
+  "sourceTag": "2.48",
+  "capabilities": {
+    "active_poll": "unsupported_upstream"
+  },
+  "paths": [
+    "channel",
+    "channel.category",
+    "channel.categoryId",
+    "channel.iconUrl",
+    "channel.id",
+    "channel.name",
+    "channel.topic",
+    "channel.type",
+    "dateRange",
+    "dateRange.after",
+    "dateRange.before",
+    "exportedAt",
+    "guild",
+    "guild.iconUrl",
+    "guild.id",
+    "guild.name",
+    "messageCount",
+    "messages[]",
+    "messages[].attachments[]",
+    "messages[].attachments[].fileName",
+    "messages[].attachments[].fileSizeBytes",
+    "messages[].attachments[].id",
+    "messages[].attachments[].url",
+    "messages[].author",
+    "messages[].author.avatarUrl",
+    "messages[].author.color",
+    "messages[].author.discriminator",
+    "messages[].author.id",
+    "messages[].author.isBot",
+    "messages[].author.name",
+    "messages[].author.nickname",
+    "messages[].author.roles[]",
+    "messages[].author.roles[].color",
+    "messages[].author.roles[].id",
+    "messages[].author.roles[].name",
+    "messages[].author.roles[].position",
+    "messages[].callEndedTimestamp",
+    "messages[].content",
+    "messages[].embeds[]",
+    "messages[].embeds[].author",
+    "messages[].embeds[].author.iconCanonicalUrl",
+    "messages[].embeds[].author.iconUrl",
+    "messages[].embeds[].author.name",
+    "messages[].embeds[].author.url",
+    "messages[].embeds[].color",
+    "messages[].embeds[].description",
+    "messages[].embeds[].fields[]",
+    "messages[].embeds[].fields[].isInline",
+    "messages[].embeds[].fields[].name",
+    "messages[].embeds[].fields[].value",
+    "messages[].embeds[].footer",
+    "messages[].embeds[].footer.iconCanonicalUrl",
+    "messages[].embeds[].footer.iconUrl",
+    "messages[].embeds[].footer.text",
+    "messages[].embeds[].image",
+    "messages[].embeds[].image.canonicalUrl",
+    "messages[].embeds[].image.height",
+    "messages[].embeds[].image.url",
+    "messages[].embeds[].image.width",
+    "messages[].embeds[].images[]",
+    "messages[].embeds[].images[].canonicalUrl",
+    "messages[].embeds[].images[].height",
+    "messages[].embeds[].images[].url",
+    "messages[].embeds[].images[].width",
+    "messages[].embeds[].inlineEmojis[]",
+    "messages[].embeds[].inlineEmojis[].code",
+    "messages[].embeds[].inlineEmojis[].id",
+    "messages[].embeds[].inlineEmojis[].imageUrl",
+    "messages[].embeds[].inlineEmojis[].isAnimated",
+    "messages[].embeds[].inlineEmojis[].name",
+    "messages[].embeds[].thumbnail",
+    "messages[].embeds[].thumbnail.canonicalUrl",
+    "messages[].embeds[].thumbnail.height",
+    "messages[].embeds[].thumbnail.url",
+    "messages[].embeds[].thumbnail.width",
+    "messages[].embeds[].timestamp",
+    "messages[].embeds[].title",
+    "messages[].embeds[].url",
+    "messages[].embeds[].video",
+    "messages[].embeds[].video.canonicalUrl",
+    "messages[].embeds[].video.height",
+    "messages[].embeds[].video.url",
+    "messages[].embeds[].video.width",
+    "messages[].forwardedMessage",
+    "messages[].forwardedMessage.attachments[]",
+    "messages[].forwardedMessage.attachments[].fileName",
+    "messages[].forwardedMessage.attachments[].fileSizeBytes",
+    "messages[].forwardedMessage.attachments[].id",
+    "messages[].forwardedMessage.attachments[].url",
+    "messages[].forwardedMessage.content",
+    "messages[].forwardedMessage.embeds[]",
+    "messages[].forwardedMessage.embeds[].author",
+    "messages[].forwardedMessage.embeds[].author.iconCanonicalUrl",
+    "messages[].forwardedMessage.embeds[].author.iconUrl",
+    "messages[].forwardedMessage.embeds[].author.name",
+    "messages[].forwardedMessage.embeds[].author.url",
+    "messages[].forwardedMessage.embeds[].color",
+    "messages[].forwardedMessage.embeds[].description",
+    "messages[].forwardedMessage.embeds[].fields[]",
+    "messages[].forwardedMessage.embeds[].fields[].isInline",
+    "messages[].forwardedMessage.embeds[].fields[].name",
+    "messages[].forwardedMessage.embeds[].fields[].value",
+    "messages[].forwardedMessage.embeds[].footer",
+    "messages[].forwardedMessage.embeds[].footer.iconCanonicalUrl",
+    "messages[].forwardedMessage.embeds[].footer.iconUrl",
+    "messages[].forwardedMessage.embeds[].footer.text",
+    "messages[].forwardedMessage.embeds[].image",
+    "messages[].forwardedMessage.embeds[].image.canonicalUrl",
+    "messages[].forwardedMessage.embeds[].image.height",
+    "messages[].forwardedMessage.embeds[].image.url",
+    "messages[].forwardedMessage.embeds[].image.width",
+    "messages[].forwardedMessage.embeds[].images[]",
+    "messages[].forwardedMessage.embeds[].images[].canonicalUrl",
+    "messages[].forwardedMessage.embeds[].images[].height",
+    "messages[].forwardedMessage.embeds[].images[].url",
+    "messages[].forwardedMessage.embeds[].images[].width",
+    "messages[].forwardedMessage.embeds[].inlineEmojis[]",
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].code",
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].id",
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].imageUrl",
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].isAnimated",
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].name",
+    "messages[].forwardedMessage.embeds[].thumbnail",
+    "messages[].forwardedMessage.embeds[].thumbnail.canonicalUrl",
+    "messages[].forwardedMessage.embeds[].thumbnail.height",
+    "messages[].forwardedMessage.embeds[].thumbnail.url",
+    "messages[].forwardedMessage.embeds[].thumbnail.width",
+    "messages[].forwardedMessage.embeds[].timestamp",
+    "messages[].forwardedMessage.embeds[].title",
+    "messages[].forwardedMessage.embeds[].url",
+    "messages[].forwardedMessage.embeds[].video",
+    "messages[].forwardedMessage.embeds[].video.canonicalUrl",
+    "messages[].forwardedMessage.embeds[].video.height",
+    "messages[].forwardedMessage.embeds[].video.url",
+    "messages[].forwardedMessage.embeds[].video.width",
+    "messages[].forwardedMessage.stickers[]",
+    "messages[].forwardedMessage.stickers[].format",
+    "messages[].forwardedMessage.stickers[].id",
+    "messages[].forwardedMessage.stickers[].name",
+    "messages[].forwardedMessage.stickers[].sourceUrl",
+    "messages[].forwardedMessage.timestamp",
+    "messages[].forwardedMessage.timestampEdited",
+    "messages[].id",
+    "messages[].inlineEmojis[]",
+    "messages[].inlineEmojis[].code",
+    "messages[].inlineEmojis[].id",
+    "messages[].inlineEmojis[].imageUrl",
+    "messages[].inlineEmojis[].isAnimated",
+    "messages[].inlineEmojis[].name",
+    "messages[].interaction",
+    "messages[].interaction.id",
+    "messages[].interaction.name",
+    "messages[].interaction.user",
+    "messages[].interaction.user.avatarUrl",
+    "messages[].interaction.user.color",
+    "messages[].interaction.user.discriminator",
+    "messages[].interaction.user.id",
+    "messages[].interaction.user.isBot",
+    "messages[].interaction.user.name",
+    "messages[].interaction.user.nickname",
+    "messages[].interaction.user.roles[]",
+    "messages[].interaction.user.roles[].color",
+    "messages[].interaction.user.roles[].id",
+    "messages[].interaction.user.roles[].name",
+    "messages[].interaction.user.roles[].position",
+    "messages[].isPinned",
+    "messages[].mentions[]",
+    "messages[].mentions[].avatarUrl",
+    "messages[].mentions[].color",
+    "messages[].mentions[].discriminator",
+    "messages[].mentions[].id",
+    "messages[].mentions[].isBot",
+    "messages[].mentions[].name",
+    "messages[].mentions[].nickname",
+    "messages[].mentions[].roles[]",
+    "messages[].mentions[].roles[].color",
+    "messages[].mentions[].roles[].id",
+    "messages[].mentions[].roles[].name",
+    "messages[].mentions[].roles[].position",
+    "messages[].reactions[]",
+    "messages[].reactions[].count",
+    "messages[].reactions[].emoji",
+    "messages[].reactions[].emoji.code",
+    "messages[].reactions[].emoji.id",
+    "messages[].reactions[].emoji.imageUrl",
+    "messages[].reactions[].emoji.isAnimated",
+    "messages[].reactions[].emoji.name",
+    "messages[].reactions[].users[]",
+    "messages[].reactions[].users[].avatarUrl",
+    "messages[].reactions[].users[].color",
+    "messages[].reactions[].users[].discriminator",
+    "messages[].reactions[].users[].id",
+    "messages[].reactions[].users[].isBot",
+    "messages[].reactions[].users[].name",
+    "messages[].reactions[].users[].nickname",
+    "messages[].reference",
+    "messages[].reference.channelId",
+    "messages[].reference.guildId",
+    "messages[].reference.messageId",
+    "messages[].reference.type",
+    "messages[].stickers[]",
+    "messages[].stickers[].format",
+    "messages[].stickers[].id",
+    "messages[].stickers[].name",
+    "messages[].stickers[].sourceUrl",
+    "messages[].timestamp",
+    "messages[].timestampEdited",
+    "messages[].type"
+  ],
+  "dispositions": {
+    "channel": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "channel.category": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "channel.categoryId": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "channel.iconUrl": {
+      "status": "ignored",
+      "family": "identity",
+      "reason": "Ferry has no channel-icon field and does not recreate channel icons."
+    },
+    "channel.id": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "channel.name": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "channel.topic": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "channel.type": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "dateRange": {
+      "status": "ignored",
+      "family": "identity",
+      "reason": "The export selection window does not affect replayed server state."
+    },
+    "dateRange.after": {
+      "status": "ignored",
+      "family": "identity",
+      "reason": "The export selection window does not affect replayed server state."
+    },
+    "dateRange.before": {
+      "status": "ignored",
+      "family": "identity",
+      "reason": "The export selection window does not affect replayed server state."
+    },
+    "exportedAt": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "guild": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "guild.iconUrl": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "guild.id": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "guild.name": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "messageCount": {
+      "status": "consumed",
+      "family": "identity"
+    },
+    "messages[]": {
+      "status": "consumed",
+      "family": "content"
+    },
+    "messages[].attachments[]": {
+      "status": "consumed",
+      "family": "attachment"
+    },
+    "messages[].attachments[].fileName": {
+      "status": "consumed",
+      "family": "attachment"
+    },
+    "messages[].attachments[].fileSizeBytes": {
+      "status": "consumed",
+      "family": "attachment"
+    },
+    "messages[].attachments[].id": {
+      "status": "consumed",
+      "family": "attachment"
+    },
+    "messages[].attachments[].url": {
+      "status": "consumed",
+      "family": "attachment"
+    },
+    "messages[].author": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.avatarUrl": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.color": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.discriminator": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.id": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.isBot": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.name": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.nickname": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.roles[]": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.roles[].color": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.roles[].id": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.roles[].name": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].author.roles[].position": {
+      "status": "consumed",
+      "family": "author-role"
+    },
+    "messages[].callEndedTimestamp": {
+      "status": "ignored",
+      "family": "content",
+      "reason": "Ferry has no call record model and does not recreate call duration."
+    },
+    "messages[].content": {
+      "status": "consumed",
+      "family": "content"
+    },
+    "messages[].embeds[]": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].author": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].author.iconCanonicalUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].author.iconUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].author.name": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].author.url": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].color": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].description": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].fields[]": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].fields[].isInline": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].fields[].name": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].fields[].value": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].footer": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].footer.iconCanonicalUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].footer.iconUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].footer.text": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].image": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].image.canonicalUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].image.height": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].image.url": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].image.width": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].images[]": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].images[].canonicalUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].images[].height": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].images[].url": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].images[].width": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].inlineEmojis[]": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].inlineEmojis[].code": {
+      "status": "ignored",
+      "family": "embed",
+      "reason": "Ferry retains emoji identity and asset fields but does not store DCE's rendered code copy."
+    },
+    "messages[].embeds[].inlineEmojis[].id": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].inlineEmojis[].imageUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].inlineEmojis[].isAnimated": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].inlineEmojis[].name": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].thumbnail": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].thumbnail.canonicalUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].thumbnail.height": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].thumbnail.url": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].thumbnail.width": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].timestamp": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].title": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].url": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].video": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].video.canonicalUrl": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].video.height": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].video.url": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].embeds[].video.width": {
+      "status": "consumed",
+      "family": "embed"
+    },
+    "messages[].forwardedMessage": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.attachments[]": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.attachments[].fileName": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.attachments[].fileSizeBytes": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.attachments[].id": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.attachments[].url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.content": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[]": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].author": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].author.iconCanonicalUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].author.iconUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].author.name": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].author.url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].color": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].description": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].fields[]": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].fields[].isInline": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].fields[].name": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].fields[].value": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].footer": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].footer.iconCanonicalUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].footer.iconUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].footer.text": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].image": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].image.canonicalUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].image.height": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].image.url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].image.width": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].images[]": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].images[].canonicalUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].images[].height": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].images[].url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].images[].width": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].inlineEmojis[]": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].code": {
+      "status": "ignored",
+      "family": "forward",
+      "reason": "Ferry retains emoji identity and asset fields but does not store DCE's rendered code copy."
+    },
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].id": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].imageUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].isAnimated": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].inlineEmojis[].name": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].thumbnail": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].thumbnail.canonicalUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].thumbnail.height": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].thumbnail.url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].thumbnail.width": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].timestamp": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].title": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].video": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].video.canonicalUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].video.height": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].video.url": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.embeds[].video.width": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.stickers[]": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.stickers[].format": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.stickers[].id": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.stickers[].name": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.stickers[].sourceUrl": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.timestamp": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].forwardedMessage.timestampEdited": {
+      "status": "consumed",
+      "family": "forward"
+    },
+    "messages[].id": {
+      "status": "consumed",
+      "family": "content"
+    },
+    "messages[].inlineEmojis[]": {
+      "status": "consumed",
+      "family": "inline-emoji"
+    },
+    "messages[].inlineEmojis[].code": {
+      "status": "ignored",
+      "family": "inline-emoji",
+      "reason": "Ferry retains emoji identity and asset fields but does not store DCE's rendered code copy."
+    },
+    "messages[].inlineEmojis[].id": {
+      "status": "consumed",
+      "family": "inline-emoji"
+    },
+    "messages[].inlineEmojis[].imageUrl": {
+      "status": "consumed",
+      "family": "inline-emoji"
+    },
+    "messages[].inlineEmojis[].isAnimated": {
+      "status": "consumed",
+      "family": "inline-emoji"
+    },
+    "messages[].inlineEmojis[].name": {
+      "status": "consumed",
+      "family": "inline-emoji"
+    },
+    "messages[].interaction": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.id": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.name": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.avatarUrl": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.color": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.discriminator": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.id": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.isBot": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.name": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.nickname": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.roles[]": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.roles[].color": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.roles[].id": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.roles[].name": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].interaction.user.roles[].position": {
+      "status": "consumed",
+      "family": "interaction"
+    },
+    "messages[].isPinned": {
+      "status": "consumed",
+      "family": "content"
+    },
+    "messages[].mentions[]": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].avatarUrl": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].color": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].discriminator": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].id": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].isBot": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].name": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].nickname": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].roles[]": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].roles[].color": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].roles[].id": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].roles[].name": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].mentions[].roles[].position": {
+      "status": "consumed",
+      "family": "mention"
+    },
+    "messages[].reactions[]": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].count": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].emoji": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].emoji.code": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Ferry retains emoji identity and asset fields but does not store DCE's rendered code copy."
+    },
+    "messages[].reactions[].emoji.id": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].emoji.imageUrl": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].emoji.isAnimated": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].emoji.name": {
+      "status": "consumed",
+      "family": "reaction"
+    },
+    "messages[].reactions[].users[]": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].avatarUrl": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].color": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].discriminator": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].id": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].isBot": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].name": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reactions[].users[].nickname": {
+      "status": "ignored",
+      "family": "reaction",
+      "reason": "Stoat receives the aggregate reaction count; individual Discord voter identities are not replayed."
+    },
+    "messages[].reference": {
+      "status": "consumed",
+      "family": "reference"
+    },
+    "messages[].reference.channelId": {
+      "status": "consumed",
+      "family": "reference"
+    },
+    "messages[].reference.guildId": {
+      "status": "consumed",
+      "family": "reference"
+    },
+    "messages[].reference.messageId": {
+      "status": "consumed",
+      "family": "reference"
+    },
+    "messages[].reference.type": {
+      "status": "consumed",
+      "family": "reference"
+    },
+    "messages[].stickers[]": {
+      "status": "consumed",
+      "family": "sticker"
+    },
+    "messages[].stickers[].format": {
+      "status": "consumed",
+      "family": "sticker"
+    },
+    "messages[].stickers[].id": {
+      "status": "consumed",
+      "family": "sticker"
+    },
+    "messages[].stickers[].name": {
+      "status": "consumed",
+      "family": "sticker"
+    },
+    "messages[].stickers[].sourceUrl": {
+      "status": "consumed",
+      "family": "sticker"
+    },
+    "messages[].timestamp": {
+      "status": "consumed",
+      "family": "content"
+    },
+    "messages[].timestampEdited": {
+      "status": "consumed",
+      "family": "content"
+    },
+    "messages[].type": {
+      "status": "consumed",
+      "family": "content"
+    }
+  }
+}

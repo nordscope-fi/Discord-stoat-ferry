@@ -10,18 +10,18 @@ Before you start, confirm you have these ready:
 
 **For 1-Click Migration (recommended):**
 
-- [ ] Your **Discord user token** — a secret key from your browser that gives Ferry temporary access to your Discord account ([how to find it](https://github.com/Tyrrrz/DiscordChatExporter/wiki/Obtaining-Token))
-- [ ] Your **Discord server ID** — right-click the server name in Discord and choose "Copy Server ID" (you may need to enable Developer Mode in Discord settings first)
-- [ ] Your **Stoat API URL** — `https://api.stoat.chat` for the official service, or your self-hosted domain
-- [ ] Your **Stoat user token** — a secret key your browser saves when you log in to Stoat. No bot or app creation needed. ([how to find it](setup-stoat.md#2-get-your-stoat-user-token))
+- [ ] Your **Discord user token**, a secret key from your browser that gives Ferry temporary access to your Discord account ([how to find it](https://github.com/Tyrrrz/DiscordChatExporter/wiki/Obtaining-Token))
+- [ ] Your **Discord server ID**, right-click the server name in Discord and choose "Copy Server ID" (you may need to enable Developer Mode in Discord settings first)
+- [ ] Your **Stoat API URL**, `https://api.stoat.chat` for the official service, or your self-hosted domain
+- [ ] Your **Stoat user token**, a secret key your browser saves when you log in to Stoat. No bot or app creation needed. ([how to find it](setup-stoat.md#2-get-your-stoat-user-token))
 
 **For Offline Migration (advanced):**
 
-- [ ] Your **Discord export folder** — produced by DiscordChatExporter, a free tool described in the [export guide](export-discord.md)
-- [ ] Your **Stoat API URL** and **Stoat user token** — same as above
+- [ ] Your **Discord export folder**, produced by the free server export tool DiscordChatExporter (DCE), described in the [export guide](export-discord.md)
+- [ ] Your **Stoat API URL** and **Stoat user token**, same as above
 
 !!! warning "Discord token security"
-    Your Discord token gives full access to your account. Never share it. Ferry does not store it to disk — it is held in memory only during the export.
+    Your Discord token gives full access to your account. Never share it. Ferry does not store it to disk, it is held in memory only during the export.
 
 !!! warning "Discord Terms of Service"
     Using a user token with third-party tools may violate Discord's Terms of Service. Ferry displays a disclaimer checkbox before proceeding. Use at your own risk.
@@ -46,7 +46,7 @@ Before you start, confirm you have these ready:
 
 === "CLI (Linux / advanced)"
 
-    1. Open a terminal (the text command window — search "Terminal" in your applications).
+    1. Open a terminal (the text command window, search "Terminal" in your applications).
     2. Run the migrate command with your credentials:
 
     ```
@@ -69,24 +69,24 @@ Before you start, confirm you have these ready:
 
     **1-Click Migration mode (default):**
 
-    1. **Discord token** — paste your Discord user token (masked input).
-    2. **Discord server ID** — paste the server ID.
-    3. **Acknowledge the ToS disclaimer** — check the checkbox.
-    4. **Stoat API URL** — select Official or Self-hosted.
-    5. **Stoat user token** — paste the token you copied from your browser (see [how to find it](setup-stoat.md#2-get-your-stoat-user-token)).
+    1. **Discord token**, paste your Discord user token (masked input).
+    2. **Discord server ID**, paste the server ID.
+    3. **Acknowledge the ToS disclaimer**, check the checkbox.
+    4. **Stoat API URL**, select Official or Self-hosted.
+    5. **Stoat user token**, paste the token you copied from your browser (see [how to find it](setup-stoat.md#2-get-your-stoat-user-token)).
 
     **Offline mode ("I already have exports"):**
 
     1. Toggle to **"I already have exports"**.
-    2. **Export folder** — browse to your DCE export folder.
-    3. **Stoat API URL** and **Stoat user token** — same as above.
+    2. **Export folder**, browse to your DCE export folder.
+    3. **Stoat API URL** and **Stoat user token**, same as above.
 
     <!-- screenshot: ferry-setup-filled -->
 
     !!! tip "Advanced Options"
         Expand the **Advanced Options** section if you need to:
 
-        - Adjust the rate limit delay (default 1.0 second between messages — increase if you see rate limit warnings)
+        - Adjust the rate limit delay (default 1.0 second between messages, increase if you see rate limit warnings)
         - Skip specific phases: emoji, messages, reactions, or threads/forum posts
         - Run a dry run to validate structure mapping without making API calls
         - Migrate into an existing Stoat server instead of creating a new one
@@ -126,13 +126,13 @@ Before you start, confirm you have these ready:
     | `--max-channels N` | Channel limit (default `200`; raise for self-hosted) |
     | `--max-emoji N` | Emoji limit (default `100`; raise for self-hosted) |
     | `--thread-strategy` | `flatten` (default), `merge`, or `archive` |
-    | `--incremental` | Delta migration — only new messages since last run |
+    | `--incremental` | Delta migration, only new messages since last run |
     | `--force` | Override freshness and soft error checks |
     | `--verify-uploads` | Post-upload file size verification |
     | `--cleanup-orphans` | Report unreferenced Autumn uploads |
     | `--force-unlock` | Clear stale migration lock from server |
     | `--skip-dce-verify` | Skip DCE binary SHA-256 verification |
-    | `--reaction-mode text\|native\|skip` | How reactions migrate (default `text` — appended as a summary; `native` calls the reaction API; `skip` drops them) |
+    | `--reaction-mode text\|native\|skip` | How reactions migrate (default `text`, appended as a summary; `native` calls the reaction API; `skip` drops them) |
     | `--min-thread-messages N` | Skip threads with fewer than N messages (default 0 = all threads) |
     | `--checkpoint-interval N` | Save state every N messages (default 50; raise for very large runs) |
     | `--max-concurrent-channels N` | Channels processed in parallel (default 3; self-hosted only) |
@@ -156,8 +156,8 @@ Before you start, confirm you have these ready:
 
     This step is automatic. When it finishes, Ferry moves to the Validate screen.
 
-    !!! info ".NET Runtime required on macOS and Linux"
-        DCE requires the .NET 8 runtime (a software framework from Microsoft that DCE needs to run). If Ferry detects it is missing, it will show an error with a download link. Windows users are not affected — the Windows version of DCE includes everything it needs.
+    !!! info "DCE is included for your platform"
+        Ferry downloads the self-contained DCE 2.48 command-line archive for your operating system and processor. You do not need to install .NET separately.
 
 === "CLI (Linux / advanced)"
 
@@ -182,7 +182,7 @@ Ferry checks your export files locally before making any API calls. Nothing is s
     <!-- screenshot: ferry-validate-screen -->
 
     !!! info "What amber warnings mean"
-        Amber warnings are not blockers. Common examples: some attachments were not downloaded with the export, or some message types will be skipped. Ferry will still proceed — check the details so you know what to expect.
+        Amber warnings are not blockers. Common examples: some attachments were not downloaded with the export, or some message types will be skipped. Ferry will still proceed, check the details so you know what to expect.
 
     3. If the status is green or amber, click **Start Migration** to continue.
     4. If the status is red, the export is missing required data. Return to the export guide and re-export with the correct flags.
@@ -215,7 +215,7 @@ Before creating anything on Stoat, Ferry shows a review summary.
     The CLI prints a summary table before proceeding. In orchestrated mode this happens automatically; in offline mode it appears after validation.
 
 !!! info "Permission migration"
-    When you provide a Discord token (1-Click mode), Ferry fetches role permissions and channel overrides directly from the Discord API and translates them to Stoat equivalents. In offline mode (no Discord token), roles are created without permissions — you will need to set them manually on Stoat.
+    When you provide a Discord token (1-Click mode), Ferry fetches role permissions and channel overrides directly from the Discord API and translates them to Stoat equivalents. In offline mode (no Discord token), roles are created without permissions, you will need to set them manually on Stoat.
 
 ---
 
@@ -225,7 +225,7 @@ Before creating anything on Stoat, Ferry shows a review summary.
 
     1. Click **Proceed** on the review dialog (or **Start Migration** if review was skipped).
     2. The Progress screen appears and shows:
-        - Phase indicator — 13 phases, each with a checkmark when complete
+        - Phase indicator, 13 phases, each with a checkmark when complete
         - Progress bar during the message import phase
         - Running totals: messages sent, attachments uploaded, errors
         - Live log stream at the bottom
@@ -256,15 +256,15 @@ Before creating anything on Stoat, Ferry shows a review summary.
 
 === "GUI (Windows / macOS)"
 
-    When all phases complete, Ferry shows a completion card with the error count and — when a Discord token was used — a native-fidelity line (slowmode settings, voice user limits, and role icons applied).
+    When all phases complete, Ferry shows a completion card with the error count and, when a Discord token was used, a native-fidelity line (slowmode settings, voice user limits, and role icons applied).
 
-    Click **Open Report** to view the full migration report, including message counts, attachment counts, and the **fidelity score** — a quantified measure of migration quality.
+    Click **Open Report** to view the full migration report, including message counts, attachment counts, and the **fidelity score**, a quantified measure of migration quality.
 
     <!-- screenshot: ferry-complete-screen -->
 
 === "CLI (Linux / advanced)"
 
-    Ferry prints a summary table when it finishes, including a **fidelity score** — a quantified measure of migration quality (messages migrated vs. source total, attachment success rate, and other factors). The full report is saved to:
+    Ferry prints a summary table when it finishes, including a **fidelity score**, a quantified measure of migration quality (messages migrated vs. source total, attachment success rate, and other factors). The full report is saved to:
 
     ```
     ferry-output/migration_report.json
@@ -287,18 +287,18 @@ Before creating anything on Stoat, Ferry shows a review summary.
 After a successful migration:
 
 - All channels and categories are created in the same structure as Discord
-- NSFW channels are correctly flagged
+- Channels marked not safe for work (NSFW) are correctly flagged
 - Channel permission overrides (@everyone and per-role) are applied
 - Forum posts are grouped into dedicated categories named after the parent forum
 - Roles are recreated with colours, hierarchy order, and permissions preserved
 - Messages appear under the original author's name and avatar, so conversations look natural
 - Original timestamps appear at the start of each message: `*[2024-01-15 14:30 UTC]*`
 - Embeds are preserved with uploaded thumbnails and images
-- Polls are rendered as formatted text in the message body
+- Active polls are unavailable because DCE 2.48 does not export them. Closed-poll notifications keep the fallback text and embeds that DCE writes.
 - Sticker images are uploaded as attachments (with text fallback for unsupported formats)
 - Pinned messages are re-pinned in their channels
 - Custom emoji are available in the server
-- All messages are sent silently (no notification spam during migration)
+- Migrated messages do not trigger notification spam
 
 !!! info "Why do messages show a timestamp at the start?"
     Stoat does not support importing historical message timestamps. Ferry embeds the original date and time as the first line of each message so the conversation history stays readable.

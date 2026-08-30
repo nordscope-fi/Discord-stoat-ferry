@@ -19,6 +19,7 @@ from discord_ferry.parser.models import (
     DCEExport,
     DCEForwardedMessage,
     DCEGuild,
+    DCEInteraction,
     DCEMessage,
     DCEReaction,
     DCEReference,
@@ -530,8 +531,14 @@ def _as_list(value: Any) -> list[Any]:
 
 def _parse_message(raw: Any) -> DCEMessage:
     author = _parse_author(raw["author"])
-    attachments = [_parse_attachment(a) for a in (raw.get("attachments") or [])]
-    reactions = [_parse_reaction(r) for r in (raw.get("reactions") or [])]
+    attachments = [_parse_attachment(a) for a in _as_list(raw.get("attachments"))]
+    reactions = [_parse_reaction(r) for r in _as_list(raw.get("reactions"))]
+    inline_emojis = [
+        emoji
+        for item in _as_list(raw.get("inlineEmojis"))
+        if isinstance(item, dict) and (emoji := _parse_emoji(item)).id
+    ]
+    interaction = _parse_interaction(raw.get("interaction"))
 
     reference: DCEReference | None = None
     ref_raw = raw.get("reference")
@@ -568,10 +575,9 @@ def _parse_message(raw: Any) -> DCEMessage:
             stickers=list(_as_list(fwd_raw.get("stickers"))),
         )
 
-    embeds: list[dict[str, object]] = list(raw.get("embeds") or [])
-    stickers: list[dict[str, str]] = list(raw.get("stickers") or [])
-    mentions: list[dict[str, str]] = list(raw.get("mentions") or [])
-    poll: dict[str, object] | None = raw.get("poll")
+    embeds: list[dict[str, object]] = list(_as_list(raw.get("embeds")))
+    stickers: list[dict[str, str]] = list(_as_list(raw.get("stickers")))
+    mentions: list[dict[str, str]] = list(_as_list(raw.get("mentions")))
 
     return DCEMessage(
         id=str(raw["id"]),
@@ -586,8 +592,9 @@ def _parse_message(raw: Any) -> DCEMessage:
         stickers=stickers,
         reactions=reactions,
         mentions=mentions,
+        inline_emojis=inline_emojis,
+        interaction=interaction,
         reference=reference,
-        poll=poll,
         forwarded_message=forwarded,
     )
 
@@ -626,17 +633,37 @@ def _parse_attachment(raw: Any) -> DCEAttachment:
     )
 
 
+def _parse_emoji(raw: Any) -> DCEEmoji:
+    return DCEEmoji(
+        id=str(raw.get("id") or ""),
+        name=str(raw.get("name") or ""),
+        is_animated=bool(raw.get("isAnimated", False)),
+        image_url=str(raw.get("imageUrl") or ""),
+    )
+
+
+def _parse_interaction(raw: Any) -> DCEInteraction | None:
+    if not isinstance(raw, dict):
+        return None
+
+    interaction_id = str(raw.get("id") or "")
+    user_raw = raw.get("user")
+    if not interaction_id or not isinstance(user_raw, dict) or not user_raw.get("id"):
+        return None
+
+    user = dict(user_raw)
+    user["name"] = user.get("name") or ""
+    return DCEInteraction(
+        id=interaction_id,
+        name=str(raw.get("name") or ""),
+        user=_parse_author(user),
+    )
+
+
 def _parse_reaction(raw: Any) -> DCEReaction:
-    emoji_raw = raw["emoji"]
     # Unicode emojis emit `"id": null` in DCE output; without `or ""` we'd
     # produce the truthy 4-char string "None" instead of an empty ID.
-    emoji = DCEEmoji(
-        id=str(emoji_raw.get("id") or ""),
-        name=str(emoji_raw.get("name") or ""),
-        is_animated=bool(emoji_raw.get("isAnimated", False)),
-        image_url=str(emoji_raw.get("imageUrl") or ""),
-    )
     return DCEReaction(
-        emoji=emoji,
+        emoji=_parse_emoji(raw["emoji"]),
         count=int(raw.get("count", 1)),
     )

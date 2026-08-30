@@ -1,8 +1,7 @@
 """Contract test: real DCE binary still exposes the flags Ferry depends on.
 
-Uses the canonical `_get_dce_dir()` location so the CI cache key
-`dce-${{ runner.os }}-2.47.3` actually populates and reuses the binary
-across runs. Without this, every CI run would re-download ~30MB and hit
+Uses the canonical `_get_dce_dir()` location so the CI cache populates and reuses the binary across
+runs. Without this, every CI run would re-download ~30MB and hit
 GitHub's unauthenticated rate limit (60/hr per IP).
 """
 
@@ -51,9 +50,10 @@ async def test_dce_help_lists_all_flags_ferry_uses() -> None:
         [str(dce_path), "exportguild", "--help"],
         capture_output=True,
         text=True,
-        timeout=60,  # 60s headroom: cold-start dotnet + ~10s JIT on slow CI runners
+        timeout=60,
     )
     output = result.stdout + result.stderr
+    assert result.returncode == 0, output
 
     missing = [flag for flag in REQUIRED_FLAGS if flag not in output]
     assert not missing, (
