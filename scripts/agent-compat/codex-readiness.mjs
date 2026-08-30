@@ -13,6 +13,7 @@ import {
 import { buildReviewPrompt } from './review-contract.mjs';
 import { CODEX_CHAT_COMMAND } from './plain-english-contract.mjs';
 import { runQwenReview } from './qwen-review.mjs';
+import { authorizeVerificationCommand } from './review-verification.mjs';
 import { runVibeReview } from './vibe-review.mjs';
 
 export function readinessRecord(
@@ -673,11 +674,19 @@ export async function runReviewerReadiness({
   now = () => performance.now(),
 }) {
   if (!root || !home) throw new Error('reviewer readiness requires root and home');
-  const prompt = `${buildReviewPrompt({
+  const cleanPrompt = `${buildReviewPrompt({
     mode: 'chunk',
     title: 'Reviewer readiness',
     focus: 'Return a clean review. This payload tests exact-model access only.',
   })}\n\nReviewer readiness marker. No project finding is requested.`;
+  const findingPrompt = `${buildReviewPrompt({
+    mode: 'chunk',
+    title: 'Reviewer readiness',
+    focus: [
+      'Return exactly one Minor maintainability finding for the readiness marker.',
+      'Use verification command exactly: rg -n -- discord-ferry pyproject.toml',
+    ].join(' '),
+  })}\n\npyproject.toml contains the discord-ferry reviewer readiness marker.`;
   const records = [];
   for (const reviewer of [
     {
@@ -685,6 +694,8 @@ export async function runReviewerReadiness({
       adapter: adapters.vibe,
       slot: 'mistral-vibe',
       model: 'zai-glm-5-2',
+      prompt: cleanPrompt,
+      requiresFinding: false,
       remediation: 'Repair the Vibe reviewer route or its Proton credential.',
     },
     {
@@ -692,13 +703,27 @@ export async function runReviewerReadiness({
       adapter: adapters.qwen,
       slot: 'qwen',
       model: 'qwen3.8-max',
+      prompt: findingPrompt,
+      requiresFinding: true,
       remediation: 'Repair the Qwen reviewer route or its Proton credential.',
     },
   ]) {
     const started = now();
     try {
-      const result = await reviewer.adapter({ prompt, home, slot: reviewer.slot });
+      const result = await reviewer.adapter({
+        prompt: reviewer.prompt,
+        home,
+        slot: reviewer.slot,
+      });
       if (result?.status !== 'valid' || result?.resolved_model !== reviewer.model) {
+        throw new Error('reviewer evidence mismatch');
+      }
+      const findingAuthorized = result?.findings?.length === 1
+        && authorizeVerificationCommand(
+          result.findings[0].verification.command,
+          { root },
+        ).authorized;
+      if (reviewer.requiresFinding && !findingAuthorized) {
         throw new Error('reviewer evidence mismatch');
       }
       records.push(readinessRecord(

@@ -73,6 +73,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Qwen review findings now survive rejected verification commands.** Provider records validate
+  response structure, while the local guard blocks unsafe commands as inconclusive findings. The
+  live readiness check now proves one non-empty authorized Qwen finding.
+
 - **DCE archives cannot write outside their cache directory.** Ferry rejects absolute, parent, and
   cross-platform escape paths before extracting any archive member. The checksum bypass remains
   available without bypassing path containment.
