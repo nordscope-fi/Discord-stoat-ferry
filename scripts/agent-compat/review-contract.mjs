@@ -4,10 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import {
-  authorizeVerificationCommand,
-  verificationExitAllowed,
-} from './review-verification.mjs';
+import { verificationExitAllowed } from './review-verification.mjs';
 
 export const VERIFICATION_OUTCOME_SCHEMA = {
   type: 'object',
@@ -179,10 +176,7 @@ function outcomesAreExclusive(first, second) {
   return firstConflicts || secondConflicts;
 }
 
-export function validateFindings(result, {
-  root = null,
-  authorize = authorizeVerificationCommand,
-} = {}) {
+export function validateFindings(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
   if (!hasExactKeys(result, RESULT_KEYS)) return false;
   if (typeof result.summary !== 'string' || !VALID_CONFIDENCES.has(result.confidence)) return false;
@@ -214,7 +208,6 @@ export function validateFindings(result, {
     if (!outcomesAreExclusive(verification.confirms_if, verification.refutes_if)) {
       return false;
     }
-    if (root !== null && !authorize(verification.command, { root }).authorized) return false;
   }
   return true;
 }
@@ -296,11 +289,10 @@ export function makeReviewRecord({
   durationMs,
   status,
   result = null,
-  root = process.cwd(),
 }) {
   if (!VALID_STATUSES.has(status)) throw new Error(`invalid review status: ${status}`);
-  if (status === 'valid' && !validateFindings(result, { root })) {
-    const error = new Error('valid review record requires authorized schema-valid findings');
+  if (status === 'valid' && !validateFindings(result)) {
+    const error = new Error('valid review record requires schema-valid findings');
     error.code = 'INVALID_SCHEMA';
     throw error;
   }
@@ -458,7 +450,7 @@ export function evaluatePlanGate(
   if (
     !Array.isArray(verdicts)
     || verdicts.length !== record.findings.length
-    || verdicts.some((verdict) => !['CONFIRMED', 'REFUTED'].includes(verdict))
+    || verdicts.some((verdict) => !['CONFIRMED', 'REFUTED', 'INCONCLUSIVE'].includes(verdict))
   ) {
     return { ready: false, reason: 'unverified plan findings', minor_findings: [] };
   }

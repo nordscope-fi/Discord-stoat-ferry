@@ -1392,6 +1392,7 @@ def test_reviewer_readiness_names_vibe_and_qwen_without_opus() -> None:
     assert set(records) == {"vibe-reviewer", "qwen-reviewer"}
     assert records["vibe-reviewer"]["details"] == {"model": "zai-glm-5-2"}
     assert records["qwen-reviewer"]["details"] == {"model": "qwen3.8-max"}
+    assert report["calls"] == {"vibe": 1, "qwen": 1}
     assert "opus" not in result.stdout.lower()
     assert "claude" not in result.stdout.lower()
 
@@ -1402,6 +1403,8 @@ def test_reviewer_readiness_names_vibe_and_qwen_without_opus() -> None:
         ("vibe-fails", "vibe-reviewer"),
         ("qwen-fails", "qwen-reviewer"),
         ("qwen-wrong-model", "qwen-reviewer"),
+        ("qwen-empty", "qwen-reviewer"),
+        ("qwen-denied", "qwen-reviewer"),
     ],
 )
 def test_reviewer_readiness_scopes_value_free_failures(
@@ -1420,6 +1423,8 @@ def test_reviewer_readiness_scopes_value_free_failures(
     assert result.returncode == 1
     assert [record["id"] for record in changed] == [failed_id]
     assert changed[0]["details"] == {"reason": "Exact reviewer probe failed"}
+    assert report["calls"] == {"vibe": 1, "qwen": 1}
+    assert "FERRY_COMMAND_CANARY" not in result.stdout + result.stderr
 
 
 def test_reviewer_readiness_redacts_adapter_failures() -> None:
@@ -1644,7 +1649,7 @@ def test_review_contract_requires_distinct_structured_verification_outcomes() ->
     }
 
 
-def test_provider_records_require_root_authorized_verification_commands(
+def test_provider_records_preserve_structurally_valid_denied_commands(
     tmp_path: Path,
 ) -> None:
     result = _run(
@@ -1658,7 +1663,15 @@ def test_provider_records_require_root_authorized_verification_commands(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
-        "accepted": {
+        "record_valid": {
+            "safe": True,
+            "shell": True,
+            "python": True,
+            "missing": True,
+            "outside": True,
+            "linked": True,
+        },
+        "command_authorized": {
             "safe": True,
             "shell": False,
             "python": False,
@@ -1666,11 +1679,11 @@ def test_provider_records_require_root_authorized_verification_commands(
             "outside": False,
             "linked": False,
         },
-        "ensemble_status": "failed",
-        "ensemble_failure": "schema",
-        "plan_status": "failed",
-        "plan_failure": "schema",
-        "plan_accepted": False,
+        "commands_run": ["rg"],
+        "verdicts": ["CONFIRMED", "INCONCLUSIVE"],
+        "ensemble_status": "valid",
+        "plan_status": "valid",
+        "plan_accepted": True,
     }
 
 
@@ -2856,6 +2869,26 @@ def test_plan_gate_treats_a_failed_selected_reviewer_as_advisory() -> None:
         "failure_stage": "total-timeout",
         "http_status": None,
         "duration_ms": 4,
+    }
+
+
+def test_plan_gate_ignores_an_inconclusive_finding() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "inconclusive",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "ready": True,
+        "reason": None,
+        "minor_findings": [],
+        "accepted_slot": "plan-qwen",
+        "accepted_model": "qwen3.8-max",
+        "decision_required": False,
+        "warning": None,
     }
 
 

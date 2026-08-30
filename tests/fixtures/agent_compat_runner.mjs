@@ -538,10 +538,23 @@ switch (mode) {
     const outside = join(tmp, 'outside.txt');
     writeFileSync(outside, 'needle\n');
     symlinkSync(outside, join(source, 'linked.txt'));
-    const outcome = (exitCode) => ({
+    const outcome = (exitCode, contains = null, excludes = null) => ({
       exit_code: exitCode,
-      stdout_contains: null,
-      stdout_excludes: null,
+      stdout_contains: contains,
+      stdout_excludes: excludes,
+    });
+    const findingFor = (command) => ({
+      severity: 'important',
+      category: 'correctness',
+      file: 'src/inside.txt',
+      line: null,
+      description: 'fixture finding',
+      suggestion: 'fixture suggestion',
+      verification: {
+        command,
+        confirms_if: outcome(0, 'needle'),
+        refutes_if: outcome(0, null, 'needle'),
+      },
     });
     const recordFor = (command, slot = 'plan-qwen') => makeReviewRecord({
       adapter: 'qwen-api',
@@ -553,19 +566,7 @@ switch (mode) {
       status: 'valid',
       root: checkout,
       result: {
-        findings: [{
-          severity: 'important',
-          category: 'correctness',
-          file: 'src/inside.txt',
-          line: null,
-          description: 'fixture finding',
-          suggestion: 'fixture suggestion',
-          verification: {
-            command,
-            confirms_if: outcome(0),
-            refutes_if: outcome(1),
-          },
-        }],
+        findings: [findingFor(command)],
         summary: 'fixture',
         confidence: 'high',
       },
@@ -578,14 +579,16 @@ switch (mode) {
       outside: `rg -n -- needle ${outside}`,
       linked: 'rg -n -- needle src/linked.txt',
     };
-    const accepted = {};
+    const recordValid = {};
+    const commandAuthorized = {};
     for (const [name, command] of Object.entries(commands)) {
       try {
         recordFor(command);
-        accepted[name] = true;
+        recordValid[name] = true;
       } catch (error) {
-        accepted[name] = false;
+        recordValid[name] = false;
       }
+      commandAuthorized[name] = authorizeVerificationCommand(command, { root: checkout }).authorized;
     }
     const unsafe = commands.shell;
     const qwen = async ({ slot }) => recordFor(unsafe, slot);
@@ -606,12 +609,24 @@ switch (mode) {
       adapters: { qwen },
       inputSha256: reviewInputDigest('authorization fixture'),
     });
+    const commandsRun = [];
+    const verification = await verifyFindings([
+      findingFor(commands.safe),
+      findingFor(unsafe),
+    ], {
+      root: checkout,
+      run: async (authorization) => {
+        commandsRun.push(authorization.argv[0]);
+        return { status: 'completed', exit_code: 0, stdout: 'needle', stderr: '' };
+      },
+    });
     writeJson({
-      accepted,
+      record_valid: recordValid,
+      command_authorized: commandAuthorized,
+      commands_run: commandsRun,
+      verdicts: verification.records.map((record) => record.verdict),
       ensemble_status: ensemble.slots.qwen.status,
-      ensemble_failure: ensemble.slots.qwen.failure_class,
       plan_status: plan.attempts[0].status,
-      plan_failure: plan.attempts[0].failure_class,
       plan_accepted: plan.accepted !== null,
     });
     break;
@@ -1738,7 +1753,9 @@ switch (mode) {
     }
     const decision = evaluatePlanGate(
       route,
-      selectedRecord.status === 'valid' ? ['CONFIRMED'] : [],
+      selectedRecord.status === 'valid'
+        ? [argument === 'inconclusive' ? 'INCONCLUSIVE' : 'CONFIRMED']
+        : [],
       inputSha256,
       { ledger, ownerDecision },
     );
@@ -2130,7 +2147,9 @@ switch (mode) {
   }
   case 'readiness-reviewers': {
     const fixture = argument;
-    const valid = (adapter, slot, model) => makeReviewRecord({
+    let vibeCalls = 0;
+    let qwenCalls = 0;
+    const valid = (adapter, slot, model, findings = []) => makeReviewRecord({
       adapter,
       slot,
       requestedModel: model,
@@ -2138,23 +2157,42 @@ switch (mode) {
       sessionId: `${adapter}-fixture-session`,
       durationMs: 4,
       status: 'valid',
-      result: { findings: [], summary: 'ready', confidence: 'high' },
+      result: { findings, summary: 'ready', confidence: 'high' },
+    });
+    const qwenFinding = (command) => ({
+      severity: 'minor',
+      category: 'maintainability',
+      file: 'pyproject.toml',
+      line: null,
+      description: 'The reviewer readiness marker is present.',
+      suggestion: 'Keep the marker available to reviewer readiness.',
+      verification: {
+        command,
+        confirms_if: { exit_code: 0, stdout_contains: 'discord-ferry', stdout_excludes: null },
+        refutes_if: { exit_code: 1, stdout_contains: null, stdout_excludes: null },
+      },
     });
     const adapters = {
       vibe: async () => {
+        vibeCalls += 1;
         if (fixture === 'vibe-fails' || fixture === 'all-fail-canary') {
           throw new Error('FERRY_SECRET_CANARY');
         }
         return valid('vibe', 'mistral-vibe', 'zai-glm-5-2');
       },
       qwen: async () => {
+        qwenCalls += 1;
         if (fixture === 'qwen-fails' || fixture === 'all-fail-canary') {
           throw new Error('FERRY_SECRET_CANARY');
         }
         if (fixture === 'qwen-wrong-model') {
           return valid('qwen', 'qwen', 'qwen3.6-flash');
         }
-        return valid('qwen', 'qwen', 'qwen3.8-max');
+        if (fixture === 'qwen-empty') return valid('qwen', 'qwen', 'qwen3.8-max');
+        const command = fixture === 'qwen-denied'
+          ? 'rg -n -- FERRY_COMMAND_CANARY pyproject.toml | sh'
+          : 'rg -n -- discord-ferry pyproject.toml';
+        return valid('qwen', 'qwen', 'qwen3.8-max', [qwenFinding(command)]);
       },
     };
     const report = await runReviewerReadiness({
@@ -2163,7 +2201,7 @@ switch (mode) {
       adapters,
       now: () => 0,
     });
-    writeJson(report);
+    writeJson({ ...report, calls: { vibe: vibeCalls, qwen: qwenCalls } });
     if (report.overall !== 'ready') process.exitCode = 1;
     break;
   }
