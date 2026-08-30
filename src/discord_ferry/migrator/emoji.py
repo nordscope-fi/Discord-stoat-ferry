@@ -12,6 +12,7 @@ from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_create_emoji, get_session
 from discord_ferry.migrator.sanitize import sanitize_emoji_name
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.parser.models import DCEEmoji
 from discord_ferry.uploader.autumn import upload_with_cache
 
 if TYPE_CHECKING:
@@ -60,20 +61,17 @@ class _EmojiRecord(TypedDict):
     uses: int
 
 
-def _record_emoji(
+def _record_emoji_use(
     discovered: dict[str, _EmojiRecord],
     emoji_id: str,
     name: str,
     is_animated: bool,
-    image_url: str,
+    image_url: str = "",
 ) -> None:
-    """Record an emoji encounter (Batch 4 S2+S3).
+    """Record one textual or reaction use and retain the best known asset."""
+    if not emoji_id:
+        return
 
-    New emoji are added with ``uses=1``. On re-encounter, ``uses`` is incremented and the
-    stored ``image_url`` is UPGRADED (never downgraded) when it is empty and the new source
-    carries a usable path — so an emoji first seen in content/embeds (no path) is rescued by a
-    later reaction that has the real downloaded asset.
-    """
     rec = discovered.get(emoji_id)
     if rec is None:
         discovered[emoji_id] = {
@@ -89,6 +87,88 @@ def _record_emoji(
         rec["image_url"] = image_url
         rec["name"] = name
         rec["is_animated"] = is_animated
+
+
+def _enrich_emoji_asset(
+    discovered: dict[str, _EmojiRecord],
+    emoji: DCEEmoji,
+) -> None:
+    """Add downloaded inline metadata without counting the same use twice."""
+    if not emoji.id:
+        return
+
+    rec = discovered.get(emoji.id)
+    if rec is None:
+        discovered[emoji.id] = {
+            "id": emoji.id,
+            "name": emoji.name,
+            "is_animated": emoji.is_animated,
+            "image_url": emoji.image_url,
+            "uses": 1,
+        }
+        return
+
+    if not rec["image_url"] and emoji.image_url:
+        rec["image_url"] = emoji.image_url
+    if not rec["name"] and emoji.name:
+        rec["name"] = emoji.name
+    if emoji.is_animated:
+        rec["is_animated"] = True
+
+
+def _discover_message_emoji(
+    discovered: dict[str, _EmojiRecord],
+    msg: DCEMessage,
+) -> None:
+    """Count message uses, then enrich them from DCE's inline asset metadata."""
+    for reaction in msg.reactions:
+        emoji = reaction.emoji
+        _record_emoji_use(
+            discovered,
+            emoji.id,
+            emoji.name,
+            emoji.is_animated,
+            emoji.image_url,
+        )
+
+    if msg.content:
+        for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(msg.content):
+            _record_emoji_use(discovered, emoji_id, emoji_name, is_animated)
+
+    embed_inline: list[DCEEmoji] = []
+    for embed in msg.embeds:
+        embed_fields: list[dict[str, object]] = (
+            embed.get("fields") if isinstance(embed.get("fields"), list) else []  # type: ignore[assignment]
+        )
+        embed_texts = [
+            embed.get("description", ""),
+            embed.get("title", ""),
+            *(field.get("value", "") for field in embed_fields),
+        ]
+        for text_field in embed_texts:
+            if text_field:
+                for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(
+                    str(text_field)
+                ):
+                    _record_emoji_use(discovered, emoji_id, emoji_name, is_animated)
+
+        raw_inline = embed.get("inlineEmojis")
+        if not isinstance(raw_inline, list):
+            continue
+        for raw_emoji in raw_inline:
+            if not isinstance(raw_emoji, dict) or not raw_emoji.get("id"):
+                continue
+            embed_inline.append(
+                DCEEmoji(
+                    id=str(raw_emoji["id"]),
+                    name=str(raw_emoji.get("name") or ""),
+                    is_animated=bool(raw_emoji.get("isAnimated", False)),
+                    image_url=str(raw_emoji.get("imageUrl") or ""),
+                )
+            )
+
+    for emoji in (*msg.inline_emojis, *embed_inline):
+        _enrich_emoji_asset(discovered, emoji)
 
 
 def _numeric_id_key(value: str) -> tuple[int, int | str]:
@@ -145,15 +225,7 @@ def find_emoji_in_exports(exports: list[DCEExport], discord_emoji_id: str) -> _E
             else iter(export.messages)
         )
         for msg in msg_iter:
-            for reaction in msg.reactions:
-                emoji = reaction.emoji
-                if emoji.id:
-                    _record_emoji(
-                        discovered, emoji.id, emoji.name, emoji.is_animated, emoji.image_url
-                    )
-            if msg.content:
-                for eid, name, is_animated in _extract_emoji_from_content(msg.content):
-                    _record_emoji(discovered, eid, name, is_animated, "")
+            _discover_message_emoji(discovered, msg)
     return discovered.get(discord_emoji_id)
 
 
@@ -229,35 +301,7 @@ async def run_emoji(
             else iter(export.messages)
         )
         for msg in msg_iter:
-            # Source 1: reactions with a non-empty custom emoji ID.
-            for reaction in msg.reactions:
-                emoji = reaction.emoji
-                if emoji.id:
-                    _record_emoji(
-                        discovered, emoji.id, emoji.name, emoji.is_animated, emoji.image_url
-                    )
-
-            # Source 2: inline emoji in message content.
-            if msg.content:
-                for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(msg.content):
-                    _record_emoji(discovered, emoji_id, emoji_name, is_animated, "")
-
-            # Source 3: emoji in embed fields.
-            for embed in msg.embeds:
-                embed_fields: list[dict[str, object]] = (
-                    embed.get("fields") if isinstance(embed.get("fields"), list) else []  # type: ignore[assignment]
-                )
-                embed_texts = [
-                    embed.get("description", ""),
-                    embed.get("title", ""),
-                    *(f.get("value", "") for f in embed_fields),
-                ]
-                for text_field in embed_texts:
-                    if text_field:
-                        for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(
-                            str(text_field)
-                        ):
-                            _record_emoji(discovered, emoji_id, emoji_name, is_animated, "")
+            _discover_message_emoji(discovered, msg)
 
     if not discovered:
         on_event(MigrationEvent(phase="emoji", status="completed", message="No custom emoji found"))
@@ -369,7 +413,28 @@ async def run_emoji(
                 )
                 continue
 
-            file_path: Path = config.export_dir / image_url
+            export_root = config.export_dir.resolve()
+            file_path: Path = (export_root / image_url).resolve()
+            if not file_path.is_relative_to(export_root):
+                reason = "path outside export directory"
+                state.warnings.append(
+                    {
+                        "phase": "emoji",
+                        "type": "unsafe_media_path",
+                        "message": f"Skipping emoji :{name}: — {reason}",
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="emoji",
+                        status="warning",
+                        message=f"Skipping :{name}: — {reason}",
+                        current=idx,
+                        total=total,
+                    )
+                )
+                continue
+
             if not file_path.exists():
                 state.warnings.append(
                     {

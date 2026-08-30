@@ -1,98 +1,136 @@
 # Discord Test Server Provisioning
 
-Standalone CLI for provisioning a Discord test server matching the fixture
-spec for issue #35's "captured-real fixtures" work. **Human-run only —
-never in CI**, per issue #35 design.
+This operator-only command prepares and checks the dedicated Discord guild used for reviewed
+DiscordChatExporter (DCE) fixtures. Its network commands never run in continuous integration.
 
 ## Prerequisites
 
-1. **Discord bot** registered in the [Discord Developer Portal][1]:
-   - Create a new application, then add a bot to it
-   - Reset & copy the bot token (it appears once)
-   - Store the token in shared 1Password vault under "Discord Ferry test bot"
-   - Bot needs `MANAGE_CHANNELS`, `SEND_MESSAGES`, and `MANAGE_THREADS` scopes
-   - Either invite the bot to an existing guild (use the OAuth URL generator)
-     OR plan to use `--create-guild` (requires bot in <10 guilds total)
+1. Use a Discord bot installed in the fixture guild with these permissions:
+   `MANAGE_CHANNELS`, `SEND_MESSAGES`, `MANAGE_THREADS`, `EMBED_LINKS`, and
+   `READ_MESSAGE_HISTORY`.
+2. Store the bot token in Proton Pass. Put only its `pass://` reference in an operator-owned dotenv
+   file:
 
-2. **Environment variable**:
-   ```bash
-   export DISCORD_TEST_BOT_TOKEN="MTM0NTY3..."
+   ```dotenv
+   DISCORD_TEST_BOT_TOKEN=pass://<share-id>/<item-id>/<field>
    ```
 
-3. **Python deps** (already in the repo's `uv sync`):
-   - aiohttp, Click, dataclasses, pytest, pytest-asyncio, aioresponses
+3. Set the reference-file and guild variables. Do not export the token itself:
 
-[1]: https://discord.com/developers/applications
+   ```bash
+   export FERRY_CAPTURE_ENV=/path/to/discord-fixture-references.env
+   export FERRY_FIXTURE_GUILD_ID=1505988963628879902
+   ```
 
-## Subcommands
+4. Install the locked development dependencies with `uv sync --locked --extra dev --extra native`.
 
-### `provision` — apply manifest to a guild
+The bot application must expose Discord's limited message-content intent during DCE capture. For a
+bot in fewer than 100 guilds, this is application flag `524288`. Record the original flags and
+restore them after capture. The reviewed 2.48 capture recorded `0`, enabled `524288`, then restored
+`0`.
 
-```bash
-# Use an existing guild:
-uv run python -m tests.provisioning.provision_test_server provision --guild-id 123456789
+## Manage the fixture guild
 
-# Bootstrap a new guild (unverified bot must be in <10 guilds):
-uv run python -m tests.provisioning.provision_test_server provision --create-guild "Test Server"
-
-# Plan only, no writes:
-uv run python -m tests.provisioning.provision_test_server provision --guild-id 123456789 --dry-run
-```
-
-Idempotent — re-running on the same guild creates only missing entities.
-
-### `teardown` — delete marker-carrying entities
+Plan a restoration before making changes:
 
 ```bash
-uv run python -m tests.provisioning.provision_test_server teardown --guild-id 123456789
-# Prompts for confirmation; use --yes to skip:
-uv run python -m tests.provisioning.provision_test_server teardown --guild-id 123456789 --yes
+pass-cli run --env-file "$FERRY_CAPTURE_ENV" -- \
+  uv run python -m tests.provisioning.provision_test_server provision \
+  --guild-id "$FERRY_FIXTURE_GUILD_ID" --dry-run
 ```
 
-Deletes ONLY channels carrying the `[ferry-fixture]` marker in their topic.
-Manually-created channels in the test guild are untouched. Does NOT delete
-the guild itself.
+Remove `--dry-run` to create only the missing manifest entities. The operation is idempotent and
+does not edit foreign channels.
 
-### `verify` — read-only state check
+Verify the live state before every capture:
 
 ```bash
-uv run python -m tests.provisioning.provision_test_server verify --guild-id 123456789
+pass-cli run --env-file "$FERRY_CAPTURE_ENV" -- \
+  uv run python -m tests.provisioning.provision_test_server verify \
+  --guild-id "$FERRY_FIXTURE_GUILD_ID"
 ```
 
-Exit codes (grep-style):
-- `0` — manifest matches live state exactly
-- `1` — drift detected (diff printed to stderr)
-- `2` — couldn't determine (auth, network, malformed manifest)
+Exit `0` means the manifest matches. Exit `1` means drift. Exit `2` means the command could not
+decide because authentication, network access, or the manifest failed. Do not capture after either
+nonzero result.
 
-## Marker conventions
+To remove only marked fixture channels, run:
 
-To enable idempotent re-runs, every entity this script creates is tagged:
+```bash
+pass-cli run --env-file "$FERRY_CAPTURE_ENV" -- \
+  uv run python -m tests.provisioning.provision_test_server teardown \
+  --guild-id "$FERRY_FIXTURE_GUILD_ID"
+```
 
-- **Channel topics**: prefixed with `[ferry-fixture]`
-- **Message content**: suffixed with `[ferry:<manifest-id>]`
+## Capture with DCE 2.48
 
-These markers are intentionally visible — they survive every renderer (Discord
-client, DCE export, fixture-file JSON). **Do NOT hand-edit these markers** in
-the Discord UI; doing so will cause `provision` re-runs to create duplicates
-(and `verify` will catch this as `extra_marker_entity` drift).
+Resolve `DCE_BIN` through Ferry's managed downloader. It selects the current platform, verifies the
+published archive digest, and extracts the self-contained command-line package. Create a new
+temporary directory for each capture:
 
-## The "no CI" rule
+```bash
+export DCE_BIN="$HOME/.discord-ferry/bin/dce/2.48/DiscordChatExporter.Cli"
+export CAPTURE_DIR="$(mktemp -d /tmp/ferry-dce-2.48-capture.XXXXXX)"
+```
 
-The `provision_test_server.py` CLI (the `provision` / `teardown` / `verify`
-subcommands documented above) must NEVER run in CI per issue #35's design.
-Reason: the DCE capture step that follows provisioning is fundamentally
-human-run (DCE requires interactive authentication). Automating provisioning
-without automating capture would be misleading — the captured fixtures could
-drift from what we expect to capture.
+Run the same argument shape as Ferry's exporter. The shell expands the injected token only inside
+the child process. Neither the command text nor this guide contains its value:
 
-This rule applies ONLY to the CLI; the unit tests in `tests/provisioning/
-test_*.py` (`test_applier.py`, `test_bot_api.py`, `test_cli.py`) are
-hermetic — they mock the Discord REST API via `aioresponses` and run in CI
-alongside the rest of the suite without contacting any real guild.
+```bash
+pass-cli run --env-file "$FERRY_CAPTURE_ENV" -- sh -c '
+  exec "$1" exportguild \
+    --token "$DISCORD_TEST_BOT_TOKEN" \
+    -g "$2" \
+    --media \
+    --reuse-media \
+    --markdown false \
+    --format Json \
+    --include-threads All \
+    --output "$3"
+' sh "$DCE_BIN" "$FERRY_FIXTURE_GUILD_ID" "$CAPTURE_DIR"
+```
 
-## Manifest
+Restore the original application flags even when DCE fails. A successful DCE exit does not replace
+the review below.
 
-The committed `fixture-spec.json` IS the fixture specification. To change
-what gets provisioned, edit the JSON; the loader enforces invariants
-(exactly 3 inline + 2 non-inline embed fields, etc.) so malformed edits
-fail fast.
+## Review before import
+
+Stop and discard the temporary capture when any check finds:
+
+- a failed manifest verification or DCE process;
+- an unexpected guild, channel, author, or fixture marker;
+- a credential or authorization header;
+- private or unrelated message content;
+- an absolute filesystem path;
+- a local media path that leaves the capture directory;
+- an application flag that was not restored.
+
+Inspect identities, channels, marker content, and local paths without printing credential values:
+
+```bash
+jq -c '{guild,channel,messageCount,exportedAt}' "$CAPTURE_DIR"/*.json
+rg -n '\[ferry:|\[ferry-fixture\]' "$CAPTURE_DIR" -g '*.json'
+rg -n '(mfa\.|Authorization|Bearer |/Users/|/home/|[A-Za-z]:\\)' \
+  "$CAPTURE_DIR" -g '*.json'
+```
+
+Compare every `[ferry:<manifest-id>]` marker with `fixture-spec.json`. Copy only reviewed fixture
+channels and their referenced media under `tests/fixtures/dce_2_48/captured/`. Record DCE version,
+release target and digest, capture date, verification and DCE exit codes, included and excluded
+channel IDs, application flags, and the redaction result in `provenance.json`.
+
+Run the local replay and privacy gate:
+
+```bash
+uv run pytest tests/test_dce_2_48_evidence.py tests/provisioning -v
+```
+
+## Marker and CI rules
+
+Fixture channel topics start with `[ferry-fixture]`. Fixture messages end with
+`[ferry:<manifest-id>]`. Do not edit these markers in Discord because the provisioner uses them for
+idempotency and drift detection.
+
+The provisioning command and live DCE capture are operator-only. Continuous integration runs only
+the mocked provisioning tests and reviewed local evidence. It must not hold a Discord credential or
+call the live fixture guild.

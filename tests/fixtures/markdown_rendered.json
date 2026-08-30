@@ -49,8 +49,7 @@
         }
       ],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000021",
@@ -76,8 +75,7 @@
       "reactions": [],
       "mentions": [],
       "reference": null,
-      "interaction": null,
-      "poll": null
+      "interaction": null
     }
   ],
   "messageCount": 2

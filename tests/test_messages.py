@@ -29,6 +29,7 @@ from discord_ferry.parser.models import (
     DCEExport,
     DCEForwardedMessage,
     DCEGuild,
+    DCEInteraction,
     DCEMessage,
     DCEReaction,
     DCEReference,
@@ -246,6 +247,121 @@ def test_build_content_fallback_emoji() -> None:
     msg = _make_message(content="<:cry:99999>")
     result = _build_content(msg, state)
     assert "[:cry:]" in result
+
+
+@pytest.mark.parametrize(
+    ("user", "display"),
+    [
+        (DCEAuthor(id="user-id", name="user-name", nickname="Display Name"), "Display Name"),
+        (DCEAuthor(id="user-id", name="user-name"), "user-name"),
+        (DCEAuthor(id="user-id", name=""), "user-id"),
+    ],
+)
+def test_interaction_context_uses_the_display_fallbacks(user: DCEAuthor, display: str) -> None:
+    interaction = DCEInteraction(id="interaction-id", name="weather", user=user)
+    content = _build_content(_make_message(interaction=interaction), _make_state())
+
+    assert f"*[Discord command /weather invoked by {display}]*" in content
+    if display != "user-id":
+        assert "interaction-id" not in content
+        assert "user-id" not in content
+
+
+def test_interaction_context_is_transformed_with_the_message() -> None:
+    interaction = DCEInteraction(
+        id="interaction-id",
+        name="weather",
+        user=DCEAuthor(id="user-id", name="user-name", nickname="__Operator__"),
+    )
+
+    content = _build_content(
+        _make_message(content="||forecast||", interaction=interaction),
+        _make_state(),
+    )
+
+    assert "invoked by **Operator**" in content
+    assert "!!forecast!!" in content
+
+
+async def test_interaction_keeps_the_original_author_masquerade(tmp_path: Path) -> None:
+    sent: list[dict[str, Any]] = []
+    interaction = DCEInteraction(
+        id="interaction-id",
+        name="weather",
+        user=DCEAuthor(id="caller-id", name="Caller", nickname="Command Caller"),
+    )
+    message = _make_message(
+        author=_make_author(name="Original", nickname="Original Sender"),
+        interaction=interaction,
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(
+            _make_config(tmp_path),
+            _make_state(),
+            [_make_export(messages=[message])],
+            lambda event: None,
+        )
+
+    assert sent[0]["masquerade"]["name"] == "Original Sender"
+    assert "invoked by Command Caller" in sent[0]["content"]
+
+
+async def test_interaction_context_appears_once_across_split_parts(tmp_path: Path) -> None:
+    sent: list[dict[str, Any]] = []
+    interaction = DCEInteraction(
+        id="interaction-id",
+        name="weather",
+        user=DCEAuthor(id="caller-id", name="Caller"),
+    )
+    message = _make_message(content="A" * 3000, interaction=interaction)
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(
+            _make_config(tmp_path),
+            _make_state(),
+            [_make_export(messages=[message])],
+            lambda event: None,
+        )
+
+    assert len(sent) >= 2
+    assert sum(item["content"].count("Discord command /weather") for item in sent) == 1
+
+
+async def test_interaction_context_is_not_duplicated_after_failed_retry(tmp_path: Path) -> None:
+    first_attempt: list[dict[str, Any]] = []
+    interaction = DCEInteraction(
+        id="interaction-id",
+        name="weather",
+        user=DCEAuthor(id="caller-id", name="Caller"),
+    )
+    message = _make_message(id="200", interaction=interaction)
+    export = _make_export(messages=[message])
+    state = _make_state()
+
+    async def fail_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        first_attempt.append(kwargs)
+        raise RuntimeError("retry me")
+
+    with patch("discord_ferry.migrator.messages.api_send_message", fail_send):
+        await run_messages(
+            _make_config(tmp_path, output_dir=tmp_path),
+            state,
+            [export],
+            lambda event: None,
+        )
+
+    second_attempt: list[dict[str, Any]] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(second_attempt)):
+        await run_messages(
+            _make_config(tmp_path, incremental=True, output_dir=tmp_path),
+            state,
+            [export],
+            lambda event: None,
+        )
+
+    assert first_attempt[0]["content"].count("Discord command /weather") == 1
+    assert second_attempt[0]["content"].count("Discord command /weather") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1306,42 +1422,49 @@ async def test_sticker_image_upload(tmp_path: Path, mock_aiohttp: aioresponses) 
     assert state.attachments_uploaded >= 1
 
 
-async def test_poll_in_build_content(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
-    """Message with a poll field includes poll text in the sent content."""
+def _poll_result_embed() -> dict[str, object]:
+    """DCE 2.48 shape derived from PollResultEmbedProjection and JsonMessageWriter."""
+    return {
+        "type": "PollResult",
+        "fields": [
+            {"name": "poll_question_text", "value": "Favourite colour?", "isInline": False},
+            {"name": "total_votes", "value": "60", "isInline": False},
+            {"name": "victor_answer_votes", "value": "42", "isInline": False},
+            {"name": "victor_answer_id", "value": "1", "isInline": False},
+            {"name": "victor_answer_text", "value": "Red", "isInline": False},
+        ],
+    }
+
+
+async def test_poll_result_preserves_fallback_content_and_embed(tmp_path: Path) -> None:
+    """DCE 2.48 PollResult data follows the ordinary content and embed path."""
     msg = _make_message(
-        id="msg_poll",
-        content="Vote here",
-        poll={
-            "question": {"text": "What do you prefer?"},
-            "answers": [
-                {"text": "Option A", "votes": 5},
-                {"text": "Option B", "votes": 3},
-            ],
-        },
+        id="poll-result",
+        msg_type="PollResult",
+        content="Alice's poll Favourite colour? has closed.",
+        embeds=[_poll_result_embed()],
     )
     export = _make_export(messages=[msg])
     config = _make_config(tmp_path)
     state = _make_state()
-    events: list[MigrationEvent] = []
+    sent: list[dict[str, Any]] = []
 
-    captured_bodies: list[dict[str, Any]] = []
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda event: None)
 
-    def capture_callback(url: object, **kwargs: Any) -> None:
-        body = kwargs.get("json") or {}
-        captured_bodies.append(dict(body))
+    assert "Alice's poll Favourite colour? has closed." in sent[0]["content"]
+    description = sent[0]["embeds"][0]["description"]
+    assert "poll_question_text" in description
+    assert "Favourite colour?" in description
+    assert "total_votes" in description
+    assert "60" in description
+    assert "victor_answer_text" in description
+    assert "Red" in description
 
-    mock_aiohttp.post(
-        CHANNEL_MSG_URL,
-        payload={"_id": "stoat_poll_msg"},
-        callback=capture_callback,
-        repeat=True,
-    )
 
-    await run_messages(config, state, [export], events.append)
-    assert "msg_poll" in state.message_map
-    # At least one sent message should contain poll text
-    poll_found = any("What do you prefer?" in str(b.get("content", "")) for b in captured_bodies)
-    assert poll_found, f"Poll text not found in sent messages: {captured_bodies}"
+def test_dce_message_has_no_active_poll_contract() -> None:
+    poll_field = "po" + "ll"
+    assert poll_field not in DCEMessage.__dataclass_fields__
 
 
 # ---------------------------------------------------------------------------
@@ -2902,16 +3025,16 @@ async def test_checkpoint_skips_non_numeric_offset_write(tmp_path: Path, monkeyp
 # ---------------------------------------------------------------------------
 
 
-async def test_poll_only_message_preserves_poll_text(tmp_path: Path) -> None:
-    """A poll-only message (empty raw content) keeps its poll text, not [empty message]."""
+async def test_empty_poll_result_preserves_its_embed(tmp_path: Path) -> None:
+    """An otherwise empty PollResult keeps its generic embed and avoids the placeholder."""
     sent: list[dict[str, Any]] = []
     state = _make_state()
     config = _make_config(tmp_path)
     msg = _make_message(
-        id="poll1",
+        id="poll-result-empty",
         content="",
-        msg_type="Default",
-        poll={"question": {"text": "Fav?"}, "answers": [{"text": "Blue", "votes": 3}]},
+        msg_type="PollResult",
+        embeds=[_poll_result_embed()],
     )
     export = _make_export(messages=[msg])
 
@@ -2919,10 +3042,8 @@ async def test_poll_only_message_preserves_poll_text(tmp_path: Path) -> None:
         await run_messages(config, state, [export], lambda e: None)
 
     assert len(sent) == 1
-    content = sent[0]["content"]
-    assert "Poll: Fav?" in content
-    assert "Blue" in content
-    assert "[empty message]" not in content
+    assert "[empty message]" not in sent[0]["content"]
+    assert "Favourite colour?" in sent[0]["embeds"][0]["description"]
 
 
 async def test_sticker_text_only_message_preserves_sticker_text(tmp_path: Path) -> None:

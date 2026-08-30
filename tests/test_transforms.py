@@ -5,7 +5,6 @@ from pathlib import Path
 from discord_ferry.parser.transforms import (
     convert_spoilers,
     flatten_embed,
-    flatten_poll,
     format_original_timestamp,
     handle_stickers,
     remap_emoji,
@@ -606,39 +605,6 @@ def test_handle_stickers_remote_url_no_path() -> None:
     text, paths = handle_stickers(stickers, export_dir=Path("/tmp"))
     assert "[Sticker: wave]" in text
     assert paths == []
-
-
-# ---------------------------------------------------------------------------
-# flatten_poll
-# ---------------------------------------------------------------------------
-
-
-def test_flatten_poll_basic() -> None:
-    """Poll renders question and options with vote counts."""
-    poll = {
-        "question": {"text": "Favourite colour?"},
-        "answers": [
-            {"text": "Red", "votes": 42},
-            {"text": "Blue", "votes": 18},
-        ],
-    }
-    result = flatten_poll(poll)
-    assert "**Poll: Favourite colour?**" in result
-    assert "\u2022 Red \u2014 42 votes" in result
-    assert "\u2022 Blue \u2014 18 votes" in result
-
-
-def test_flatten_poll_empty() -> None:
-    """Empty poll dict renders minimal output."""
-    result = flatten_poll({})
-    assert "**Poll: **" in result
-
-
-def test_flatten_poll_string_question() -> None:
-    """Poll with string question (not dict) still works."""
-    poll = {"question": "Simple?", "answers": []}
-    result = flatten_poll(poll)
-    assert "**Poll: Simple?**" in result
 
 
 # ---------------------------------------------------------------------------

@@ -126,6 +126,23 @@ async def test_repair_acts_on_emoji_missing(tmp_path: Path) -> None:
     assert state.created_emoji_names[EMOJI_ID] == "smile"
 
 
+async def test_repair_recovers_an_inline_only_emoji_asset(tmp_path: Path) -> None:
+    _with_image(tmp_path)
+    config, state = _config(tmp_path), _state()
+    message = _message(with_reaction=False)
+    message.inline_emojis = [DCEEmoji(id=EMOJI_ID, name="smile", image_url="smile.png")]
+
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))) as upload,
+        patch(_EDIT, new=AsyncMock()),
+    ):
+        outcome = await run_repair(config, state, [_export([message])], [].append)
+
+    upload.assert_awaited_once()
+    assert [record["discord_id"] for record in outcome.recreated_emoji] == [EMOJI_ID]
+
+
 async def test_recreate_writes_map_and_record_in_one_save(tmp_path: Path) -> None:
     """SC-1.3: the new id and the resume record land in a single save_state."""
     _with_image(tmp_path)

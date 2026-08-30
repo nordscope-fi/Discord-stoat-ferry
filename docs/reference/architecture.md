@@ -13,12 +13,38 @@ For a quick introduction to what Ferry does and how to use it, see the
 
 Discord Ferry is a Python 3.11+ migration tool that moves a Discord server to
 [Stoat](https://stoat.chat) (formerly Revolt). It reads DiscordChatExporter (DCE) JSON
-exports, transforms them into Stoat API calls, and sends everything — messages, channels,
-roles, emoji, attachments, permissions — to the target Stoat instance.
+exports, transforms them into Stoat API calls, and sends everything, messages, channels,
+roles, emoji, attachments, permissions, to the target Stoat instance.
 
 **Tech stack**: aiohttp (HTTP client), NiceGUI (web GUI), Click (CLI), Rich (formatted
 terminal output), ijson (streaming JSON), pytest + pytest-asyncio (tests), ruff (lint/format),
 mypy strict (types), PyInstaller (binary packaging).
+
+### Terms used in this reference
+
+- The Python package registry is the Python Package Index (PyPI).
+- The tool-download stage is called EXPORT. The export-checking stage is called VALIDATE. CONNECT
+  means the API connection stage.
+- SERVER means server creation.
+- ROLES means role creation. Category creation is called CATEGORIES.
+- CHANNELS means channel creation. Emoji copying is called EMOJI. Avatar copying is called AVATARS.
+- MESSAGES means message copying.
+- REACTIONS means reaction copying.
+- PINS means pin copying.
+- REPORT means report writing.
+- TextChannel means a text server-channel record.
+- VoiceChannel means a voice record. NSFW means not safe for work.
+- POST means the resource-creation web method.
+- PATCH means the partial-update method.
+- MigrationEvent means a progress record.
+- A web-service interface is known as REST. TUI means a terminal user interface.
+- A cache can discard its least recently used entry, known as LRU. A cache expiry period is called
+  a time to live.
+- TTL stands for time to live.
+- The Python web framework is called FastAPI. Estimated time of arrival is abbreviated ETA.
+- ZIP means a compressed archive. .NET means Microsoft's software runtime. SDK stands for software
+  development kit.
+- Discord's all-access permission is called ADMINISTRATOR.
 
 **Core design principle**: one engine, two shells. The migration engine (`core/engine.py`)
 contains all logic. It never imports from the GUI or CLI. The GUI and CLI are thin wrappers
@@ -30,7 +56,7 @@ that configure the engine, subscribe to its event stream, and render progress in
 
 All Ferry workflows run on the Node 24 GitHub Actions runtime as of v2.1.2, ahead of GitHub's June 2026 Node 20 retirement. Action pins follow the lowest-Node-24-major principle (for example, `actions/checkout@v6` and `actions/upload-artifact@v6`) to minimise behavior delta versus the previous Node 20 versions. The `pypa/gh-action-pypi-publish` step is Docker-based and unaffected by Node runtime deprecation.
 
-The `auto-tag.yml` → `release.yml` cascade — tag pushes from `auto-tag.yml` automatically firing `release.yml` to build binaries and publish to PyPI — is enabled (as of v2.1.3) by a GitHub App (`Ferry Auto-Tag Bot`, owned by `nordscope-fi`, installed on this repo only with `Contents: Read and write` permission). The App's credentials (`AUTO_TAG_APP_CLIENT_ID` variable + `AUTO_TAG_APP_PRIVATE_KEY` secret) live in the `auto-tag` GitHub Environment. At runtime, `auto-tag.yml` mints a ~1-hour installation token via `actions/create-github-app-token@v3` and passes it to `actions/checkout@v6`'s `token:` input — the resulting tag push originates from the App identity (not `GITHUB_TOKEN`), so it triggers downstream workflows. If the App is deleted or the credentials revoked, `auto-tag.yml` silently regresses to no-cascade; the manual `git push --delete origin v<tag>` + re-push protocol remains the fallback.
+The `auto-tag.yml` → `release.yml` cascade, tag pushes from `auto-tag.yml` automatically firing `release.yml` to build binaries and publish to PyPI, is enabled (as of v2.1.3) by a GitHub App (`Ferry Auto-Tag Bot`, owned by `nordscope-fi`, installed on this repo only with `Contents: Read and write` permission). The App's credentials (`AUTO_TAG_APP_CLIENT_ID` variable + `AUTO_TAG_APP_PRIVATE_KEY` secret) live in the `auto-tag` GitHub Environment. At runtime, `auto-tag.yml` mints a ~1-hour installation token via `actions/create-github-app-token@v3` and passes it to `actions/checkout@v6`'s `token:` input, the resulting tag push originates from the App identity (not `GITHUB_TOKEN`), so it triggers downstream workflows. If the App is deleted or the credentials revoked, `auto-tag.yml` stops starting the release workflow. The manual `git push --delete origin v<tag>` plus re-push protocol remains the fallback.
 
 ---
 
@@ -39,8 +65,8 @@ The `auto-tag.yml` → `release.yml` cascade — tag pushes from `auto-tag.yml` 
 ```
 src/discord_ferry/
 ├── __init__.py              # Package version (__version__)
-├── config.py                # FerryConfig dataclass — all runtime settings
-├── state.py                 # MigrationState dataclass — ID maps, counters, resume checkpoints
+├── config.py                # FerryConfig dataclass, all runtime settings
+├── state.py                 # MigrationState dataclass, ID maps, counters, resume checkpoints
 ├── errors.py                # Custom exception hierarchy (FerryError base)
 ├── reporter.py              # Post-migration report generator
 ├── review.py                # Pre-creation review summary builder
@@ -49,24 +75,24 @@ src/discord_ferry/
 ├── cli.py                   # Click CLI (migrate, validate, build, export-blueprint, rollback, stats, check, repair, retry, probe, tls-check)
 │
 ├── core/
-│   ├── engine.py            # Migration orchestrator — runs all 13 phases
+│   ├── engine.py            # Migration orchestrator, runs all 13 phases
 │   ├── events.py            # MigrationEvent dataclass and EventCallback type
-│   └── security.py          # SecureTokenStore — token masking and sanitization at output boundaries
+│   └── security.py          # SecureTokenStore, token masking and sanitization at output boundaries
 │
 ├── parser/
-│   ├── models.py            # 10 DCE dataclasses (DCEExport, DCEMessage, etc.)
+│   ├── models.py            # 12 DCE dataclasses (DCEExport, DCEMessage, etc.)
 │   ├── dce_parser.py        # JSON parsing, validation, streaming
-│   └── transforms.py        # Content transforms (mentions, emoji, embeds, polls, stickers)
+│   └── transforms.py        # Content transforms (mentions, emoji, embeds, stickers)
 │
 ├── migrator/
 │   ├── api.py               # Stoat REST API wrapper with retry + rate limit handling
-│   ├── connect.py           # Phase 2: CONNECT — test credentials, discover Autumn URL
+│   ├── connect.py           # Phase 2: CONNECT, test credentials, discover Autumn URL
 │   ├── structure.py         # Phases 3–6: SERVER, ROLES, CATEGORIES, CHANNELS
-│   ├── emoji.py             # Phase 7: EMOJI — extract, upload, register
-│   ├── avatars.py           # Phase 7.5: AVATARS — pre-flight avatar download + Autumn upload
-│   ├── messages.py          # Phase 8: MESSAGES — 9-step per-message pipeline
-│   ├── reactions.py         # Phase 9: REACTIONS — apply queued reactions
-│   └── pins.py              # Phase 10: PINS — re-pin messages
+│   ├── emoji.py             # Phase 7: EMOJI, extract, upload, register
+│   ├── avatars.py           # Phase 7.5: AVATARS, pre-flight avatar download + Autumn upload
+│   ├── messages.py          # Phase 8: MESSAGES, 9-step per-message pipeline
+│   ├── reactions.py         # Phase 9: REACTIONS, apply queued reactions
+│   └── pins.py              # Phase 10: PINS, re-pin messages
 │
 ├── uploader/
 │   └── autumn.py            # Autumn (Stoat file storage) upload client with caching
@@ -131,7 +157,7 @@ class FerryConfig:
     # Required credentials
     export_dir: Path  # DCE JSON exports directory
     stoat_url: str  # Stoat API base URL
-    token: str  # Stoat user token (repr=False — hidden in logs)
+    token: str  # Stoat user token (repr=False, hidden in logs)
 
     # Optional input
     server_id: str | None  # Attach to existing Stoat server (else create new)
@@ -195,7 +221,7 @@ class MigrationState:
     role_map: dict[str, str]
     channel_map: dict[str, str]
     category_map: dict[str, str]
-    message_map: dict[str, str]  # For reply reference resolution — saved to message_map.json
+    message_map: dict[str, str]  # For reply reference resolution, saved to message_map.json
     emoji_map: dict[str, str]
 
     # Upload caches (avoid re-uploading identical files)
@@ -311,7 +337,7 @@ and validates. Both use `_state_to_dict()` / `_dict_to_state()` for JSON round-t
 
 ### DCE Parser Models (`parser/models.py`)
 
-Ten dataclasses representing DiscordChatExporter JSON structure:
+Twelve dataclasses representing DiscordChatExporter JSON structure:
 
 | Dataclass | Key Fields |
 |-----------|-----------|
@@ -322,8 +348,10 @@ Ten dataclasses representing DiscordChatExporter JSON structure:
 | `DCEAttachment` | `id`, `url`, `file_name`, `file_size_bytes` |
 | `DCEEmoji` | `id`, `name`, `is_animated`, `image_url` |
 | `DCEReaction` | `emoji` (DCEEmoji), `count` |
-| `DCEReference` | `message_id`, `channel_id`, `guild_id` |
-| `DCEMessage` | `id`, `type`, `timestamp`, `content`, `author`, `is_pinned`, `attachments`, `embeds`, `stickers`, `reactions`, `mentions`, `reference`, `poll` |
+| `DCEReference` | `message_id`, `channel_id`, `guild_id`, `type` |
+| `DCEForwardedMessage` | `timestamp`, `timestamp_edited`, `content`, `attachments`, `embeds`, `stickers` |
+| `DCEInteraction` | `id`, `name`, `user` |
+| `DCEMessage` | `id`, `type`, `timestamp`, `timestamp_edited`, `content`, `author`, `is_pinned`, `attachments`, `embeds`, `stickers`, `reactions`, `mentions`, `inline_emojis`, `interaction`, `reference`, `forwarded_message` |
 | `DCEExport` | `guild`, `channel`, `messages`, `message_count`, `exported_at`, `is_thread`, `parent_channel_name`, `json_path` |
 
 ### Discord Metadata Models (`discord/models.py`, `discord/metadata.py`)
@@ -355,7 +383,7 @@ BlueprintCategory(name, channels)
 ServerBlueprint(name, description, roles, categories, uncategorized_channels)
 ```
 
-Blueprints use **names, not IDs** — making them portable across Stoat instances.
+Blueprints use **names, not IDs**, making them portable across Stoat instances.
 
 ---
 
@@ -426,11 +454,11 @@ Uploads the guild icon to Autumn and applies it. Sets server default permissions
 `FERRY_MIN_PERMISSIONS` (1,022,361,624) to ensure the Ferry account can operate.
 
 **ROLES** (Phase 4): Iterates all exports to collect unique role IDs (skipping @everyone where
-`role_id == guild_id`). The create call carries **name only**. `colour`, `hoist` and `icon` are
-applied in a second attributes pass keyed by the created role's ID, so a resume that already has
-`role_map` populated retries those fields without recreating the role. `state.roles_finalized`
-gates the resume so the attributes pass is not skipped when its own last write failed. Permission
-bits are translated and written via `api_set_role_permissions()`.
+`role_id == guild_id`). The create call carries **name only**. A second attributes pass applies
+`colour`, `hoist`, and `icon`, keyed by the created role's ID. A resume with `role_map` populated
+retries those fields without recreating the role. `state.roles_finalized` protects the attributes
+pass when its last write failed. Permission bits are translated and written via
+`api_set_role_permissions()`.
 
 Hierarchy is applied last, once for the whole server, by reading the server back and sending the
 complete ordered role list to `PATCH /servers/:id/roles/ranks`. Index 0 of that list is the top of
@@ -457,8 +485,8 @@ to Autumn with tag `emojis`, creates on server. 2.0s delay between creates (shar
 `/servers` rate bucket). Populates `state.emoji_map`.
 
 **AVATARS** (Phase 7.5): Pre-flight avatar download and upload. `run_avatars()` in
-`migrator/avatars.py` scans all exports for unique authors, downloads each author's avatar
-(local file or remote URL), uploads to Autumn with the `avatars` tag, and populates
+`migrator/avatars.py` scans all exports for unique authors and downloads each author's avatar.
+It uploads the local file or remote URL to Autumn with the `avatars` tag and populates
 `state.avatar_cache` (user ID → Autumn file ID). This front-loads all avatar uploads before
 the MESSAGES phase begins, so message sends never block on avatar I/O. Skippable via
 `skip_avatars` config flag. Added in v1.5.0.
@@ -474,18 +502,18 @@ architecture**:
 - Results from each worker are merged into the main `MigrationState` after the channel
   completes (serialized under a `save_lock: asyncio.Lock`)
 - **Thread merge mode** (`thread_strategy="merge"`) processes thread channels sequentially
-  AFTER all parent channels finish, so parent message IDs are available for reply linking
+  after all parent channels finish, so parent message IDs are available for reply linking
 
 Per channel, messages are streamed oldest-first. Per message (9-step pipeline):
 
 1. Check skip types → skip system messages (join, boost, etc.)
 2. If `ChannelPinnedMessage` → extract reference, add to `pending_pins`
-3. Transform content (spoilers → underline → mentions → emoji → timestamps)
-4. Upload attachments to Autumn (max 5 per message)
+3. Add interaction context and transform content (spoilers → underline → mentions → emoji → timestamps)
+4. Upload attachments and local sticker images to Autumn (max 5 per message)
 5. Flatten embeds (extract media, convert to Stoat format)
-6. Handle stickers (upload image or text fallback)
-7. Render polls as formatted text
-8. Build masquerade (author name + avatar + colour)
+6. Preserve DCE fallback content and embeds for system notifications such as `PollResult`
+7. Append the reaction summary when text reaction mode is selected
+8. Build masquerade (original author name + avatar + colour)
 9. Send via `api_send_message` with `Idempotency-Key` header `ferry-{discord_msg_id}`
 
 Collects `pending_reactions` for Phase 9. Saves state every `checkpoint_interval` messages
@@ -498,7 +526,7 @@ IDs are recorded in `state.completed_channel_ids`.
   `api_add_reaction` for each. Enforces the 20-reactions-per-message Stoat limit. Fire-and-forget
   error handling (failures logged as warnings, do not stop migration).
 - `text` (default from v2.7.0): no API calls in Phase 9. Instead, the MESSAGES phase calls
-  `_build_reaction_text()` per message to append a reaction summary to the message body — e.g.
+  `_build_reaction_text()` per message to append a reaction summary to the message body, e.g.
   `Reactions: :thumbsup: 3, :heart: 1`. Custom emoji migrated in Phase 7 render as
   `<:stoat_id:>` (the Stoat inline-emoji syntax); custom emoji that were not migrated fall back
   to `[:name:]`; unicode emoji pass through unchanged. Native-mode also appends an
@@ -514,7 +542,7 @@ dynamic post-migration checklist.
 
 **VALIDATE MIGRATION** (Phase 12, optional): Runs inline in `engine.py` only when
 `validate_after=True`. Calls `run_check()` from `migrator/verify.py`, which is the same engine
-`ferry check` uses on its own — every recorded channel, role, category and emoji is fetched by
+`ferry check` uses on its own, every recorded channel, role, category and emoji is fetched by
 ID, and each channel's most recent messages are compared against the tail Ferry recorded. The
 result is a `CheckReport` with per-entity `ok` / `warn` / `fail` / `unverifiable` verdicts,
 serialised into `state.validation_results` and echoed to the run log. Does not modify anything
@@ -570,7 +598,7 @@ entries). Uses `ui.timer` to drive async updates in NiceGUI's event loop.
 and prints warnings/errors to the console via `Rich.Live`.
 
 Neither shell knows about the other. Adding a new UI (REST API, TUI, etc.) only requires
-writing a new callback — no engine changes needed.
+writing a new callback, no engine changes needed.
 
 ---
 
@@ -630,7 +658,7 @@ Stoat uses **fixed 10-second windows** (not sliding).
 CORS. `X-RateLimit-Reset-After` is in **milliseconds**, unlike Discord's identically named header.
 See [Stoat API Notes](stoat-api-notes.md#rate-limits).
 
-**429 response body**: `{ "retry_after": 4200 }` — Ferry sleeps for this duration (milliseconds)
+**429 response body**: `{ "retry_after": 4200 }`, Ferry sleeps for this duration (milliseconds)
 and retries. In addition, Ferry's adaptive 429-frequency optimizer tracks 429 frequency in a
 rolling 60-second window and auto-adjusts a delay multiplier (1.5× increase on burst, 0.75×
 decay when clear).
@@ -646,7 +674,8 @@ All other HTTP errors raise `MigrationError` immediately.
 
 ### British Spelling
 
-The Stoat API uses British English. Using American spelling causes silent failures.
+The Stoat API uses British English. Fields with American spelling can be accepted without taking
+effect.
 
 | Always use | Never use |
 |-----------|----------|
@@ -657,13 +686,12 @@ This applies to masquerade payloads, embed objects, role objects, and permission
 
 ### Permission Bits
 
-Stoat has **no single ADMINISTRATOR permission**. Every capability must be granted individually.
+Stoat has no single all-access permission named `ADMINISTRATOR`. Every capability must be granted individually.
 Stoat defines **34** permission bits; the complete list lives in one place, in
 [Stoat API Notes → Permission Bits](stoat-api-notes.md#permission-bits).
 
-This page deliberately does **not** copy that table. It used to, and the copy went stale: it
-carried a 13-bit subset long after Stoat's enum had grown to 34, and the resulting blind spot is
-what let Ferry ship voice channels that granted no voice permissions. One table, one owner.
+This page does not copy that table. An older copy held 13 bits after Stoat's enum had grown to 34.
+That gap allowed Ferry to ship voice channels without voice permissions. One table, one owner.
 
 **Ferry minimum permissions** (bits 3, 4, 20–23, 26–29):
 
@@ -713,7 +741,7 @@ directory, parses guild, channel, and message data into typed dataclasses.
 
 **Metadata-only parse** (`parse_export_directory(export_dir, metadata_only=True)`): Reads
 guild and channel data but **skips the messages array**. Sets `json_path` and `message_count`
-on each `DCEExport` so messages can be streamed later. This is the default mode — it keeps
+on each `DCEExport` so messages can be streamed later. This is the default mode, it keeps
 memory flat for large exports.
 
 **Streaming** (`stream_messages(json_path)`): Uses `ijson.items()` to iterate messages one at
@@ -751,8 +779,16 @@ mangling code snippets in messages.
 | `remap_emoji` | `<:name:ID>` | `:stoat_id:` or `[:name:]` | Uses emoji_map, fallback for unmapped |
 | `format_original_timestamp` | ISO 8601 | `*[2024-01-15 14:30 UTC]*` | Prepended to message body |
 | `flatten_embed` | Discord embed dict | Stoat SendableEmbed + media path | Author, fields, footer → description |
-| `flatten_poll` | Poll dict | Formatted text | Question + options with vote counts |
 | `handle_stickers` | Sticker list | Text reference or upload path | Image if local, `[Sticker: name]` fallback |
+
+DCE 2.48 writes `inlineEmojis` metadata on messages and embeds. The parser adds those image paths
+to the emoji asset candidates without changing message or reaction counts. An `interaction` adds
+the command name and invoking user's display name to message content. Its ID and other user profile
+fields are parsed but have no matching Stoat object to send.
+
+DCE 2.48 does not write active poll objects. A `PollResult` notification carries ordinary fallback
+content and embeds, so it follows the standard content and embed paths. Ferry does not call a native
+Stoat poll endpoint.
 
 ### Embed Flattening
 
@@ -771,12 +807,12 @@ that ceiling **before** sending: at step 7b it walks the embed list in order, tr
 sum, and drops any embed whose description would push the total past 2000. Each dropped embed
 appends a compact note to the message content (`[Embed dropped: <title or 'untitled'>]`) and is
 counted in `state.embeds_dropped`, which the fidelity score reads. Trailing embeds are the ones
-lost — earlier embeds always fit — so an embed-heavy message that arrives with the first two
+lost, earlier embeds always fit, so an embed-heavy message that arrives with the first two
 present and the tail replaced by drop notes is expected, not a bug.
 
 ---
 
-## File Upload — Autumn (`uploader/autumn.py`)
+## File Upload, Autumn (`uploader/autumn.py`)
 
 Autumn is Stoat's media storage service. It accepts file uploads via multipart form POST and
 returns a file ID that can be referenced in messages, avatars, and emoji.
@@ -866,26 +902,26 @@ the equivalent Stoat bitfield.
 **Special cases**:
 
 - **ADMINISTRATOR** (Discord bit 3): Expands to `ALL_STOAT_PERMISSIONS`, derived from
-  `STOAT_PERMISSION_BITS` — every one of the 34 bits Stoat defines, and nothing from its
+  `STOAT_PERMISSION_BITS`, every one of the 34 bits Stoat defines, and nothing from its
   reserved 41–52 free area
 - **CONNECT** maps to **two** bits: Stoat gates joining a voice channel on `Connect` but gates
   hearing anyone on `Listen`, and Discord's single permission covers both
-- **PIN_MESSAGES** (51) is deliberately unmapped — Stoat has no pin-only bit, and its nearest
+- **PIN_MESSAGES** (51) is deliberately unmapped, Stoat has no pin-only bit, and its nearest
   equivalent (`ManageMessages`) also permits deletion
-- **Unmapped Discord bits**: Silently dropped (no Stoat equivalent)
+- **Unmapped Discord bits**: Dropped and recorded as having no Stoat equivalent
 - **Managed/bot roles**: Permissions skipped (role still created for mention remapping)
 
 ### @everyone Handling
 
 Discord's @everyone role has `id == guild_id`. In channel permission overwrites, this must be
 extracted as the channel's `default_override` and applied via Stoat's separate
-`PUT /channels/:id/permissions/default` endpoint. If it goes into `role_overrides`, it silently
-drops because `guild_id` is never in `role_map`.
+`PUT /channels/:id/permissions/default` endpoint. If it goes into `role_overrides`, it is dropped
+because `guild_id` is never in `role_map`.
 
 ### Metadata Persistence
 
 `DiscordMetadata` is saved to `discord_metadata.json` alongside `state.json`. This ensures
-permission data survives resume — the Discord API does not need to be re-queried.
+permission data survives resume, the Discord API does not need to be re-queried.
 
 ---
 
@@ -899,12 +935,12 @@ full content transformation and author attribution.
 ```
 1. Type check         → skip system messages (join, boost, pin notification, etc.)
 2. Pin detection      → if ChannelPinnedMessage, extract reference for pending_pins
-3. Content transforms → spoilers, underline, mentions, emoji, timestamps
-4. Attachment upload   → download local file, upload to Autumn (max 5 per message)
-5. Embed flattening   → convert Discord embed to Stoat format, upload media
-6. Sticker handling   → upload image or generate text fallback
-7. Poll rendering     → convert poll data to formatted text in message body
-8. Masquerade build   → author name + avatar (lazy upload) + colour
+3. Content transforms → interaction context, spoilers, underline, mentions, emoji, timestamps
+4. Attachment upload   → upload attachments and local sticker images (max 5 per message)
+5. Embed flattening    → convert Discord embed to Stoat format, upload media
+6. System fallback     → preserve DCE content and embeds, including `PollResult` notifications
+7. Reaction summary    → append text when text reaction mode is selected
+8. Masquerade build    → original author name + avatar (lazy upload) + colour
 9. Send               → api_send_message with Idempotency-Key for deduplication
 ```
 
@@ -934,15 +970,15 @@ Every message send includes an `Idempotency-Key` HTTP header set to `ferry-{disc
 **It does not make the MESSAGES phase safe to re-run**, and an earlier revision of this page said
 it did. Stoat's store is a 1000-entry, in-memory, process-local LRU with no TTL that is emptied on
 restart, and a repeated key returns **HTTP 409**, not the original message. Treat it as a guard
-against an immediate double-send inside one run and nothing more — see
+against an immediate double-send inside one run and nothing more, see
 [Stoat API Notes → Message Deduplication](stoat-api-notes.md#message-deduplication-with-idempotency-key)
 for the source-verified contract and for which client-side marker actually covers each strategy.
 
 ### Reply Reference Resolution
 
 When `type == "Reply"`, the `reference.messageId` is looked up in `state.message_map` to get
-the corresponding Stoat message ID. If the referenced message was not migrated (e.g. predates
-the export), the reply is sent as a regular message and a warning is logged.
+the corresponding Stoat message ID. If the referenced message predates the export or was otherwise
+not migrated, the reply is sent as a regular message. Ferry logs a warning.
 
 ### Message Type Handling
 
@@ -988,13 +1024,13 @@ The MESSAGES phase has finer granularity (v2.0.0+):
 
 - `state.completed_channel_ids`: set of Discord channel IDs whose messages were fully sent
 - `state.channel_message_offsets`: maps a partially-processed channel ID to the last Discord
-  message ID **checkpointed** — the phase resumes within that channel from that offset. Note
+  message ID **checkpointed**, the phase resumes within that channel from that offset. Note
   "checkpointed", not "successfully sent": the counter advances on a failed send too, so a
   failure can sit below the offset. Such a message stays in `state.failed_messages` and is
   re-attempted by `--incremental` (not by `--resume`, which is a pure continuation)
-- Under `--thread-strategy merge` the same pair of markers is kept per *thread*, keyed by the
-  thread's own channel ID (batch 6, #107) — that path writes no `message_map`, so the markers
-  are the only protection against a re-run duplicating the thread into its parent
+- Under `--thread-strategy merge`, the same pair of markers is kept per *thread*, keyed by the
+  thread's own channel ID (batch 6, #107). That path writes no `message_map`. The markers prevent
+  a re-run from duplicating the thread in its parent.
 
 **v1→v2 automatic migration**: On `--resume` with a v1 state file, Ferry detects the old
 `last_completed_channel` / `last_completed_message` fields, converts them to the new set/dict
@@ -1003,7 +1039,7 @@ format, and saves a backup of the original state file before proceeding.
 ### Dry-Run Rejection
 
 `state.is_dry_run` is set to `True` during dry-run mode. If a user attempts `--resume` on a
-dry-run state file, the engine raises `StateError` — you cannot resume a dry run into a real
+dry-run state file, the engine raises `StateError`, you cannot resume a dry run into a real
 migration.
 
 ### Atomic Saves
@@ -1060,7 +1096,7 @@ FerryError (base)
 ├── StateError                 # state.json read/write problem
 └── ExportError (→ MigrationError)
     ├── DCENotFoundError       # DCE binary not available
-    ├── DotNetMissingError     # .NET 8 runtime not detected
+    ├── DotNetMissingError     # Legacy import-compatible type; current export path does not raise it
     └── DiscordAuthError       # Discord token invalid or expired
 ```
 
@@ -1089,7 +1125,7 @@ reporting.
 
 ## Presentation Layers
 
-### GUI (`gui.py`) — NiceGUI
+### GUI (`gui.py`), NiceGUI
 
 **Architecture**: NiceGUI runs an embedded FastAPI server with Vue.js frontend. Ferry launches
 it in native mode (pywebview window) if available, otherwise opens the default browser to
@@ -1111,7 +1147,7 @@ Uses `ui.timer` for async event loop integration.
 **Storage**: `app.storage.user` writes to `.nicegui/storage-user.json`. Sensitive data
 (Discord tokens) is cleared in a `finally` block.
 
-### CLI (`cli.py`) — Click + Rich
+### CLI (`cli.py`), Click + Rich
 
 **Commands**:
 
@@ -1152,15 +1188,21 @@ No engine changes required. The event system is the only integration point.
 
 ### Binary Management (`manager.py`)
 
-DCE (DiscordChatExporter) is an external .NET tool. Ferry downloads and caches it automatically.
+DCE (DiscordChatExporter) is an external export tool. Ferry downloads and caches its self-contained
+command-line archive automatically.
 
-- **Version**: Pinned to `DCE_VERSION = "2.47.3"`
+- **Version**: Pinned to `DCE_VERSION = "2.48"`
 - **Cache location**: `~/.discord-ferry/bin/dce/{version}/`
-- **Platform detection**: Maps `(platform.system(), platform.machine())` to DCE release asset
-  names (win-x64, linux-x64, osx-x64, osx-arm64)
+- **Source-install platform detection**: Selects one of the nine upstream downloader targets:
+  win-x64, win-arm64, win-x86, linux-musl-x64, linux-x64, linux-arm64, linux-arm, osx-x64, or
+  osx-arm64
+- **Packaged Ferry applications**: Published as Windows x64, macOS x64, and macOS Arm64 builds.
+  This application release list is separate from the nine DCE downloader targets available to
+  source and Python-package installations.
 - **Download**: Fetches ZIP from GitHub Releases, extracts, validates
-- **.NET requirement**: macOS and Linux require .NET 8 runtime. `detect_dotnet()` checks for
-  `dotnet` in PATH and validates version. Windows DCE builds are self-contained.
+- **Runtime**: All DCE 2.48 command-line archives used by Ferry are self-contained. No separate
+  .NET installation is required. `detect_dotnet()` remains as a compatibility stub and does not
+  start a process.
 - **Retry**: `download_dce()` retries once on network error before raising `DCENotFoundError`
 
 ### Subprocess Execution (`runner.py`)
@@ -1234,7 +1276,7 @@ account. Masquerade makes each message display the original Discord author's nam
 preserving conversation readability. The `Idempotency-Key` header (`ferry-{discord_msg_id}`)
 guards against an immediate double-send within a single run. It does **not** protect a resume:
 Stoat's cache holds 1000 entries in memory, is cleared on restart, and returns HTTP 409 rather
-than the original message. Resume safety comes from Ferry's own markers — `state.message_map` and
+than the original message. Resume safety comes from Ferry's own markers, `state.message_map` and
 `completed_channel_ids` under `flatten`, `channel_high_water` and `channel_message_offsets` under
 `merge`.
 
@@ -1270,12 +1312,12 @@ rate limit handling, and British spelling conventions without depending on SDK r
 | Resource | Stoat Default | Self-Hosted Configurable |
 |----------|--------------|------------------------|
 | Channels per server | 200 | `server_channels` in Revolt.overrides.toml |
-| Roles per server | 200 | — |
+| Roles per server | 200 | Not configurable |
 | Custom emoji per server | 100 | `server_emoji` |
 | Message length | 2,000 chars | `message_length` |
-| Attachments per message | 5 | — |
-| Embeds per message | 5 | — |
-| Reactions per message | 20 | — |
+| Attachments per message | 5 | Not configurable |
+| Embeds per message | 5 | Not configurable |
+| Reactions per message | 20 | Not configurable |
 | Attachment upload size | 20 MB | `attachment_size` |
 
 Ferry's VALIDATE phase warns when source data is likely to exceed these limits. Pass
@@ -1297,7 +1339,7 @@ Messages that exceed the 2,000-character Stoat limit are split into multiple sen
   parts 1 and 2 send and part 3 fails, part 3 enters `state.failed_messages` and the run keeps
   going; parts 1 and 2 are not re-sent on the next retry or incremental run. Earlier versions
   treated the whole split as one transaction and rolled the delivered parts back on failure,
-  which produced silent duplicates on retry.
+  which produced duplicate messages on retry without reporting them.
 
 ---
 
@@ -1309,16 +1351,16 @@ The `thread_strategy` config option controls how forum and thread channels are h
 |----------|-----------|
 | `flatten` | Each thread becomes its own standalone text channel (default pre-v2) |
 | `merge` | Thread messages are appended into the parent channel after it is processed; threads are NOT created as separate channels. Processed after all parent channels complete. |
-| `archive` | Threads are converted to a markdown attachment on a header message in the parent channel — no new channel is created |
+| `archive` | Threads are converted to a markdown attachment on a header message in the parent channel, no new channel is created |
 
 `min_thread_messages` (default 0 = include all) filters out threads with fewer messages than
-the threshold — useful for suppressing near-empty auto-created threads.
+the threshold, useful for suppressing near-empty auto-created threads.
 
 **Filename sanitisation (from v2.19.12, PR #443).** The `archive` and `merge` strategies write
-attachment filenames derived from Discord parent-channel and thread names, both of which are
-free-form. `sanitize_filename()` in `migrator/messages.py` strips characters that are illegal on
-Windows (`< > : " \ | ? *`), collapses forward slashes so a thread called `wip/2026` does not
-create a subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). Two
+attachment filenames derived from free-form Discord parent-channel and thread names.
+`sanitize_filename()` in `migrator/messages.py` strips characters that are illegal on Windows
+(`< > : " \ | ? *`). It collapses forward slashes so a thread called `wip/2026` does not create a
+subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). Two
 threads whose sanitised names collide are suffixed with the thread ID so neither file overwrites
 the other.
 
@@ -1380,7 +1422,7 @@ The score is written to `migration_report.json` under `fidelity_score`.
 
 **Per-key full-mask policy (from v2.19.9, PR #436).** `register()` and `register_secret()` take
 a keyword-only `fully_mask` flag. For opaque high-entropy tokens (Stoat, Discord) the default
-`****{last4}` tail is fine — leaking the last four characters of a 40-character random string
+`****{last4}` tail is fine, leaking the last four characters of a 40-character random string
 tells an attacker nothing. For short, human-chosen secrets that tail exposes a large fraction of
 the value, so `_strip_userinfo()` in `core/http.py` registers both `proxy_password` and the
 derived base64 `proxy_authorization` header value with `fully_mask=True`, and `masked()` returns
@@ -1395,7 +1437,7 @@ messages.
 
 The test suite is exercised in CI on every push. For a current count run
 `find tests -name 'test_*.py' | wc -l` for the file count and
-`uv run pytest --collect-only -q | tail -1` for the test count — a hard-coded number here rots
+`uv run pytest --collect-only -q | tail -1` for the test count, a hard-coded number here rots
 after the first PR that adds a test. Key patterns:
 
 - **Phase tests**: Mock `aiohttp.ClientSession` with `aioresponses`, inject via `config.session`

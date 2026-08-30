@@ -8,13 +8,13 @@ import io
 import json as _json
 import logging
 import platform
-import subprocess
 import time as _time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import aiohttp
+from packaging.tags import platform_tags
 
 from discord_ferry.core.http import new_session, proxy_error_is_permanent, proxy_hint, tls_hint
 from discord_ferry.errors import DCENotFoundError, ValidationError
@@ -24,16 +24,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DCE_VERSION = "2.47.3"
-
-# Map (system, machine) to DCE release asset suffix.
-_PLATFORM_MAP: dict[tuple[str, str], str] = {
-    ("Windows", "AMD64"): "win-x64",
-    ("Linux", "x86_64"): "linux-x64",
-    ("Linux", "aarch64"): "linux-arm64",
-    ("Darwin", "x86_64"): "osx-x64",
-    ("Darwin", "arm64"): "osx-arm64",
-}
+DCE_VERSION = "2.48"
 
 _GITHUB_RELEASE_URL = (
     "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{version}"
@@ -42,11 +33,40 @@ _GITHUB_RELEASE_URL = (
 _MAX_DCE_BYTES = 150 * 1024 * 1024  # 150 MB hard ceiling
 
 
-def _get_platform_key() -> str | None:
-    """Return the checksums-file platform key for the current platform, or None if unsupported."""
+def _get_platform_key() -> str:
+    """Return the DCE release target supported by the running Python installation."""
     system = platform.system()
     machine = platform.machine()
-    return _PLATFORM_MAP.get((system, machine))
+    tags = tuple(platform_tags())
+
+    if system == "Windows":
+        for tag, target in (
+            ("win_amd64", "win-x64"),
+            ("win_arm64", "win-arm64"),
+            ("win32", "win-x86"),
+        ):
+            if tag in tags:
+                return target
+    elif system == "Darwin":
+        if any(tag.startswith("macosx_") and tag.endswith("_arm64") for tag in tags):
+            return "osx-arm64"
+        if any(tag.startswith("macosx_") and tag.endswith("_x86_64") for tag in tags):
+            return "osx-x64"
+    elif system == "Linux":
+        families = (
+            ("musllinux", "x86_64", "linux-musl-x64"),
+            ("manylinux", "x86_64", "linux-x64"),
+            ("manylinux", "aarch64", "linux-arm64"),
+            ("manylinux", "armv7l", "linux-arm"),
+        )
+        for family, architecture, target in families:
+            if any(
+                tag.startswith(f"{family}_") and tag.endswith(f"_{architecture}") for tag in tags
+            ):
+                return target
+
+    evidence = ", ".join(tags[:3]) or "no compatibility tags"
+    raise DCENotFoundError(f"Unsupported DCE platform: {system} {machine} ({evidence})")
 
 
 def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> None:
@@ -99,37 +119,39 @@ def _get_dce_dir() -> Path:
     return Path.home() / ".discord-ferry" / "bin" / "dce" / DCE_VERSION
 
 
-def _get_asset_name() -> str:
-    """Return the DCE release asset name for the current platform."""
-    system = platform.system()
-    machine = platform.machine()
-    suffix = _PLATFORM_MAP.get((system, machine))
-    if suffix is None:
-        raise ValueError(f"Unsupported platform: {system} {machine}")
-    return f"DiscordChatExporter.Cli.{suffix}.zip"
+def _get_asset_name(platform_key: str | None = None) -> str:
+    """Return the DCE release asset name for a resolved or current platform."""
+    target = platform_key or _get_platform_key()
+    return f"DiscordChatExporter.Cli.{target}.zip"
+
+
+def _validated_archive_members(
+    archive: zipfile.ZipFile, destination: Path
+) -> list[zipfile.ZipInfo]:
+    """Return all archive members after proving each path stays in the destination."""
+    root = destination.resolve()
+    members = archive.infolist()
+    for member in members:
+        posix_name = PurePosixPath(member.filename)
+        windows_name = PureWindowsPath(member.filename)
+        candidate = (root / member.filename).resolve()
+        unsafe = (
+            posix_name.is_absolute()
+            or windows_name.is_absolute()
+            or ".." in posix_name.parts
+            or ".." in windows_name.parts
+            or not candidate.is_relative_to(root)
+        )
+        if unsafe:
+            raise DCENotFoundError(
+                f"Zip entry {member.filename!r} would extract outside target directory"
+            )
+    return members
 
 
 def detect_dotnet() -> bool:
-    """Check if .NET 8+ runtime is available. Always True on Windows (self-contained)."""
-    if platform.system() == "Windows":
-        return True
-    # On non-Windows the Windows-only flag does not exist -- pass 0 (no-op).
-    creationflags = 0
-    try:
-        result = subprocess.run(
-            ["dotnet", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=creationflags,
-        )
-        if result.returncode != 0:
-            return False
-        version_str = result.stdout.strip().split("-")[0]  # strip pre-release suffix
-        major = int(version_str.split(".")[0])
-        return major >= 8
-    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
-        return False
+    """Retain the former public probe for import compatibility."""
+    return True
 
 
 def get_dce_path() -> Path | None:
@@ -161,7 +183,8 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
     """
     from discord_ferry.core.events import MigrationEvent
 
-    asset_name = _get_asset_name()
+    platform_key = _get_platform_key()
+    asset_name = _get_asset_name(platform_key)
     release_url = _GITHUB_RELEASE_URL.format(version=DCE_VERSION)
     dce_dir = _get_dce_dir()
 
@@ -247,29 +270,13 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
     assert data is not None  # unreachable — both-fail case raises above
 
     if not skip_verify:
-        platform_key = _get_platform_key()
-        if platform_key is None:
-            # Unreachable in practice — _get_asset_name() above already raises
-            # for any platform absent from _PLATFORM_MAP — but fail closed rather
-            # than silently skip verification if that ordering ever changes
-            # (issue #37: no unverified binaries, structurally).
-            raise DCENotFoundError(
-                "Cannot verify the DCE binary: unrecognized platform. "
-                "To bypass at your own risk, pass --skip-dce-verify (CLI) "
-                "or skip_verify=True (API)."
-            )
         _verify_dce_checksum(data, DCE_VERSION, platform_key)
 
     dce_dir.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            for member in zf.infolist():
-                member_path = (dce_dir / member.filename).resolve()
-                if not str(member_path).startswith(str(dce_dir.resolve())):
-                    raise DCENotFoundError(
-                        f"Zip entry {member.filename!r} would extract outside target directory"
-                    )
-            zf.extractall(dce_dir)
+            members = _validated_archive_members(zf, dce_dir)
+            zf.extractall(dce_dir, members=members)
     except zipfile.BadZipFile as e:
         raise DCENotFoundError(f"Downloaded file is not a valid zip: {e}") from e
 

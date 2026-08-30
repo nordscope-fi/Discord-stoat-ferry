@@ -1,7 +1,10 @@
-# DCE Export Format
+# DiscordChatExporter (DCE) Export Format
 
 This page documents the DiscordChatExporter (DCE) JSON format as it matters to Discord Ferry. It is a
 reference for developers working on the parser and for admins troubleshooting export problems.
+
+Ferry's export-checking stage is called VALIDATE. A content delivery network (CDN) serves Discord's
+remote media files.
 
 ---
 
@@ -32,7 +35,7 @@ DiscordChatExporter export \
 
 !!! warning "--media is critical"
     If `--media` was omitted, attachment URLs in the export begin with `https://cdn.discordapp.com/`
-    rather than a relative local path. Ferry cannot migrate these — Discord CDN URLs expire and Autumn
+    rather than a relative local path. Ferry cannot migrate these, Discord CDN URLs expire and Autumn
     cannot fetch URLs directly. Ferry's VALIDATE phase detects this condition and reports it as an error.
 
 ---
@@ -56,13 +59,13 @@ with a regex on the filename.
 
 !!! info "Sanitisation for downstream file writes"
     The names above come straight from Discord and can contain any Unicode. When Ferry writes a
-    file **it** owns — a thread archive under `--thread-strategy archive`, or a merged-thread
-    attachment under `--thread-strategy merge` — `sanitize_filename()` in
-    `migrator/messages.py` strips characters that are illegal on Windows (`< > : " \ | ? *`),
+    file **it** owns, it sanitises the name. This includes a thread archive under
+    `--thread-strategy archive` or a merged-thread attachment under `--thread-strategy merge`.
+    `sanitize_filename()` strips characters that are illegal on Windows (`< > : " \ | ? *`). It
     replaces `/` with `-` so a name like `wip/2026` never creates a subdirectory, and rewrites
     Win32 reserved device names (`CON`, `NUL`, etc.). Two threads whose sanitised names collide
     are suffixed with the thread ID so neither file overwrites the other. This does not affect
-    DCE's own output filenames — DCE writes those before Ferry sees them.
+    DCE's own output filenames, DCE writes those before Ferry sees them.
 
 ---
 
@@ -87,7 +90,8 @@ during validation.
 
 ## Channel Types
 
-DCE 2.47 writes the channel type as its **own PascalCase enum name**, which is not the
+DCE 2.47 writes the channel type as its own enum name, with each word capitalised and no
+separators. This style is called PascalCase, and it is not the
 SCREAMING_SNAKE constant the Discord API documentation uses. Ferry normalises both to Discord's
 canonical integer on parse, in `_coerce_channel_type`, because every downstream branch works on the
 integer.
@@ -109,7 +113,8 @@ users hold old exports.
 | `GuildForum` | 15 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the forum |
 | `GuildMedia` | 16 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the media channel |
 
-Stoat has exactly five channel types: SavedMessages, DirectMessage, Group, TextChannel, VoiceChannel.
+Stoat has exactly five channel types. `SavedMessages` stores a user's own notes, `DirectMessage`
+and `Group` are private chats, and `TextChannel` and `VoiceChannel` are server channels.
 There are no native threads or forums, so Discord threads are flattened into regular text channels.
 Forum and media channel threads are grouped into dedicated Stoat categories named after the parent
 forum, preserving the organisational structure.
@@ -167,16 +172,17 @@ Unknown type strings are logged as warnings and the message is skipped.
   "mentions": [
     { "id": "...", "name": "Bob" }
   ],
+  "inlineEmojis": [
+    { "id": "...", "name": "wave", "isAnimated": false, "imageUrl": "media/wave.png" }
+  ],
+  "interaction": {
+    "id": "...",
+    "name": "status",
+    "user": { "id": "...", "name": "Bob", "nickname": "Bobby" }
+  },
   "stickers": [
     { "name": "wave", "sourceUrl": "media/stickers/wave.png" }
   ],
-  "poll": {
-    "question": { "text": "Favourite colour?" },
-    "answers": [
-      { "text": "Red", "votes": 12 },
-      { "text": "Blue", "votes": 8 }
-    ]
-  },
   "reference": null,
   "isPinned": false
 }
@@ -193,9 +199,19 @@ Ferry prepends `*(edited)*` to the migrated message content, after the timestamp
 image as a message attachment. Lottie stickers and missing files fall back to a text placeholder
 like `[Sticker: wave]`.
 
-**Polls**: Ferry renders poll data as formatted text in the message body (Stoat has no native poll
-support). The output looks like: `**Poll: Favourite colour?**` followed by bullet-pointed options
-with vote counts.
+**Inline emoji metadata**: DCE 2.48 writes `inlineEmojis` on messages and embeds. Ferry uses the
+local image paths as emoji asset sources. These entries enrich the emoji records already found in
+message content and do not increase reaction or message counts.
+
+**Interactions**: An `interaction` records an application command name and the Discord user who
+invoked it. Ferry adds a context line such as `*[Discord command /status invoked by Bobby]*` before
+the message content. The interaction ID and the user's other profile fields are parsed but are not
+sent to Stoat because Stoat has no matching command-interaction object.
+
+**Polls**: DCE 2.48 does not write an active `poll` object to JSON. Ferry therefore cannot recreate
+active polls or their choices. A closed poll can appear as a `PollResult` system message. DCE writes
+that notification as ordinary `content` and `embeds`, which Ferry migrates through the normal
+message and embed paths. Stoat has no native poll endpoint used by Ferry.
 
 ---
 
@@ -204,7 +220,7 @@ with vote counts.
 ### Webhook and Bot Messages
 
 Both webhook-originated and bot-authored messages have `author.isBot = true`. DCE does not include a
-`webhook_id` field. Ferry treats both identically — they are imported using masquerade with the
+`webhook_id` field. Ferry treats both identically, they are imported using masquerade with the
 bot/webhook's display name and avatar.
 
 ### Forwarded Messages
@@ -227,7 +243,7 @@ Since **DCE 2.47** (February 2026, PR #1451) a forwarded message exports its ful
 }
 ```
 
-The message's own `content` is usually empty — the payload lives entirely in the block.
+The message's own `content` is usually empty, the payload lives entirely in the block.
 
 **There is no author field.** Ferry therefore posts recovered content under whoever forwarded it;
 the original writer is not present in the export.
@@ -237,14 +253,15 @@ embed and sticker paths handle it.
 
 **Exports older than DCE 2.47** wrote neither `forwardedMessage` nor `reference.type`. Those
 messages carry no recoverable content and are still skipped with a warning naming the cause.
-An empty `reference.type` is the signal for "this export predates 2.47" and is meaningfully
-different from `"Default"` — Ferry falls back to the old empty-content heuristic only in that case,
-because the heuristic alone also matches an ordinary reply carrying just a sticker or an embed.
+An empty `reference.type` signals that the export predates 2.47. It is different from `"Default"`.
+Ferry uses the old empty-content test only for that older shape, because the test also matches an
+ordinary reply carrying just a sticker or an embed.
 
 ### System Messages with Empty Content
 
-System message types (GuildMemberJoin, ChannelPinnedMessage, etc.) often have `content: ""`. Ferry
-always checks the `type` field first, never skipping a message solely because `content` is empty.
+System message types often have `content: ""`. These include member joins (`GuildMemberJoin`) and
+pin events (`ChannelPinnedMessage`). Ferry always checks the `type` field first, never skipping a
+message solely because `content` is empty.
 
 ### Reply References
 
@@ -255,6 +272,6 @@ When `type` is `"Reply"`, the `reference` object contains only the original mess
 ```
 
 It does not embed the referenced message's content. Ferry cross-references this ID against the
-Discord→Stoat message ID map built during the MESSAGES phase. If the referenced message was not
+Discord→Stoat message ID map built during the message-copying stage, named MESSAGES. If the referenced message was not
 migrated (e.g. it predates the export date range), the reply is imported as a regular message
 without a reply reference, and a warning is logged.

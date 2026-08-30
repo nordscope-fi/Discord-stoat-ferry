@@ -1,0 +1,26 @@
+{
+  "evidenceClass": "captured",
+  "dceVersion": "2.48",
+  "releaseTarget": "osx-arm64",
+  "releaseSha256": "623f9d2dce568e17a46b8fbd366a18dca49803d386216f4ba24507d2c000fee9",
+  "captureDate": "2026-08-30",
+  "fixtureManifestVersion": 1,
+  "fixtureVerifyExitCode": 0,
+  "dceExitCode": 0,
+  "redactionReview": "passed",
+  "guildId": "1505988963628879902",
+  "applicationId": "1505990747130953738",
+  "applicationFlagsBefore": 0,
+  "applicationFlagsDuringCapture": 524288,
+  "applicationFlagsRestored": 0,
+  "includedChannelIds": [
+    "1543572361285083187",
+    "1543572368977428611",
+    "1543572393384087642"
+  ],
+  "excludedChannelIds": [
+    "1505988964585050175",
+    "1505988964585050176"
+  ],
+  "exclusionReason": "not part of the fixture manifest"
+}

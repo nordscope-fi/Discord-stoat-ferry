@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -264,6 +265,56 @@ async def test_run_emoji_http_image_url_skipped(tmp_path: Path) -> None:
     assert "222" not in state.emoji_map
     warning_messages = [w["message"] for w in state.warnings]
     assert any("222" in m or "cloud" in m for m in warning_messages)
+
+
+async def test_run_emoji_rejects_local_images_outside_export_dir(tmp_path: Path) -> None:
+    """Never upload a local path that escapes the reviewed export directory."""
+    outside = tmp_path.parent / "outside-secret.png"
+    outside.write_bytes(b"private")
+    messages = [
+        _make_message(
+            msg_id="parent-path",
+            reactions=[
+                DCEReaction(
+                    emoji=DCEEmoji(
+                        id="parent",
+                        name="parent",
+                        image_url=f"../{outside.name}",
+                    ),
+                    count=1,
+                )
+            ],
+        ),
+        _make_message(
+            msg_id="absolute-path",
+            reactions=[
+                DCEReaction(
+                    emoji=DCEEmoji(
+                        id="absolute",
+                        name="absolute",
+                        image_url=str(outside),
+                    ),
+                    count=1,
+                )
+            ],
+        ),
+    ]
+    state = _make_state()
+    mock_upload = AsyncMock(return_value="autumn_id")
+
+    with (
+        patch("discord_ferry.migrator.emoji.upload_with_cache", new=mock_upload),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "autumn_id"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_emoji(_make_config(tmp_path), state, [_make_export(messages)], lambda event: None)
+
+    mock_upload.assert_not_awaited()
+    assert state.emoji_map == {}
+    assert sum(warning["type"] == "unsafe_media_path" for warning in state.warnings) == 2
 
 
 async def test_run_emoji_missing_file_skipped(tmp_path: Path) -> None:
@@ -617,6 +668,141 @@ async def test_emoji_content_only_still_skipped(tmp_path: Path) -> None:
     assert "123" not in state.emoji_map
 
 
+async def test_message_inline_emoji_supplies_the_local_asset(tmp_path: Path) -> None:
+    (tmp_path / "smile.png").write_bytes(b"PNG")
+    msg = _make_message(content="hello <:smile:123>")
+    msg.inline_emojis = [DCEEmoji(id="123", name="smile", image_url="smile.png")]
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [_make_export([msg])], [].append)
+
+    assert state.emoji_map == {"123": "autumn_id"}
+
+
+async def test_embed_inline_emoji_supplies_the_local_asset(tmp_path: Path) -> None:
+    (tmp_path / "vote.png").write_bytes(b"PNG")
+    msg = _make_message()
+    msg.embeds = [
+        {
+            "description": "result <:vote:456>",
+            "inlineEmojis": [
+                {
+                    "id": "456",
+                    "name": "vote",
+                    "isAnimated": False,
+                    "imageUrl": "vote.png",
+                }
+            ],
+        }
+    ]
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [_make_export([msg])], [].append)
+
+    assert state.emoji_map == {"456": "autumn_id"}
+
+
+async def test_embed_inline_emoji_ignores_malformed_entries(tmp_path: Path) -> None:
+    (tmp_path / "vote.png").write_bytes(b"PNG")
+    msg = _make_message(content="<:vote:456>")
+    msg.embeds = [
+        {
+            "inlineEmojis": [
+                None,
+                "wrong",
+                {},
+                {"id": "", "name": "empty"},
+                {"id": "456", "name": "vote", "imageUrl": "vote.png"},
+            ]
+        }
+    ]
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [_make_export([msg])], [].append)
+
+    assert state.emoji_map == {"456": "autumn_id"}
+
+
+async def test_streaming_message_inline_emoji_supplies_the_local_asset(tmp_path: Path) -> None:
+    (tmp_path / "smile.png").write_bytes(b"PNG")
+    json_path = tmp_path / "export.json"
+    json_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "id": "m1",
+                        "type": "Default",
+                        "timestamp": "2026-08-29T10:00:00+00:00",
+                        "content": "<:smile:123>",
+                        "author": {"id": "u1", "name": "User"},
+                        "inlineEmojis": [{"id": "123", "name": "smile", "imageUrl": "smile.png"}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    export = _make_export()
+    export.json_path = json_path
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [export], [].append)
+
+    assert state.emoji_map == {"123": "autumn_id"}
+
+
+async def test_inline_metadata_never_replaces_an_existing_asset_path(tmp_path: Path) -> None:
+    (tmp_path / "reaction.png").write_bytes(b"PNG")
+    msg = _make_message(
+        reactions=[
+            DCEReaction(emoji=DCEEmoji(id="123", name="smile", image_url="reaction.png"), count=1)
+        ]
+    )
+    msg.inline_emojis = [DCEEmoji(id="123", name="other", image_url="missing.png")]
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [_make_export([msg])], [].append)
+
+    assert state.emoji_map == {"123": "autumn_id"}
+
+
+async def test_inline_metadata_does_not_double_count_a_text_use_at_the_cap(
+    tmp_path: Path,
+) -> None:
+    messages: list[DCEMessage] = []
+    for emoji_id in range(1, 101):
+        image = f"{emoji_id}.png"
+        (tmp_path / image).write_bytes(b"PNG")
+        message = _make_message(msg_id=f"m{emoji_id}")
+        message.inline_emojis = [DCEEmoji(id=str(emoji_id), name=f"e{emoji_id}", image_url=image)]
+        messages.append(message)
+
+    (tmp_path / "999.png").write_bytes(b"PNG")
+    text_message = _make_message(msg_id="m999", content="<:last:999>")
+    text_message.inline_emojis = [DCEEmoji(id="999", name="last", image_url="999.png")]
+    messages.append(text_message)
+
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [_make_export(messages)], [].append)
+
+    assert len(state.emoji_map) == 100
+    assert "100" in state.emoji_map
+    assert "999" not in state.emoji_map
+
+
 async def test_emoji_cap_ranks_by_usage(tmp_path: Path) -> None:
     """SC-9: the cap keeps the MOST-used emoji, not the lexicographic-first."""
     for fn in ("a.png", "b.png", "c.png"):
@@ -840,6 +1026,17 @@ def test_find_emoji_in_exports_recovers_name_and_image() -> None:
     assert rec["name"] == "smile"
     assert rec["image_url"] == "smile.png"
     assert rec["is_animated"] is False
+
+
+def test_find_emoji_in_exports_recovers_inline_only_asset() -> None:
+    message = _make_message(content="<:smile:123>")
+    message.inline_emojis = [DCEEmoji(id="123", name="smile", image_url="smile.png")]
+
+    record = find_emoji_in_exports([_make_export([message])], "123")
+
+    assert record is not None
+    assert record["image_url"] == "smile.png"
+    assert record["uses"] == 1
 
 
 def test_find_emoji_in_exports_none_when_absent() -> None:

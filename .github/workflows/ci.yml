@@ -51,7 +51,7 @@ jobs:
 
   contract-test:
     name: Contract test (DCE binary)
-    runs-on: ubuntu-latest  # ubuntu-24.04 ships .NET 8 SDK preinstalled
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -65,14 +65,11 @@ jobs:
       - name: Cache DCE binary
         uses: actions/cache@v5
         with:
-          path: ~/.discord-ferry/bin/dce/2.47.3
-          key: dce-${{ runner.os }}-2.47.3
+          path: ~/.discord-ferry/bin/dce/2.48
+          key: dce-${{ runner.os }}-2.48
 
       - name: Install dependencies
         run: uv sync --locked --extra dev --extra native
-
-      - name: Sanity-check .NET 8
-        run: dotnet --version
 
       - name: Run contract + replay tests
         run: uv run pytest tests/test_dce_contract.py tests/test_dce_output_replay.py -v

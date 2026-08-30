@@ -5,7 +5,6 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry
 
@@ -294,40 +293,6 @@ def flatten_embed(
                     break  # Don't set media_path — expired URL stripped
 
     return result, media_path
-
-
-def flatten_poll(poll: dict[str, Any]) -> str:
-    """Render a Discord poll as plain text for inclusion in message content.
-
-    Args:
-        poll: Poll dict from DCE JSON with ``question`` and ``answers`` keys.
-
-    Returns:
-        Formatted poll text like ``**Poll: question**\\n• Option — N votes``.
-    """
-    question = ""
-    q = poll.get("question")
-    if isinstance(q, dict):
-        question = q.get("text", "")
-    elif isinstance(q, str):
-        question = q
-
-    lines = [f"**Poll: {question}**"]
-    answers = poll.get("answers")
-    if isinstance(answers, list):
-        for answer in answers:
-            if not isinstance(answer, dict):
-                continue
-            text = ""
-            a = answer.get("text")
-            if isinstance(a, str):
-                text = a
-            elif isinstance(a, dict):
-                text = a.get("text", "")
-            votes = answer.get("votes", 0)
-            lines.append(f"\u2022 {text} \u2014 {votes} votes")
-
-    return "\n".join(lines)
 
 
 def format_original_timestamp(iso_timestamp: str) -> str:

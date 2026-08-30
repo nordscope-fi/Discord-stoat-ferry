@@ -71,8 +71,7 @@
           }
         ]
       },
-      "interaction": null,
-      "poll": null
+      "interaction": null
     },
     {
       "id": "900000000000000102",
@@ -103,8 +102,7 @@
         "channelId": "222222222222222222",
         "guildId": "111111111111111111"
       },
-      "interaction": null,
-      "poll": null
+      "interaction": null
     }
   ],
   "messageCount": 2
