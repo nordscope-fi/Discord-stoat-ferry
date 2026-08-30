@@ -11,6 +11,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Discord Ferry now links to Peter Sterkenburg's GitHub Sponsors profile.** The final README
   section gives readers a direct path to support Peter's open-source work.
 
+- **Managed exports now cover every DCE 2.48 command-line target.** Ferry selects and verifies all
+  nine official Windows, Linux, and macOS archives from Python compatibility tags. Every pinned
+  archive is self-contained, so exports no longer require a separate Microsoft runtime.
+
+- **Current DCE message metadata reaches migration.** Message and embed inline emoji metadata can
+  supply local assets without inflating usage counts. Application commands add the command name
+  and invoking user's display name while retaining the original message author.
+
+- **The DCE 2.48 JSON contract has executable evidence.** A source-pinned ledger gives every writer
+  path an exact consumed or ignored disposition. Reviewed fixture-guild captures prove eager and
+  streaming replay while credential, local-path, provenance, and continuous-integration guards
+  keep the evidence bounded.
+
 - **Codex setup is repeat-safe and self-checking.** One command now installs scoped trust,
   reviewer access, command rules, linked-worktree state and static readiness checks. Paid live
   checks remain explicit. An expired reviewer credential is renewed on the next setup run.
@@ -59,6 +72,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   snippet semantics changed.
 
 ### Fixed
+
+- **DCE archives cannot write outside their cache directory.** Ferry rejects absolute, parent, and
+  cross-platform escape paths before extracting any archive member. The checksum bypass remains
+  available without bypassing path containment.
+
+- **DCE emoji assets cannot read outside the export directory.** Ferry rejects absolute, parent,
+  and symbolic-link escape paths before uploading local reaction or inline emoji media.
+
+- **Closed-poll notifications and active-poll limits now match DCE 2.48.** Closed notifications
+  retain DCE's ordinary fallback text and embeds. The unsupported active-poll model and formatter
+  are gone because DCE does not export active poll state.
 
 - **Codex chat hooks now have a 60-second outer budget.** The plain-English judge can finish its
   normal check, while generated-state checks still detect hook drift.

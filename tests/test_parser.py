@@ -816,6 +816,174 @@ def test_stream_messages_handles_empty(tmp_path: Path) -> None:
     assert len(msgs) == 0
 
 
+def _current_message_raw() -> dict[str, object]:
+    return {
+        "id": "100",
+        "type": "Default",
+        "timestamp": "2026-08-29T10:00:00+00:00",
+        "content": "hello <:wave:9001>",
+        "author": {"id": "10", "name": "author"},
+    }
+
+
+def test_parse_message_inline_emoji() -> None:
+    raw = _current_message_raw()
+    raw["inlineEmojis"] = [
+        {
+            "id": "9001",
+            "name": "wave",
+            "code": "<:wave:9001>",
+            "isAnimated": False,
+            "imageUrl": "media/emoji/wave.png",
+        }
+    ]
+
+    message = _parse_message(raw)
+
+    assert len(message.inline_emojis) == 1
+    assert message.inline_emojis[0].id == "9001"
+    assert message.inline_emojis[0].name == "wave"
+    assert message.inline_emojis[0].image_url == "media/emoji/wave.png"
+
+
+@pytest.mark.parametrize("inline_emojis", [None, {}, "wrong", 42])
+def test_parse_message_inline_emoji_wrong_container_is_empty(inline_emojis: object) -> None:
+    raw = _current_message_raw()
+    raw["inlineEmojis"] = inline_emojis
+
+    assert _parse_message(raw).inline_emojis == []
+
+
+def test_parse_message_inline_emoji_absent_is_empty() -> None:
+    assert _parse_message(_current_message_raw()).inline_emojis == []
+
+
+@pytest.mark.parametrize(
+    ("user", "expected_name", "expected_nickname"),
+    [
+        ({"id": "20", "name": "alex", "nickname": "Alex"}, "alex", "Alex"),
+        ({"id": "20", "name": "alex"}, "alex", ""),
+        ({"id": "20"}, "", ""),
+    ],
+)
+def test_parse_message_interaction_user_fallback_fields(
+    user: dict[str, str], expected_name: str, expected_nickname: str
+) -> None:
+    raw = _current_message_raw()
+    raw["interaction"] = {"id": "30", "name": "weather", "user": user}
+
+    interaction = _parse_message(raw).interaction
+
+    assert interaction is not None
+    assert interaction.id == "30"
+    assert interaction.name == "weather"
+    assert interaction.user.id == "20"
+    assert interaction.user.name == expected_name
+    assert interaction.user.nickname == expected_nickname
+
+
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        None,
+        [],
+        "wrong",
+        42,
+        {},
+        {"id": "30", "name": "weather"},
+        {"id": "", "user": {"id": "20"}},
+        {"id": "30", "user": {"id": ""}},
+    ],
+)
+def test_parse_message_malformed_interaction_is_none(interaction: object) -> None:
+    raw = _current_message_raw()
+    raw["interaction"] = interaction
+
+    message = _parse_message(raw)
+
+    assert message.interaction is None
+    assert message.id == "100"
+    assert message.content == "hello <:wave:9001>"
+
+
+def test_optional_message_lists_require_list_containers() -> None:
+    raw = _current_message_raw()
+    raw.update(
+        {
+            "attachments": {},
+            "embeds": "wrong",
+            "stickers": 42,
+            "reactions": {},
+            "mentions": "wrong",
+        }
+    )
+
+    message = _parse_message(raw)
+
+    assert message.attachments == []
+    assert message.embeds == []
+    assert message.stickers == []
+    assert message.reactions == []
+    assert message.mentions == []
+
+
+def test_current_message_fields_match_between_eager_and_streaming_reads(tmp_path: Path) -> None:
+    from discord_ferry.parser.dce_parser import stream_messages
+
+    raw = _current_message_raw()
+    raw.update(
+        {
+            "type": "PollResult",
+            "inlineEmojis": [
+                {
+                    "id": "9001",
+                    "name": "wave",
+                    "isAnimated": False,
+                    "imageUrl": "media/emoji/wave.png",
+                }
+            ],
+            "interaction": {
+                "id": "30",
+                "name": "weather",
+                "user": {"id": "20", "name": "alex", "nickname": "Alex"},
+            },
+            "embeds": [
+                {
+                    "description": "result <:vote:9002>",
+                    "inlineEmojis": [
+                        {
+                            "id": "9002",
+                            "name": "vote",
+                            "isAnimated": False,
+                            "imageUrl": "media/emoji/vote.png",
+                        }
+                    ],
+                }
+            ],
+            "forwardedMessage": {
+                "timestamp": "2026-08-28T10:00:00+00:00",
+                "content": "forwarded",
+                "attachments": [],
+                "embeds": [],
+                "stickers": [],
+            },
+        }
+    )
+    export_data = {
+        "guild": {"id": "1", "name": "Guild"},
+        "channel": {"id": "2", "type": "GuildTextChat", "name": "general"},
+        "messages": [raw],
+        "messageCount": 1,
+    }
+    json_path = tmp_path / "current.json"
+    json_path.write_text(json.dumps(export_data), encoding="utf-8")
+
+    eager = parse_single_export(json_path).messages
+    streamed = list(stream_messages(json_path))
+
+    assert streamed == eager
+
+
 def test_parse_single_export_metadata_only(tmp_path: Path) -> None:
     """metadata_only=True returns DCEExport with empty messages list."""
     import json

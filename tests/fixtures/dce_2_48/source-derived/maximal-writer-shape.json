@@ -1,0 +1,289 @@
+{
+  "guild": {
+    "id": "100000000000000001",
+    "name": "Contract Guild",
+    "iconUrl": "media/guild-icon.png"
+  },
+  "channel": {
+    "id": "200000000000000001",
+    "type": "GuildTextChat",
+    "categoryId": "200000000000000000",
+    "category": "Contract Category",
+    "name": "contract-channel",
+    "topic": "Source-derived DCE writer contract",
+    "iconUrl": "media/channel-icon.png"
+  },
+  "dateRange": {
+    "after": "2026-08-01T00:00:00+00:00",
+    "before": "2026-08-31T00:00:00+00:00"
+  },
+  "exportedAt": "2026-08-30T12:00:00+00:00",
+  "messages": [
+    {
+      "id": "300000000000000001",
+      "type": "PollResult",
+      "timestamp": "2026-08-30T10:00:00+00:00",
+      "timestampEdited": "2026-08-30T10:05:00+00:00",
+      "callEndedTimestamp": "2026-08-30T10:10:00+00:00",
+      "isPinned": true,
+      "content": "Alice's poll Favourite colour? has closed. <@400000000000000002> <:wave:900000000000000001>",
+      "author": {
+        "id": "400000000000000001",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#336699",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "500000000000000001",
+            "name": "Maintainer",
+            "color": "#ff8800",
+            "position": 7
+          }
+        ],
+        "avatarUrl": "media/alice-avatar.png"
+      },
+      "attachments": [
+        {
+          "id": "600000000000000001",
+          "url": "media/report.txt",
+          "fileName": "report.txt",
+          "fileSizeBytes": 128
+        }
+      ],
+      "embeds": [
+        {
+          "title": "Poll closed",
+          "url": "https://example.invalid/poll",
+          "timestamp": "2026-08-30T10:00:00+00:00",
+          "description": "Favourite colour? <:chart:900000000000000002>",
+          "color": "#5865f2",
+          "author": {
+            "name": "Poll bot",
+            "url": "https://example.invalid/bot",
+            "iconUrl": "media/embed-author.png",
+            "iconCanonicalUrl": "https://cdn.example.invalid/embed-author.png"
+          },
+          "thumbnail": {
+            "url": "media/thumbnail.png",
+            "canonicalUrl": "https://cdn.example.invalid/thumbnail.png",
+            "width": 320,
+            "height": 180
+          },
+          "image": {
+            "url": "media/image.png",
+            "canonicalUrl": "https://cdn.example.invalid/image.png",
+            "width": 640,
+            "height": 360
+          },
+          "video": {
+            "url": "https://media.example.invalid/video.mp4",
+            "canonicalUrl": "https://cdn.example.invalid/video.mp4",
+            "width": 1280,
+            "height": 720
+          },
+          "footer": {
+            "text": "60 votes",
+            "iconUrl": "media/footer.png",
+            "iconCanonicalUrl": "https://cdn.example.invalid/footer.png"
+          },
+          "images": [
+            {
+              "url": "media/gallery.png",
+              "canonicalUrl": "https://cdn.example.invalid/gallery.png",
+              "width": 800,
+              "height": 600
+            }
+          ],
+          "fields": [
+            {
+              "name": "Red",
+              "value": "42 votes",
+              "isInline": true
+            }
+          ],
+          "inlineEmojis": [
+            {
+              "id": "900000000000000002",
+              "name": "chart",
+              "code": "<:chart:900000000000000002>",
+              "isAnimated": false,
+              "imageUrl": "media/chart.png"
+            }
+          ]
+        }
+      ],
+      "stickers": [
+        {
+          "id": "700000000000000001",
+          "name": "Approved",
+          "format": "Png",
+          "sourceUrl": "media/approved.png"
+        }
+      ],
+      "reactions": [
+        {
+          "emoji": {
+            "id": "900000000000000003",
+            "name": "agree",
+            "code": "<:agree:900000000000000003>",
+            "isAnimated": false,
+            "imageUrl": "media/agree.png"
+          },
+          "count": 2,
+          "users": [
+            {
+              "id": "400000000000000002",
+              "name": "bob",
+              "discriminator": "0000",
+              "nickname": "Bob",
+              "color": "#00aa88",
+              "isBot": false,
+              "avatarUrl": "media/bob-avatar.png"
+            }
+          ]
+        }
+      ],
+      "mentions": [
+        {
+          "id": "400000000000000002",
+          "name": "bob",
+          "discriminator": "0000",
+          "nickname": "Bob",
+          "color": "#00aa88",
+          "isBot": false,
+          "roles": [
+            {
+              "id": "500000000000000002",
+              "name": "Member",
+              "color": "#00aa88",
+              "position": 2
+            }
+          ],
+          "avatarUrl": "media/bob-avatar.png"
+        }
+      ],
+      "reference": {
+        "type": "Default",
+        "messageId": "300000000000000000",
+        "channelId": "200000000000000001",
+        "guildId": "100000000000000001"
+      },
+      "forwardedMessage": {
+        "timestamp": "2026-08-29T09:00:00+00:00",
+        "timestampEdited": "2026-08-29T09:01:00+00:00",
+        "content": "Forwarded contract content",
+        "attachments": [
+          {
+            "id": "600000000000000002",
+            "url": "media/forwarded.txt",
+            "fileName": "forwarded.txt",
+            "fileSizeBytes": 64
+          }
+        ],
+        "embeds": [
+          {
+            "title": "Forwarded embed",
+            "url": "https://example.invalid/forwarded",
+            "timestamp": "2026-08-29T09:00:00+00:00",
+            "description": "Forwarded description <:forward:900000000000000004>",
+            "color": "#112233",
+            "author": {
+              "name": "Forward author",
+              "url": "https://example.invalid/forward-author",
+              "iconUrl": "media/forward-author.png",
+              "iconCanonicalUrl": "https://cdn.example.invalid/forward-author.png"
+            },
+            "thumbnail": {
+              "url": "media/forward-thumbnail.png",
+              "canonicalUrl": "https://cdn.example.invalid/forward-thumbnail.png",
+              "width": 160,
+              "height": 90
+            },
+            "image": {
+              "url": "media/forward-image.png",
+              "canonicalUrl": "https://cdn.example.invalid/forward-image.png",
+              "width": 640,
+              "height": 360
+            },
+            "video": {
+              "url": "https://media.example.invalid/forward-video.mp4",
+              "canonicalUrl": "https://cdn.example.invalid/forward-video.mp4",
+              "width": 1280,
+              "height": 720
+            },
+            "footer": {
+              "text": "Forward footer",
+              "iconUrl": "media/forward-footer.png",
+              "iconCanonicalUrl": "https://cdn.example.invalid/forward-footer.png"
+            },
+            "images": [
+              {
+                "url": "media/forward-gallery.png",
+                "canonicalUrl": "https://cdn.example.invalid/forward-gallery.png",
+                "width": 800,
+                "height": 600
+              }
+            ],
+            "fields": [
+              {
+                "name": "Forward field",
+                "value": "Forward value",
+                "isInline": false
+              }
+            ],
+            "inlineEmojis": [
+              {
+                "id": "900000000000000004",
+                "name": "forward",
+                "code": "<:forward:900000000000000004>",
+                "isAnimated": false,
+                "imageUrl": "media/forward.png"
+              }
+            ]
+          }
+        ],
+        "stickers": [
+          {
+            "id": "700000000000000002",
+            "name": "Forwarded",
+            "format": "Png",
+            "sourceUrl": "media/forwarded-sticker.png"
+          }
+        ]
+      },
+      "interaction": {
+        "id": "800000000000000001",
+        "name": "close-poll",
+        "user": {
+          "id": "400000000000000002",
+          "name": "bob",
+          "discriminator": "0000",
+          "nickname": "Bob",
+          "color": "#00aa88",
+          "isBot": false,
+          "roles": [
+            {
+              "id": "500000000000000002",
+              "name": "Member",
+              "color": "#00aa88",
+              "position": 2
+            }
+          ],
+          "avatarUrl": "media/bob-avatar.png"
+        }
+      },
+      "inlineEmojis": [
+        {
+          "id": "900000000000000001",
+          "name": "wave",
+          "code": "<:wave:900000000000000001>",
+          "isAnimated": false,
+          "imageUrl": "media/wave.png"
+        }
+      ]
+    }
+  ],
+  "messageCount": 1
+}

@@ -471,6 +471,26 @@ async def test_export_skipped_in_offline_mode(tmp_path: Path) -> None:
     assert any(e.status == "skipped" for e in export_events)
 
 
+async def test_export_does_not_probe_for_external_dotnet(tmp_path: Path) -> None:
+    """The self-contained DCE archive runs without an external runtime gate."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, skip_export=False, discord_token="discord-token")
+
+    with (
+        patch("discord_ferry.core.engine.validate_discord_token", new=AsyncMock()),
+        patch(
+            "discord_ferry.exporter.detect_dotnet",
+            side_effect=AssertionError("runtime probe must not run"),
+        ),
+        patch("discord_ferry.core.engine.get_dce_path", return_value=tmp_path / "dce"),
+        patch("discord_ferry.core.engine.run_dce_export", new=AsyncMock()) as run_dce,
+    ):
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    run_dce.assert_awaited_once()
+    assert any(event.phase == "export" and event.status == "completed" for event in events)
+
+
 _DISCORD_API = "https://discord.com/api/v10"
 
 _MOCK_ROLES = [

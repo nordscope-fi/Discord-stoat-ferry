@@ -525,7 +525,7 @@ wheels = [
 
 [[package]]
 name = "discord-ferry"
-version = "2.36.0"
+version = "2.37.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -534,6 +534,7 @@ dependencies = [
     { name = "ijson" },
     { name = "multidict" },
     { name = "nicegui" },
+    { name = "packaging" },
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "yarl" },
@@ -570,6 +571,7 @@ requires-dist = [
     { name = "multidict", specifier = ">=4.5" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "nicegui", specifier = ">=3.0" },
+    { name = "packaging" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21" },

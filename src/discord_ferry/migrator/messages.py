@@ -17,7 +17,6 @@ from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_message
 from discord_ferry.parser.transforms import (
     convert_spoilers,
     flatten_embed,
-    flatten_poll,
     format_original_timestamp,
     handle_stickers,
     remap_emoji,
@@ -1875,6 +1874,14 @@ def _is_unrecoverable_forward(msg: DCEMessage) -> bool:
     return msg.content == "" and not msg.attachments and msg.type == "Default"
 
 
+def _interaction_context(msg: DCEMessage) -> str:
+    interaction = msg.interaction
+    if interaction is None or not interaction.name.strip():
+        return ""
+    display = interaction.user.nickname or interaction.user.name or interaction.user.id
+    return f"*[Discord command /{interaction.name} invoked by {display}]*"
+
+
 def _build_content(msg: DCEMessage, state: MigrationState) -> str:
     """Apply all content transforms in the required order.
 
@@ -1886,6 +1893,9 @@ def _build_content(msg: DCEMessage, state: MigrationState) -> str:
         Transformed content string (not yet truncated).
     """
     content = msg.content
+    interaction_context = _interaction_context(msg)
+    if interaction_context:
+        content = "\n".join(part for part in (interaction_context, content) if part)
 
     # Transforms applied in order.
     content = convert_spoilers(content)
@@ -1903,10 +1913,6 @@ def _build_content(msg: DCEMessage, state: MigrationState) -> str:
     # Append sticker representations (text only — images uploaded separately).
     sticker_text, _ = handle_stickers(msg.stickers)
     content += sticker_text
-
-    # Append poll text if present.
-    if msg.poll is not None:
-        content += "\n" + flatten_poll(msg.poll)
 
     return content
 

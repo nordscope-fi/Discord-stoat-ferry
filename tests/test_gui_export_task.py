@@ -74,7 +74,10 @@ async def test_export_page_reaches_the_first_progress_event(
     with (
         patch("discord_ferry.exporter.validate_discord_token", new=AsyncMock()),
         patch("discord_ferry.exporter.get_dce_path", return_value=tmp_path / "dce"),
-        patch("discord_ferry.exporter.detect_dotnet", return_value=True),
+        patch(
+            "discord_ferry.exporter.detect_dotnet",
+            side_effect=AssertionError("runtime probe must not run"),
+        ),
         patch("discord_ferry.exporter.run_dce_export", new=AsyncMock()) as run_dce,
     ):
         await user.open("/export")

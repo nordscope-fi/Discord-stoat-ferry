@@ -975,9 +975,8 @@ async def export_page() -> None:
         fail before the first event reaches the log panel — the failure mode that
         made #123 invisible.
         """
-        from discord_ferry.errors import DiscordAuthError, DotNetMissingError
+        from discord_ferry.errors import DiscordAuthError
         from discord_ferry.exporter import (
-            detect_dotnet,
             download_dce,
             get_dce_path,
             run_dce_export,
@@ -1026,19 +1025,6 @@ async def export_page() -> None:
                     )
                     dce_path = await download_dce(on_export_event)
 
-                on_export_event(
-                    _MigrationEvent(
-                        phase="export",
-                        status="progress",
-                        message="Verifying .NET 8 runtime...",
-                    )
-                )
-                if not detect_dotnet():
-                    raise DotNetMissingError(
-                        "DCE requires .NET 8 runtime. "
-                        "Install from https://dotnet.microsoft.com/download/dotnet/8.0"
-                    )
-
                 config = FerryConfig(
                     export_dir=export_dir,
                     stoat_url=str(storage.get("stoat_url", "")),
@@ -1072,9 +1058,6 @@ async def export_page() -> None:
             except DiscordAuthError as exc:
                 on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
                 ui.notify(f"Discord auth failed: {exc}", type="negative")
-            except DotNetMissingError as exc:
-                on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
-                ui.notify(str(exc), type="negative")
             except Exception as exc:
                 on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
                 ui.notify(f"Export failed: {exc}", type="negative")

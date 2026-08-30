@@ -1,0 +1,55 @@
+{
+  "guild": {
+    "id": "1505988963628879902",
+    "name": "Discord Ferry Test",
+    "iconUrl": "Discord Ferry Test - feedback-forum - Bug Report [1543572393384087642].json_Files/0-eb806f2bcf037a33.png"
+  },
+  "channel": {
+    "id": "1543572393384087642",
+    "type": "GuildPublicThread",
+    "categoryId": "1543572364359372880",
+    "category": "feedback-forum",
+    "name": "Bug Report",
+    "topic": null
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2026-08-30T13:53:00.399181+03:00",
+  "messages": [
+    {
+      "id": "1543572393384087642",
+      "type": "Default",
+      "timestamp": "2026-08-30T13:45:36.771+03:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Bug report post body — initial forum-post message. [ferry:post-bug]",
+      "author": {
+        "id": "1505990747130953738",
+        "name": "D-Ferry Test app",
+        "discriminator": "5764",
+        "nickname": "D-Ferry Test app",
+        "color": null,
+        "isBot": true,
+        "roles": [
+          {
+            "id": "1505993202266673347",
+            "name": "D-Ferry Test app",
+            "color": null,
+            "position": 1
+          }
+        ],
+        "avatarUrl": "Discord Ferry Test - feedback-forum - Bug Report [1543572393384087642].json_Files/4-4551a51a707878de.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": [],
+      "inlineEmojis": []
+    }
+  ],
+  "messageCount": 1
+}
