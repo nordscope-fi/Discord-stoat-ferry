@@ -64,6 +64,25 @@ export const FINDINGS_SCHEMA = {
   required: ['findings', 'summary', 'confidence'],
 };
 
+export const QWEN_SCHEMA_FAILURE_REASONS = Object.freeze([
+  'stream-body',
+  'stream-event',
+  'stream-completion',
+  'stream-trailing-data',
+  'stream-model',
+  'stream-finish-reason',
+  'stream-content',
+  'response-envelope',
+  'response-json',
+  'response-findings',
+  'response-unclassified',
+]);
+const QWEN_SCHEMA_FAILURE_REASON_SET = new Set(QWEN_SCHEMA_FAILURE_REASONS);
+
+export function isQwenSchemaFailureReason(value) {
+  return QWEN_SCHEMA_FAILURE_REASON_SET.has(value);
+}
+
 export const PROJECT_CONTEXT = `Discord Ferry migrates a Discord server export to Stoat (a Revolt fork). Python 3.11+, aiohttp,
 Click, Rich, NiceGUI, pytest.
 

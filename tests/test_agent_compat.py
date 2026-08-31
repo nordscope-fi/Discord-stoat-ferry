@@ -2184,6 +2184,65 @@ def test_qwen_review_rejects_invalid_stream_completion(
 
 
 @pytest.mark.parametrize(
+    ("fixture", "reason"),
+    [
+        ("stream-body", "stream-body"),
+        ("invalid-event", "stream-event"),
+        ("missing-done", "stream-completion"),
+        ("trailing-data", "stream-trailing-data"),
+        ("missing-model", "stream-model"),
+        ("length", "stream-finish-reason"),
+        ("missing-content", "stream-content"),
+        ("response-envelope", "response-envelope"),
+        ("response-json", "response-json"),
+        ("response-findings", "response-findings"),
+        ("response-unclassified", "response-unclassified"),
+    ],
+)
+def test_qwen_review_reports_each_schema_failure_reason(
+    fixture: str,
+    reason: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-schema-reason",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "code": "INVALID_SCHEMA",
+        "failure_reason": reason,
+    }
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_qwen_schema_failure_fixture_covers_the_declared_enum() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-schema-reason",
+        "declared",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert set(json.loads(result.stdout)["reasons"]) == {
+        "stream-body",
+        "stream-event",
+        "stream-completion",
+        "stream-trailing-data",
+        "stream-model",
+        "stream-finish-reason",
+        "stream-content",
+        "response-envelope",
+        "response-json",
+        "response-findings",
+        "response-unclassified",
+    }
+
+
+@pytest.mark.parametrize(
     ("fixture", "deadline"),
     [
         ("connection", "connection"),
