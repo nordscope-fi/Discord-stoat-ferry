@@ -2,8 +2,16 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   canonicalCheckoutRoot,
@@ -11,7 +19,7 @@ import {
   verifyReviewerRuntime,
 } from './codex-bootstrap.mjs';
 import { buildReviewPrompt } from './review-contract.mjs';
-import { CODEX_CHAT_COMMAND } from './plain-english-contract.mjs';
+import { codexChatCommand } from './plain-english-contract.mjs';
 import { runQwenReview } from './qwen-review.mjs';
 import { authorizeVerificationCommand } from './review-verification.mjs';
 import { runVibeReview } from './vibe-review.mjs';
@@ -134,10 +142,11 @@ async function checkRecord({ id, className, remediation, reason, now }, check) {
   }
 }
 
-function hasNativeChatHooks(document) {
+function hasNativeChatHooks(document, ownerRoot) {
+  const expectedCommand = codexChatCommand(ownerRoot);
   return ['Stop', 'SubagentStop'].every((event) => {
     const native = (document.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? [])
-      .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+      .filter((hook) => hook.command === expectedCommand);
     return native.length === 1 && native[0].timeout === 60;
   });
 }
@@ -303,16 +312,17 @@ function runAdapter(root, mode, payload, command) {
   return result;
 }
 
-function stopEvidence(root, event, command) {
+function stopEvidence(root, event, eventCwd, command) {
   const hooks = JSON.parse(readFileSync(join(root, '.codex', 'hooks.json'), 'utf8'));
+  const expectedCommand = codexChatCommand(root);
   const native = (hooks.hooks?.[event] ?? []).flatMap((group) => group.hooks ?? [])
-    .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+    .filter((hook) => hook.command === expectedCommand);
   if (native.length !== 1 || native[0].timeout !== 60) {
     throw new Error('native Stop hook contract mismatch');
   }
   const started = performance.now();
   const result = command('/bin/sh', ['-c', native[0].command], {
-    cwd: root,
+    cwd: eventCwd,
     input: JSON.stringify({
       last_assistant_message: 'Task status: verification passed. No action is required.',
     }),
@@ -322,6 +332,9 @@ function stopEvidence(root, event, command) {
     status: result.status === 0 ? 'ok' : 'failed',
     timeout_seconds: native[0].timeout,
     duration_ms: performance.now() - started,
+    owner_root: root,
+    event_cwd: eventCwd,
+    command: native[0].command,
   };
 }
 
@@ -336,7 +349,9 @@ async function defaultWorktreeProbe({ root, command = liveCommand }) {
     { cwd: primaryRoot, timeoutMs: 60_000 },
   );
   if (added.status !== 0) throw new Error('temporary worktree creation failed');
+  let eventCwd = null;
   try {
+    eventCwd = mkdtempSync(join(tmpdir(), 'ferry-codex-stop-'));
     const primaryBefore = treeHash(primaryRoot, command);
     const worktreeBefore = treeHash(worktree, command);
     const primaryMarkers = sessionEvidence(primaryRoot, command);
@@ -355,11 +370,13 @@ async function defaultWorktreeProbe({ root, command = liveCommand }) {
 
     return {
       primary: {
+        path: primaryRoot,
         markers: primaryMarkers,
         tree_hash_before: primaryBefore,
         tree_hash_after: treeHash(primaryRoot, command),
       },
       worktree: {
+        path: worktree,
         markers: worktreeMarkers,
         tree_hash_before: worktreeBefore,
         tree_hash_after: treeHash(worktree, command),
@@ -371,14 +388,20 @@ async function defaultWorktreeProbe({ root, command = liveCommand }) {
         pre_tool_block: preBlock.status === 0 && preBlock.stdout.includes('"decision":"block"')
           ? 'ok' : 'failed',
         post_tool: postTool.status === 0 ? 'ok' : 'failed',
-        stop_main: stopEvidence(primaryRoot, 'Stop', command),
-        stop_child: stopEvidence(primaryRoot, 'SubagentStop', command),
+        stop_main: stopEvidence(primaryRoot, 'Stop', eventCwd, command),
+        stop_child: stopEvidence(primaryRoot, 'SubagentStop', eventCwd, command),
       },
       roles: roleEvidence(primaryRoot, command),
     };
   } finally {
+    if (eventCwd !== null) rmSync(eventCwd, { recursive: true, force: true });
     command('git', ['worktree', 'remove', worktree], { cwd: primaryRoot, timeoutMs: 60_000 });
   }
+}
+
+function pathIsWithin(root, candidate) {
+  const offset = relative(resolve(root), resolve(candidate));
+  return offset === '' || (!offset.startsWith('..') && !isAbsolute(offset));
 }
 
 export async function runStaticReadiness({
@@ -480,7 +503,7 @@ export async function runStaticReadiness({
     const source = requireText(files, join(projectRoot, '.codex', 'hooks.json'), 'Codex hooks');
     let document;
     try { document = JSON.parse(source); } catch { throw new Error('hooks invalid'); }
-    if (!hasNativeChatHooks(document)) throw new Error('native chat hooks missing');
+    if (!hasNativeChatHooks(document, ownedRoot)) throw new Error('native chat hooks missing');
     return { native_chat_hooks: 2, timeout_seconds: 60 };
   });
 
@@ -823,10 +846,21 @@ export async function runWorktreeReadiness({
     }, () => {
       const details = evidence?.hooks?.[key];
       if (details?.status !== 'ok' || details?.timeout_seconds !== 60 ||
-          !Number.isFinite(details?.duration_ms) || details.duration_ms > 58_000) {
+          !Number.isFinite(details?.duration_ms) || details.duration_ms > 58_000 ||
+          details.owner_root !== evidence?.primary?.path ||
+          details.command !== codexChatCommand(evidence.primary.path) ||
+          typeof details.event_cwd !== 'string' ||
+          pathIsWithin(evidence.primary.path, details.event_cwd) ||
+          pathIsWithin(evidence.worktree.path, details.event_cwd)) {
         throw new Error('Stop-hook evidence mismatch');
       }
-      return { timeout_seconds: 60, duration_ms: details.duration_ms };
+      return {
+        timeout_seconds: 60,
+        duration_ms: details.duration_ms,
+        owner_root: details.owner_root,
+        event_cwd: details.event_cwd,
+        command: details.command,
+      };
     });
   }
 

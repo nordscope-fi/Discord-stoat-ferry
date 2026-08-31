@@ -29,8 +29,8 @@ import {
   vibePostToolMatcher,
 } from './hook-parity.mjs';
 import {
-  CODEX_CHAT_COMMAND,
   canonicalCheckoutRoot,
+  codexChatCommand,
   normalizeCodexChatHooks,
   removeUnusedIssueChannel,
   requirePlainEnglish,
@@ -168,11 +168,11 @@ function renderStagedFerryHosts(stage) {
   );
 }
 
-function normalizeStagedHosts(stage) {
+function normalizeStagedHosts(stage, ownerRoot) {
   const codexPath = join(stage, '.codex', 'hooks.json');
   const codex = JSON.parse(readFileSync(codexPath, 'utf8'));
   removeUnusedIssueChannel(codex);
-  normalizeCodexChatHooks(codex);
+  normalizeCodexChatHooks(codex, ownerRoot);
   writeFileSync(codexPath, `${JSON.stringify(codex, null, 2)}\n`, { mode: 0o600 });
 
   const vibePath = join(stage, '.vibe', 'hooks.toml');
@@ -181,11 +181,12 @@ function normalizeStagedHosts(stage) {
   });
 }
 
-function validActualCodexChatHooks(document) {
+function validActualCodexChatHooks(document, ownerRoot) {
+  const expectedCommand = codexChatCommand(ownerRoot);
   for (const event of ['Stop', 'SubagentStop']) {
     const matches = (document.hooks?.[event] ?? [])
       .flatMap((group) => group.hooks ?? [])
-      .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+      .filter((hook) => hook.command === expectedCommand);
     if (matches.length !== 1) {
       fail(`expected one native plain-English chat hook for ${event}; found ${matches.length}`);
       return false;
@@ -199,9 +200,9 @@ function validActualCodexChatHooks(document) {
 }
 
 function compareCodexArtifacts(stage, actualHooksPath) {
-  const actualRoot = dirname(dirname(actualHooksPath));
+  const actualRoot = dirname(dirname(realpathSync(actualHooksPath)));
   const actual = JSON.parse(readFileSync(actualHooksPath, 'utf8'));
-  if (!validActualCodexChatHooks(actual)) return;
+  if (!validActualCodexChatHooks(actual, actualRoot)) return;
   const expected = JSON.parse(readFileSync(join(stage, '.codex', 'hooks.json'), 'utf8'));
   if (canonicalJson(actual) !== canonicalJson(expected)) {
     fail('Codex hooks differ from staged plain-English output');
@@ -261,6 +262,7 @@ export function checkPlainEnglishState({
 } = {}) {
   const stage = mkdtempSync(join(stageParent, 'ferry-plain-english-'));
   try {
+    const ownerRoot = dirname(dirname(realpathSync(codexHooksPath)));
     execFileSync('git', ['init', '-q', stage], { stdio: 'pipe' });
     writeFileSync(
       join(stage, 'AGENTS.md'),
@@ -270,7 +272,7 @@ export function checkPlainEnglishState({
     if (!runInit(stage, 'codex', { timeoutMs: 30_000 })) return false;
     if (includeVibe && !runInit(stage, 'vibe', { timeoutMs: 30_000 })) return false;
     try {
-      normalizeStagedHosts(stage);
+      normalizeStagedHosts(stage, ownerRoot);
     } catch (err) {
       fail(`plain-English staged host normalization failed: ${err.message}`);
       return false;

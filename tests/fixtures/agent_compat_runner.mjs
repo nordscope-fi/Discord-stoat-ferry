@@ -12,6 +12,7 @@ import {
   readdirSync,
   realpathSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -38,8 +39,9 @@ import {
 } from '../../scripts/agent-compat/check.mjs';
 import { routesFor } from '../../scripts/agent-compat/hook-parity.mjs';
 import {
-  CODEX_CHAT_COMMAND,
+  UPSTREAM_CODEX_CHAT_COMMAND,
   canonicalCheckoutRoot,
+  codexChatCommand,
   normalizeCodexChatHooks,
   plainEnglishFailure,
   probePlainEnglish,
@@ -156,9 +158,12 @@ function plainEnglishContract(fixture) {
 }
 
 function hookRegeneration(shape) {
+  const ownerIndex = process.argv.indexOf('--owner');
+  const owner = ownerIndex === -1 ? null : process.argv[ownerIndex + 1];
+  if (!owner) throw new Error('--owner is required');
   const command = shape === 'altered-command'
-    ? `${CODEX_CHAT_COMMAND} --changed`
-    : CODEX_CHAT_COMMAND;
+    ? `${UPSTREAM_CODEX_CHAT_COMMAND} --changed`
+    : UPSTREAM_CODEX_CHAT_COMMAND;
   const timeout = shape === 'timeout-30' ? 30 : 10;
   const runsIndex = process.argv.indexOf('--runs');
   const runs = runsIndex === -1 ? 1 : Number(process.argv[runsIndex + 1]);
@@ -166,7 +171,7 @@ function hookRegeneration(shape) {
   removeUnusedIssueChannel(document);
   let previous = null;
   for (let index = 0; index < runs; index += 1) {
-    normalizeCodexChatHooks(document);
+    normalizeCodexChatHooks(document, owner);
     const current = JSON.stringify(document);
     if (previous !== null && current !== previous) throw new Error('hook regeneration drifted');
     previous = current;
@@ -175,7 +180,42 @@ function hookRegeneration(shape) {
     document.hooks[event].flatMap((group) => group.hooks));
   writeJson({
     hook_count: hooks.length,
+    commands: hooks.map((hook) => hook.command),
     timeouts: hooks.map((hook) => hook.timeout),
+  });
+}
+
+function hookCommandExecution() {
+  const baseIndex = process.argv.indexOf('--base');
+  const base = baseIndex === -1 ? null : process.argv[baseIndex + 1];
+  if (!base) throw new Error('--base is required');
+  const ownerToken = "a b'c$HOME$(printf expanded)*?[ab]";
+  const owner = join(base, ownerToken);
+  const launcher = join(owner, '.codex', 'hooks', 'plain-english.mjs');
+  mkdirSync(join(owner, '.codex', 'hooks'), { recursive: true });
+  writeFileSync(
+    launcher,
+    "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
+  );
+  for (const token of ['star', 'question', 'class-a', 'class-b']) {
+    mkdirSync(join(base, token), { recursive: true });
+  }
+  const document = nativeChatDocument(UPSTREAM_CODEX_CHAT_COMMAND);
+  normalizeCodexChatHooks(document, owner);
+  const command = document.hooks.Stop[0].hooks[0].command;
+  const eventCwd = join(base, 'event');
+  mkdirSync(eventCwd);
+  const result = spawnSync('/bin/sh', ['-c', command], {
+    cwd: eventCwd,
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+  writeJson({
+    command,
+    launcher,
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
   });
 }
 
@@ -183,11 +223,16 @@ function stagedPlainEnglishTimeout(targetAgent) {
   const baseIndex = process.argv.indexOf('--base');
   const base = baseIndex === -1 ? null : process.argv[baseIndex + 1];
   if (!base) throw new Error('--base is required');
+  const owner = join(base, 'generated-owner');
+  const codexHooksPath = join(owner, '.codex', 'hooks.json');
+  mkdirSync(join(owner, '.codex'), { recursive: true });
+  writeFileSync(codexHooksPath, '{}\n');
   const calls = [];
   let timeoutMs = null;
   let killSignal = null;
   let comparisons = 0;
   checkPlainEnglishState({
+    codexHooksPath,
     stageParent: base,
     instructions: '# Fixture instructions\n',
     runInit(stage, agent, options) {
@@ -209,6 +254,7 @@ function stagedPlainEnglishTimeout(targetAgent) {
       comparisons += 1;
     },
   });
+  rmSync(owner, { recursive: true, force: true });
   writeJson({
     calls,
     timeout_ms: timeoutMs,
@@ -434,6 +480,9 @@ switch (mode) {
   }
   case 'hook-regeneration':
     hookRegeneration(argument);
+    break;
+  case 'hook-command-execution':
+    hookCommandExecution();
     break;
   case 'plain-english-staged-timeout':
     stagedPlainEnglishTimeout(argument);
@@ -1951,9 +2000,10 @@ switch (mode) {
       '[mcp_servers.serena]',
       ...(fixture === 'missing-tool-server' ? [] : ['[mcp_servers.context7]']),
     ].join('\n');
+    const canonicalHookCommand = codexChatCommand(root);
     const hookCommand = fixture === 'stale-wrapper'
       ? 'plain-english-chat-hook.mjs'
-      : CODEX_CHAT_COMMAND;
+      : canonicalHookCommand;
     const hooks = fixture === 'missing-hook'
       ? { hooks: { Stop: [], SubagentStop: [] } }
       : fixture === 'misdistributed-hook'
@@ -1961,8 +2011,8 @@ switch (mode) {
             hooks: {
               Stop: [{
                 hooks: [
-                  { command: CODEX_CHAT_COMMAND, timeout: 60 },
-                  { command: CODEX_CHAT_COMMAND, timeout: 60 },
+                  { command: canonicalHookCommand, timeout: 60 },
+                  { command: canonicalHookCommand, timeout: 60 },
                 ],
               }],
               SubagentStop: [],
@@ -2419,11 +2469,13 @@ switch (mode) {
     const fixture = argument;
     const evidence = {
       primary: {
+        path: '/fixture/primary',
         markers: ['instructions', 'skill', 'qmd'],
         tree_hash_before: 'primary-hash',
         tree_hash_after: 'primary-hash',
       },
       worktree: {
+        path: '/fixture/worktree',
         markers: ['instructions', 'skill', 'qmd'],
         tree_hash_before: 'worktree-hash',
         tree_hash_after: 'worktree-hash',
@@ -2433,8 +2485,22 @@ switch (mode) {
         pre_tool_allow: 'ok',
         pre_tool_block: 'ok',
         post_tool: 'ok',
-        stop_main: { status: 'ok', timeout_seconds: 60, duration_ms: 20 },
-        stop_child: { status: 'ok', timeout_seconds: 60, duration_ms: 20 },
+        stop_main: {
+          status: 'ok',
+          timeout_seconds: 60,
+          duration_ms: 20,
+          owner_root: '/fixture/primary',
+          event_cwd: '/fixture/event',
+          command: codexChatCommand('/fixture/primary'),
+        },
+        stop_child: {
+          status: 'ok',
+          timeout_seconds: 60,
+          duration_ms: 20,
+          owner_root: '/fixture/primary',
+          event_cwd: '/fixture/event',
+          command: codexChatCommand('/fixture/primary'),
+        },
       },
       roles: {
         coordinator: { model: 'gpt-5.6-sol', sandbox: 'workspace-write', selected: true },
@@ -2447,6 +2513,9 @@ switch (mode) {
     if (fixture === 'hook-nonzero') evidence.hooks.post_tool = 'failed';
     if (fixture === 'stop-ten-second') evidence.hooks.stop_main.timeout_seconds = 10;
     if (fixture === 'stop-timeout') evidence.hooks.stop_child.duration_ms = 59_000;
+    if (fixture === 'stop-event-inside-owner') {
+      evidence.hooks.stop_main.event_cwd = evidence.primary.path;
+    }
     if (fixture === 'wrong-role') evidence.roles.locator.model = 'gpt-5.6-terra';
     const report = await runWorktreeReadiness({
       root: process.cwd(),

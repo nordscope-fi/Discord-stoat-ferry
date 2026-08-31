@@ -271,6 +271,55 @@ def test_installer_keeps_native_plain_english_artifacts(tmp_path: Path) -> None:
     assert not (root / ".codex/bin/plain-english-chat-hook.mjs").exists()
     assert "npx" not in (root / ".codex/hooks.json").read_text()
     assert "npm exec" not in (root / ".vibe/hooks.toml").read_text()
+    document = json.loads((root / ".codex/hooks.json").read_text())
+    native = [
+        hook
+        for event in ("Stop", "SubagentStop")
+        for group in document["hooks"][event]
+        for hook in group["hooks"]
+        if "plain-english.mjs" in hook["command"]
+    ]
+    expected = f"node '{root}/.codex/hooks/plain-english.mjs' hook chat --agent codex"
+    assert [hook["command"] for hook in native] == [expected, expected]
+    assert all("git rev-parse" not in hook["command"] for hook in native)
+
+
+def test_installed_codex_chat_hooks_run_outside_repository(tmp_path: Path) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    fake_cli = Path(env["PATH"].split(":", 1)[0]) / "plain-english"
+    fake_cli.write_text("#!/bin/sh\nexit 0\n")
+    fake_cli.chmod(0o755)
+    event_cwd = tmp_path / "event-cwd"
+    event_cwd.mkdir()
+    document = json.loads((root / ".codex/hooks.json").read_text())
+
+    for event in ("Stop", "SubagentStop"):
+        native = [
+            hook
+            for group in document["hooks"][event]
+            for hook in group["hooks"]
+            if "plain-english.mjs" in hook["command"]
+        ]
+        assert len(native) == 1
+        result = subprocess.run(
+            ["/bin/sh", "-c", native[0]["command"]],
+            cwd=event_cwd,
+            env=env,
+            input=json.dumps({"hook_event_name": event}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 def test_installer_second_run_preserves_native_bytes_and_modes(tmp_path: Path) -> None:
@@ -285,9 +334,11 @@ def test_installer_second_run_preserves_native_bytes_and_modes(tmp_path: Path) -
     )
     assert first.returncode == 0, first.stderr
     first_snapshot = _generated_host_snapshot(root)
+    linked_root = tmp_path / "linked repo"
+    linked_root.symlink_to(root)
     second = subprocess.run(
         [NODE, "scripts/agent-compat/install-local.mjs"],
-        cwd=root,
+        cwd=linked_root,
         env=env,
         capture_output=True,
         text=True,
@@ -548,7 +599,13 @@ def test_agent_check_gates_only_generated_state_modes_on_the_exact_version(
 
 
 def _alter_plain_english_state(root: Path, fixture: str) -> None:
-    if fixture in {"codex-command", "duplicate-codex-hook", "codex-timeout"}:
+    if fixture in {
+        "codex-command",
+        "duplicate-codex-hook",
+        "codex-timeout",
+        "event-time-git",
+        "outside-codex-launcher",
+    }:
         hooks_path = root / ".codex/hooks.json"
         document = json.loads(hooks_path.read_text())
         native = [
@@ -562,8 +619,19 @@ def _alter_plain_english_state(root: Path, fixture: str) -> None:
             native[0]["command"] += " --changed"
         elif fixture == "duplicate-codex-hook":
             document["hooks"]["Stop"][0]["hooks"].append(dict(native[0]))
-        else:
+        elif fixture == "codex-timeout":
             native[0]["timeout"] = 10
+        elif fixture == "event-time-git":
+            native[0]["command"] = (
+                'node "$(git rev-parse --show-toplevel)/.codex/hooks/plain-english.mjs" '
+                "hook chat --agent codex"
+            )
+        else:
+            outside = root.parent / "outside/plain-english.mjs"
+            outside.parent.mkdir()
+            outside.write_text("process.exit(0);\n")
+            outside.chmod(0o755)
+            native[0]["command"] = f"node '{outside}' hook chat --agent codex"
         hooks_path.write_text(f"{json.dumps(document, indent=2)}\n")
     elif fixture == "missing-codex-launcher":
         (root / ".codex/hooks/plain-english.mjs").unlink()
@@ -589,6 +657,11 @@ def _alter_plain_english_state(root: Path, fixture: str) -> None:
         ("changed-vibe-prompt", "Vibe plain-English artifact differs"),
         ("stale-ferry-wrapper", "stale Ferry plain-English wrapper remains"),
         ("missing-vibe-launcher", "missing Vibe plain-English artifact"),
+        ("event-time-git", "expected one native plain-English chat hook for Stop"),
+        (
+            "outside-codex-launcher",
+            "expected one native plain-English chat hook for Stop",
+        ),
     ],
 )
 def test_agent_check_rejects_native_plain_english_drift(
@@ -659,10 +732,9 @@ def test_agent_check_rejects_a_ten_second_native_chat_hook(tmp_path: Path) -> No
     ]
     assert len(native) == 2
     native[0]["timeout"] = 10
-    probe = tmp_path / "hooks.json"
-    probe.write_text(json.dumps(document))
+    hooks.write_text(json.dumps(document))
     result = subprocess.run(
-        [NODE, "scripts/agent-compat/check.mjs", "--check-codex-hooks", str(probe)],
+        [NODE, "scripts/agent-compat/check.mjs", "--check-codex-hooks", str(hooks)],
         cwd=root,
         env=env,
         capture_output=True,
@@ -676,11 +748,14 @@ def test_agent_check_rejects_a_ten_second_native_chat_hook(tmp_path: Path) -> No
 
 
 def test_native_codex_chat_normalization_is_repeat_safe() -> None:
+    owner = "/fixture/canonical owner"
     stable = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
         "hook-regeneration",
         "current",
+        "--owner",
+        owner,
         "--runs",
         "2",
         "--json",
@@ -688,6 +763,14 @@ def test_native_codex_chat_normalization_is_repeat_safe() -> None:
     assert stable.returncode == 0, stable.stderr
     report = json.loads(stable.stdout)
     assert report["hook_count"] == 2
+    assert (
+        report["commands"]
+        == [
+            "node '/fixture/canonical owner/.codex/hooks/plain-english.mjs' "
+            "hook chat --agent codex",
+        ]
+        * 2
+    )
     assert report["timeouts"] == [60, 60]
 
 
@@ -697,6 +780,8 @@ def test_native_codex_chat_normalization_rejects_upstream_shape_drift() -> None:
         "tests/fixtures/agent_compat_runner.mjs",
         "hook-regeneration",
         "altered-command",
+        "--owner",
+        "/fixture/canonical-owner",
         "--json",
     )
     assert altered.returncode == 1
@@ -709,10 +794,33 @@ def test_native_codex_chat_normalization_rejects_unknown_timeout() -> None:
         "tests/fixtures/agent_compat_runner.mjs",
         "hook-regeneration",
         "timeout-30",
+        "--owner",
+        "/fixture/canonical-owner",
         "--json",
     )
     assert result.returncode == 1
     assert "unexpected plain-English chat timeout for Stop: 30" in result.stderr
+
+
+def test_codex_chat_command_shell_literal_survives_metacharacters(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "hook-command-execution",
+        "current",
+        "--base",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    encoded_token = "a b'\\''c$HOME$(printf expanded)*?[ab]"
+    expected_launcher = f"'{tmp_path}/{encoded_token}/.codex/hooks/plain-english.mjs'"
+    assert report["command"] == (f"node {expected_launcher} hook chat --agent codex")
+    assert report["status"] == 0, report["stderr"]
+    assert json.loads(report["stdout"]) == ["hook", "chat", "--agent", "codex"]
 
 
 def test_worktree_script_names_codex_and_vibe_links() -> None:
@@ -835,6 +943,76 @@ def test_node_entrypoints_run_when_invoked_through_symlinks(tmp_path: Path) -> N
     checker = _run(NODE, str(checker_link), "--ci")
     assert checker.returncode == 0, checker.stderr
     assert "All checks passed" in checker.stdout
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_codex_adapter_modes_run_from_a_non_repository_directory(
+    tmp_path: Path,
+) -> None:
+    adapter = REPO / "scripts/agent-compat/codex-hook-adapter.mjs"
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+    clean = subprocess.run(
+        [NODE, str(adapter), "stop"],
+        cwd=event_cwd,
+        input=json.dumps({"last_assistant_message": "Verification passed."}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert clean.returncode == 0, clean.stderr
+    assert clean.stdout == ""
+
+    contradictory = subprocess.run(
+        [NODE, str(adapter), "stop"],
+        cwd=event_cwd,
+        input=json.dumps({"last_assistant_message": "Fixed. Not yet tested."}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert contradictory.returncode == 0, contradictory.stderr
+    assert json.loads(contradictory.stdout) == {
+        "decision": "block",
+        "reason": (
+            "Completion claimed but unfinished-work language detected. "
+            "Finish the work, file it, or close the task."
+        ),
+    }
+
+    unknown = subprocess.run(
+        [NODE, str(adapter), "bogus-mode"],
+        cwd=event_cwd,
+        input="{}",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unknown.returncode == 1
+    assert 'codex-hook-adapter: unknown mode "bogus-mode"' in unknown.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_codex_adapter_symlink_uses_the_installed_project_root(tmp_path: Path) -> None:
+    adapter_link = tmp_path / "codex-hook-adapter.mjs"
+    adapter_link.symlink_to(REPO / "scripts/agent-compat/codex-hook-adapter.mjs")
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        [NODE, str(adapter_link), "session-start"],
+        cwd=event_cwd,
+        env={**os.environ, "HOME": str(home)},
+        input="{}",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("Discord Ferry v")
 
 
 def test_checker_uses_the_installer_plain_english_command() -> None:
@@ -1458,6 +1636,11 @@ def test_live_worktree_probe_checks_both_stop_events() -> None:
     assert records["hook-post-tool"]["status"] == "ok"
     assert records["stop-main-agent"]["details"]["timeout_seconds"] == 60
     assert records["stop-child-agent"]["details"]["timeout_seconds"] == 60
+    for record_id in ("stop-main-agent", "stop-child-agent"):
+        details = records[record_id]["details"]
+        assert details["owner_root"] == "/fixture/primary"
+        assert details["event_cwd"] == "/fixture/event"
+        assert "git rev-parse" not in details["command"]
     primary = records["primary-session"]["details"]
     worktree = records["worktree-session"]["details"]
     assert primary["markers"] == worktree["markers"]
@@ -1492,6 +1675,7 @@ def test_live_worktree_probe_checks_both_stop_events() -> None:
         ("hook-nonzero", "hook-post-tool"),
         ("stop-ten-second", "stop-main-agent"),
         ("stop-timeout", "stop-child-agent"),
+        ("stop-event-inside-owner", "stop-main-agent"),
         ("wrong-role", "role-locator"),
     ],
 )
