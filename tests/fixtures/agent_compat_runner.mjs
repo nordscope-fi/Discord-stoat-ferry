@@ -12,6 +12,7 @@ import {
   readdirSync,
   realpathSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -222,11 +223,16 @@ function stagedPlainEnglishTimeout(targetAgent) {
   const baseIndex = process.argv.indexOf('--base');
   const base = baseIndex === -1 ? null : process.argv[baseIndex + 1];
   if (!base) throw new Error('--base is required');
+  const owner = join(base, 'generated-owner');
+  const codexHooksPath = join(owner, '.codex', 'hooks.json');
+  mkdirSync(join(owner, '.codex'), { recursive: true });
+  writeFileSync(codexHooksPath, '{}\n');
   const calls = [];
   let timeoutMs = null;
   let killSignal = null;
   let comparisons = 0;
   checkPlainEnglishState({
+    codexHooksPath,
     stageParent: base,
     instructions: '# Fixture instructions\n',
     runInit(stage, agent, options) {
@@ -248,6 +254,7 @@ function stagedPlainEnglishTimeout(targetAgent) {
       comparisons += 1;
     },
   });
+  rmSync(owner, { recursive: true, force: true });
   writeJson({
     calls,
     timeout_ms: timeoutMs,
