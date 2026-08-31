@@ -76,6 +76,7 @@ import {
   requestQwen,
   runQwenReview,
 } from '../../scripts/agent-compat/qwen-review.mjs';
+import * as qwenReview from '../../scripts/agent-compat/qwen-review.mjs';
 import { runClaudeReview } from '../../scripts/agent-compat/claude-review.mjs';
 import {
   advertisesSelfTest,
@@ -915,6 +916,96 @@ switch (mode) {
       });
     } catch (error) {
       writeJson({ ok: false, code: error.code ?? null, message: error.message });
+    }
+    break;
+  }
+  case 'qwen-schema-reason': {
+    if (argument === 'declared') {
+      writeJson({ reasons: qwenReview.QWEN_SCHEMA_FAILURE_REASONS ?? [] });
+      break;
+    }
+    const clean = JSON.stringify({ findings: [], summary: 'clean', confidence: 'high' });
+    const event = ({ model = 'qwen3.8-max', delta = {}, finishReason = null } = {}) =>
+      `data: ${JSON.stringify({
+        id: 'schema-session',
+        ...(model === null ? {} : { model }),
+        choices: [{ delta, finish_reason: finishReason }],
+      })}\n\n`;
+    const streamBody = (source) => {
+      const bytes = new TextEncoder().encode(source);
+      return new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+    };
+    const responseBody = (content) => ({
+      id: 'schema-session',
+      model: 'qwen3.8-max',
+      choices: [{ message: { role: 'assistant', content } }],
+    });
+    try {
+      if (argument === 'stream-body') {
+        await qwenReview.readQwenStream(null);
+      } else if (argument === 'invalid-event') {
+        await qwenReview.readQwenStream(streamBody('data: {\n\n'));
+      } else if (argument === 'missing-done') {
+        await qwenReview.readQwenStream(streamBody([
+          event({ delta: { content: clean } }),
+          event({ finishReason: 'stop' }),
+        ].join('')));
+      } else if (argument === 'trailing-data') {
+        await qwenReview.readQwenStream(streamBody([
+          event({ delta: { content: clean } }),
+          event({ finishReason: 'stop' }),
+          'data: [DONE]\n\ntrailing',
+        ].join('')));
+      } else if (argument === 'missing-model') {
+        await qwenReview.readQwenStream(streamBody([
+          event({ model: null, delta: { content: clean } }),
+          event({ model: null, finishReason: 'stop' }),
+          'data: [DONE]\n\n',
+        ].join('')));
+      } else if (argument === 'length') {
+        await qwenReview.readQwenStream(streamBody([
+          event({ delta: { content: clean } }),
+          event({ finishReason: 'length' }),
+          'data: [DONE]\n\n',
+        ].join('')));
+      } else if (argument === 'missing-content') {
+        await qwenReview.readQwenStream(streamBody([
+          event(),
+          event({ finishReason: 'stop' }),
+          'data: [DONE]\n\n',
+        ].join('')));
+      } else if (argument === 'response-envelope') {
+        parseQwenResponse(null);
+      } else if (argument === 'response-json') {
+        parseQwenResponse(responseBody('{'));
+      } else if (argument === 'response-findings') {
+        parseQwenResponse(responseBody('{"findings":[]}'));
+      } else if (argument === 'response-unclassified') {
+        await runQwenReview({
+          prompt: 'fixture',
+          home: process.cwd(),
+          credential: async () => 'fixture-api-key',
+          request: async () => {
+            const error = new Error('FERRY_SECRET_CANARY');
+            error.code = 'INVALID_SCHEMA';
+            error.failureReason = 'FERRY_SECRET_CANARY';
+            throw error;
+          },
+        });
+      } else {
+        throw new Error(`unknown Qwen schema-reason fixture: ${argument}`);
+      }
+      throw new Error(`Qwen schema-reason fixture did not reject: ${argument}`);
+    } catch (error) {
+      writeJson({
+        code: error.code ?? null,
+        failure_reason: error.failureReason ?? null,
+      });
     }
     break;
   }

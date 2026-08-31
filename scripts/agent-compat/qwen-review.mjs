@@ -7,10 +7,14 @@ import {
   buildReviewPrompt,
   classifyReviewFailure,
   FINDINGS_SCHEMA,
+  isQwenSchemaFailureReason,
   makeReviewRecord,
   parseJsonText,
+  QWEN_SCHEMA_FAILURE_REASONS,
   validateFindings,
 } from './review-contract.mjs';
+
+export { QWEN_SCHEMA_FAILURE_REASONS };
 
 export const QWEN_MODEL = 'qwen3.8-max';
 export const QWEN_URL =
@@ -21,7 +25,6 @@ export const QWEN_DEADLINES = Object.freeze({
   idleMs: 30000,
   totalMs: 600000,
 });
-
 export function qwenRequestBody(prompt) {
   return {
     model: QWEN_MODEL,
@@ -44,9 +47,10 @@ export function qwenRequestBody(prompt) {
   };
 }
 
-function reviewError(code, message = 'Qwen response was invalid') {
+function reviewError(code, failureReason = null, message = 'Qwen response was invalid') {
   const error = new Error(message);
   error.code = code;
+  error.failureReason = failureReason;
   return error;
 }
 
@@ -133,12 +137,12 @@ function parseQwenEvent(data) {
   try {
     const event = JSON.parse(data);
     if (!event || typeof event !== 'object' || Array.isArray(event)) {
-      throw reviewError('INVALID_SCHEMA');
+      throw reviewError('INVALID_SCHEMA', 'stream-event');
     }
     return event;
   } catch (error) {
     if (error?.code === 'INVALID_SCHEMA') throw error;
-    throw reviewError('INVALID_SCHEMA');
+    throw reviewError('INVALID_SCHEMA', 'stream-event');
   }
 }
 
@@ -148,7 +152,9 @@ export async function readQwenStream(body, {
   schedule = setTimeout,
   cancel = clearTimeout,
 } = {}) {
-  if (!body || typeof body.getReader !== 'function') throw reviewError('INVALID_SCHEMA');
+  if (!body || typeof body.getReader !== 'function') {
+    throw reviewError('INVALID_SCHEMA', 'stream-body');
+  }
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -204,10 +210,13 @@ export async function readQwenStream(body, {
     if (idleTimer !== null) cancel(idleTimer);
   }
   buffer += decoder.decode();
-  if (!completed || buffer.trim() || resolvedModel !== QWEN_MODEL ||
-      finishReason !== 'stop' || !content) {
-    throw reviewError('INVALID_SCHEMA');
+  if (!completed) throw reviewError('INVALID_SCHEMA', 'stream-completion');
+  if (buffer.trim()) throw reviewError('INVALID_SCHEMA', 'stream-trailing-data');
+  if (resolvedModel !== QWEN_MODEL) throw reviewError('INVALID_SCHEMA', 'stream-model');
+  if (finishReason !== 'stop') {
+    throw reviewError('INVALID_SCHEMA', 'stream-finish-reason');
   }
+  if (!content) throw reviewError('INVALID_SCHEMA', 'stream-content');
   return {
     id: sessionId,
     model: resolvedModel,
@@ -261,18 +270,22 @@ export async function requestQwen({
 
 export function parseQwenResponse(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw reviewError('INVALID_SCHEMA');
+    throw reviewError('INVALID_SCHEMA', 'response-envelope');
   }
   if (body.model !== QWEN_MODEL) throw reviewError('WRONG_MODEL');
   const text = body.choices?.[0]?.message?.content;
-  if (typeof text !== 'string') throw reviewError('INVALID_SCHEMA');
+  if (typeof text !== 'string') {
+    throw reviewError('INVALID_SCHEMA', 'response-envelope');
+  }
   let result;
   try {
     result = parseJsonText(text, 'Qwen response');
   } catch {
-    throw reviewError('INVALID_SCHEMA');
+    throw reviewError('INVALID_SCHEMA', 'response-json');
   }
-  if (!validateFindings(result)) throw reviewError('INVALID_SCHEMA');
+  if (!validateFindings(result)) {
+    throw reviewError('INVALID_SCHEMA', 'response-findings');
+  }
   return { result, sessionId: typeof body.id === 'string' ? body.id : null };
 }
 
@@ -290,6 +303,11 @@ function responseFailure(error, { durationMs = 0, stage = 'qwen-response' } = {}
   wrapped.durationMs = durationMs;
   wrapped.classification = classification;
   wrapped.httpStatus = Number.isInteger(error?.httpStatus) ? error.httpStatus : null;
+  wrapped.failureReason = classification === 'schema'
+    ? isQwenSchemaFailureReason(error?.failureReason)
+      ? error.failureReason
+      : 'response-unclassified'
+    : null;
   if (classification === 'timeout') wrapped.code = 'ETIMEDOUT';
   else if (classification === 'schema') wrapped.code = 'INVALID_SCHEMA';
   else if (classification === 'wrong-model') wrapped.code = 'WRONG_MODEL';
