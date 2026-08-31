@@ -373,12 +373,17 @@ function validPlanLedger(route, ledger) {
     && latest.resolved_model === record?.resolved_model
     && latest.session_id === record?.session_id
     && latest.failure_class === (record?.failure_class ?? null)
+    && latest.failure_reason === (record?.failure_reason ?? null)
     && latest.record_sha256 === reviewRecordDigest(record);
 }
 
 function validFailedPlanRecord(route, record) {
   const selectedSlot = PLAN_SLOTS.get(route?.selected_provider);
   const expectedRequestedModel = PLAN_REQUESTED_MODELS.get(selectedSlot);
+  const validFailureReason = route?.selected_provider === 'qwen'
+    && record?.failure_class === 'schema'
+    ? isQwenSchemaFailureReason(record?.failure_reason)
+    : record?.failure_reason === null;
   return route?.accepted === null
     && Array.isArray(route.attempts)
     && route.attempts.length === 1
@@ -391,6 +396,7 @@ function validFailedPlanRecord(route, record) {
     && record.substitution_for === null
     && record.substitution_reason === null
     && FAILURE_CLASSES.has(record.failure_class)
+    && validFailureReason
     && route.automatic_opus_calls === 0
     && route.owner_selected_opus_calls === (route.selected_provider === 'opus' ? 1 : 0);
 }
@@ -429,6 +435,7 @@ export function evaluatePlanGate(
       warning: {
         failure_class: attempt.failure_class,
         failure_stage: attempt.failure_stage ?? null,
+        failure_reason: attempt.failure_reason ?? null,
         http_status: attempt.http_status ?? null,
         duration_ms: attempt.duration_ms,
       },
