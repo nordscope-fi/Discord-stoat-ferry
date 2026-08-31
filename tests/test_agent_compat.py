@@ -3136,15 +3136,79 @@ def test_plan_gate_treats_a_failed_selected_reviewer_as_advisory() -> None:
         "--json",
     )
     assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout)
+    report = json.loads(result.stdout)["decision"]
     assert report["ready"] is True
     assert report["decision_required"] is False
     assert report["warning"] == {
-        "failure_class": "timeout",
-        "failure_stage": "total-timeout",
+        "failure_class": "schema",
+        "failure_stage": "qwen-response",
+        "failure_reason": "response-findings",
         "http_status": None,
         "duration_ms": 4,
     }
+
+
+def test_plan_gate_preserves_safe_failure_reason() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        "failure-advisory",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["decision"]["ready"] is True
+    assert report["decision"]["warning"]["failure_reason"] == "response-findings"
+    assert report["ledger_attempt"]["failure_reason"] == "response-findings"
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["altered-failure-reason", "missing-failure-reason"],
+)
+def test_plan_gate_rejects_altered_failure_reason(fixture: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == {
+        "ready": False,
+        "reason": "invalid plan review ledger",
+        "minor_findings": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("fixture", "reason"),
+    [
+        ("undeclared-record-failure-reason", "invalid plan review record"),
+        ("missing-record-failure-reason", "invalid plan review ledger"),
+        ("non-schema-record-failure-reason", "invalid plan review record"),
+    ],
+)
+def test_plan_gate_rejects_invalid_record_failure_reason(
+    fixture: str,
+    reason: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == {
+        "ready": False,
+        "reason": reason,
+        "minor_findings": [],
+    }
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
 def test_plan_gate_ignores_an_inconclusive_finding() -> None:

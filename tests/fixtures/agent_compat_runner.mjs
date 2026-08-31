@@ -1894,14 +1894,23 @@ switch (mode) {
         requestedModel: 'qwen3.8-max',
         sessionId: null,
         durationMs: 4,
-        status: 'timed_out',
+        status: 'failed',
       }),
-      failure_class: 'timeout',
-      failure_stage: 'total-timeout',
+      failure_class: 'schema',
+      failure_stage: 'qwen-response',
       http_status: null,
+      failure_reason: 'response-findings',
     };
-    const selectedRecord = argument === 'failure-advisory' ? failedRecord : validRecord;
-    const round = argument === 'failure-advisory' ? 1 : 2;
+    const failureVariants = new Set([
+      'failure-advisory',
+      'altered-failure-reason',
+      'missing-failure-reason',
+      'undeclared-record-failure-reason',
+      'missing-record-failure-reason',
+      'non-schema-record-failure-reason',
+    ]);
+    const selectedRecord = failureVariants.has(argument) ? failedRecord : validRecord;
+    const round = failureVariants.has(argument) ? 1 : 2;
     const route = {
       policy: 'ferry-bounded-plan-v4',
       plan_id: planId,
@@ -1924,6 +1933,7 @@ switch (mode) {
       resolved_model: record.resolved_model,
       session_id: record.session_id,
       failure_class: record.failure_class ?? null,
+      failure_reason: record.failure_reason ?? null,
       record_sha256: createHash('sha256').update(JSON.stringify(record)).digest('hex'),
     });
     const ledger = {
@@ -1950,6 +1960,33 @@ switch (mode) {
     if (argument === 'altered-route') {
       route.accepted.findings[0].description = 'altered after the ledger was written';
     }
+    if (argument === 'altered-failure-reason') {
+      ledger.attempts[0].failure_reason = 'response-json';
+    }
+    if (argument === 'missing-failure-reason') {
+      delete ledger.attempts[0].failure_reason;
+    }
+    if (argument === 'undeclared-record-failure-reason') {
+      selectedRecord.failure_reason = 'FERRY_SECRET_CANARY';
+      ledger.attempts[0].failure_reason = selectedRecord.failure_reason;
+      ledger.attempts[0].record_sha256 = createHash('sha256')
+        .update(JSON.stringify(selectedRecord)).digest('hex');
+    }
+    if (argument === 'missing-record-failure-reason') {
+      delete selectedRecord.failure_reason;
+      delete ledger.attempts[0].failure_reason;
+      ledger.attempts[0].record_sha256 = createHash('sha256')
+        .update(JSON.stringify(selectedRecord)).digest('hex');
+    }
+    if (argument === 'non-schema-record-failure-reason') {
+      selectedRecord.status = 'timed_out';
+      selectedRecord.failure_class = 'timeout';
+      selectedRecord.failure_stage = 'total-timeout';
+      ledger.attempts[0].status = selectedRecord.status;
+      ledger.attempts[0].failure_class = selectedRecord.failure_class;
+      ledger.attempts[0].record_sha256 = createHash('sha256')
+        .update(JSON.stringify(selectedRecord)).digest('hex');
+    }
     const decision = evaluatePlanGate(
       route,
       selectedRecord.status === 'valid'
@@ -1958,7 +1995,19 @@ switch (mode) {
       inputSha256,
       { ledger, ownerDecision },
     );
-    writeJson(decision);
+    const ledgerOutputVariants = new Set([
+      'failure-advisory',
+      'altered-failure-reason',
+      'missing-failure-reason',
+    ]);
+    writeJson(failureVariants.has(argument)
+      ? {
+          decision,
+          ...(ledgerOutputVariants.has(argument)
+            ? { ledger_attempt: ledger.attempts.at(-1) }
+            : {}),
+        }
+      : decision);
     break;
   }
   case 'plan-args': {
