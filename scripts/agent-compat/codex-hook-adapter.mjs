@@ -5,13 +5,19 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { routesFor } from './hook-parity.mjs';
 import { isDestructiveGitCommand } from './destructive-git.mjs';
 
 const mode = process.argv[2];
-const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
+
+export function installedProjectRoot(moduleUrl = import.meta.url) {
+  const modulePath = realpathSync(fileURLToPath(moduleUrl));
+  return resolve(dirname(modulePath), '..', '..');
+}
+
+const projectRoot = installedProjectRoot();
 const userHooksDir = join(process.env.HOME, '.claude', 'hooks');
 
 let input;

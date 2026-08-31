@@ -2,14 +2,23 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const EXPECTED_PLAIN_ENGLISH_VERSION = '1.0.0';
 export const PLAIN_ENGLISH_RECOVERY = 'npm install -g plain-english@1.0.0';
-export const CODEX_CHAT_COMMAND =
+export const UPSTREAM_CODEX_CHAT_COMMAND =
   'node "$(git rev-parse --show-toplevel)/.codex/hooks/plain-english.mjs" ' +
   'hook chat --agent codex';
+
+export function shellSingleQuoted(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function codexChatCommand(ownerRoot) {
+  const launcher = join(ownerRoot, '.codex', 'hooks', 'plain-english.mjs');
+  return `node ${shellSingleQuoted(launcher)} hook chat --agent codex`;
+}
 
 const VERSION_SHAPE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 
@@ -65,11 +74,13 @@ export function stripVibeIssueChannel(content) {
   ).join('').replace(/\n{3,}/gu, '\n\n');
 }
 
-export function normalizeCodexChatHooks(document) {
+export function normalizeCodexChatHooks(document, ownerRoot) {
+  const targetCommand = codexChatCommand(ownerRoot);
   for (const event of ['Stop', 'SubagentStop']) {
     const matches = (document.hooks?.[event] ?? [])
       .flatMap((group) => group.hooks ?? [])
-      .filter((hook) => hook.command === CODEX_CHAT_COMMAND);
+      .filter((hook) =>
+        [UPSTREAM_CODEX_CHAT_COMMAND, targetCommand].includes(hook.command));
     if (matches.length !== 1) {
       throw new Error(
         `expected one native plain-English chat hook for ${event}; found ${matches.length}`,
@@ -80,6 +91,7 @@ export function normalizeCodexChatHooks(document) {
         `unexpected plain-English chat timeout for ${event}: ${matches[0].timeout}`,
       );
     }
+    matches[0].command = targetCommand;
     matches[0].timeout = 60;
   }
   return document;

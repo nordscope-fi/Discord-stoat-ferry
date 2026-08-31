@@ -73,6 +73,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Codex completion hooks no longer depend on the current directory.** Main-agent and child-agent
+  checks now use their generated Ferry paths, so finishing work outside the checkout does not
+  produce a generic hook process failure.
+
 - **Qwen review findings now survive rejected verification commands.** Provider records validate
   response structure, while the local guard blocks unsafe commands as inconclusive findings. The
   live readiness check now proves one non-empty authorized Qwen finding.

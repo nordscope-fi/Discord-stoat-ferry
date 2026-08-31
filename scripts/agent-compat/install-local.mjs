@@ -214,7 +214,7 @@ async function main() {
     const codexHooksPath = join(projectRoot, '.codex', 'hooks.json');
     const codexHooks = JSON.parse(readFileSync(codexHooksPath, 'utf8'));
     removeUnusedIssueChannel(codexHooks);
-    normalizeCodexChatHooks(codexHooks);
+    normalizeCodexChatHooks(codexHooks, projectRoot);
     writeFileSync(codexHooksPath, `${JSON.stringify(codexHooks, null, 2)}\n`, { mode: 0o600 });
   }
   console.log('  installed native plain-English launchers and preserved linked host owners');
