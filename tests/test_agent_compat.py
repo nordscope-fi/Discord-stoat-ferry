@@ -2288,19 +2288,33 @@ def test_qwen_review_progress_completes_inside_idle_deadline() -> None:
 
 
 @pytest.mark.parametrize(
-    ("fixture", "status", "failure_class", "stage", "http_status"),
+    (
+        "fixture",
+        "status",
+        "failure_class",
+        "stage",
+        "http_status",
+        "failure_reason",
+    ),
     [
-        ("timeout", "timed_out", "timeout", "qwen-response", None),
-        ("credential", "failed", "credential", "qwen-credential", None),
-        ("wrong-model", "failed", "wrong-model", "qwen-response", None),
-        ("schema", "failed", "schema", "qwen-response", None),
-        ("http-401", "failed", "credential", "qwen-response", 401),
-        ("http-403", "failed", "credential", "qwen-response", 403),
-        ("http-429", "failed", "rate-limit", "qwen-response", 429),
-        ("http-400", "failed", "request", "qwen-response", 400),
-        ("http-500", "failed", "provider", "qwen-response", 500),
-        ("http-502", "failed", "provider", "qwen-response", 502),
-        ("unknown", "failed", "unknown", "qwen-response", None),
+        ("timeout", "timed_out", "timeout", "qwen-response", None, None),
+        ("credential", "failed", "credential", "qwen-credential", None, None),
+        ("wrong-model", "failed", "wrong-model", "qwen-response", None, None),
+        (
+            "schema",
+            "failed",
+            "schema",
+            "qwen-response",
+            None,
+            "response-findings",
+        ),
+        ("http-401", "failed", "credential", "qwen-response", 401, None),
+        ("http-403", "failed", "credential", "qwen-response", 403, None),
+        ("http-429", "failed", "rate-limit", "qwen-response", 429, None),
+        ("http-400", "failed", "request", "qwen-response", 400, None),
+        ("http-500", "failed", "provider", "qwen-response", 500, None),
+        ("http-502", "failed", "provider", "qwen-response", 502, None),
+        ("unknown", "failed", "unknown", "qwen-response", None, None),
     ],
 )
 def test_qwen_failure_record_keeps_safe_diagnostics(
@@ -2309,6 +2323,7 @@ def test_qwen_failure_record_keeps_safe_diagnostics(
     failure_class: str,
     stage: str,
     http_status: int | None,
+    failure_reason: str | None,
 ) -> None:
     result = _run(
         "node",
@@ -2325,7 +2340,24 @@ def test_qwen_failure_record_keeps_safe_diagnostics(
         assert route["failure_stage"] == stage
         assert route["http_status"] == http_status
         assert route["duration_ms"] == 25
+        assert route["failure_reason"] == failure_reason
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_failure_reason_is_null_outside_qwen_schema_failures() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "provider-failure-reasons",
+        "matrix",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["vibe_schema"]["failure_reason"] is None
+    assert report["opus_schema"]["failure_reason"] is None
+    assert "failure_reason" not in report["qwen_valid"]
+    assert "failure_reason" not in report["vibe_valid"]
 
 
 def test_qwen_review_redacts_an_injected_response_and_error() -> None:

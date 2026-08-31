@@ -1154,6 +1154,65 @@ switch (mode) {
     writeJson({ advisory: advisory.slots.qwen, plan: plan.attempts[0] });
     break;
   }
+  case 'provider-failure-reasons': {
+    if (argument !== 'matrix') throw new Error('invalid provider failure-reason fixture');
+    const clean = { findings: [], summary: 'clean', confidence: 'high' };
+    const vibeRecord = () => makeReviewRecord({
+      adapter: 'vibe',
+      slot: 'mistral-vibe',
+      requestedModel: 'zai-glm-5-2',
+      resolvedModel: 'zai-glm-5-2',
+      sessionId: 'vibe-session',
+      durationMs: 1,
+      status: 'valid',
+      result: clean,
+    });
+    const qwenRecord = () => makeReviewRecord({
+      adapter: 'qwen-api',
+      slot: 'qwen',
+      requestedModel: 'qwen3.8-max',
+      resolvedModel: 'qwen3.8-max',
+      sessionId: 'qwen-session',
+      durationMs: 1,
+      status: 'valid',
+      result: clean,
+    });
+    const failedVibe = await runEnsemble({ prompt: 'fixture' }, {
+      vibe: async () => ({ ...vibeRecord(), confidence: 'certain' }),
+      qwen: async () => qwenRecord(),
+    });
+    const validProviders = await runEnsemble({ prompt: 'fixture' }, {
+      vibe: async () => vibeRecord(),
+      qwen: async () => qwenRecord(),
+    });
+    const failedOpus = await runPlanReview({
+      request: { prompt: 'fixture' },
+      inputSha256: reviewInputDigest('fixture'),
+      selectedProvider: 'opus',
+      adapters: {
+        opus: async () => ({
+          ...makeReviewRecord({
+            adapter: 'claude',
+            slot: 'plan-opus',
+            requestedModel: 'opus',
+            resolvedModel: 'claude-opus-5',
+            sessionId: 'opus-session',
+            durationMs: 1,
+            status: 'valid',
+            result: clean,
+          }),
+          confidence: 'certain',
+        }),
+      },
+    });
+    writeJson({
+      vibe_schema: failedVibe.slots['mistral-vibe'],
+      opus_schema: failedOpus.attempts[0],
+      qwen_valid: failedVibe.slots.qwen,
+      vibe_valid: validProviders.slots['mistral-vibe'],
+    });
+    break;
+  }
   case 'claude-review': {
     if (argument !== 'canary-child-error') throw new Error('invalid Claude fixture');
     try {

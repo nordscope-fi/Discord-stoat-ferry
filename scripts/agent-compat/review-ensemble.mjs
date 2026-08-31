@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url';
 import {
   buildReviewPrompt,
   classifyReviewFailure,
+  isQwenSchemaFailureReason,
   makeReviewRecord,
   reviewInputDigest,
   reviewRecordDigest,
@@ -195,6 +196,7 @@ function completePlanReviewAttempt({ ledgerPath, root, round, inputSha256, recor
       resolved_model: record.resolved_model,
       session_id: record.session_id,
       failure_class: record.failure_class ?? null,
+      failure_reason: record.failure_reason ?? null,
       record_sha256: reviewRecordDigest(record),
     });
     writePlanLedger(checkedPath, ledger);
@@ -242,6 +244,11 @@ function fulfilledFailure(record, provider) {
 
 function failedProviderRecord(provider, error) {
   const failureClass = classifyReviewFailure(error);
+  const failureReason = provider.call === 'qwen' && failureClass === 'schema'
+    ? isQwenSchemaFailureReason(error?.failureReason)
+      ? error.failureReason
+      : 'response-unclassified'
+    : null;
   return {
     ...makeReviewRecord({
       adapter: provider.adapter,
@@ -254,6 +261,7 @@ function failedProviderRecord(provider, error) {
     failure_class: failureClass,
     failure_stage: typeof error?.stage === 'string' ? error.stage : null,
     http_status: Number.isInteger(error?.httpStatus) ? error.httpStatus : null,
+    failure_reason: failureReason,
   };
 }
 
