@@ -73,6 +73,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Qwen schema failures preserve a safe rejection reason.** Failed advisory and plan records now
+  distinguish stream framing, response JSON, and findings validation without retaining provider
+  content. Existing failure fields and valid review records keep their prior contract.
+
 - **Codex completion hooks no longer depend on the current directory.** Main-agent and child-agent
   checks now use their generated Ferry paths, so finishing work outside the checkout does not
   produce a generic hook process failure.
