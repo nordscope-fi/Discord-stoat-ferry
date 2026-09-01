@@ -96,7 +96,7 @@ async def test_upload_to_autumn_429_retry(tmp_path: Path, mock_aiohttp: aiorespo
 
 
 async def test_upload_to_autumn_server_error_retry(
-    tmp_path: Path, mock_aiohttp: aioresponses
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
 ) -> None:
     """A 502 response is retried; a subsequent 200 returns the file ID."""
     file = tmp_path / "doc.pdf"
@@ -109,10 +109,11 @@ async def test_upload_to_autumn_server_error_retry(
         result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
 
     assert result == "abc999"
+    assert slept == [2]
 
 
 async def test_upload_to_autumn_retries_exhausted(
-    tmp_path: Path, mock_aiohttp: aioresponses
+    tmp_path: Path, mock_aiohttp: aioresponses, slept: list[float]
 ) -> None:
     """Three consecutive 502 responses exhaust retries and raise AutumnUploadError."""
     file = tmp_path / "data.bin"
@@ -124,6 +125,7 @@ async def test_upload_to_autumn_retries_exhausted(
     async with aiohttp.ClientSession() as session:
         with pytest.raises(AutumnUploadError, match="Upload failed after"):
             await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+    assert slept == [2, 2]
 
 
 async def test_upload_to_autumn_413_specific_message(
