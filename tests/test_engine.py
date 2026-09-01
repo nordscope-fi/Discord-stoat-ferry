@@ -4114,6 +4114,12 @@ async def _repair_with_state(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
         )
+        m.post(
+            re.compile(r".*/channels/01JSTOATCHN000000000NEW/messages"),
+            status=400,
+            body="intentional resend failure",
+            repeat=True,
+        )
         await run_repair(config, state, exports, events.append)
     return state, events
 
