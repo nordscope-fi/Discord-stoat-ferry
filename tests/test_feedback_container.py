@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -74,6 +76,28 @@ def _docker_available() -> bool:
     return result.returncode == 0
 
 
+def _require_docker() -> None:
+    if _docker_available():
+        return
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail("Docker daemon is unavailable on GitHub Actions")
+    pytest.skip("Docker daemon is unavailable")
+
+
+def test_docker_unavailable_skips_locally(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_docker_available", lambda: False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="Docker daemon is unavailable"):
+        _require_docker()
+
+
+def test_docker_unavailable_fails_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_docker_available", lambda: False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with pytest.raises(pytest.fail.Exception, match="Docker daemon is unavailable"):
+        _require_docker()
+
+
 def _free_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -89,8 +113,8 @@ def _private_key() -> str:
     ).decode()
 
 
-@pytest.mark.skipif(not _docker_available(), reason="Docker daemon is unavailable")
 def test_feedback_container_runs_read_only_with_only_data_writable() -> None:
+    _require_docker()
     tag = f"discord-ferry-feedback-test:{time.time_ns()}"
     name = f"discord-ferry-feedback-test-{time.time_ns()}"
     volume = f"{name}-data"
