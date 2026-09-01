@@ -90,6 +90,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Required Python checks finish faster without dropping coverage.** Test-only API state
+  isolation and bounded retry-wait repairs let each existing Python job run its full owned suite
+  across four workers. Python 3.11, 3.12, and 3.13, both CI triggers, required status names, and
+  every pre-existing test remain.
+
 - **Coolify can verify the feedback container before routing traffic.** The runtime image now
   includes the HTTP client used by Coolify's `/health` deployment check.
 
