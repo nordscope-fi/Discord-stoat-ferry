@@ -24,10 +24,6 @@ from discord_ferry.core.engine import (
     run_rollback,
 )
 from discord_ferry.errors import MigrationError
-from discord_ferry.migrator.api import (
-    _reset_circuit_state,
-    _reset_rate_state,
-)
 from discord_ferry.state import (
     MigrationState,
     RollbackProgress,
@@ -43,25 +39,6 @@ BASE_URL = "https://api.test"
 TOKEN = "test-session-token"
 SERVER_ID = "srv01"
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _clean_circuit() -> None:  # type: ignore[misc]
-    """Reset circuit breaker + rate state + semaphore between tests."""
-    import discord_ferry.migrator.api as _api_mod
-
-    _reset_circuit_state()
-    _reset_rate_state()
-    _api_mod._request_semaphore = None
-    yield  # type: ignore[misc]
-    _reset_circuit_state()
-    _reset_rate_state()
-    _api_mod._request_semaphore = None
 
 
 @pytest.fixture
