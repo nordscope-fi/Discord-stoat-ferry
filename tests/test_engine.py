@@ -1218,6 +1218,55 @@ async def test_validation_calls_run_check(tmp_path: Path) -> None:
     assert state.validation_results["counts"]["ok"] == 1
     saved = load_state(tmp_path)
     assert saved.validation_results["schema_version"] == 1
+    validation_completed = next(
+        index
+        for index, event in enumerate(events)
+        if event.phase == "validate_migration" and event.status == "completed"
+    )
+    report_completed = next(
+        index
+        for index, event in enumerate(events)
+        if event.phase == "report" and event.status == "completed"
+    )
+    assert validation_completed < report_completed
+    written_report = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    assert written_report["validation"] == state.validation_results
+
+
+async def test_validation_cancellation_skips_report_publication(tmp_path: Path) -> None:
+    """Cancel during validation returns without publishing a completed report."""
+    cancel = asyncio.Event()
+    events: list[MigrationEvent] = []
+
+    async def set_server_id(
+        config: FerryConfig,
+        state: MigrationState,
+        exports: list,
+        emit: EventCallback,
+    ) -> None:
+        state.stoat_server_id = STOAT_SERVER_ID
+
+    mock_report = CheckReport()
+    mock_report.add(
+        name="general",
+        status="ok",
+        kind="channel_present",
+        detail="found",
+    )
+
+    async def cancel_during_check(*args: object) -> CheckReport:
+        cancel.set()
+        return mock_report
+
+    config = _make_config(tmp_path, validate_after=True, cancel_event=cancel)
+    overrides = {**_NOOP_OVERRIDES, "connect": set_server_id}
+
+    with patch("discord_ferry.migrator.verify.run_check", side_effect=cancel_during_check):
+        state = await run_migration(config, events.append, phase_overrides=overrides)
+
+    assert state.validation_results["has_failures"] is False
+    assert not any(event.phase == "report" and event.status == "completed" for event in events)
+    assert not (tmp_path / "migration_report.json").exists()
 
 
 async def test_validation_reports_failures(tmp_path: Path) -> None:
