@@ -9,6 +9,7 @@ full build-and-inspect smoke test exists.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,41 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 # draft of these tests inspect icon code and pass vacuously. The `\n` cannot match
 # inside `elif` because the character before `if` is `l`, not a newline.
 _DARWIN_BRANCH = '\nif sys.platform == "darwin":'
+
+
+def test_feedback_minor_release_surfaces_agree() -> None:
+    """The feature release and its public promises move as one contract."""
+
+    expected = "2.38.0"
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    runtime = (_REPO_ROOT / "src" / "discord_ferry" / "__init__.py").read_text(encoding="utf-8")
+    changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert pyproject["project"]["version"] == expected
+    assert f'__version__ = "{expected}"' in runtime
+    root_records = [item for item in lock["package"] if item["name"] == "discord-ferry"]
+    assert len(root_records) == 1
+    assert root_records[0]["version"] == expected
+
+    added_source = changelog.split("## [Unreleased]", 1)[1].split("### Changed", 1)[0]
+    added = " ".join(added_source.casefold().split())
+    for promise in (
+        "feedback",
+        "ferry feedback",
+        "app",
+        "issue",
+        "discussion",
+        "public preview",
+        "diagnostics",
+        "private contact",
+        "retry",
+        "copy",
+        "save",
+        "coolify",
+        "personal apps",
+    ):
+        assert promise in added, f"Unreleased Added does not cover {promise!r}"
 
 
 def _fails_the_build_after(text: str, anchor: str, terminator: str) -> bool:

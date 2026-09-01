@@ -33,6 +33,7 @@ from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import CheckError, MigrationError, StateError
+from discord_ferry.feedback_cli import _print_feedback_hint, run_feedback_cli
 from discord_ferry.migrator.api import init_request_semaphore
 from discord_ferry.migrator.structure import run_role_backfill
 from discord_ferry.parser.dce_parser import (
@@ -661,6 +662,16 @@ def main(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
+@main.command("feedback")
+def feedback_command() -> None:
+    """Share a Bug, Idea, or General comment.
+
+    Reports can be anonymous. Your report and any diagnostics you choose to
+    include become public on GitHub. You can review everything before sending.
+    """
+    asyncio.run(run_feedback_cli())
+
+
 @main.command()
 @_add_options(_common_options)
 def migrate(**kwargs: Any) -> None:
@@ -710,6 +721,7 @@ def migrate(**kwargs: Any) -> None:
             final_state = asyncio.run(run_migration(config, on_event=tracker.on_event))
     except MigrationError as exc:
         console.print(f"\n[bold red]Migration failed:[/] {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/] State saved — use --resume to continue.")
@@ -744,6 +756,7 @@ def validate(export_dir: str, rate_limit: float) -> None:
 
     if not exports:
         console.print("[bold red]Error:[/] No valid DCE JSON files found.")
+        _print_feedback_hint()
         sys.exit(1)
 
     guild_name = exports[0].guild.name
@@ -767,6 +780,7 @@ def validate(export_dir: str, rate_limit: float) -> None:
     reason = acknowledgement_required(warnings)
     if reason is not None:
         console.print(f"\n[bold red]{_safe(reason)}[/]")
+        _print_feedback_hint()
         sys.exit(1)
     else:
         console.print("[bold green]Export looks good.[/]")
@@ -842,6 +856,7 @@ def build(
         server_id = asyncio.run(run_build(stoat_url, token, bp, _on_event))
     except MigrationError as exc:
         console.print(f"\n[bold red]Build failed:[/] {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(1)
     console.print(f"\n[bold green]Done![/] Server '{_safe(bp.name)}' created ({server_id})")
 
@@ -869,6 +884,7 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
     exports = parse_export_directory(Path(from_dir))
     if not exports:
         console.print("[bold red]Error:[/] No valid DCE JSON files found.")
+        _print_feedback_hint()
         sys.exit(1)
 
     bp = blueprint_from_exports(exports, name)
@@ -898,6 +914,7 @@ def stats(output_dir: str) -> None:
         state = load_state(Path(output_dir))
     except StateError as e:
         console.print(f"[bold red]Error:[/] {_safe(e)}")
+        _print_feedback_hint()
         sys.exit(1)
 
     summary = summarize_state(state)
@@ -1148,6 +1165,7 @@ def rollback_cmd(
         state = load_state(out_path)
     except StateError as exc:
         console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(2)
 
     config = FerryConfig(
@@ -1176,6 +1194,7 @@ def rollback_cmd(
 
         # Exit code reflects rollback outcome.
         if state.rollback_progress is not None and state.rollback_progress.failures:
+            _print_feedback_hint()
             sys.exit(1)
 
     _print_proxy_notices()
@@ -1184,6 +1203,7 @@ def rollback_cmd(
         asyncio.run(_runner())
     except MigrationError as exc:
         console.print(f"\n[bold red]Rollback failed:[/] {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(1)
     except click.exceptions.Abort:
         console.print("\n[yellow]Aborted.[/]")
@@ -1256,6 +1276,8 @@ def probe_cmd(
         colour = {"ok": "green", "warn": "yellow", "fail": "red"}.get(c.status, "white")
         table.add_row(escape(c.name), f"[{colour}]{c.status}[/]", escape(c.detail))
     console.print(table)
+    if any(check.status == "fail" for check in report.checks):
+        _print_feedback_hint()
 
 
 @main.command(name="check")
@@ -1314,12 +1336,14 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None, as_json
         state = load_state(Path(output_dir))
     except StateError as exc:
         console.print(f"[bold red]Error:[/] {_safe(exc)}")
+        _print_feedback_hint(to_stderr=as_json)
         sys.exit(1)
 
     try:
         report = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
     except (CheckError, MigrationError) as exc:
         console.print(f"[bold red]Cannot check this migration:[/] {_safe(exc)}")
+        _print_feedback_hint(to_stderr=as_json)
         sys.exit(1)
 
     if as_json:
@@ -1330,6 +1354,8 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None, as_json
         click.echo(json.dumps(report.to_dict()))
     else:
         _render_check_report(report, state.thread_strategy)
+    if report.has_failures and not as_json:
+        _print_feedback_hint()
     sys.exit(1 if report.has_failures else 0)
 
 
@@ -1462,6 +1488,7 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
         state = load_state(out_path)
     except StateError as exc:
         console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(2)
 
     # The export is NOT optional and NOT a placeholder, which is the whole point
@@ -1478,6 +1505,7 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     # they cannot copy. Same mechanism as issue #145, which was about JSON.
     if not export_path.exists():
         click.echo(f"Error: export directory not found: {export_path}", err=True)
+        _print_feedback_hint(to_stderr=True)
         sys.exit(2)
     try:
         exports = parse_export_directory(export_path)
@@ -1488,6 +1516,7 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
         # not a redaction step and never was: the export holds no Stoat token,
         # and documents are redacted at their writer.
         click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        _print_feedback_hint(to_stderr=True)
         sys.exit(2)
 
     config = FerryConfig(
@@ -1508,11 +1537,14 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
         asyncio.run(run_retry_failed(config, state, exports, _on_event))
     except MigrationError as exc:
         console.print(f"\n[bold red]Retry failed:[/] {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/] State saved — re-run to continue.")
         sys.exit(130)
 
+    if state.failed_messages:
+        _print_feedback_hint()
     sys.exit(1 if state.failed_messages else 0)
 
 
@@ -1605,6 +1637,7 @@ def repair_cmd(
         state = load_state(out_path)
     except StateError as exc:
         console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        _print_feedback_hint(to_stderr=as_json)
         sys.exit(2)
 
     export_path = Path(export_dir)
@@ -1612,11 +1645,13 @@ def repair_cmd(
     # columns off a terminal and would break the path across lines (#145).
     if not export_path.exists():
         click.echo(f"Error: export directory not found: {export_path}", err=True)
+        _print_feedback_hint(to_stderr=True)
         sys.exit(2)
     try:
         exports = parse_export_directory(export_path)
     except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome
         click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        _print_feedback_hint(to_stderr=True)
         sys.exit(2)
 
     config = FerryConfig(
@@ -1643,6 +1678,7 @@ def repair_cmd(
         outcome = asyncio.run(run_repair(config, state, exports, _on_event))
     except (CheckError, MigrationError) as exc:
         human.print(f"\n[bold red]Repair failed:[/] {_safe(exc)}")
+        _print_feedback_hint(to_stderr=as_json)
         sys.exit(1)
     except KeyboardInterrupt:
         human.print("\n[yellow]Interrupted.[/] State saved after each repair — re-run to continue.")
@@ -1683,6 +1719,8 @@ def repair_cmd(
     if as_json:
         _emit_repair_json(outcome, dry_run, stoat_url, token, state)
 
+    if code != 0 and not as_json:
+        _print_feedback_hint()
     sys.exit(code)
 
 
@@ -1739,6 +1777,7 @@ def backfill_roles_cmd(
         state = load_state(out_path)
     except StateError as exc:
         console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(2)
 
     export_path = Path(export_dir)
@@ -1746,11 +1785,13 @@ def backfill_roles_cmd(
     # columns off a terminal and would break the path across lines (#145).
     if not export_path.exists():
         click.echo(f"Error: export directory not found: {export_path}", err=True)
+        _print_feedback_hint(to_stderr=True)
         sys.exit(2)
     try:
         exports = parse_export_directory(export_path)
     except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome
         click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        _print_feedback_hint(to_stderr=True)
         sys.exit(2)
 
     config = FerryConfig(
@@ -1782,6 +1823,7 @@ def backfill_roles_cmd(
         asyncio.run(run_role_backfill(config, state, exports, _on_event))
     except (CheckError, MigrationError) as exc:
         console.print(f"\n[bold red]Backfill failed:[/] {_safe(exc)}")
+        _print_feedback_hint()
         sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/]")
@@ -1800,6 +1842,7 @@ def backfill_roles_cmd(
         if w.get("type") in {"role_ordering_not_permitted", "role_ordering_failed"}
     ]
     if failed:
+        _print_feedback_hint()
         sys.exit(1)
 
     if not reordered:

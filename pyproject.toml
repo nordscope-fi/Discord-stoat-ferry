@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "discord-ferry"
-version = "2.37.3"
+version = "2.38.0"
 description = "Migrate Discord servers to Stoat (formerly Revolt)"
 readme = "README.md"
 license = "MIT"
@@ -48,6 +48,9 @@ Homepage = "https://github.com/nordscope-fi/Discord-stoat-ferry"
 Issues = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues"
 
 [project.optional-dependencies]
+feedback-service = [
+    "PyJWT[crypto]>=2.10",
+]
 native = [
     "pywebview>=5.0",
 ]
@@ -58,6 +61,7 @@ dev = [
     "ruff",
     "mypy",
     "pyinstaller>=6.0",
+    "PyJWT[crypto]>=2.10",
 ]
 # Mutation testing, kept out of `dev` on purpose: CI installs `dev` on five jobs
 # and never runs a mutation sweep, so putting cosmic-ray there would pay its

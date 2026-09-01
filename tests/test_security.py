@@ -6,10 +6,12 @@ import pytest
 
 from discord_ferry.core.security import (
     SecureTokenStore,
+    contains_registered_secret,
     register_secret,
     safe_sanitize,
     sanitize_for_display,
     sanitize_secrets,
+    sanitize_secrets_for_public_output,
     scrub_document,
 )
 
@@ -483,3 +485,37 @@ def test_register_secret_fully_mask_propagates_to_sanitize_secrets() -> None:
 def test_register_secret_default_keeps_last_four_tail() -> None:
     register_secret("stoat", "abcde12345")
     assert sanitize_secrets("token abcde12345") == "token ****2345"
+
+
+def test_sanitize_secrets_for_public_output_removes_all_tails() -> None:
+    register_secret("stoat", "hunter2horse")
+
+    assert sanitize_secrets_for_public_output("x hunter2horse y ****orse") == "x **** y ****"
+
+
+def test_sanitize_secrets_for_public_output_removes_urlsafe_mask_tails() -> None:
+    assert sanitize_secrets_for_public_output("x ****-_aB") == "x ****"
+
+
+def test_sanitize_secrets_for_public_output_masks_multiple_complete_values() -> None:
+    register_secret("stoat", "stoat-value-1234")
+    register_secret("discord", "discord-value-5678")
+
+    result = sanitize_secrets_for_public_output(
+        "stoat-value-1234 and discord-value-5678 and stoat-value-1234"
+    )
+
+    assert result == "**** and **** and ****"
+
+
+def test_sanitize_secrets_for_public_output_leaves_clean_text_unchanged() -> None:
+    assert sanitize_secrets_for_public_output("No credentials here") == "No credentials here"
+
+
+def test_contains_registered_secret_checks_complete_non_empty_values() -> None:
+    register_secret("ignored", "")
+    register_secret("stoat", "stoat-value-1234")
+
+    assert contains_registered_secret("prefix stoat-value-1234 suffix") is True
+    assert contains_registered_secret("prefix ****1234 suffix") is False
+    assert contains_registered_secret("") is False

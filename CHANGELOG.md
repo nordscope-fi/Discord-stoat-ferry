@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Account-free feedback now starts inside Ferry.** The app and the new `ferry feedback` command
+  collect Bug, Idea, or General reports without a GitHub account. Both routes show an exact public
+  preview before sending. Bugs become labelled GitHub Issues, while ideas and general feedback
+  become Discussions in their matching categories.
+
+- **Feedback privacy and recovery stay under the user's control.** Diagnostics and private contact
+  are optional and reviewed separately. The public route accepts no raw exports or attachments,
+  cleans diagnostic credentials again at the service boundary, and retains encrypted contact for
+  no more than 30 days. A failed send keeps its request identity and offers only user-chosen retry,
+  copy, save, edit, or cancel actions.
+
+- **The isolated feedback service is ready for the Personal Apps environment in Coolify.** Its
+  dedicated GitHub App routes Issues and Discussions, while proof challenges, rolling quotas,
+  durable receipts, and pending-write reconciliation protect the public boundary. The operator
+  guide covers private storage, health, readiness, contact deletion, receipt recovery, key
+  rotation, rollback, log audits, deployment, and production smoke cleanup.
+
 - **Discord Ferry now links to Peter Sterkenburg's GitHub Sponsors profile.** The final README
   section gives readers a direct path to support Peter's open-source work.
 
