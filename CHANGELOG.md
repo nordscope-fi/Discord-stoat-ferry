@@ -90,6 +90,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Coolify can verify the feedback container before routing traffic.** The runtime image now
+  includes the HTTP client used by Coolify's `/health` deployment check.
+
 - **GitHub App keys issued in RSA PEM format now start the feedback service.** Startup accepts the
   standard RSA footer returned by GitHub while retaining the existing closed validation for the
   private key field.
