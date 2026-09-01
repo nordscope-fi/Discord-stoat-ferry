@@ -131,10 +131,14 @@ class ServiceConfig:
             raise ConfigError("FERRY_FEEDBACK_REPOSITORY must name the Ferry repository")
 
         private_key = _required(source, "FERRY_FEEDBACK_GITHUB_PRIVATE_KEY")
-        if not (
-            private_key.startswith("-----BEGIN ")
-            and "PRIVATE KEY-----" in private_key
-            and private_key.rstrip().endswith("-----END PRIVATE KEY-----")
+        private_key_envelopes = (
+            ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"),
+            ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"),
+        )
+        normalized_private_key = private_key.rstrip()
+        if not any(
+            normalized_private_key.startswith(header) and normalized_private_key.endswith(footer)
+            for header, footer in private_key_envelopes
         ):
             raise ConfigError("FERRY_FEEDBACK_GITHUB_PRIVATE_KEY must contain a private PEM key")
 

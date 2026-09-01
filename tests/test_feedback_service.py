@@ -94,6 +94,32 @@ def test_service_config_parses_the_closed_runtime_values() -> None:
     assert config.general_category == "General"
 
 
+def test_service_config_accepts_github_rsa_private_key() -> None:
+    env = _valid_config_env()
+    env["FERRY_FEEDBACK_GITHUB_PRIVATE_KEY"] = (
+        "-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END RSA PRIVATE KEY-----\n"
+    )
+
+    config = ServiceConfig.from_env(env)
+
+    assert config.github_private_key == env["FERRY_FEEDBACK_GITHUB_PRIVATE_KEY"]
+
+
+@pytest.mark.parametrize(
+    "private_key",
+    [
+        "-----BEGIN EC PRIVATE KEY-----\nfixture\n-----END RSA PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----",
+    ],
+)
+def test_service_config_rejects_mismatched_private_key_envelopes(private_key: str) -> None:
+    env = _valid_config_env()
+    env["FERRY_FEEDBACK_GITHUB_PRIVATE_KEY"] = private_key
+
+    with pytest.raises(ConfigError, match="FERRY_FEEDBACK_GITHUB_PRIVATE_KEY"):
+        ServiceConfig.from_env(env)
+
+
 @pytest.mark.parametrize("missing", sorted(_valid_config_env()))
 def test_service_config_names_each_missing_variable_without_a_value(missing: str) -> None:
     env = _valid_config_env()
