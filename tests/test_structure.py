@@ -142,6 +142,7 @@ async def test_run_server_creates_server(tmp_path: Path) -> None:
             f"{STOAT_URL}/servers/create",
             payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
         )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
 
         await run_server(config, state, exports, events.append)
 
@@ -257,6 +258,7 @@ async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
 
     with aioresponses() as m:
         m.get(f"{STOAT_URL}/servers/existing-srv", payload={"_id": "existing-srv"})
+        m.patch(f"{STOAT_URL}/servers/existing-srv", payload={}, repeat=True)
 
         await run_server(config, state, exports, events.append)
 
@@ -281,7 +283,7 @@ async def test_run_server_uploads_icon(tmp_path: Path) -> None:
             payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
         )
         m.post(f"{AUTUMN_URL}/icons", payload={"id": "icon-autumn-id"})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
         await run_server(config, state, exports, events.append)
 
@@ -306,6 +308,7 @@ async def test_run_server_icon_upload_failure_is_non_fatal(tmp_path: Path) -> No
             payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
         )
         m.post(f"{AUTUMN_URL}/icons", status=500)  # Autumn failure
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
 
         # Should NOT raise — icon failure is non-fatal.
         await run_server(config, state, exports, events.append)
@@ -335,6 +338,7 @@ async def test_run_roles_creates_roles(tmp_path: Path) -> None:
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2", "name": "Mod"})
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, events.append)
 
@@ -799,6 +803,7 @@ async def test_live_only_role_is_created(tmp_path: Path) -> None:
         )
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r2", payload={}, repeat=True)
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, events.append)
 
@@ -931,6 +936,7 @@ async def test_structural_roles_counted_for_live_only(tmp_path: Path) -> None:
         )
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r2", payload={}, repeat=True)
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, events.append)
 
@@ -992,6 +998,7 @@ async def test_no_token_fallback_unchanged(tmp_path: Path) -> None:
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2", "name": "Mod"})
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, events.append)
 
@@ -2072,7 +2079,7 @@ async def test_run_channels_skip_threads_false(tmp_path: Path) -> None:
 async def test_run_channels_forum_threads_get_dedicated_category(tmp_path: Path) -> None:
     """Forum thread exports (type 15) create a dedicated category named after the forum."""
     events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
 
     # Forum thread export (type 15, is_thread=True, parent_channel_name="Questions")
@@ -2096,10 +2103,16 @@ async def test_run_channels_forum_threads_get_dedicated_category(tmp_path: Path)
             f"{STOAT_URL}/servers/srv1/channels",
             payload={"_id": "stoat-ft1", "name": "Questions-how-to-install"},
         )
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            status=400,
+            body="intentional forum index failure",
+        )
         # Category upsert via PATCH /servers/srv1.
         m.patch(
             f"{STOAT_URL}/servers/srv1",
             payload={"_id": "srv1"},
+            repeat=True,
             callback=lambda url, **kwargs: patch_body.update(  # type: ignore[misc]
                 kwargs.get("json", {})
             ),
@@ -2214,6 +2227,7 @@ async def test_banner_uploaded_and_applied(tmp_path: Path) -> None:
         m.patch(
             f"{STOAT_URL}/servers/srv1",
             payload={"_id": "srv1"},
+            repeat=True,
             callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
                 kwargs.get("json", {})
             ),
@@ -2250,6 +2264,7 @@ async def test_banner_download_fails_graceful(tmp_path: Path) -> None:
             f"{STOAT_URL}/servers/create",
             payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
         )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
         # CDN returns 404.
         m.get(
             f"{BANNER_CDN}/111/abc123banner.png?size=1024",
@@ -2286,6 +2301,7 @@ async def test_no_banner_skipped(tmp_path: Path) -> None:
             f"{STOAT_URL}/servers/create",
             payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
         )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
         # No CDN mock — if banner download were attempted, aioresponses would raise.
 
         await run_server(config, state, exports, events.append)
@@ -2304,7 +2320,7 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
     """Forum category with 2 posts creates an index channel with a pinned message
     that includes channel references and message counts."""
     events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
 
     # Two forum thread exports from the same parent forum.
@@ -2362,7 +2378,7 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
             payload={},
         )
         # Category PATCH.
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
         await run_channels(config, state, exports, events.append)
 
@@ -2387,7 +2403,7 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
 async def test_forum_index_empty_forum(tmp_path: Path) -> None:
     """Forum category with 0 posts sends 'No posts migrated.' message."""
     events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
     # Pre-populate a forum category that has no channels assigned to it.
     # This simulates the case where forum_categories was detected but all posts got dropped.
     state = MigrationState(
@@ -2453,7 +2469,7 @@ async def test_forum_index_empty_forum(tmp_path: Path) -> None:
             payload={},
         )
         # Category PATCH.
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
         await run_channels(config, state, exports, events.append)
 
@@ -2570,8 +2586,7 @@ async def test_banner_download_includes_auth_header(tmp_path: Path) -> None:
             callback=_capture_get,
         )
         m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
         await run_server(config, state, exports, events.append)
 
@@ -2610,8 +2625,7 @@ async def test_banner_download_no_auth_header_when_no_token(tmp_path: Path) -> N
             callback=_capture_get,
         )
         m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
         await run_server(config, state, exports, events.append)
 
@@ -2667,6 +2681,7 @@ async def test_role_cap_truncates_and_warns(tmp_path: Path) -> None:
             ),
         )
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True)
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, events.append)
 
@@ -2734,7 +2749,7 @@ async def test_too_many_roles_backstop_non_fatal(tmp_path: Path) -> None:
 
 async def test_resume_truncation_deterministic(tmp_path: Path) -> None:
     """Two runs over identical discord_metadata truncate to the same top-N set."""
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
 
     role_a = DCERole(id="r1", name="Admin")
     exports = [_make_export(messages=[_make_message("m1", roles=[role_a])])]
@@ -2779,6 +2794,16 @@ async def _run_and_collect(config: FerryConfig, exports: list[DCEExport]) -> set
             ),
         )
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-x", payload={}, repeat=True)
+        m.put(
+            f"{STOAT_URL}/servers/srv1/permissions/stoat-x",
+            payload={},
+            repeat=True,
+        )
+        m.get(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1", "roles": {"stoat-x": {"rank": 0}}},
+            repeat=True,
+        )
         await run_roles(config, state, exports, events.append)
     return set(created_names)
 
@@ -3252,6 +3277,7 @@ async def test_completed_run_finalizes_all_created_roles(tmp_path: Path) -> None
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2"})
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
         await run_roles(config, state, exports, lambda e: None)
     assert state.roles_finalized == {"r1", "r2"}
 
@@ -3267,6 +3293,7 @@ async def test_run_roles_mid_phase_save(tmp_path: Path) -> None:
         patch("discord_ferry.migrator.structure.save_state") as spy,
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-x"}, repeat=True)
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
         await run_roles(config, state, exports, lambda e: None)
     # One save per role (2) + one finalize-at-end save (1) = 3.
     assert spy.call_count == 3
@@ -3310,6 +3337,7 @@ async def test_role_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
     resumed_state = loaded
     with aioresponses() as m2:
         m2.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r3", "name": "C"})
+        m2.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
         await run_roles(config, resumed_state, exports, lambda e: None)
 
     assert len(resumed_state.role_map) == 3
@@ -3514,7 +3542,7 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
     not the message id, so it must still happen.
     """
     events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
 
     exports = [
@@ -3553,7 +3581,7 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
             payload={},
             callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
         )
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
         await run_channels(config, state, exports, events.append)
 
@@ -3712,7 +3740,7 @@ async def test_the_forum_index_channel_records_its_name(tmp_path: Path) -> None:
     The name is keyed exactly as the id, so the check's lookup needs no special
     case for the synthetic key.
     """
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
     exports = [
         _make_export(
@@ -3752,7 +3780,7 @@ async def test_the_forum_index_channel_records_its_name(tmp_path: Path) -> None:
         )
         m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages", payload={"_id": "m1"})
         m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
         await run_channels(config, state, exports, [].append)
 
     index_key = "forum-index-forum-my-forum"
@@ -3849,7 +3877,7 @@ async def test_a_fresh_structure_run_records_a_name_for_every_id(tmp_path: Path)
     This is the guard that catches a create site added later by someone who
     never read the design. Removing any one of the three write sites fails it.
     """
-    config = _make_config(tmp_path)
+    config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
     role = DCERole(id="d-role-1", name="Moderators")
     exports = [
@@ -3898,7 +3926,7 @@ async def test_a_fresh_structure_run_records_a_name_for_every_id(tmp_path: Path)
         )
         m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages", payload={"_id": "m1"})
         m.post(f"{STOAT_URL}/channels/01JSTOATIX00000000000AAA/messages/m1/pin", payload={})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
         await run_channels(config, state, exports, [].append)
 
     # Three channel ids and one role id, every one of them named.
