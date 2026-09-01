@@ -47,7 +47,7 @@ jobs:
         # 3 Python versions concurrently trips the API rate limit (intermittent
         # 403 flake). The dedicated cached `contract-test` job below is its sole
         # owner; the matrix only needs the pure-Python suite.
-        run: uv run pytest --ignore=tests/test_dce_contract.py
+        run: uv run pytest -n 4 --dist=load --ignore=tests/test_dce_contract.py --durations=20
 
   contract-test:
     name: Contract test (DCE binary)
