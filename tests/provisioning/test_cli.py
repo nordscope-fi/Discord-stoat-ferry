@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aioresponses import aioresponses
@@ -297,8 +297,11 @@ def test_cli_verify_401_exits_two(
 
 def test_cli_provision_partial_failure_prints_resume_hint(
     mock_discord_for_state: aioresponses,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SC-S3-ER3: partial failure mid-provision exits 1 with resume hint."""
+    slept = AsyncMock()
+    monkeypatch.setattr("tests.provisioning._bot_api.asyncio.sleep", slept)
     guild = "111"
     mock_discord_for_state.get(
         f"{DISCORD_API}/guilds/{guild}/channels",
@@ -332,6 +335,7 @@ def test_cli_provision_partial_failure_prints_resume_hint(
         "re-run" in (result.output + result.stderr).lower()
         or "resume" in (result.output + result.stderr).lower()
     )
+    assert [call.args[0] for call in slept.await_args_list] == [1.0, 2.0, 4.0]
 
 
 def test_cli_create_guild_preflight_fails_at_ten_guilds(
