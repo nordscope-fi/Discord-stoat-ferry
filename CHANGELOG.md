@@ -90,6 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Feedback container tests remove their temporary images.** Each Docker-backed run deletes its
+  exact unique image tag after container and volume cleanup. Setup failures after a successful
+  build still clean the image without hiding the original error.
+
 - **The final migration report now contains results from its own post-migration check.** Ferry
   finishes the optional check before writing either report format or announcing completion, so
   users cannot open the report before current check results have been stored.
