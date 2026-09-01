@@ -30,6 +30,7 @@ def test_feedback_container_has_a_locked_non_root_runtime() -> None:
     assert uv_requirements.startswith("uv==0.12.7 \\\n")
     assert uv_requirements.count("--hash=sha256:") == 3
     assert "uv sync --frozen --no-dev --no-editable --extra feedback-service" in source
+    assert "apt-get install --yes --no-install-recommends curl" in source
     assert "USER 10001:10001" in source
     assert source.count("EXPOSE 8080") == 1
     assert 'VOLUME ["/data"]' in source
@@ -167,6 +168,13 @@ def test_feedback_container_runs_read_only_with_only_data_writable() -> None:
             text=True,
         )
         assert user.stdout.strip() == "10001"
+        subprocess.run(
+            ["docker", "exec", name, "curl", "--fail", "http://127.0.0.1:8080/health"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         read_only = subprocess.run(
             ["docker", "inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", name],
             check=True,
