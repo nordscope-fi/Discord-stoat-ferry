@@ -25,7 +25,7 @@ _DARWIN_BRANCH = '\nif sys.platform == "darwin":'
 def test_feedback_minor_release_surfaces_agree() -> None:
     """The feature release and its public promises move as one contract."""
 
-    expected = "2.38.2"
+    expected = "2.38.3"
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
     runtime = (_REPO_ROOT / "src" / "discord_ferry" / "__init__.py").read_text(encoding="utf-8")

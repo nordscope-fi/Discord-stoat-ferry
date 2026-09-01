@@ -90,6 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **The final migration report now contains results from its own post-migration check.** Ferry
+  finishes the optional check before writing either report format or announcing completion, so
+  users cannot open the report before current check results have been stored.
+
 - **Required Python checks finish faster without dropping coverage.** Test-only API state
   isolation and bounded retry-wait repairs let each existing Python job run its full owned suite
   across four workers. Python 3.11, 3.12, and 3.13, both CI triggers, required status names, and
