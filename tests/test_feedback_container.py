@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 import shutil
 import socket
@@ -11,6 +12,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -137,106 +139,212 @@ def test_feedback_container_runs_read_only_with_only_data_writable() -> None:
         check=True,
         timeout=300,
     )
-    command = [
-        "docker",
-        "run",
-        "--detach",
-        "--name",
-        name,
-        "--read-only",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=16m",
-        "--publish",
-        f"127.0.0.1:{port}:8080",
-        "--volume",
-        f"{volume}:/data",
-    ]
-    for key, value in environment.items():
-        command.extend(("--env", f"{key}={value}"))
-    command.append(tag)
-
-    subprocess.run(
-        ["docker", "volume", "create", volume],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
-        deadline = time.monotonic() + 20
-        while True:
-            try:
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/health",
-                    timeout=2,
-                ) as response:
-                    assert response.status == 200
-                    break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    logs = subprocess.run(
-                        ["docker", "logs", name],
-                        capture_output=True,
-                        check=False,
-                        text=True,
-                    )
-                    pytest.fail(
-                        f"feedback container did not become healthy:\n{logs.stdout}{logs.stderr}"
-                    )
-                time.sleep(0.2)
-        user = subprocess.run(
-            ["docker", "exec", name, "id", "-u"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        assert user.stdout.strip() == "10001"
+        command = [
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=16m",
+            "--publish",
+            f"127.0.0.1:{port}:8080",
+            "--volume",
+            f"{volume}:/data",
+        ]
+        for key, value in environment.items():
+            command.extend(("--env", f"{key}={value}"))
+        command.append(tag)
+
         subprocess.run(
-            ["docker", "exec", name, "curl", "--fail", "http://127.0.0.1:8080/health"],
+            ["docker", "volume", "create", volume],
             check=True,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
-        read_only = subprocess.run(
-            ["docker", "inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", name],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        assert read_only.stdout.strip() == "true"
-        database = subprocess.run(
-            [
-                "docker",
-                "exec",
-                name,
-                "python",
-                "-c",
-                "from pathlib import Path; assert Path('/data/feedback.sqlite3').is_file()",
-            ],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        assert database.returncode == 0, database.stderr
-        outside = subprocess.run(
-            ["docker", "exec", name, "python", "-c", "open('/forbidden', 'w').close()"],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        assert outside.returncode != 0
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/health",
+                        timeout=2,
+                    ) as response:
+                        assert response.status == 200
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        logs = subprocess.run(
+                            ["docker", "logs", name],
+                            capture_output=True,
+                            check=False,
+                            text=True,
+                        )
+                        pytest.fail(
+                            f"feedback container did not become healthy:\n{logs.stdout}"
+                            f"{logs.stderr}"
+                        )
+                    time.sleep(0.2)
+            user = subprocess.run(
+                ["docker", "exec", name, "id", "-u"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert user.stdout.strip() == "10001"
+            subprocess.run(
+                ["docker", "exec", name, "curl", "--fail", "http://127.0.0.1:8080/health"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            read_only = subprocess.run(
+                ["docker", "inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", name],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert read_only.stdout.strip() == "true"
+            database = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    name,
+                    "python",
+                    "-c",
+                    "from pathlib import Path; assert Path('/data/feedback.sqlite3').is_file()",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            assert database.returncode == 0, database.stderr
+            outside = subprocess.run(
+                ["docker", "exec", name, "python", "-c", "open('/forbidden', 'w').close()"],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            assert outside.returncode != 0
+        finally:
+            subprocess.run(
+                ["docker", "rm", "--force", name],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            subprocess.run(
+                ["docker", "volume", "rm", "--force", volume],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
     finally:
         subprocess.run(
-            ["docker", "rm", "--force", name],
+            ["docker", "image", "rm", "--force", "--no-prune", tag],
             capture_output=True,
             check=False,
             text=True,
         )
-        subprocess.run(
-            ["docker", "volume", "rm", "--force", volume],
-            capture_output=True,
-            check=False,
-            text=True,
+
+
+def test_feedback_container_cleanup_removes_current_resources_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tag = "discord-ferry-feedback-test:101"
+    name = "discord-ferry-feedback-test-202"
+    volume = f"{name}-data"
+    timestamps = iter((101, 202))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((list(command), dict(kwargs)))
+        stdout = ""
+        returncode = 0
+        if command[-2:] == ["id", "-u"]:
+            stdout = "10001\n"
+        elif command[:3] == ["docker", "inspect", "--format"]:
+            stdout = "true\n"
+        elif command[-1] == "open('/forbidden', 'w').close()":
+            returncode = 1
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=stdout,
+            stderr="",
         )
+
+    monkeypatch.setattr(sys.modules[__name__], "_require_docker", lambda: None)
+    monkeypatch.setattr(sys.modules[__name__], "_private_key", lambda: "test-key")
+    monkeypatch.setattr(sys.modules[__name__], "_free_port", lambda: 45_678)
+    monkeypatch.setattr(time, "time_ns", lambda: next(timestamps))
+    monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: contextlib.nullcontext(SimpleNamespace(status=200)),
+    )
+
+    test_feedback_container_runs_read_only_with_only_data_writable()
+
+    commands = [command for command, _kwargs in calls]
+    assert commands[-3:] == [
+        ["docker", "rm", "--force", name],
+        ["docker", "volume", "rm", "--force", volume],
+        ["docker", "image", "rm", "--force", "--no-prune", tag],
+    ]
+    assert [command for command in commands if command[:2] == ["docker", "image"]] == [
+        ["docker", "image", "rm", "--force", "--no-prune", tag]
+    ]
+    assert calls[-1][1]["check"] is False
+
+
+def test_feedback_container_cleanup_preserves_post_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tag = "discord-ferry-feedback-test:303"
+    name = "discord-ferry-feedback-test-404"
+    volume = f"{name}-data"
+    timestamps = iter((303, 404))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    volume_error = subprocess.CalledProcessError(
+        17,
+        ["docker", "volume", "create", volume],
+    )
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((list(command), dict(kwargs)))
+        if command[:3] == ["docker", "volume", "create"]:
+            raise volume_error
+        if command[:3] == ["docker", "image", "rm"]:
+            if kwargs.get("check") is not False:
+                raise subprocess.CalledProcessError(23, command)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="in use")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sys.modules[__name__], "_require_docker", lambda: None)
+    monkeypatch.setattr(sys.modules[__name__], "_private_key", lambda: "test-key")
+    monkeypatch.setattr(sys.modules[__name__], "_free_port", lambda: 45_678)
+    monkeypatch.setattr(time, "time_ns", lambda: next(timestamps))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        test_feedback_container_runs_read_only_with_only_data_writable()
+
+    assert caught.value is volume_error
+    assert calls[-1] == (
+        ["docker", "image", "rm", "--force", "--no-prune", tag],
+        {"capture_output": True, "check": False, "text": True},
+    )
