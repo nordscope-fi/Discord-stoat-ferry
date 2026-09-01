@@ -90,6 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **The native plain-English process cleanup check now allows bounded operating-system teardown.**
+  It still fails if a descendant survives for two seconds, but no longer treats the few
+  milliseconds between process-group signalling and PID removal as a leaked hook process.
+
 - **Qwen schema failures preserve a safe rejection reason.** Failed advisory and plan records now
   distinguish stream framing, response JSON, and findings validation without retaining provider
   content. Existing failure fields and valid review records keep their prior contract.
