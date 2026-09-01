@@ -660,11 +660,6 @@ async def run_migration(
     ):
         await _generate_invite(config, state, exports, on_event)
 
-    generate_report(config, state, exports)
-    generate_markdown_report(config, state, exports)
-    save_state(state, config.output_dir)
-    on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
-
     # Phase 12: VALIDATE_MIGRATION — optional post-migration verification
     if config.validate_after and state.stoat_server_id:
         state.current_phase = "validate_migration"
@@ -718,6 +713,14 @@ async def run_migration(
                     )
                 )
         save_state(state, config.output_dir)
+
+    if config.cancel_event and config.cancel_event.is_set():
+        return state
+
+    generate_report(config, state, exports)
+    generate_markdown_report(config, state, exports)
+    save_state(state, config.output_dir)
+    on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
 
     return state
 
