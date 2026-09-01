@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 from discord_ferry.core import logging_setup
 from discord_ferry.core.http import reset_http_state
 from discord_ferry.core.security import reset_secret_registry
+from discord_ferry.migrator import api as migrator_api
+from discord_ferry.migrator.api import (
+    _reset_circuit_state,
+    _reset_pacer_state,
+    _reset_rate_state,
+)
 
 # --- aioresponses / aiohttp 3.14 compatibility shim ---------------------------
 # aiohttp 3.14 made ``stream_writer`` a *required* keyword-only argument of
@@ -180,6 +186,13 @@ async def fake_proxy() -> AsyncIterator[
                 await server.wait_closed()
 
 
+def _reset_api_runtime_state() -> None:
+    _reset_circuit_state()
+    _reset_rate_state()
+    _reset_pacer_state()
+    migrator_api._request_semaphore = None
+
+
 @pytest.fixture(autouse=True)
 def _isolate_ferry_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep `configure_logging()` away from the developer's real home directory.
@@ -193,13 +206,15 @@ def _isolate_ferry_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     Autouse and unconditional: a test that opts out by accident is a test that
     silently writes to the real filesystem.
     """
-    monkeypatch.setattr(logging_setup, "_log_path", lambda: tmp_path / "ferry.log")
-    logging_setup.reset_logging()
-    reset_secret_registry()
-    reset_http_state()
+    _reset_api_runtime_state()
     try:
+        monkeypatch.setattr(logging_setup, "_log_path", lambda: tmp_path / "ferry.log")
+        logging_setup.reset_logging()
+        reset_secret_registry()
+        reset_http_state()
         yield
     finally:
+        _reset_api_runtime_state()
         logging_setup.reset_logging()
         reset_secret_registry()
         reset_http_state()

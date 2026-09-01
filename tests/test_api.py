@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import ssl
 import time
@@ -15,13 +16,13 @@ from aioresponses import aioresponses
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.http import new_session
 from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.migrator import api as api_module
 from discord_ferry.migrator.api import (
     _api_request,
     _BucketState,
     _circuit_state,
     _headers,
     _reset_circuit_state,
-    _reset_pacer_state,
     _reset_rate_state,
     api_add_reaction,
     api_create_channel,
@@ -63,20 +64,27 @@ TOKEN = "test-session-token"
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _clean_circuit() -> None:  # type: ignore[misc]
-    """Reset circuit breaker, semaphore, adaptive rate, and pacer state between tests."""
-    import discord_ferry.migrator.api as _api_mod
+def _assert_api_runtime_defaults() -> None:
+    assert api_module._circuit_state.consecutive_failures == 0
+    assert list(api_module._rate_429_window) == []
+    assert api_module._rate_multiplier == 1.0
+    assert api_module._bucket_state == {}
+    assert api_module._url_to_bucket == {}
+    assert api_module._request_semaphore is None
 
-    _reset_circuit_state()
-    _reset_rate_state()
-    _reset_pacer_state()
-    _api_mod._request_semaphore = None
-    yield  # type: ignore[misc]
-    _reset_circuit_state()
-    _reset_rate_state()
-    _reset_pacer_state()
-    _api_mod._request_semaphore = None
+
+def test_shared_fixture_resets_api_runtime_state_after_dirty_test() -> None:
+    _assert_api_runtime_defaults()
+    api_module._circuit_state.consecutive_failures = 6
+    api_module._rate_429_window.append(1.0)
+    api_module._rate_multiplier = 2.0
+    api_module._bucket_state["dirty"] = _BucketState(remaining=0, limit=1, reset_at=1.0)
+    api_module._url_to_bucket["https://api.test/dirty"] = "dirty"
+    api_module._request_semaphore = asyncio.Semaphore(1)
+
+
+def test_shared_fixture_resets_api_runtime_state_before_next_test() -> None:
+    _assert_api_runtime_defaults()
 
 
 # ---------------------------------------------------------------------------
