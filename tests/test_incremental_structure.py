@@ -112,6 +112,7 @@ async def test_run_server_reuses_carried_stoat_server_id(tmp_path: Path) -> None
 
     with aioresponses() as m:
         m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
         # /servers/create intentionally absent — a create attempt would error.
         await run_server(config, state, exports, lambda e: None)
 
@@ -228,6 +229,7 @@ async def test_run_roles_skips_all_passes_for_already_migrated_roles(
             repeat=True,
             callback=lambda url, **kw: perm_calls.append(url),  # type: ignore[misc]
         )
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, lambda e: None)
 
@@ -266,6 +268,18 @@ async def test_run_roles_creates_only_new_roles_on_incremental_rerun(
             payload={"id": "stoat-r2", "name": "Mod"},
             callback=lambda url, **kw: create_calls.append(url),  # type: ignore[misc]
         )
+        for role_id in ("stoat-r1", "stoat-r2"):
+            m.patch(
+                f"{STOAT_URL}/servers/srv1/roles/{role_id}",
+                payload={},
+                repeat=True,
+            )
+            m.put(
+                f"{STOAT_URL}/servers/srv1/permissions/{role_id}",
+                payload={},
+                repeat=True,
+            )
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, lambda e: None)
 
@@ -344,6 +358,7 @@ async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
         )
         m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
         m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r2", payload={}, repeat=True)
+        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
 
         await run_roles(config, state, exports, lambda e: None)
 
