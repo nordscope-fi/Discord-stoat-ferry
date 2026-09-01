@@ -90,6 +90,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **The feedback container smoke test now uses deployment-style private storage.** Its Docker
+  volume preserves the image's non-root ownership for `/data`, so the test checks the service
+  instead of failing on a CI runner-owned bind directory. Startup failures now include the
+  container log.
+
 - **The native plain-English process cleanup check now allows bounded operating-system teardown.**
   It still fails if a descendant survives for two seconds, but no longer treats the few
   milliseconds between process-group signalling and PID removal as a leaked hook process.

@@ -89,12 +89,11 @@ def _private_key() -> str:
 
 
 @pytest.mark.skipif(not _docker_available(), reason="Docker daemon is unavailable")
-def test_feedback_container_runs_read_only_with_only_data_writable(tmp_path: Path) -> None:
+def test_feedback_container_runs_read_only_with_only_data_writable() -> None:
     tag = f"discord-ferry-feedback-test:{time.time_ns()}"
     name = f"discord-ferry-feedback-test-{time.time_ns()}"
+    volume = f"{name}-data"
     port = _free_port()
-    data = tmp_path / "data"
-    data.mkdir()
     encoded_keys = [base64.urlsafe_b64encode(bytes([fill]) * 32).decode() for fill in (1, 2, 3)]
     environment = {
         "FERRY_FEEDBACK_REPOSITORY": "nordscope-fi/Discord-stoat-ferry",
@@ -125,14 +124,21 @@ def test_feedback_container_runs_read_only_with_only_data_writable(tmp_path: Pat
         "--publish",
         f"127.0.0.1:{port}:8080",
         "--volume",
-        f"{data}:/data",
+        f"{volume}:/data",
     ]
     for key, value in environment.items():
         command.extend(("--env", f"{key}={value}"))
     command.append(tag)
 
-    subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+    subprocess.run(
+        ["docker", "volume", "create", volume],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
         deadline = time.monotonic() + 20
         while True:
             try:
@@ -144,7 +150,15 @@ def test_feedback_container_runs_read_only_with_only_data_writable(tmp_path: Pat
                     break
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise
+                    logs = subprocess.run(
+                        ["docker", "logs", name],
+                        capture_output=True,
+                        check=False,
+                        text=True,
+                    )
+                    pytest.fail(
+                        f"feedback container did not become healthy:\n{logs.stdout}{logs.stderr}"
+                    )
                 time.sleep(0.2)
         user = subprocess.run(
             ["docker", "exec", name, "id", "-u"],
@@ -153,7 +167,27 @@ def test_feedback_container_runs_read_only_with_only_data_writable(tmp_path: Pat
             text=True,
         )
         assert user.stdout.strip() == "10001"
-        assert (data / "feedback.sqlite3").is_file()
+        read_only = subprocess.run(
+            ["docker", "inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", name],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert read_only.stdout.strip() == "true"
+        database = subprocess.run(
+            [
+                "docker",
+                "exec",
+                name,
+                "python",
+                "-c",
+                "from pathlib import Path; assert Path('/data/feedback.sqlite3').is_file()",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert database.returncode == 0, database.stderr
         outside = subprocess.run(
             ["docker", "exec", name, "python", "-c", "open('/forbidden', 'w').close()"],
             capture_output=True,
@@ -164,6 +198,12 @@ def test_feedback_container_runs_read_only_with_only_data_writable(tmp_path: Pat
     finally:
         subprocess.run(
             ["docker", "rm", "--force", name],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        subprocess.run(
+            ["docker", "volume", "rm", "--force", volume],
             capture_output=True,
             check=False,
             text=True,
