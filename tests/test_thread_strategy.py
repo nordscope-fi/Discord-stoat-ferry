@@ -972,9 +972,7 @@ async def test_archive_strategy_writes_forwarded_content(tmp_path: Path) -> None
     state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
     state.channel_map["100"] = "stoat-ch-100"
 
-    parent = _make_export(
-        channel_id="100", channel_name="general", messages=[_make_message("m1")], message_count=1
-    )
+    parent = _make_export(channel_id="100", channel_name="general", messages=[], message_count=0)
     thread = _make_export(
         channel_id="200",
         channel_name="my-thread",
