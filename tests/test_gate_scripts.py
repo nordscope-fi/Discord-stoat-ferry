@@ -386,6 +386,33 @@ def _gates_job() -> str:
     return "\n".join(ln for ln in lines[start:end] if not ln.strip().startswith("#"))
 
 
+def _python_matrix_job() -> str:
+    lines = CI_WORKFLOW.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "lint-and-test:")
+    end = next(
+        i
+        for i in range(start + 1, len(lines))
+        if lines[i] and lines[i].startswith("  ") and not lines[i].startswith("    ")
+    )
+    return "\n".join(line for line in lines[start:end] if not line.strip().startswith("#"))
+
+
+def test_python_matrix_keeps_required_contract_and_runs_four_workers() -> None:
+    job = _python_matrix_job()
+    for required in (
+        'python-version: ["3.11", "3.12", "3.13"]',
+        "runs-on: ubuntu-latest",
+        "fail-fast: false",
+        "uv run ruff check .",
+        "uv run ruff format --check .",
+        "uv run mypy src/",
+        "uv run pytest -n 4 --dist=load --ignore=tests/test_dce_contract.py --durations=20",
+    ):
+        assert required in job
+    assert "continue-on-error" not in job
+    assert job.count("--ignore=") == 1
+
+
 def test_ci_runs_the_deferral_sweep() -> None:
     """SC-2.7: the sweep is actually wired into CI, not merely written."""
     assert "check-deferrals.sh" in _gates_job()
