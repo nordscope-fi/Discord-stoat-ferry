@@ -2272,12 +2272,13 @@ async def test_pacer_pauses_on_remaining_zero(mock_aiohttp: aioresponses) -> Non
         },
     )
 
-    async with new_session() as session:
-        await _api_request(session, "GET", url, TOKEN)
-        start = time.monotonic()
-        await _api_request(session, "GET", url, TOKEN)
-        elapsed = time.monotonic() - start
-        assert elapsed >= 0.08  # waited at least ~0.1s
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock) as slept:
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+
+    slept.assert_awaited_once()
+    assert slept.await_args.args[0] == pytest.approx(0.1, abs=0.02)
 
 
 async def test_pacer_no_pause_on_remaining_positive(mock_aiohttp: aioresponses) -> None:
@@ -2304,12 +2305,12 @@ async def test_pacer_no_pause_on_remaining_positive(mock_aiohttp: aioresponses) 
         },
     )
 
-    async with new_session() as session:
-        await _api_request(session, "GET", url, TOKEN)
-        start = time.monotonic()
-        await _api_request(session, "GET", url, TOKEN)
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.05  # no pacing delay
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock) as slept:
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+
+    slept.assert_not_awaited()
 
 
 async def test_pacer_bucket_state_updated_from_response(
@@ -2354,11 +2355,11 @@ async def test_pacer_first_request_not_delayed(mock_aiohttp: aioresponses) -> No
         },
     )
 
-    start = time.monotonic()
-    async with new_session() as session:
-        await _api_request(session, "GET", url, TOKEN)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.05
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock) as slept:
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+
+    slept.assert_not_awaited()
 
 
 async def test_pacer_shadow_decrement(mock_aiohttp: aioresponses) -> None:
@@ -2517,11 +2518,11 @@ async def test_pacer_different_bucket_not_delayed(mock_aiohttp: aioresponses) ->
             "X-RateLimit-Reset-After": "10000",
         },
     )
-    start = time.monotonic()
-    async with new_session() as session:
-        await _api_request(session, "GET", url2, TOKEN)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.05
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock) as slept:
+        async with new_session() as session:
+            await _api_request(session, "GET", url2, TOKEN)
+
+    slept.assert_not_awaited()
 
 
 async def test_pacer_reset_after_expiry(mock_aiohttp: aioresponses) -> None:
@@ -2542,11 +2543,11 @@ async def test_pacer_reset_after_expiry(mock_aiohttp: aioresponses) -> None:
             "X-RateLimit-Reset-After": "10000",
         },
     )
-    start = time.monotonic()
-    async with new_session() as session:
-        await _api_request(session, "GET", url, TOKEN)
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.05
+    with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock) as slept:
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+
+    slept.assert_not_awaited()
 
 
 async def test_pacer_debug_log_on_pace(
