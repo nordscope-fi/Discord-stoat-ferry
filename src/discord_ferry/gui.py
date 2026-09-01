@@ -27,6 +27,8 @@ from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret
 from discord_ferry.errors import MigrationError, StateError
+from discord_ferry.feedback import FeedbackInterface
+from discord_ferry.feedback_gui import FeedbackGuiContext, render_feedback_action
 from discord_ferry.parser.dce_parser import (
     _ACKNOWLEDGEABLE_TYPES,
     acknowledgement_required,
@@ -816,6 +818,15 @@ def setup_page() -> None:
                     "color=amber-7 text-color=white unelevated"
                 ).classes("font-semibold")
 
+        render_feedback_action(
+            FeedbackGuiContext(
+                interface=FeedbackInterface.GUI,
+                stage="setup",
+                last_error=None,
+                log_path=Path.home() / ".discord-ferry" / "logs" / "ferry.log",
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # Screen 2: Export (orchestrated mode only)
@@ -1187,6 +1198,15 @@ def validate_page() -> None:
                     # disabled without an explicit disable() call.
                     start_btn.bind_enabled_from(ack, "value")
 
+        render_feedback_action(
+            FeedbackGuiContext(
+                interface=FeedbackInterface.GUI,
+                stage="review",
+                last_error=None,
+                log_path=Path.home() / ".discord-ferry" / "logs" / "ferry.log",
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # Screen 3: Migrate
@@ -1304,6 +1324,12 @@ async def migrate_page() -> None:
     warning_count = 0
     total_messages = 0
     report_path: list[Path] = []  # mutable container so the closure can write to it
+    feedback_context = FeedbackGuiContext(
+        interface=FeedbackInterface.GUI,
+        stage="setup",
+        last_error=None,
+        log_path=Path.home() / ".discord-ferry" / "logs" / "ferry.log",
+    )
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):  # noqa: SIM117
         with ui.card().classes("w-full max-w-3xl shadow-md"):
@@ -1358,6 +1384,8 @@ async def migrate_page() -> None:
                     ui.button("Repair", on_click=lambda: _open_tool("/tools/repair")).classes(
                         "bg-blue-600 text-white"
                     )
+
+            render_feedback_action(feedback_context)
 
     # ---------------------------------------------------------------------------
     # Cancel confirmation dialog
@@ -1575,6 +1603,10 @@ async def migrate_page() -> None:
     def _update_ui(event: MigrationEvent) -> None:
         nonlocal messages_sent, error_count, warning_count, total_messages
 
+        feedback_context.stage = event.phase
+        if event.status == "error":
+            feedback_context.last_error = event.message
+
         # Update phase chip colour and text indicator (WCAG 1.4.1)
         chip = phase_chips.get(event.phase)
         if chip is not None:
@@ -1744,6 +1776,7 @@ async def migrate_page() -> None:
                     _on_migration_cancelled()
             except StateError as exc:
                 storage["resume"] = False
+                feedback_context.last_error = str(exc)
                 log_display.push(
                     f"[ERROR] Could not load previous state: {exc}. "
                     "The resume flag has been cleared. "
@@ -1754,10 +1787,12 @@ async def migrate_page() -> None:
                     type="negative",
                 )
             except MigrationError as exc:
+                feedback_context.last_error = str(exc)
                 log_display.push(f"[ERROR] Migration failed: {exc}")
                 errors_label.set_text(f"Errors: {error_count} (FAILED)")
                 ui.notify(f"Migration failed: {exc}", type="negative")
             except Exception as exc:
+                feedback_context.last_error = str(exc)
                 log_display.push(f"[ERROR] Unexpected error: {exc}")
                 ui.notify(f"Unexpected error: {exc}", type="negative")
             finally:

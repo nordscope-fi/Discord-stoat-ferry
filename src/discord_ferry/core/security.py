@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,6 +123,7 @@ def safe_sanitize(token_store: SecureTokenStore | None, text: str) -> str:
 # secrets registered by one test leak into the whole pytest session.
 
 _secret_registry: SecureTokenStore = SecureTokenStore({})
+_PARTIAL_MASK = re.compile(r"\*{4}\S{4}")
 
 
 def register_secret(name: str, value: str, *, fully_mask: bool = False) -> None:
@@ -148,6 +150,26 @@ def sanitize_secrets(text: str) -> str:
     a floor for that window must apply their own pattern-based redaction.
     """
     return _secret_registry.sanitize(text)
+
+
+def sanitize_secrets_for_public_output(text: str) -> str:
+    """Fully mask registered values and existing four-character mask tails."""
+
+    result = text
+    values = sorted(
+        (value for value in _secret_registry._tokens.values() if value),
+        key=len,
+        reverse=True,
+    )
+    for value in values:
+        result = result.replace(value, "****")
+    return _PARTIAL_MASK.sub("****", result)
+
+
+def contains_registered_secret(text: str) -> bool:
+    """Return whether *text* contains any complete registered secret value."""
+
+    return any(value and value in text for value in _secret_registry._tokens.values())
 
 
 def reset_secret_registry() -> None:

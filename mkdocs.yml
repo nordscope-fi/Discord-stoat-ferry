@@ -51,6 +51,7 @@ nav:
   - Guides:
     - GUI Walkthrough: guides/gui-walkthrough.md
     - CLI Reference: guides/cli-reference.md
+    - Sharing Feedback: guides/feedback.md
     - Large Servers: guides/large-servers.md
     - Self-Hosted Tips: guides/self-hosted-tips.md
     - Timestamp Preservation: guides/timestamps.md

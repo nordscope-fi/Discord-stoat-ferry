@@ -105,6 +105,7 @@ def test_validate_empty_dir(runner: CliRunner, tmp_path: Path) -> None:
     result = runner.invoke(main, ["validate", str(tmp_path)])
     assert result.exit_code == 1
     assert "No valid DCE JSON files" in result.output
+    assert result.output.index("No valid DCE JSON files") < result.output.index("ferry feedback")
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,7 @@ def test_migrate_missing_url(runner: CliRunner) -> None:
     )
     assert result.exit_code == 1
     assert "--stoat-url is required" in result.output
+    assert "ferry feedback" not in result.output
 
 
 def test_migrate_missing_token(runner: CliRunner) -> None:
@@ -130,6 +132,7 @@ def test_migrate_missing_token(runner: CliRunner) -> None:
     )
     assert result.exit_code == 1
     assert "--token is required" in result.output
+    assert "ferry feedback" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +277,7 @@ def test_migrate_engine_error(runner: CliRunner) -> None:
         )
     assert result.exit_code == 1
     assert "Migration failed" in result.output
+    assert result.output.index("Migration failed") < result.output.index("ferry feedback")
 
 
 def test_verbose_flag(runner: CliRunner) -> None:
@@ -691,6 +695,7 @@ def test_rollback_engine_error(runner: CliRunner, tmp_path: Path) -> None:
         )
     assert result.exit_code == 1
     assert "Lock conflict" in result.output
+    assert result.output.index("Lock conflict") < result.output.index("ferry feedback")
 
 
 def test_rollback_prints_proxy_notice(
@@ -1329,6 +1334,7 @@ def test_build_non_voice_failure_aborts(runner: CliRunner, tmp_path: Path) -> No
         )
     assert result.exit_code == 1
     assert "Build failed" in result.output
+    assert result.output.index("Build failed") < result.output.index("ferry feedback")
 
 
 def test_build_empty_blueprint(runner: CliRunner, tmp_path: Path) -> None:  # SC-21
@@ -1347,6 +1353,7 @@ def test_build_empty_blueprint(runner: CliRunner, tmp_path: Path) -> None:  # SC
             catch_exceptions=False,
         )
     assert result.exit_code == 0
+    assert "ferry feedback" not in result.output
     assert create.await_count == 0
 
 
@@ -2065,6 +2072,7 @@ def test_check_requires_a_url(runner: CliRunner, tmp_path: Path) -> None:
     """Matches probe_cmd: a clear message rather than a traceback."""
     result = runner.invoke(main, ["check", str(tmp_path), "--token", "t"], env={"STOAT_URL": ""})
     assert result.exit_code != 0
+    assert "ferry feedback" not in result.output
     assert "stoat-url" in result.output.lower()
 
 
@@ -2092,6 +2100,7 @@ def test_check_exits_non_zero_on_any_failure(runner: CliRunner, tmp_path: Path) 
             ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
         )
     assert result.exit_code != 0
+    assert "ferry feedback" in result.output
 
 
 def test_a_warning_alone_still_exits_zero(runner: CliRunner, tmp_path: Path) -> None:
@@ -2753,6 +2762,7 @@ def test_retry_exits_non_zero_when_a_message_is_still_failed(
     with patch("discord_ferry.cli.run_retry_failed", new=_leaves_it_failed):
         result = runner.invoke(main, _retry_argv(out_dir, export_dir))
     assert result.exit_code == 1, result.output
+    assert "ferry feedback" in result.output
 
 
 def test_retry_with_a_missing_export_directory_exits_two_and_makes_no_request(
@@ -2849,6 +2859,7 @@ def test_repair_exits_non_zero_when_a_message_is_still_failed(
     with patch("discord_ferry.cli.run_repair", new=_leaves_it):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
     assert result.exit_code == 1, result.output
+    assert "ferry feedback" in result.output
 
 
 def test_a_repair_dry_run_always_exits_zero(runner: CliRunner, tmp_path: Path) -> None:

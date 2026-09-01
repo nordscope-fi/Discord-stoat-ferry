@@ -1,6 +1,6 @@
 # Installing Discord Ferry
 
-Discord Ferry runs entirely on your own computer. There is no account to create and no data is sent to any external service — your messages stay between you and your Stoat server.
+Discord Ferry runs on your own computer. There is no Ferry account to create. Migration data goes only to your chosen Stoat server. The optional feedback feature sends only the report you review and confirm.
 
 Pick your operating system below to get started.
 
@@ -143,7 +143,7 @@ Then try opening Ferry again. The `-r` is important: without it the flag is only
 
 **macOS says it "could not verify Ferry is free of malware"**
 
-This is the normal first-launch prompt, not a fault. Follow the **Approving Ferry** steps in the macOS tab above. Whatever you do, do not click **Move to Bin** — that deletes the app.
+This is the normal first-launch prompt, not a fault. Follow the **Approving Ferry** steps in the macOS tab above. Do not click **Move to Bin**, because that deletes the app.
 
 **"Python not found" or "python3: command not found" (Linux)**
 
@@ -160,4 +160,4 @@ sudo apt install python3.11
 ```
 
 !!! tip "Still stuck?"
-    Open an issue on the [Discord Ferry GitHub page](https://github.com/nordscope-fi/Discord-stoat-ferry/issues) and include the error message you saw. Someone from the community will help you out.
+    Select **Feedback** in the Ferry app, or run `ferry feedback` in a terminal. You do not need a GitHub account. [Review what Ferry shares](../guides/feedback.md) before sending.

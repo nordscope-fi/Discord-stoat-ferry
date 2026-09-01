@@ -156,6 +156,8 @@ See the [CLI reference](docs/guides/cli-reference.md) for all commands and optio
 
 We welcome contributions! See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
+Maintainers deploying the public intake service should follow the [feedback service operations guide](docs/operations/feedback-service.md). It covers the isolated Personal Apps deployment, private storage, readiness, recovery, and smoke cleanup.
+
 ---
 
 ## License
