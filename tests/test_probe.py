@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import aiohttp
 import pytest
 from aioresponses import aioresponses
 
+from discord_ferry.migrator import api as api_module
 from discord_ferry.migrator.probe import ProbeReport, _check_autumn, run_probe
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
@@ -38,7 +41,16 @@ def mock_aiohttp() -> aioresponses:
         yield m
 
 
-async def test_probe_voice_teardown_fires_on_getback_failure(mock_aiohttp: aioresponses) -> None:
+@pytest.fixture
+def api_slept(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    slept = AsyncMock()
+    monkeypatch.setattr(api_module.asyncio, "sleep", slept)
+    return slept
+
+
+async def test_probe_voice_teardown_fires_on_getback_failure(
+    mock_aiohttp: aioresponses, api_slept: AsyncMock
+) -> None:
     """If the GET-back fails, the created channel is still deleted (I2)."""
     # Root (autumn discovery) — minimal.
     mock_aiohttp.get(
@@ -65,6 +77,7 @@ async def test_probe_voice_teardown_fires_on_getback_failure(mock_aiohttp: aiore
 
     assert delete_called["n"] == 1  # teardown fired despite GET-back failure
     assert isinstance(report, ProbeReport)
+    assert api_slept.await_count > 0
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +257,7 @@ async def test_server_bucket_we_have_no_limit_for_is_reported(mock_aiohttp: aior
     assert "stickers" in result
 
 
-async def test_probe_does_not_close_an_injected_session() -> None:
+async def test_probe_does_not_close_an_injected_session(api_slept: AsyncMock) -> None:
     """SC-134-4: run_probe closes only what it created."""
     from discord_ferry.core.http import new_session
 
@@ -254,4 +267,5 @@ async def test_probe_does_not_close_an_injected_session() -> None:
             await run_probe(
                 "https://example.invalid", "tok", "srv", lambda _e: None, session=injected
             )
+        assert api_slept.await_count > 0
         assert not injected.closed, "an injected session must outlive run_probe"
