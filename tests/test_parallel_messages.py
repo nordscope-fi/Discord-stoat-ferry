@@ -45,6 +45,7 @@ TOKEN = "test-token"
 def _make_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
     defaults: dict[str, Any] = {
         "export_dir": tmp_path,
+        "output_dir": tmp_path,
         "stoat_url": BASE_URL,
         "token": TOKEN,
         "message_rate_limit": 0.0,
@@ -54,6 +55,10 @@ def _make_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
     }
     defaults.update(overrides)
     return FerryConfig(**defaults)
+
+
+def test_make_config_isolates_output_under_tmp_path(tmp_path: Path) -> None:
+    assert _make_config(tmp_path).output_dir == tmp_path
 
 
 def _make_state(**overrides: Any) -> MigrationState:
