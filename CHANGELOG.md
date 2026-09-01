@@ -90,6 +90,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **GitHub App keys issued in RSA PEM format now start the feedback service.** Startup accepts the
+  standard RSA footer returned by GitHub while retaining the existing closed validation for the
+  private key field.
+
 - **The feedback container smoke test now uses deployment-style private storage.** Its Docker
   volume preserves the image's non-root ownership for `/data`, so the test checks the service
   instead of failing on a CI runner-owned bind directory. Startup failures now include the
