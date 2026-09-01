@@ -379,8 +379,14 @@ def test_native_plain_english_launcher_terminates_its_process_tree(tmp_path: Pat
     launcher.send_signal(signal.SIGTERM)
     assert launcher.wait(timeout=5) == -signal.SIGTERM
     for pid in descendant_pids:
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        for _ in range(200):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"plain-English descendant {pid} survived SIGTERM")
 
 
 def test_agents_names_tested_mcp_calls_and_review_quorum() -> None:
