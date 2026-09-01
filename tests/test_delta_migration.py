@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PhaseFunction, run_migration
@@ -208,7 +209,13 @@ async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> Non
     save_state(prior, tmp_path)
 
     config = _make_config(tmp_path, incremental=True)
-    state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+    with patch(
+        "discord_ferry.core.engine._rebuild_forum_indexes",
+        new_callable=AsyncMock,
+    ) as rebuild:
+        state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
+
+    rebuild.assert_awaited_once()
 
     # All forum-rebuild + membership fields carried verbatim from the prior run.
     assert state.forum_channel_members == {forum_key: ["fp1"]}
