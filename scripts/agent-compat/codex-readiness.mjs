@@ -4,11 +4,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -18,6 +20,7 @@ import {
   inspectProjectTrustToml,
   verifyReviewerRuntime,
 } from './codex-bootstrap.mjs';
+import { brainstormRegistrationReport } from './check.mjs';
 import { buildReviewPrompt } from './review-contract.mjs';
 import { codexChatCommand } from './plain-english-contract.mjs';
 import { runQwenReview } from './qwen-review.mjs';
@@ -305,11 +308,94 @@ function sessionEvidence(path, command) {
   return ['instructions', 'skill', 'qmd'];
 }
 
-function runAdapter(root, mode, payload, command) {
+function runAdapter(root, mode, payload, command, eventCwd = root) {
   const result = command(process.execPath, [
     join(root, 'scripts', 'agent-compat', 'codex-hook-adapter.mjs'), mode,
-  ], { cwd: root, input: JSON.stringify(payload), timeoutMs: 15_000 });
+  ], { cwd: eventCwd, input: JSON.stringify(payload), timeoutMs: 15_000 });
   return result;
+}
+
+export function runBrainstormEvidenceProbe(root, eventCwd, command = liveCommand) {
+  const requirements = join(root, 'docs', 'plans', 'specs', 'codex-readiness.md');
+  const stateRoot = join(root, 'docs', 'plans', '.brainstorm-evidence');
+  mkdirSync(join(root, 'docs', 'plans', 'specs'), { recursive: true });
+  writeFileSync(requirements, '# Requirements\n');
+  try {
+    const common = { session_id: 'readiness-session' };
+    const edited = runAdapter(root, 'post-tool', {
+      ...common,
+      turn_id: 'readiness-turn-1',
+      tool_use_id: 'readiness-spec',
+      tool_name: 'Write',
+      tool_input: { file_path: requirements },
+      tool_response: { status: 'ok' },
+    }, command, eventCwd);
+    const prompted = runAdapter(root, 'user-prompt', {
+      ...common,
+      turn_id: 'readiness-turn-1',
+      prompt: 'continue',
+    }, command, eventCwd);
+    const sourceInput = { file_path: join(root, 'CHANGELOG.md') };
+    const before = runAdapter(root, 'pre-tool', {
+      ...common,
+      turn_id: 'readiness-turn-1',
+      tool_use_id: 'readiness-source',
+      tool_name: 'Read',
+      tool_input: sourceInput,
+    }, command, eventCwd);
+    const pendingDirectory = join(stateRoot, 'receipts', 'pending');
+    const pendingCreated = existsSync(pendingDirectory) && readdirSync(pendingDirectory).length === 1;
+    const after = runAdapter(root, 'post-tool', {
+      ...common,
+      turn_id: 'readiness-turn-1',
+      tool_use_id: 'readiness-source',
+      tool_name: 'Read',
+      tool_input: sourceInput,
+      tool_response: readFileSync(sourceInput.file_path, 'utf8'),
+    }, command, eventCwd);
+    const completedDirectory = join(stateRoot, 'receipts', 'completed');
+    const resultCreated = existsSync(completedDirectory)
+      && readdirSync(completedDirectory).length === 1;
+    const incomplete = runAdapter(root, 'stop', {
+      ...common,
+      turn_id: 'readiness-turn-1',
+      last_assistant_message: '## Recommendation\n\nUse the selected approach.',
+    }, command, eventCwd);
+    const incompleteBlocked = incomplete.status === 0
+      && incomplete.stdout.includes('"decision":"block"');
+    const ledgerPath = join(stateRoot, 'ledger.json');
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+    ledger.approaches = [{ id: 'readiness-approach', title: 'Readiness', drawbacks: [] }];
+    ledger.drawback_resolutions = [];
+    ledger.alternative_challenges = [];
+    ledger.recommendation = {
+      selected_approach_id: 'readiness-approach',
+      rejected_alternative_ids: [],
+    };
+    writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    const promptedAgain = runAdapter(root, 'user-prompt', {
+      ...common,
+      turn_id: 'readiness-turn-2',
+      prompt: 'continue',
+    }, command, eventCwd);
+    const complete = runAdapter(root, 'stop', {
+      ...common,
+      turn_id: 'readiness-turn-2',
+      last_assistant_message: '## Recommendation\n\nUse the selected approach.',
+    }, command, eventCwd);
+    const outside = !pathIsWithin(root, eventCwd);
+    return {
+      brainstorm_prompt: prompted.status === 0 && promptedAgain.status === 0 ? 'ok' : 'failed',
+      brainstorm_pre_tool: before.status === 0 && pendingCreated ? 'ok' : 'failed',
+      brainstorm_result: after.status === 0 && resultCreated ? 'ok' : 'failed',
+      brainstorm_incomplete_stop: incompleteBlocked ? 'ok' : 'failed',
+      brainstorm_complete_stop: complete.status === 0 && complete.stdout === '' ? 'ok' : 'failed',
+      brainstorm_outside_directory: outside && edited.status === 0 ? 'ok' : 'failed',
+    };
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(requirements, { force: true });
+  }
 }
 
 function stopEvidence(root, event, eventCwd, command) {
@@ -367,6 +453,7 @@ async function defaultWorktreeProbe({ root, command = liveCommand }) {
     const postTool = runAdapter(primaryRoot, 'post-tool', {
       tool_name: 'apply_patch', tool_input: { patch: '' },
     }, command);
+    const brainstorm = runBrainstormEvidenceProbe(worktree, eventCwd, command);
 
     return {
       primary: {
@@ -388,6 +475,7 @@ async function defaultWorktreeProbe({ root, command = liveCommand }) {
         pre_tool_block: preBlock.status === 0 && preBlock.stdout.includes('"decision":"block"')
           ? 'ok' : 'failed',
         post_tool: postTool.status === 0 ? 'ok' : 'failed',
+        ...brainstorm,
         stop_main: stopEvidence(primaryRoot, 'Stop', eventCwd, command),
         stop_child: stopEvidence(primaryRoot, 'SubagentStop', eventCwd, command),
       },
@@ -497,14 +585,44 @@ export async function runStaticReadiness({
   await add({
     id: 'hooks',
     className: 'hooks',
-    reason: 'Codex hooks are missing the two 60-second native plain-English chat hooks',
-    remediation: 'Run ./scripts/agent-install.sh to regenerate Codex hooks.',
+    reason: 'Claude or Codex hooks are missing required chat or brainstorm events',
+    remediation: 'Run ./scripts/agent-install.sh and restore Claude project hooks.',
   }, () => {
     const source = requireText(files, join(projectRoot, '.codex', 'hooks.json'), 'Codex hooks');
+    const claudeSource = requireText(
+      files,
+      join(projectRoot, '.claude', 'settings.json'),
+      'Claude settings',
+    );
     let document;
-    try { document = JSON.parse(source); } catch { throw new Error('hooks invalid'); }
-    if (!hasNativeChatHooks(document, ownedRoot)) throw new Error('native chat hooks missing');
-    return { native_chat_hooks: 2, timeout_seconds: 60 };
+    let claudeDocument;
+    try {
+      document = JSON.parse(source);
+      claudeDocument = JSON.parse(claudeSource);
+    } catch {
+      throw new Error('hooks invalid');
+    }
+    const codexBrainstorm = brainstormRegistrationReport(document, {
+      host: 'codex',
+      root: ownedRoot,
+    });
+    const claudeBrainstorm = brainstormRegistrationReport(claudeDocument, {
+      host: 'claude',
+      root: ownedRoot,
+    });
+    if (
+      !hasNativeChatHooks(document, ownedRoot)
+      || !codexBrainstorm.valid
+      || !claudeBrainstorm.valid
+    ) {
+      throw new Error('hook registrations missing');
+    }
+    return {
+      native_chat_hooks: 2,
+      brainstorm_hooks: codexBrainstorm.events,
+      claude_brainstorm_hooks: claudeBrainstorm.events,
+      timeout_seconds: 60,
+    };
   });
 
   await add({
@@ -807,6 +925,25 @@ export async function runWorktreeReadiness({
       return details;
     });
   }
+
+  for (const [id, key] of [
+    ['brainstorm-prompt-activation', 'brainstorm_prompt'],
+    ['brainstorm-evidence-pre-tool', 'brainstorm_pre_tool'],
+    ['brainstorm-evidence-result', 'brainstorm_result'],
+    ['brainstorm-incomplete-stop', 'brainstorm_incomplete_stop'],
+    ['brainstorm-complete-stop', 'brainstorm_complete_stop'],
+    ['brainstorm-outside-directory', 'brainstorm_outside_directory'],
+  ]) {
+    await add({
+      id,
+      className: 'hooks',
+      reason: `${id} did not return its expected result`,
+      remediation: 'Regenerate brainstorm hooks and rerun the live worktree probe.',
+    }, () => {
+      if (evidence?.hooks?.[key] !== 'ok') throw new Error('brainstorm hook mismatch');
+      return { result: 'ok' };
+    });
+  }
   if (JSON.stringify(evidence?.primary?.markers) !== JSON.stringify(evidence?.worktree?.markers)) {
     const worktree = records.find((record) => record.id === 'worktree-session');
     Object.assign(worktree, safeReadinessFailure(
@@ -936,13 +1073,15 @@ async function main() {
     selfTest();
     return;
   }
-  const known = new Set(['--root', '--home', '--json', '--live', '--worktree', '--reviewers']);
+  const known = new Set([
+    '--root', '--project-root', '--home', '--json', '--static', '--live', '--worktree', '--reviewers',
+  ]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (!known.has(argument)) throw new Error(`unknown argument: ${argument}`);
-    if (argument === '--root' || argument === '--home') index += 1;
+    if (argument === '--root' || argument === '--project-root' || argument === '--home') index += 1;
   }
-  const root = option(args, '--root') ?? process.cwd();
+  const root = option(args, '--project-root') ?? option(args, '--root') ?? process.cwd();
   const home = option(args, '--home') ?? process.env.HOME;
   let report;
   const requested = [];

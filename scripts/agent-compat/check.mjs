@@ -113,6 +113,56 @@ function ferryBlocksPresent(generatedPath, adapterScript) {
   }
 }
 
+export function brainstormRegistrationReport(
+  document,
+  { host, root, postToolMatcher = codexPostToolMatcher() },
+) {
+  const definitions = host === 'claude'
+    ? [
+        ['UserPromptSubmit', null, 'brainstorm-evidence.mjs', null],
+        ['PreToolUse', '.*', 'brainstorm-evidence.mjs', null],
+        ['PostToolUse', '.*', 'brainstorm-evidence.mjs', null],
+        ['PostToolUseFailure', '.*', 'brainstorm-evidence.mjs', null],
+        ['Stop', null, 'brainstorm-evidence.mjs', null],
+      ]
+    : [
+        ['UserPromptSubmit', null, 'codex-hook-adapter.mjs', 'user-prompt'],
+        ['PreToolUse', '.*', 'codex-hook-adapter.mjs', 'pre-tool'],
+        ['PostToolUse', postToolMatcher, 'codex-hook-adapter.mjs', 'post-tool'],
+        ['Stop', null, 'codex-hook-adapter.mjs', 'stop'],
+      ];
+  if (!['claude', 'codex'].includes(host) || document === null || typeof document !== 'object') {
+    return { valid: false, events: [], missing: definitions.map(([event]) => event) };
+  }
+  const expectedClaudeCommand =
+    'node "$CLAUDE_PROJECT_DIR/scripts/agent-compat/brainstorm-evidence.mjs" --host claude';
+  const events = [];
+  const missing = [];
+  for (const [event, matcher, script, mode] of definitions) {
+    const expectedCommand = host === 'claude'
+      ? expectedClaudeCommand
+      : `node "${root}/scripts/agent-compat/${script}" ${mode}`;
+    const matches = (document.hooks?.[event] ?? []).flatMap((group) =>
+      (group.hooks ?? []).map((hook) => ({ group, hook })))
+      .filter(({ hook }) => hook.command === expectedCommand);
+    const valid = matches.length === 1
+      && (matches[0].group.matcher ?? null) === matcher
+      && matches[0].hook.type === 'command'
+      && matches[0].hook.timeout === 10;
+    if (valid) events.push(event);
+    else missing.push(event);
+  }
+  return { valid: missing.length === 0, events, missing };
+}
+
+function checkBrainstormDocument(document, options) {
+  const report = brainstormRegistrationReport(document, options);
+  if (!report.valid) {
+    fail(`${options.host} brainstorm hook registration is incomplete: ${report.missing.join(', ')}`);
+  }
+  return report;
+}
+
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -286,7 +336,14 @@ export function checkPlainEnglishState({
 }
 
 export function checkCodexHooks(actualPath) {
-  return checkPlainEnglishState({ codexHooksPath: actualPath, includeVibe: false });
+  const validPlainEnglish = checkPlainEnglishState({
+    codexHooksPath: actualPath,
+    includeVibe: false,
+  });
+  const root = dirname(dirname(realpathSync(actualPath)));
+  const document = JSON.parse(readFileSync(actualPath, 'utf8'));
+  const validBrainstorm = checkBrainstormDocument(document, { host: 'codex', root }).valid;
+  return validPlainEnglish && validBrainstorm;
 }
 
 export function checkWorktreeContract(
@@ -377,6 +434,17 @@ function checkCodexState() {
 
   fileMatches(join(codexDir, 'config.toml'), render('codex-config.toml'));
   ferryBlocksPresent(join(codexDir, 'hooks.json'), 'codex-hook-adapter.mjs');
+  const hooksPath = join(codexDir, 'hooks.json');
+  if (existsSync(hooksPath)) {
+    try {
+      checkBrainstormDocument(JSON.parse(readFileSync(hooksPath, 'utf8')), {
+        host: 'codex',
+        root: projectRoot,
+      });
+    } catch (error) {
+      fail(`Codex hooks are invalid: ${error.message}`);
+    }
+  }
 
   const expectedRoles = ['coordinator.toml', 'reviewer.toml', 'explorer.toml', 'locator.toml'];
   const agentsDir = join(codexDir, 'agents');
@@ -570,6 +638,22 @@ function checkHookParity() {
   for (const w of result.warnings) warn(`hook parity: ${w}`);
 }
 
+function checkClaudeBrainstormState() {
+  const settingsPath = join(projectRoot, '.claude', 'settings.json');
+  if (!existsSync(settingsPath)) {
+    fail('Claude project settings are missing');
+    return;
+  }
+  try {
+    checkBrainstormDocument(JSON.parse(readFileSync(settingsPath, 'utf8')), {
+      host: 'claude',
+      root: projectRoot,
+    });
+  } catch (error) {
+    fail(`Claude project settings are invalid: ${error.message}`);
+  }
+}
+
 // --- Check: Config safety -------------------------------------------------------
 
 function checkConfigSafety() {
@@ -651,7 +735,12 @@ function checkTemplates() {
 
   try {
     const codexHooks = render('codex-hooks.json', testReplacements);
-    JSON.parse(codexHooks);
+    const document = JSON.parse(codexHooks);
+    checkBrainstormDocument(document, {
+      host: 'codex',
+      root: projectRoot,
+      postToolMatcher: testReplacements.__POST_TOOL_MATCHER__,
+    });
   } catch (err) {
     fail(`codex-hooks.json template is not valid JSON after rendering: ${err.message}`);
   }
@@ -704,6 +793,7 @@ function main() {
     }
 
     checkCodexState();
+    checkClaudeBrainstormState();
     checkVibeState();
     checkPlainEnglishState();
     checkQwenState();

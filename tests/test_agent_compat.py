@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -50,6 +51,35 @@ def _installer_checkout(
     fixture_skill = root / ".claude/skills/fixture-skill/SKILL.md"
     fixture_skill.parent.mkdir(parents=True)
     fixture_skill.write_text("# Fixture skill\n")
+    brainstorm_command = (
+        'node "$CLAUDE_PROJECT_DIR/scripts/agent-compat/brainstorm-evidence.mjs" --host claude'
+    )
+
+    def claude_group(matcher: str | None = None) -> dict[str, object]:
+        return {
+            **({} if matcher is None else {"matcher": matcher}),
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": brainstorm_command,
+                    "timeout": 10,
+                }
+            ],
+        }
+
+    (root / ".claude/settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [claude_group()],
+                    "PreToolUse": [claude_group(".*")],
+                    "PostToolUse": [claude_group(".*")],
+                    "PostToolUseFailure": [claude_group(".*")],
+                    "Stop": [claude_group()],
+                }
+            }
+        )
+    )
     worktree_script = root / ".claude/scripts/new-worktree.sh"
     worktree_script.parent.mkdir(parents=True)
     worktree_script.write_text(
@@ -419,12 +449,111 @@ def test_codex_and_vibe_adapters_skip_native_plain_english_routes() -> None:
     )
     assert result.returncode == 0, result.stderr
     routes = json.loads(result.stdout)
-    assert routes["codex_write"] == ["write"]
+    assert routes["codex_write"] == ["brainstorm-evidence", "write"]
     assert routes["vibe_write"] == ["write"]
     assert "docs" in routes["qwen_write"]
     assert "github-docs" not in routes["codex_bash"]
     assert "github-docs" not in routes["vibe_bash"]
     assert "github-docs" in routes["qwen_bash"]
+
+
+def test_brainstorm_hook_parity_names_all_five_events_and_host_dispositions() -> None:
+    result = subprocess.run(
+        ["node", "tests/fixtures/agent_compat_runner.mjs", "hook-routes", "--json"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    entries = report["brainstorm_entries"]
+    assert [entry["event"] for entry in entries] == [
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+    ]
+    assert [entry["codex_disposition"] for entry in entries] == [
+        "ported",
+        "ported",
+        "ported",
+        "compensated",
+        "ported",
+    ]
+    assert {entry["vibe_disposition"] for entry in entries} == {"unsupported"}
+    assert {entry["qwen_disposition"] for entry in entries} == {"unsupported"}
+
+
+def test_brainstorm_hook_parity_matches_open_ended_codex_tools_only() -> None:
+    result = subprocess.run(
+        ["node", "tests/fixtures/agent_compat_runner.mjs", "hook-routes", "--json"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["brainstorm_codex_external_before"] == ["brainstorm-evidence"]
+    assert report["brainstorm_codex_external_after"] == ["brainstorm-evidence"]
+    assert re.fullmatch(report["brainstorm_codex_post_matcher"], "mcp__context7__query-docs")
+    assert report["vibe_post_matcher"] == "re:^(apply_patch|edit|write_file)$"
+    assert report["qwen_post_matcher"] == "edit|write_file"
+
+
+def test_claude_brainstorm_hooks_register_all_five_direct_events() -> None:
+    settings = REPO / ".claude/settings.json"
+    if not settings.exists():
+        pytest.skip("snapshot-backed Claude settings are absent in CI")
+    document = json.loads(settings.read_text())
+    command = (
+        'node "$CLAUDE_PROJECT_DIR/scripts/agent-compat/brainstorm-evidence.mjs" --host claude'
+    )
+    expected_matchers = {
+        "UserPromptSubmit": None,
+        "PreToolUse": ".*",
+        "PostToolUse": ".*",
+        "PostToolUseFailure": ".*",
+        "Stop": None,
+    }
+    for event, matcher in expected_matchers.items():
+        matches = [
+            (group, hook)
+            for group in document["hooks"][event]
+            for hook in group["hooks"]
+            if hook.get("command") == command
+        ]
+        assert len(matches) == 1
+        group, hook = matches[0]
+        assert group.get("matcher") == matcher
+        assert hook == {"type": "command", "command": command, "timeout": 10}
+
+    stop_commands = [
+        hook["command"]
+        for group in document["hooks"]["Stop"]
+        for hook in group["hooks"]
+        if hook["type"] == "command"
+    ]
+    assert stop_commands.count("$CLAUDE_PROJECT_DIR/.claude/hooks/plain-english-chat.sh") == 1
+
+
+def test_claude_brainstorm_skill_requires_saved_evidence_before_recommendation() -> None:
+    skill = REPO / ".claude/skills/df-brainstorm/SKILL.md"
+    if not skill.exists():
+        pytest.skip("snapshot-backed brainstorm skill is absent in CI")
+    text = skill.read_text()
+    normalized = " ".join(text.split()).lower()
+    assert "give every approach and drawback a stable identifier" in normalized
+    assert "docs/plans/.brainstorm-evidence/ledger.json" in text
+    assert "before the source call" in normalized
+    assert "completed source receipt" in normalized
+    assert "exact quoted line" in normalized
+    assert "falsifying outcome before running" in normalized
+    assert "completed challenge receipt" in normalized
+    assert "$df-brainstorm cancel" in text
+    assert "validator must pass before presenting the recommendation" in normalized
 
 
 def test_codex_patch_policy_finishes_inside_the_outer_budget() -> None:
@@ -444,6 +573,7 @@ def test_codex_patch_policy_finishes_inside_the_outer_budget() -> None:
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["plain_english_children"] == 0
+    assert report["evidence_children"] == ["brainstorm-evidence"]
     assert report["security_children"] == ["write"]
     assert report["duration_ms"] < 2000
 
@@ -998,6 +1128,197 @@ def test_codex_adapter_modes_run_from_a_non_repository_directory(
     assert 'codex-hook-adapter: unknown mode "bogus-mode"' in unknown.stderr
 
 
+def test_brainstorm_hook_template_registers_codex_user_prompt_and_open_post() -> None:
+    document = json.loads((REPO / "config/agent-compat/codex-hooks.json").read_text())
+    submitted = document["hooks"]["UserPromptSubmit"]
+    assert len(submitted) == 1
+    assert "matcher" not in submitted[0]
+    assert submitted[0]["hooks"] == [
+        {
+            "type": "command",
+            "command": (
+                'node "__PROJECT_ROOT__/scripts/agent-compat/codex-hook-adapter.mjs" user-prompt'
+            ),
+            "timeout": 10,
+        }
+    ]
+    assert document["hooks"]["PostToolUse"][0]["matcher"] == "__POST_TOOL_MATCHER__"
+
+
+def _run_copied_codex_adapter(
+    root: Path,
+    home: Path,
+    event_cwd: Path,
+    mode: str,
+    payload: dict[str, object],
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    assert NODE is not None
+    return subprocess.run(
+        [NODE, str(root / "scripts/agent-compat/codex-hook-adapter.mjs"), mode],
+        cwd=event_cwd,
+        env={**os.environ, "HOME": str(home), **(extra_env or {})},
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_codex_adapter_routes_brainstorm_events_from_unrelated_directory(
+    tmp_path: Path,
+) -> None:
+    root, home, _ = _installer_checkout(tmp_path)
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+    source = root / "docs/reference.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("Independent source line.\n")
+    subprocess.run(["git", "-C", str(root), "add", "docs/reference.md"], check=True)
+    requirements = root / "docs/plans/specs/feature.md"
+    requirements.parent.mkdir(parents=True)
+    requirements.write_text("# Requirements\n")
+    edit_payload = {
+        "session_id": "session-1",
+        "turn_id": "turn-1",
+        "tool_use_id": "edit-spec",
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(requirements)},
+        "tool_response": {"status": "ok"},
+    }
+    assert (
+        _run_copied_codex_adapter(root, home, event_cwd, "post-tool", edit_payload).returncode == 0
+    )
+
+    prompt = _run_copied_codex_adapter(
+        root,
+        home,
+        event_cwd,
+        "user-prompt",
+        {
+            "session_id": "session-1",
+            "turn_id": "turn-2",
+            "prompt": "continue",
+        },
+    )
+    assert prompt.returncode == 0, prompt.stderr
+
+    tool_input = {"libraryId": "/nodejs/node", "query": "file replacement"}
+    before = _run_copied_codex_adapter(
+        root,
+        home,
+        event_cwd,
+        "pre-tool",
+        {
+            "session_id": "session-1",
+            "turn_id": "turn-2",
+            "tool_use_id": "external-source",
+            "tool_name": "mcp__context7__query-docs",
+            "tool_input": tool_input,
+        },
+    )
+    assert before.returncode == 0, before.stderr
+    pending = root / "docs/plans/.brainstorm-evidence/receipts/pending"
+    assert len(list(pending.iterdir())) == 1
+
+    after = _run_copied_codex_adapter(
+        root,
+        home,
+        event_cwd,
+        "post-tool",
+        {
+            "session_id": "session-1",
+            "turn_id": "turn-2",
+            "tool_use_id": "external-source",
+            "tool_name": "mcp__context7__query-docs",
+            "tool_input": tool_input,
+            "tool_response": {"content": [{"type": "text", "text": "Source line."}]},
+        },
+    )
+    assert after.returncode == 0, after.stderr
+    completed = root / "docs/plans/.brainstorm-evidence/receipts/completed"
+    assert list(pending.iterdir()) == []
+    assert len(list(completed.iterdir())) == 1
+
+
+def test_codex_adapter_keeps_qmd_edit_behavior_and_stable_fields(tmp_path: Path) -> None:
+    root, home, _ = _installer_checkout(tmp_path)
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+    marker = tmp_path / "qmd-event.json"
+    hook = home / ".claude/hooks/qmd-live-update.sh"
+    hook.parent.mkdir(parents=True)
+    hook.write_text(
+        '#!/bin/sh\nIFS= read -r payload\nprintf \'%s\' "$payload" > "$FERRY_QMD_MARKER"\n'
+    )
+    hook.chmod(0o755)
+    target = root / "docs/example.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Example\n")
+    payload = {
+        "session_id": "session-1",
+        "turn_id": "turn-1",
+        "tool_use_id": "edit-doc",
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(target)},
+        "tool_response": {"status": "ok"},
+    }
+
+    result = _run_copied_codex_adapter(
+        root,
+        home,
+        event_cwd,
+        "post-tool",
+        payload,
+        extra_env={"FERRY_QMD_MARKER": str(marker)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(marker.read_text())
+    assert observed["session_id"] == "session-1"
+    assert observed["tool_use_id"] == "edit-doc"
+    assert observed["tool_input"]["file_path"] == str(target)
+
+
+def test_codex_adapter_unfinished_guard_runs_before_brainstorm_stop(tmp_path: Path) -> None:
+    root, home, _ = _installer_checkout(tmp_path)
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+    result = _run_copied_codex_adapter(
+        root,
+        home,
+        event_cwd,
+        "stop",
+        {
+            "session_id": "session-1",
+            "turn_id": "turn-1",
+            "last_assistant_message": (
+                "The recommendation is complete, with remaining work not yet tested."
+            ),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["reason"].startswith(
+        "Completion claimed but unfinished-work language detected."
+    )
+
+
+@pytest.mark.parametrize("mode", ["user-prompt", "pre-tool", "post-tool", "stop"])
+def test_codex_adapter_malformed_brainstorm_events_allow_from_unrelated_directory(
+    tmp_path: Path, mode: str
+) -> None:
+    root, home, _ = _installer_checkout(tmp_path)
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+
+    result = _run_copied_codex_adapter(root, home, event_cwd, mode, {})
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
 @pytest.mark.skipif(NODE is None, reason="Node.js is required")
 def test_codex_adapter_symlink_uses_the_installed_project_root(tmp_path: Path) -> None:
     adapter_link = tmp_path / "codex-hook-adapter.mjs"
@@ -1449,12 +1770,65 @@ def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> No
     records = {record["id"]: record for record in report["records"]}
     assert records["hooks"]["details"] == {
         "native_chat_hooks": 2,
+        "brainstorm_hooks": [
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ],
+        "claude_brainstorm_hooks": [
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "Stop",
+        ],
         "timeout_seconds": 60,
     }
     assert records["worktree-parity"]["details"] == {
         "canonical_hosts": 4,
         "manifest_contract_sources": 3,
     }
+
+
+def test_brainstorm_readiness_live_sequence_is_value_free_and_tree_clean(
+    tmp_path: Path,
+) -> None:
+    root, _, _ = _installer_checkout(tmp_path)
+    event_cwd = tmp_path / "event"
+    event_cwd.mkdir()
+    changelog = root / "CHANGELOG.md"
+    changelog.write_text("# Changelog\n")
+    subprocess.run(["git", "-C", str(root), "add", "CHANGELOG.md"], check=True)
+    before = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "brainstorm-readiness-live",
+        "--root",
+        str(root),
+        "--event-cwd",
+        str(event_cwd),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert set(json.loads(result.stdout).values()) == {"ok"}
+    assert "# Requirements" not in result.stdout
+    assert "# Changelog" not in result.stdout
+    after = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert after == before
 
 
 def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -> None:
@@ -1482,6 +1856,9 @@ def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -
         ("missing-role", "roles"),
         ("missing-skill-bridge", "skills"),
         ("missing-hook", "hooks"),
+        ("missing-brainstorm-prompt", "hooks"),
+        ("broken-brainstorm-matcher", "hooks"),
+        ("missing-brainstorm-failed-tool", "hooks"),
         ("missing-tool-server", "mcp-registration"),
         ("missing-client", "reviewer-clients"),
         ("misdistributed-hook", "hooks"),
@@ -1640,6 +2017,12 @@ def test_live_worktree_probe_checks_both_stop_events() -> None:
     assert records["hook-pre-tool-allow"]["status"] == "ok"
     assert records["hook-pre-tool-block"]["status"] == "ok"
     assert records["hook-post-tool"]["status"] == "ok"
+    assert records["brainstorm-prompt-activation"]["status"] == "ok"
+    assert records["brainstorm-evidence-pre-tool"]["status"] == "ok"
+    assert records["brainstorm-evidence-result"]["status"] == "ok"
+    assert records["brainstorm-incomplete-stop"]["status"] == "ok"
+    assert records["brainstorm-complete-stop"]["status"] == "ok"
+    assert records["brainstorm-outside-directory"]["status"] == "ok"
     assert records["stop-main-agent"]["details"]["timeout_seconds"] == 60
     assert records["stop-child-agent"]["details"]["timeout_seconds"] == 60
     for record_id in ("stop-main-agent", "stop-child-agent"):
@@ -1679,6 +2062,9 @@ def test_live_worktree_probe_checks_both_stop_events() -> None:
     [
         ("missing-links", "worktree-session"),
         ("hook-nonzero", "hook-post-tool"),
+        ("brainstorm-missing-prompt", "brainstorm-prompt-activation"),
+        ("brainstorm-broken-matcher", "brainstorm-evidence-pre-tool"),
+        ("brainstorm-adapter-inside-repo", "brainstorm-outside-directory"),
         ("stop-ten-second", "stop-main-agent"),
         ("stop-timeout", "stop-child-agent"),
         ("stop-event-inside-owner", "stop-main-agent"),

@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Brainstorm recommendations now require independent evidence on Claude and Codex.** The workflow
+  records real source reads and predeclared challenge results before it permits a selected approach.
+  Prepared, suspended, cancelled, and unrelated work remain outside the recommendation gate.
+
 - **Account-free feedback now starts inside Ferry.** The app and the new `ferry feedback` command
   collect Bug, Idea, or General reports without a GitHub account. Both routes show an exact public
   preview before sending. Bugs become labelled GitHub Issues, while ideas and general feedback

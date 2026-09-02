@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { handleBrainstormHook } from './brainstorm-evidence.mjs';
 import { routesFor } from './hook-parity.mjs';
 import { isDestructiveGitCommand } from './destructive-git.mjs';
 
@@ -88,6 +89,8 @@ function runRoute(route, payload) {
       return runUserHook('qmd-live-update.sh', payload);
     case 'destructive-git':
       return checkDestructiveGit(payload);
+    case 'brainstorm-evidence':
+      return handleBrainstormHook(payload, { host: 'codex', root: projectRoot });
     default:
       return null;
   }
@@ -150,37 +153,47 @@ function sessionStart() {
 }
 
 export function dispatchCodexPreTool(hookInput, routeRunner = runRoute) {
-  const tool = hookInput.tool_name ?? '';
-  const payload = { tool_name: tool, tool_input: hookInput.tool_input ?? {} };
+  dispatchCodexToolEvent('PreToolUse', hookInput, routeRunner);
+}
 
-  if (tool === 'Bash' || tool === 'bash') {
-    for (const route of routesFor('PreToolUse', 'Bash', 'codex')) routeRunner(route, payload);
+function toolAliases(tool) {
+  if (['Bash', 'bash', 'exec_command'].includes(tool)) {
+    return [tool, 'Bash', 'bash', 'exec_command'];
+  }
+  if (['Read', 'read_file'].includes(tool)) return [tool, 'Read', 'read_file'];
+  if (['apply_patch', 'Edit', 'Write', 'edit', 'write_file'].includes(tool)) {
+    return [tool, 'apply_patch', 'Edit', 'Write', 'edit', 'write_file'];
+  }
+  return [tool];
+}
+
+function stablePayload(hookInput, eventName) {
+  return {
+    ...hookInput,
+    hook_event_name: eventName,
+    tool_name: hookInput?.tool_name ?? '',
+    tool_input: hookInput?.tool_input ?? {},
+  };
+}
+
+export function dispatchCodexToolEvent(eventName, hookInput, routeRunner = runRoute) {
+  const tool = hookInput?.tool_name ?? '';
+  const payload = stablePayload(hookInput ?? {}, eventName);
+  const routes = new Set(toolAliases(tool).flatMap(alias =>
+    routesFor(eventName, alias, 'codex')));
+  const paths = ['apply_patch', 'Edit', 'Write', 'edit', 'write_file'].includes(tool)
+    ? editPaths(payload.tool_input)
+    : [];
+  if (paths.length === 0) {
+    for (const route of routes) routeRunner(route, payload);
     return;
   }
-
-  if (tool === 'Read' || tool === 'read_file') {
-    for (const route of routesFor('PreToolUse', 'Read', 'codex')) routeRunner(route, payload);
-    return;
-  }
-
-  if (tool === 'apply_patch' || tool === 'Edit' || tool === 'Write' ||
-      tool === 'edit' || tool === 'write_file') {
-    const paths = editPaths(hookInput.tool_input ?? {});
-    for (const p of paths) {
-      const editPayload = { ...payload, tool_input: { ...payload.tool_input, file_path: p } };
-      const routes = [
-        ...routesFor('PreToolUse', 'apply_patch', 'codex'),
-        ...routesFor('PreToolUse', 'Edit', 'codex'),
-        ...routesFor('PreToolUse', 'Write', 'codex'),
-      ];
-      const seen = new Set();
-      for (const route of routes) {
-        if (seen.has(route)) continue;
-        seen.add(route);
-        routeRunner(route, editPayload);
-      }
-    }
-    return;
+  for (const path of paths) {
+    const editPayload = {
+      ...payload,
+      tool_input: { ...payload.tool_input, file_path: path },
+    };
+    for (const route of routes) routeRunner(route, editPayload);
   }
 }
 
@@ -188,19 +201,20 @@ function preTool() {
   dispatchCodexPreTool(input);
 }
 
+export function dispatchCodexPostTool(hookInput, routeRunner = runRoute) {
+  dispatchCodexToolEvent('PostToolUse', hookInput, routeRunner);
+}
+
 function postTool() {
-  const tool = input.tool_name ?? '';
-  const payload = { tool_name: tool, tool_input: input.tool_input ?? {} };
-
-  if (tool === 'apply_patch' || tool === 'Edit' || tool === 'Write' ||
-      tool === 'edit' || tool === 'write_file') {
-    const paths = editPaths(input.tool_input ?? {});
-    for (const p of paths) {
-      runRoute('qmd', { ...payload, tool_input: { ...payload.tool_input, file_path: p } });
-    }
-  }
-
+  dispatchCodexPostTool(input);
   flushContext('PostToolUse');
+}
+
+function userPrompt() {
+  const payload = stablePayload(input, 'UserPromptSubmit');
+  for (const route of routesFor('UserPromptSubmit', null, 'codex')) {
+    runRoute(route, payload);
+  }
 }
 
 function stopGuard() {
@@ -214,6 +228,14 @@ function stopGuard() {
       reason: 'Completion claimed but unfinished-work language detected. Finish the work, file it, or close the task.',
     }));
     process.exit(0);
+  }
+  const payload = stablePayload(input, 'Stop');
+  for (const route of routesFor('Stop', null, 'codex')) {
+    const result = runRoute(route, payload);
+    if (result?.decision === 'block') {
+      process.stdout.write(JSON.stringify(result));
+      return;
+    }
   }
 }
 
@@ -241,6 +263,7 @@ if (process.argv[1]) {
 if (invokedAsMain) {
   switch (mode) {
     case 'session-start': sessionStart(); break;
+    case 'user-prompt': userPrompt(); break;
     case 'pre-tool': preTool(); break;
     case 'post-tool': postTool(); break;
     case 'stop': stopGuard(); break;
