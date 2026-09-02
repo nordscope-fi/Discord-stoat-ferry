@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readProtonField } from './proton-credential.mjs';
 
@@ -23,20 +24,40 @@ export function context7Environment(source, key) {
   return environment;
 }
 
+export function readContext7Access(home) {
+  const path = join(home, '.config', 'discord-ferry', 'context7-agent.json');
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) {
+    throw new Error('Context7 ownership record is unsafe');
+  }
+  const record = JSON.parse(readFileSync(path, 'utf8'));
+  if (record?.version !== 2
+      || record.state !== 'ready'
+      || typeof record.share_id !== 'string'
+      || record.share_id.length === 0
+      || typeof record.item_id !== 'string'
+      || record.item_id.length === 0) {
+    throw new Error('Context7 ownership record is invalid');
+  }
+  return { shareId: record.share_id, itemId: record.item_id };
+}
+
 export async function runContext7({
   home,
   check = false,
   fieldReader = readProtonField,
+  accessReader = readContext7Access,
   spawnChild = spawn,
   environment = process.env,
   parent = process,
 }) {
   let key;
   try {
+    const access = accessReader(home);
     key = await fieldReader({
       tokenFile: 'context7-agent.pat',
-      vaultName: 'Personal',
-      itemTitle: 'Context7 API Key',
+      shareId: access.shareId,
+      itemId: access.itemId,
       field: 'API Key',
       reason: 'Start Discord Ferry Context7',
       home,
