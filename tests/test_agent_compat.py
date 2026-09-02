@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -276,6 +277,130 @@ def test_installer_renders_project_pins_with_conflicting_global_defaults(
     assert 'model_reasoning_effort = "high"' in rendered
     assert 'sandbox_mode = "workspace-write"' in rendered
     assert 'web_search = "disabled"' in rendered
+
+
+def test_installer_routes_context7_through_the_protected_launcher(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    launcher = str(
+        user_home / ".local/share/discord-ferry/reviewer-runtime/current/context7-mcp.mjs"
+    )
+
+    codex = tomllib.loads((root / ".codex/config.toml").read_text())
+    vibe = tomllib.loads((root / ".vibe/config.toml").read_text())
+    qwen = json.loads((root / ".qwen/settings.json").read_text())
+    context7_servers = [
+        codex["mcp_servers"]["context7"],
+        next(server for server in vibe["mcp_servers"] if server["name"] == "context7"),
+        qwen["mcpServers"]["context7"],
+    ]
+
+    for server in context7_servers:
+        assert server["command"] == "node"
+        assert server["args"] == [launcher]
+        assert "env" not in server
+        assert "@upstash/context7-mcp" not in json.dumps(server)
+    assert codex["mcp_servers"]["context7"]["startup_timeout_sec"] == 30
+    assert context7_servers[1]["transport"] == "stdio"
+    assert qwen["mcpServers"]["context7"]["timeout"] == 30_000
+    rendered = "\n".join(
+        [
+            (root / ".codex/config.toml").read_text(),
+            (root / ".vibe/config.toml").read_text(),
+            (root / ".qwen/settings.json").read_text(),
+        ]
+    )
+    assert "@upstash/context7-mcp" not in rendered
+    assert "CONTEXT7_API_KEY" not in rendered
+    assert "FERRY_SECRET_CANARY" not in rendered
+
+
+def test_generated_state_check_rejects_context7_launcher_drift(tmp_path: Path) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    config = root / ".codex/config.toml"
+    config.write_text(config.read_text().replace("context7-mcp.mjs", "context8-mcp.mjs", 1))
+
+    checked = subprocess.run(
+        [NODE, "scripts/agent-compat/check.mjs", "--generated-only"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert checked.returncode == 1
+    assert ".codex/config.toml does not match template" in checked.stdout
+
+
+def test_custom_data_home_routes_every_context7_host_to_the_installed_launcher(
+    tmp_path: Path,
+) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    data_home = tmp_path / "custom data"
+    env["XDG_DATA_HOME"] = str(data_home)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    launcher = str(data_home / "discord-ferry/reviewer-runtime/current/context7-mcp.mjs")
+
+    codex = tomllib.loads((root / ".codex/config.toml").read_text())
+    vibe = tomllib.loads((root / ".vibe/config.toml").read_text())
+    qwen = json.loads((root / ".qwen/settings.json").read_text())
+    assert codex["mcp_servers"]["context7"]["args"] == [launcher]
+    assert next(
+        server["args"] for server in vibe["mcp_servers"] if server["name"] == "context7"
+    ) == [launcher]
+    assert qwen["mcpServers"]["context7"]["args"] == [launcher]
+
+    readiness = subprocess.run(
+        [
+            NODE,
+            "tests/fixtures/agent_compat_runner.mjs",
+            "readiness-static",
+            "healthy",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert readiness.returncode == 0, readiness.stderr
+    record = next(
+        item
+        for item in json.loads(readiness.stdout)["records"]
+        if item["id"] == "context7-credential"
+    )
+    assert record["status"] == "ok"
 
 
 @pytest.mark.parametrize(
@@ -1835,6 +1960,242 @@ def test_bootstrap_refuses_an_orphaned_reviewer_token(tmp_path: Path) -> None:
     assert "pst_testfixture" not in result.stdout + result.stderr
 
 
+def test_context7_agent_is_item_limited_and_repeatable(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "context7-agent",
+        "create-repeat",
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"] == {"created": True, "renewed": False, "recovered": False}
+    assert report["second"] == {"created": False, "renewed": False, "recovered": False}
+    assert report["grant"] == [
+        "agent",
+        "access",
+        "grant",
+        "discord-ferry-context7",
+        "--vault-name",
+        "Personal",
+        "--item-title",
+        "Context7 API Key",
+        "--role",
+        "viewer",
+    ]
+    assert report["grant_count"] == report["create_count"] == 1
+    assert report["field_reads"] == 2
+    assert report["token_mode"] == report["ownership_mode"] == 0o600
+    assert report["ownership"] == {
+        "version": 1,
+        "agent_id": "context7-agent-id-1",
+        "agent_name": "discord-ferry-context7",
+        "state": "ready",
+        "grant_sha256": report["ownership"]["grant_sha256"],
+    }
+    assert len(report["ownership"]["grant_sha256"]) == 64
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def _context7_agent_fixture(tmp_path: Path, fixture: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "context7-agent",
+        fixture,
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+
+
+def test_context7_agent_renews_without_repeating_the_item_grant(tmp_path: Path) -> None:
+    result = _context7_agent_fixture(tmp_path, "expired")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"] == {"created": True, "renewed": False, "recovered": False}
+    assert report["second"] == {"created": False, "renewed": True, "recovered": False}
+    assert report["create_count"] == report["grant_count"] == report["renew_count"] == 1
+    assert report["field_reads"] == 2
+
+
+def test_context7_agent_recovers_its_matching_interrupted_creation(tmp_path: Path) -> None:
+    result = _context7_agent_fixture(tmp_path, "interrupted")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"] is None
+    assert report["second"] == {"created": True, "renewed": False, "recovered": True}
+    assert report["delete_calls"] == [["agent", "delete", "discord-ferry-context7"]]
+    assert report["create_count"] == report["grant_count"] == 2
+    assert report["ownership"]["agent_id"] == "context7-agent-id-2"
+
+
+@pytest.mark.parametrize("fixture", ["unmanaged", "duplicate-agent", "duplicate-item"])
+def test_context7_agent_refuses_ambiguous_remote_state(tmp_path: Path, fixture: str) -> None:
+    result = _context7_agent_fixture(tmp_path, fixture)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"]
+    assert report["create_count"] == report["grant_count"] == 0
+    assert report["delete_calls"] == []
+    assert report["field_reads"] == 0
+
+
+@pytest.mark.parametrize(
+    "fixture, expected",
+    [
+        ("unsafe-token", "context7-agent.pat must have mode 0600"),
+        ("unsafe-ownership", "context7-agent.json must have mode 0600"),
+        ("invalid-ownership", "Context7 ownership record is invalid"),
+    ],
+)
+def test_context7_agent_refuses_unsafe_local_state(
+    tmp_path: Path, fixture: str, expected: str
+) -> None:
+    result = _context7_agent_fixture(tmp_path, fixture)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"] == expected
+    assert report["create_count"] == report["grant_count"] == 1
+    assert report["renew_count"] == 0
+    assert report["delete_calls"] == []
+
+
+def test_bootstrap_provisions_reviewer_and_context7_credentials() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "bootstrap-provisioners",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "calls": [
+            ["reviewer", "/fixture/home", "/fixture/pass-cli"],
+            ["context7", "/fixture/home", "/fixture/pass-cli"],
+        ],
+        "report": {
+            "reviewer": {"created": False, "renewed": False},
+            "context7": {"created": True, "renewed": False, "recovered": False},
+        },
+    }
+
+
+def test_bootstrap_returns_value_free_claude_context7_commands(tmp_path: Path) -> None:
+    home = tmp_path / "home with spaces"
+    root = tmp_path / "project"
+    root.mkdir()
+    protected_config = root / ".mcp.json"
+    protected_config.write_bytes(b'FERRY_PROTECTED_CANARY\x00{"do_not_parse":true}\n')
+    protected_config.chmod(0o640)
+    before = (
+        protected_config.read_bytes(),
+        protected_config.stat().st_mode,
+        protected_config.stat().st_mtime_ns,
+    )
+
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "bootstrap-claude-handoff",
+        "--home",
+        str(home),
+        "--root",
+        str(root),
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        protected_config.read_bytes(),
+        protected_config.stat().st_mode,
+        protected_config.stat().st_mtime_ns,
+    ) == before
+    document = json.loads(result.stdout)
+    launcher = str(home / ".local/share/discord-ferry/reviewer-runtime/current/context7-mcp.mjs")
+    action = document["report"]["claudeContext7"]
+    assert action["launcher"] == launcher
+    assert action["commands"] == [
+        ["claude", "mcp", "remove", "--scope", "project", "context7"],
+        [
+            "claude",
+            "mcp",
+            "add",
+            "--scope",
+            "project",
+            "context7",
+            "--",
+            "node",
+            launcher,
+        ],
+    ]
+    assert "claude mcp remove --scope project context7" in document["human"]
+    assert "claude mcp add --scope project context7 -- node" in document["human"]
+    assert "Fresh Claude Code sessions" in document["human"]
+    assert "FERRY_PROTECTED_CANARY" not in result.stdout + result.stderr
+    assert "CONTEXT7_API_KEY" not in result.stdout + result.stderr
+
+
+def _context7_launcher_fixture(fixture: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "context7-launch",
+        fixture,
+        "--json",
+    )
+
+
+def test_context7_launcher_passes_only_the_required_environment() -> None:
+    result = _context7_launcher_fixture("success")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["command"] == "npx"
+    assert report["args"] == ["-y", "@upstash/context7-mcp"]
+    assert report["stdio"] == "inherit"
+    assert report["child_env_names"] == [
+        "CONTEXT7_API_KEY",
+        "HOME",
+        "LANG",
+        "NODE_EXTRA_CA_CERTS",
+        "PATH",
+        "TMPDIR",
+    ]
+    assert report["child_has_context7_key"] is True
+    assert report["child_has_parent_canary"] is False
+    assert report["result"] == {"status": 23, "signal": None, "ready": False}
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_context7_launcher_forwards_signals_and_removes_listeners() -> None:
+    result = _context7_launcher_fixture("signal")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["result"] == {"status": 0, "signal": "SIGTERM", "ready": False}
+    assert report["forwarded"] == ["SIGTERM"]
+    assert report["remaining_signal_listeners"] == 0
+
+
+def test_context7_launcher_stops_before_spawn_when_key_access_fails() -> None:
+    result = _context7_launcher_fixture("credential-failure")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"] == "Context7 credential unavailable"
+    assert report["spawn_count"] == 0
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_context7_launcher_check_reads_the_key_without_starting_child() -> None:
+    result = _context7_launcher_fixture("check")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["result"] == {"status": 0, "signal": None, "ready": True}
+    assert report["spawn_count"] == 0
+
+
 def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> None:
     result = _run(
         "node",
@@ -1862,6 +2223,7 @@ def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> No
         "mcp-registration",
         "worktree-parity",
         "reviewer-clients",
+        "context7-credential",
     }
     assert all(
         set(record) == {"id", "class", "status", "duration_ms", "remediation", "details"}
@@ -1889,6 +2251,49 @@ def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> No
         "canonical_hosts": 4,
         "manifest_contract_sources": 3,
     }
+
+
+def test_static_readiness_reports_context7_credential_without_values(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "readiness-static",
+        "healthy",
+        "--root",
+        str(REPO),
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    record = next(item for item in report["records"] if item["id"] == "context7-credential")
+    assert record["status"] == "ok"
+    assert record["details"] == {"credential": "ready"}
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_static_readiness_redacts_context7_credential_failure(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "readiness-static",
+        "context7-unavailable",
+        "--root",
+        str(REPO),
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    record = next(item for item in report["records"] if item["id"] == "context7-credential")
+    assert record["status"] == "fail"
+    assert record["details"] == {
+        "reason": "The protected Context7 credential or launcher is unavailable"
+    }
+    assert record["remediation"] == "Run node scripts/agent-compat/codex-bootstrap.mjs."
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
 def test_brainstorm_readiness_live_sequence_is_value_free_and_tree_clean(
@@ -2447,6 +2852,35 @@ def test_proton_helper_uses_isolated_session_and_returns_only_the_field(
     assert "all checks passed" in result.stderr
 
 
+def test_proton_field_reader_uses_the_caller_descriptor(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "proton-field-descriptor",
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report == {
+        "context7_args": [
+            "item",
+            "view",
+            "--vault-name",
+            "Personal",
+            "--item-title",
+            "Context7 API Key",
+            "--field",
+            "API Key",
+        ],
+        "context7_token_selected": True,
+        "reviewer_vault": "PortalPilot",
+        "reviewer_token_selected": True,
+        "sessions_removed": True,
+    }
+
+
 def test_proton_helper_redacts_injected_child_streams(tmp_path: Path) -> None:
     result = _run(
         "node",
@@ -2461,6 +2895,24 @@ def test_proton_helper_redacts_injected_child_streams(tmp_path: Path) -> None:
     report = json.loads(result.stdout)
     assert report["stage"] in {"login", "field-read"}
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_proton_helper_rejects_a_symbolic_token_before_login(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "proton-field",
+        "symlink-token",
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "stage": "local",
+        "error": "reviewer-agent.pat must be a regular file",
+        "child_calls": 0,
+    }
 
 
 def test_vibe_review_pins_glm_and_disables_tools() -> None:

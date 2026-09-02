@@ -31,6 +31,6 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 
 [mcp_servers.context7]
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
+command = "node"
+args = ["__DATA_HOME__/discord-ferry/reviewer-runtime/current/context7-mcp.mjs"]
 startup_timeout_sec = 30

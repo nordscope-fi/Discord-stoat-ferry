@@ -17,6 +17,7 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readProtonField } from './proton-credential.mjs';
 
 const TOML_TRUST_PROBE = String.raw`
 import json
@@ -45,9 +46,17 @@ sys.stdout.write(json.dumps({
 
 const REVIEWER_AGENT = 'discord-ferry-reviewers';
 const REVIEWER_VAULT = 'PortalPilot';
+const CONTEXT7_AGENT = 'discord-ferry-context7';
+const CONTEXT7_VAULT = 'Personal';
+const CONTEXT7_ITEM = 'Context7 API Key';
+const CONTEXT7_FIELD = 'API Key';
+const CONTEXT7_TOKEN_FILE = 'context7-agent.pat';
+const CONTEXT7_STATE_FILE = 'context7-agent.json';
+const CONTEXT7_STATE_VERSION = 1;
 export const REVIEWER_RUNTIME_FILES = [
   'review-contract.mjs',
   'proton-credential.mjs',
+  'context7-mcp.mjs',
   'vibe-review.mjs',
   'qwen-review.mjs',
   'claude-review.mjs',
@@ -459,6 +468,246 @@ export async function provisionReviewerAgent({ home, passCli }) {
   return { created: true, renewed: false };
 }
 
+function context7GrantDigest() {
+  return createHash('sha256').update(JSON.stringify({
+    vault: CONTEXT7_VAULT,
+    item: CONTEXT7_ITEM,
+    role: 'viewer',
+  })).digest('hex');
+}
+
+function context7Ownership(agent, state) {
+  return {
+    version: CONTEXT7_STATE_VERSION,
+    agent_id: String(agent.id),
+    agent_name: CONTEXT7_AGENT,
+    state,
+    grant_sha256: context7GrantDigest(),
+  };
+}
+
+function secureRegularFile(path, label) {
+  const info = lstatOrNull(path);
+  if (!info) return null;
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${label} must be a regular file`);
+  if ((info.mode & 0o777) !== 0o600) throw new Error(`${label} must have mode 0600`);
+  return info;
+}
+
+function readContext7Ownership(path) {
+  if (!secureRegularFile(path, CONTEXT7_STATE_FILE)) return null;
+  let document;
+  try {
+    document = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error('Context7 ownership record is invalid');
+  }
+  const keys = Object.keys(document ?? {}).sort();
+  const expectedKeys = ['agent_id', 'agent_name', 'grant_sha256', 'state', 'version'];
+  if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
+      || document.version !== CONTEXT7_STATE_VERSION
+      || typeof document.agent_id !== 'string'
+      || document.agent_id.length === 0
+      || document.agent_name !== CONTEXT7_AGENT
+      || !['creating', 'ready'].includes(document.state)
+      || document.grant_sha256 !== context7GrantDigest()) {
+    throw new Error('Context7 ownership record is invalid');
+  }
+  return document;
+}
+
+function parseCreatedContext7Agent(stdout) {
+  let envelope;
+  try {
+    envelope = JSON.parse(stdout);
+  } catch {
+    throw new Error('Proton agent command returned an invalid Context7 identity');
+  }
+  const agent = envelope?.agent;
+  if (!agent || agent.name !== CONTEXT7_AGENT
+      || !['string', 'number'].includes(typeof agent.id)
+      || String(agent.id).length === 0) {
+    throw new Error('Proton agent command returned an invalid Context7 identity');
+  }
+  return { agent, token: parseAgentToken(stdout) };
+}
+
+function writeContext7Ownership(path, agent, state) {
+  writeAtomic(path, `${JSON.stringify(context7Ownership(agent, state))}\n`, null, 0o600);
+}
+
+async function verifyContext7Field({ home, fieldReader }) {
+  await fieldReader({
+    tokenFile: CONTEXT7_TOKEN_FILE,
+    vaultName: CONTEXT7_VAULT,
+    itemTitle: CONTEXT7_ITEM,
+    field: CONTEXT7_FIELD,
+    reason: 'Verify Discord Ferry Context7 access',
+    home,
+  });
+}
+
+async function createContext7Agent({
+  home,
+  passCli,
+  run,
+  fieldReader,
+  tokenPath,
+  ownershipPath,
+  recovered,
+}) {
+  const created = parseCreatedContext7Agent(run(passCli, [
+    'agent', 'create', CONTEXT7_AGENT, '--expiration', '3m',
+  ]));
+  writeContext7Ownership(ownershipPath, created.agent, 'creating');
+  writeAtomic(tokenPath, created.token, null, 0o600);
+  run(passCli, [
+    'agent', 'access', 'grant', CONTEXT7_AGENT,
+    '--vault-name', CONTEXT7_VAULT,
+    '--item-title', CONTEXT7_ITEM,
+    '--role', 'viewer',
+  ]);
+  await verifyContext7Field({ home, fieldReader });
+  writeContext7Ownership(ownershipPath, created.agent, 'ready');
+  return { created: true, renewed: false, recovered };
+}
+
+export async function provisionContext7Agent({
+  home,
+  passCli,
+  run = runPassCli,
+  fieldReader = readProtonField,
+  now = () => Date.now(),
+}) {
+  if (!home || !passCli) throw new Error('Context7 agent setup requires home and pass-cli');
+  const help = run(passCli, ['agent', 'access', 'grant', '--help']);
+  if (!help.includes('--item-title') || !help.includes('--role')) {
+    throw new Error('installed pass-cli does not support item-limited agent access');
+  }
+  const vaults = parseValueFreeList(
+    run(passCli, ['vault', 'list', '--output', 'json']),
+    'vault list',
+    'vaults',
+  );
+  if (vaults.filter((vault) => vault?.name === CONTEXT7_VAULT).length !== 1) {
+    throw new Error('pass-cli must expose exactly one Personal vault');
+  }
+  const items = parseValueFreeList(
+    run(passCli, ['item', 'list', '--vault-name', CONTEXT7_VAULT, '--output', 'json']),
+    'item list',
+    'items',
+  );
+  if (items.filter((item) => item?.title === CONTEXT7_ITEM).length !== 1) {
+    throw new Error('pass-cli must expose exactly one Context7 API Key item');
+  }
+  const agents = parseValueFreeList(
+    run(passCli, ['agent', 'list', '--output', 'json']),
+    'agent list',
+    'agents',
+  );
+  const matchingAgents = agents.filter((agent) => agent?.name === CONTEXT7_AGENT);
+  if (matchingAgents.length > 1) {
+    throw new Error('multiple discord-ferry-context7 agents exist; remove duplicates before setup');
+  }
+
+  const credentialDirectory = join(home, '.config', 'discord-ferry');
+  const tokenPath = join(credentialDirectory, CONTEXT7_TOKEN_FILE);
+  const ownershipPath = join(credentialDirectory, CONTEXT7_STATE_FILE);
+  const ownership = readContext7Ownership(ownershipPath);
+  if (matchingAgents.length === 1) {
+    const agent = matchingAgents[0];
+    if (!ownership || ownership.agent_id !== String(agent.id)) {
+      throw new Error('Context7 agent exists without a matching ownership record');
+    }
+    if (ownership.state === 'creating') {
+      run(passCli, ['agent', 'delete', CONTEXT7_AGENT]);
+      rmSync(tokenPath, { force: true });
+      rmSync(ownershipPath, { force: true });
+      return createContext7Agent({
+        home,
+        passCli,
+        run,
+        fieldReader,
+        tokenPath,
+        ownershipPath,
+        recovered: true,
+      });
+    }
+    if (!secureRegularFile(tokenPath, CONTEXT7_TOKEN_FILE)) {
+      throw new Error('Context7 token file is missing');
+    }
+    const expireTime = Number(agent.expire_time);
+    const expired = Number.isFinite(expireTime)
+      && expireTime <= Math.floor(now() / 1000);
+    if (expired) {
+      const renewed = run(passCli, [
+        'agent', 'renew', '--expiration', '3m', '--output', 'json', CONTEXT7_AGENT,
+      ]);
+      writeAtomic(tokenPath, parseAgentToken(renewed), null, 0o600);
+      await verifyContext7Field({ home, fieldReader });
+      return { created: false, renewed: true, recovered: false };
+    }
+    await verifyContext7Field({ home, fieldReader });
+    return { created: false, renewed: false, recovered: false };
+  }
+  if (ownership || lstatOrNull(tokenPath)) {
+    throw new Error('Context7 local credential state has no matching agent');
+  }
+
+  return createContext7Agent({
+    home,
+    passCli,
+    run,
+    fieldReader,
+    tokenPath,
+    ownershipPath,
+    recovered: false,
+  });
+}
+
+export async function provisionAgentCredentials({
+  home,
+  passCli,
+  reviewer = provisionReviewerAgent,
+  context7 = provisionContext7Agent,
+}) {
+  const reviewerReport = await reviewer({ home, passCli });
+  const context7Report = await context7({ home, passCli });
+  return { reviewer: reviewerReport, context7: context7Report };
+}
+
+function quoteShellArgument(argument) {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(argument)) return argument;
+  return `'${argument.replaceAll("'", `'"'"'`)}'`;
+}
+
+function renderShellCommand(arguments_) {
+  return arguments_.map(quoteShellArgument).join(' ');
+}
+
+export function claudeContext7OwnerAction(home, currentPath = null) {
+  const runtimePath = currentPath ?? join(reviewerRuntimeRoot(home), 'current');
+  const launcher = join(runtimePath, 'context7-mcp.mjs');
+  return {
+    launcher,
+    commands: [
+      ['claude', 'mcp', 'remove', '--scope', 'project', 'context7'],
+      ['claude', 'mcp', 'add', '--scope', 'project', 'context7', '--', 'node', launcher],
+    ],
+  };
+}
+
+export function renderBootstrapMessage(report) {
+  const commands = report.claudeContext7.commands.map(renderShellCommand);
+  return [
+    `Codex trust ready for ${report.canonicalRoot}`,
+    'Context7 credential ready.',
+    'Run these commands from the project root:',
+    ...commands,
+    'Fresh Claude Code sessions use the protected Context7 launcher after you apply them.',
+  ].join('\n');
+}
+
 function resolveInstalledPassCli(home) {
   const installed = join(home, '.local', 'bin', 'pass-cli');
   if (!existsSync(installed)) {
@@ -489,8 +738,16 @@ export async function runBootstrap({
     inspectProjectTrustToml(readFileSync(configPath, 'utf8'), ownedRoot);
   }
   const runtimeReport = await runtime({ home, root: resolve(root), dryRun });
-  if (!dryRun) await proton({ home, root, canonicalRoot: ownedRoot });
-  return { changed: reconciled !== source, canonicalRoot: ownedRoot, runtime: runtimeReport };
+  const credentialReport = dryRun
+    ? null
+    : await proton({ home, root, canonicalRoot: ownedRoot });
+  return {
+    changed: reconciled !== source,
+    canonicalRoot: ownedRoot,
+    runtime: runtimeReport,
+    credentials: credentialReport,
+    claudeContext7: claudeContext7OwnerAction(home, runtimeReport.currentPath),
+  };
 }
 
 function selfTest() {
@@ -527,13 +784,13 @@ async function main() {
     home,
     root,
     dryRun: args.includes('--dry-run'),
-    proton: ({ home: bootstrapHome }) => provisionReviewerAgent({
+    proton: ({ home: bootstrapHome }) => provisionAgentCredentials({
       home: bootstrapHome,
       passCli: resolveInstalledPassCli(bootstrapHome),
     }),
   });
   if (args.includes('--json')) process.stdout.write(`${JSON.stringify(report)}\n`);
-  else process.stdout.write(`Codex trust ready for ${report.canonicalRoot}\n`);
+  else process.stdout.write(`${renderBootstrapMessage(report)}\n`);
 }
 
 let invokedAsMain = false;

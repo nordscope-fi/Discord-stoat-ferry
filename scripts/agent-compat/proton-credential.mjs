@@ -6,10 +6,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  lstatSync,
   readFileSync,
   realpathSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -101,21 +101,27 @@ function stageFailure(stage, error) {
   return wrapped;
 }
 
-export async function readReviewerField({
+export async function readProtonField({
+  tokenFile,
+  vaultName,
   itemTitle,
-  field = 'API Key',
+  field,
   reason,
   home,
   run = runBoundedChild,
 }) {
-  if (!itemTitle || !reason || !home) {
-    throw new Error('reviewer field access requires item title, reason, and home');
+  if (![tokenFile, vaultName, itemTitle, field, reason, home].every(Boolean)) {
+    throw new Error('Proton field access requires token, vault, item, field, reason, and home');
   }
-  const tokenPath = join(home, '.config', 'discord-ferry', 'reviewer-agent.pat');
-  const tokenMode = statSync(tokenPath).mode & 0o777;
-  if (tokenMode !== 0o600) throw new Error('reviewer token file must have mode 0600');
+  const tokenPath = join(home, '.config', 'discord-ferry', tokenFile);
+  const tokenStat = lstatSync(tokenPath);
+  if (!tokenStat.isFile() || tokenStat.isSymbolicLink()) {
+    throw new Error(`${tokenFile} must be a regular file`);
+  }
+  const tokenMode = tokenStat.mode & 0o777;
+  if (tokenMode !== 0o600) throw new Error(`${tokenFile} must have mode 0600`);
   const token = readFileSync(tokenPath, 'utf8').trim();
-  if (!/^pst_[^\s]{32,}$/u.test(token)) throw new Error('reviewer token file is invalid');
+  if (!/^pst_[^\s]{32,}$/u.test(token)) throw new Error(`${tokenFile} is invalid`);
   const sessionDirectory = mkdtempSync(join(tmpdir(), 'ferry-pass-session-'));
   const environment = {
     PATH: process.env.PATH ?? '',
@@ -137,7 +143,7 @@ export async function readReviewerField({
         'item',
         'view',
         '--vault-name',
-        'PortalPilot',
+        vaultName,
         '--item-title',
         itemTitle,
         '--field',
@@ -158,6 +164,15 @@ export async function readReviewerField({
   } finally {
     rmSync(sessionDirectory, { recursive: true, force: true });
   }
+}
+
+export function readReviewerField(options) {
+  return readProtonField({
+    ...options,
+    tokenFile: 'reviewer-agent.pat',
+    vaultName: 'PortalPilot',
+    field: options.field ?? 'API Key',
+  });
 }
 
 async function selfTest(basePath) {
@@ -220,7 +235,7 @@ exit 73
         run,
       });
     } catch (error) {
-      rejectedMode = error.message === 'reviewer token file must have mode 0600';
+      rejectedMode = error.message === 'reviewer-agent.pat must have mode 0600';
     }
     if (!rejectedMode) throw new Error('mode-0644 token fixture was accepted');
   } finally {

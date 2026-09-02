@@ -165,6 +165,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.40.1] - 2026-09-02
+
+### Fixed
+
+- **All four coding hosts now use the same protected Context7 key from Proton Pass.** Setup gives
+  Context7 read access to only its existing item. The generated settings contain no copy of the
+  key, and logs never print it. Startup stops with a safe message when the key cannot be read.
+
 ## [2.36.0] - 2026-08-29
 
 ### Added

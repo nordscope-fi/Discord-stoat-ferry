@@ -45,6 +45,7 @@ const sourceRoot = resolve(execFileSync(
 const projectRoot = canonicalCheckoutRoot(sourceRoot);
 const templateDir = join(sourceRoot, 'config', 'agent-compat');
 const home = process.env.HOME;
+const dataHome = process.env.XDG_DATA_HOME || join(home, '.local', 'share');
 
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
@@ -92,6 +93,7 @@ function render(templateName, replacements = {}) {
   let content = readFileSync(join(templateDir, templateName), 'utf8');
   content = content.replaceAll('__PROJECT_ROOT__', projectRoot);
   content = content.replaceAll('__HOME__', home);
+  content = content.replaceAll('__DATA_HOME__', dataHome);
   for (const [key, value] of Object.entries(replacements)) {
     content = content.replaceAll(key, value);
   }
@@ -727,6 +729,7 @@ function checkConfigSafety() {
     if (!existsSync(filePath)) continue;
     const content = readFileSync(filePath, 'utf8');
     if (content.includes('__PROJECT_ROOT__') || content.includes('__HOME__') ||
+        content.includes('__DATA_HOME__') ||
         content.includes('__POST_TOOL_MATCHER__') || content.includes('__VIBE_POST_TOOL_MATCHER__')) {
       fail(`unresolved placeholder in ${filePath}`);
     }

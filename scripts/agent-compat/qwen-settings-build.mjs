@@ -7,10 +7,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { qwenPostToolMatcher } from './hook-parity.mjs';
 
-export function buildQwenSettings({ projectRoot, home, templateDir }) {
+export function buildQwenSettings({
+  projectRoot,
+  home,
+  templateDir,
+  dataHome = process.env.XDG_DATA_HOME || join(home, '.local', 'share'),
+}) {
   let content = readFileSync(join(templateDir, 'qwen-settings.json'), 'utf8');
   content = content.replaceAll('__PROJECT_ROOT__', projectRoot);
   content = content.replaceAll('__HOME__', home);
+  content = content.replaceAll('__DATA_HOME__', dataHome);
   content = content.replaceAll('__QWEN_POST_TOOL_MATCHER__', qwenPostToolMatcher());
   const settings = JSON.parse(content);
   mergeQwenPromptHooks(settings, projectRoot);

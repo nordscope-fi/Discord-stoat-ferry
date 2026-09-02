@@ -417,17 +417,42 @@ function setupRepeatReal() {
   const passCli = join(home, '.local', 'bin', 'pass-cli');
   mkdirSync(join(home, '.local', 'bin'), { recursive: true });
   writeFileSync(passCli, `#!/bin/sh
-state="$HOME/.config/fake-pass-agent"
+reviewer_state="$HOME/.config/fake-reviewer-agent"
+context7_state="$HOME/.config/fake-context7-agent"
 if [ "$1 $2 $3" = "agent create --help" ]; then
   printf 'NAME --expiration 3m --vault\\n'
+elif [ "$1 $2 $3 $4" = "agent access grant --help" ]; then
+  printf '%s\\n' '--item-title --role'
 elif [ "$1 $2" = "vault list" ]; then
-  printf '[{"name":"PortalPilot"}]\\n'
+  printf '[{"name":"PortalPilot"},{"name":"Personal"}]\\n'
+elif [ "$1 $2" = "item list" ]; then
+  printf '[{"title":"Context7 API Key"}]\\n'
 elif [ "$1 $2" = "agent list" ]; then
-  if [ -f "$state" ]; then printf '[{"name":"discord-ferry-reviewers"}]\\n'; else printf '[]\\n'; fi
+  printf '['
+  separator=''
+  if [ -f "$reviewer_state" ]; then
+    printf '{"id":"reviewer-id","name":"discord-ferry-reviewers","expire_time":1999999999}'
+    separator=','
+  fi
+  if [ -f "$context7_state" ]; then
+    printf '%s{"id":"context7-id","name":"discord-ferry-context7","expire_time":1999999999}' "$separator"
+  fi
+  printf ']\\n'
 elif [ "$1 $2" = "agent create" ]; then
   mkdir -p "$HOME/.config"
-  : > "$state"
-  printf '{"token":"PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_12345678901234567890123456789012"}\\n'
+  if [ "$3" = "discord-ferry-reviewers" ]; then
+    : > "$reviewer_state"
+    printf '{"token":"PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_12345678901234567890123456789012"}\\n'
+  else
+    : > "$context7_state"
+    printf '{"agent":{"id":"context7-id","name":"discord-ferry-context7","credentials":{"token":"pst_abcdefghijklmnopqrstuvwxyz12345678901234"}}}\\n'
+  fi
+elif [ "$1 $2 $3" = "agent access grant" ]; then
+  exit 0
+elif [ "$1" = "login" ]; then
+  exit 0
+elif [ "$1 $2" = "item view" ]; then
+  printf 'FERRY_CONTEXT7_FIXTURE_VALUE\\n'
 else
   exit 1
 fi
@@ -453,7 +478,7 @@ esac
     ...process.env,
     HOME: home,
     CODEX_HOME: join(home, '.codex'),
-    PATH: `${fakeBin}:${process.env.PATH}`,
+    PATH: `${join(home, '.local', 'bin')}:${fakeBin}:${process.env.PATH}`,
     FERRY_PLAIN_ENGLISH_VERSION: '1.0.0',
   };
   const run = () => spawnSync('bash', [join(root, 'scripts', 'codex-setup.sh')], {
@@ -714,22 +739,74 @@ switch (mode) {
     });
     break;
   }
+  case 'proton-field-descriptor': {
+    const homeIndex = process.argv.indexOf('--home');
+    const home = homeIndex === -1 ? null : process.argv[homeIndex + 1];
+    if (!home) throw new Error('proton-field-descriptor requires --home');
+    const credential = await import('../../scripts/agent-compat/proton-credential.mjs');
+    const tokenDirectory = join(home, '.config', 'discord-ferry');
+    mkdirSync(tokenDirectory, { recursive: true });
+    const context7Token = `pst_${'c'.repeat(40)}`;
+    const reviewerToken = `pst_${'r'.repeat(40)}`;
+    writeFileSync(join(tokenDirectory, 'context7-agent.pat'), context7Token, { mode: 0o600 });
+    writeFileSync(join(tokenDirectory, 'reviewer-agent.pat'), reviewerToken, { mode: 0o600 });
+    const calls = [];
+    const sessions = new Set();
+    const run = async (command, args, options) => {
+      if (command !== 'pass-cli') throw new Error('unexpected command');
+      sessions.add(options.env.PROTON_PASS_SESSION_DIR);
+      calls.push({ args, token: options.env.PROTON_PASS_PERSONAL_ACCESS_TOKEN });
+      return { stdout: args[0] === 'item' ? 'FIXTURE_FIELD_VALUE\n' : '' };
+    };
+    await credential.readProtonField({
+      tokenFile: 'context7-agent.pat',
+      vaultName: 'Personal',
+      itemTitle: 'Context7 API Key',
+      field: 'API Key',
+      reason: 'Start Context7',
+      home,
+      run,
+    });
+    await credential.readReviewerField({
+      itemTitle: 'Mistral Vibe API Key',
+      reason: 'Review Ferry code',
+      home,
+      run,
+    });
+    const itemCalls = calls.filter(call => call.args[0] === 'item');
+    writeJson({
+      context7_args: itemCalls[0].args,
+      context7_token_selected: itemCalls[0].token === context7Token,
+      reviewer_vault: itemCalls[1].args[itemCalls[1].args.indexOf('--vault-name') + 1],
+      reviewer_token_selected: itemCalls[1].token === reviewerToken,
+      sessions_removed: [...sessions].every(path => !existsSync(path)),
+    });
+    break;
+  }
   case 'proton-field': {
     const homeIndex = process.argv.indexOf('--home');
     const home = homeIndex === -1 ? null : process.argv[homeIndex + 1];
-    if (argument !== 'canary-child-error' || !home) {
+    if (!['canary-child-error', 'symlink-token'].includes(argument) || !home) {
       throw new Error('invalid proton field fixture');
     }
     const tokenDirectory = join(home, '.config', 'discord-ferry');
     mkdirSync(tokenDirectory, { recursive: true });
     const tokenPath = join(tokenDirectory, 'reviewer-agent.pat');
-    writeFileSync(tokenPath, `pst_${'x'.repeat(40)}`, { mode: 0o600 });
+    if (argument === 'symlink-token') {
+      const outsideToken = join(home, 'outside-agent.pat');
+      writeFileSync(outsideToken, `pst_${'x'.repeat(40)}`, { mode: 0o600 });
+      symlinkSync(outsideToken, tokenPath);
+    } else {
+      writeFileSync(tokenPath, `pst_${'x'.repeat(40)}`, { mode: 0o600 });
+    }
+    let childCalls = 0;
     try {
       await readReviewerField({
         itemTitle: 'Mistral Vibe API Key',
         reason: 'fixture',
         home,
         run: async () => {
+          childCalls += 1;
           const error = new Error('FERRY_SECRET_CANARY');
           error.status = 23;
           error.stdout = 'FERRY_SECRET_CANARY';
@@ -738,7 +815,7 @@ switch (mode) {
         },
       });
     } catch (error) {
-      writeJson({ stage: error.stage ?? 'login', error: error.message });
+      writeJson({ stage: error.stage ?? 'local', error: error.message, child_calls: childCalls });
       process.exitCode = 1;
     }
     break;
@@ -2211,6 +2288,255 @@ switch (mode) {
     writeJson({ ok: true });
     break;
   }
+  case 'bootstrap-provisioners': {
+    const { provisionAgentCredentials } = await import(
+      '../../scripts/agent-compat/codex-bootstrap.mjs'
+    );
+    const calls = [];
+    const report = await provisionAgentCredentials({
+      home: '/fixture/home',
+      passCli: '/fixture/pass-cli',
+      reviewer: async (options) => {
+        calls.push(['reviewer', options.home, options.passCli]);
+        return { created: false, renewed: false };
+      },
+      context7: async (options) => {
+        calls.push(['context7', options.home, options.passCli]);
+        return { created: true, renewed: false, recovered: false };
+      },
+    });
+    writeJson({ calls, report });
+    break;
+  }
+  case 'bootstrap-claude-handoff': {
+    const fixtureArgs = process.argv.slice(3);
+    const option = (name) => {
+      const index = fixtureArgs.indexOf(name);
+      return index === -1 ? undefined : fixtureArgs[index + 1];
+    };
+    const home = option('--home');
+    const root = option('--root');
+    const { renderBootstrapMessage } = await import(
+      '../../scripts/agent-compat/codex-bootstrap.mjs'
+    );
+    const currentPath = join(
+      home, '.local', 'share', 'discord-ferry', 'reviewer-runtime', 'current',
+    );
+    const report = await runBootstrap({
+      home,
+      root,
+      canonicalRoot: root,
+      runtime: async () => ({ fixture: true, currentPath }),
+      proton: async () => ({
+        reviewer: { created: false, renewed: false },
+        context7: { created: false, renewed: false, recovered: false },
+      }),
+    });
+    writeJson({ report, human: renderBootstrapMessage(report) });
+    break;
+  }
+  case 'context7-agent': {
+    const fixtureArgs = process.argv.slice(3);
+    const option = (name) => {
+      const index = fixtureArgs.indexOf(name);
+      return index === -1 ? undefined : fixtureArgs[index + 1];
+    };
+    const fixture = argument;
+    const home = option('--home');
+    const supported = new Set([
+      'create-repeat',
+      'expired',
+      'interrupted',
+      'unmanaged',
+      'duplicate-agent',
+      'duplicate-item',
+      'unsafe-token',
+      'unsafe-ownership',
+      'invalid-ownership',
+    ]);
+    if (!supported.has(fixture) || !home) {
+      throw new Error('invalid context7-agent fixture');
+    }
+    const { provisionContext7Agent } = await import(
+      '../../scripts/agent-compat/codex-bootstrap.mjs'
+    );
+    const calls = [];
+    let agents = fixture === 'unmanaged'
+      ? [{ id: 'unmanaged-id', name: 'discord-ferry-context7', expire_time: 1999999999 }]
+      : fixture === 'duplicate-agent'
+        ? [
+            { id: 'duplicate-1', name: 'discord-ferry-context7' },
+            { id: 'duplicate-2', name: 'discord-ferry-context7' },
+          ]
+        : [];
+    let fieldReads = 0;
+    let generation = 0;
+    let failGrant = fixture === 'interrupted';
+    const run = (_passCli, args) => {
+      calls.push(args);
+      if (args.join(' ') === 'agent access grant --help') return '--item-title --role';
+      if (args[0] === 'vault') return JSON.stringify({ vaults: [{ name: 'Personal' }] });
+      if (args[0] === 'item') return JSON.stringify({ items: fixture === 'duplicate-item'
+        ? [{ title: 'Context7 API Key' }, { title: 'Context7 API Key' }]
+        : [{ title: 'Context7 API Key' }] });
+      if (args[0] === 'agent' && args[1] === 'list') return JSON.stringify({ agents });
+      if (args[0] === 'agent' && args[1] === 'create') {
+        generation += 1;
+        const id = `context7-agent-id-${generation}`;
+        agents = [{
+          id,
+          name: 'discord-ferry-context7',
+          expire_time: 1999999999,
+        }];
+        return JSON.stringify({
+          agent: {
+            id,
+            name: 'discord-ferry-context7',
+            credentials: { token: `pst_${'n'.repeat(40)}` },
+          },
+        });
+      }
+      if (args[0] === 'agent' && args[1] === 'access' && args[2] === 'grant') {
+        if (failGrant) {
+          failGrant = false;
+          throw new Error('grant failed');
+        }
+        return '';
+      }
+      if (args[0] === 'agent' && args[1] === 'renew') {
+        agents[0].expire_time = 1999999999;
+        return JSON.stringify({ token: `pst_${'w'.repeat(40)}` });
+      }
+      if (args[0] === 'agent' && args[1] === 'delete') {
+        agents = [];
+        return '';
+      }
+      throw new Error(`unexpected pass-cli call: ${args.join(' ')}`);
+    };
+    const fieldReader = async (descriptor) => {
+      fieldReads += 1;
+      if (descriptor.tokenFile !== 'context7-agent.pat'
+          || descriptor.vaultName !== 'Personal'
+          || descriptor.itemTitle !== 'Context7 API Key'
+          || descriptor.field !== 'API Key') {
+        throw new Error('wrong Context7 field descriptor');
+      }
+      return 'FERRY_SECRET_CANARY';
+    };
+    const provision = () => provisionContext7Agent({
+      home, passCli: '/fixture/pass-cli', run, fieldReader,
+    });
+    let first = null;
+    let second = null;
+    let error = null;
+    try {
+      first = await provision();
+    } catch (caught) {
+      error = caught.message;
+    }
+    const tokenPath = join(home, '.config', 'discord-ferry', 'context7-agent.pat');
+    const ownershipPath = join(home, '.config', 'discord-ferry', 'context7-agent.json');
+    if (fixture === 'expired' && first) agents[0].expire_time = 1;
+    if (fixture === 'unsafe-token' && first) chmodSync(tokenPath, 0o644);
+    if (fixture === 'unsafe-ownership' && first) chmodSync(ownershipPath, 0o644);
+    if (fixture === 'invalid-ownership' && first) {
+      const document = JSON.parse(readFileSync(ownershipPath, 'utf8'));
+      writeFileSync(ownershipPath, JSON.stringify({ ...document, extra: true }), { mode: 0o600 });
+    }
+    if (['create-repeat', 'expired', 'interrupted', 'unsafe-token',
+      'unsafe-ownership', 'invalid-ownership'].includes(fixture)) {
+      try {
+        second = await provision();
+      } catch (caught) {
+        error = caught.message;
+      }
+    }
+    const isGrant = args => args[0] === 'agent' && args[1] === 'access'
+      && args[2] === 'grant' && args[3] !== '--help';
+    const grant = calls.find(isGrant);
+    const ownershipExists = existsSync(ownershipPath);
+    writeJson({
+      first,
+      second,
+      error,
+      grant,
+      grant_count: calls.filter(isGrant).length,
+      create_count: calls.filter(args => args[0] === 'agent' && args[1] === 'create').length,
+      renew_count: calls.filter(args => args[0] === 'agent' && args[1] === 'renew').length,
+      delete_calls: calls.filter(args => args[0] === 'agent' && args[1] === 'delete'),
+      field_reads: fieldReads,
+      token_mode: existsSync(tokenPath) ? lstatSync(tokenPath).mode & 0o777 : null,
+      ownership_mode: ownershipExists ? lstatSync(ownershipPath).mode & 0o777 : null,
+      ownership: ownershipExists ? JSON.parse(readFileSync(ownershipPath, 'utf8')) : null,
+    });
+    break;
+  }
+  case 'context7-launch': {
+    const fixture = argument;
+    const supported = new Set(['success', 'signal', 'credential-failure', 'check']);
+    if (!supported.has(fixture)) throw new Error('invalid context7-launch fixture');
+    const { EventEmitter } = await import('node:events');
+    const { context7Environment, runContext7 } = await import(
+      '../../scripts/agent-compat/context7-mcp.mjs'
+    );
+    const sourceEnvironment = {
+      PATH: '/fixture/bin',
+      HOME: '/fixture/home',
+      TMPDIR: '/fixture/tmp',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: undefined,
+      NODE_EXTRA_CA_CERTS: '/fixture/ca.pem',
+      OPENAI_API_KEY: 'FERRY_SECRET_CANARY',
+    };
+    const parent = new EventEmitter();
+    const child = new EventEmitter();
+    child.pid = 123;
+    const forwarded = [];
+    child.kill = signal => forwarded.push(signal);
+    const spawns = [];
+    const spawnChild = (command, args, options) => {
+      spawns.push({ command, args, options });
+      queueMicrotask(() => {
+        if (fixture === 'signal') parent.emit('SIGTERM');
+        child.emit('close', fixture === 'success' ? 23 : 0, fixture === 'signal' ? 'SIGTERM' : null);
+      });
+      return child;
+    };
+    const fieldReader = async () => {
+      if (fixture === 'credential-failure') throw new Error('FERRY_SECRET_CANARY');
+      return 'FERRY_CONTEXT7_KEY_CANARY';
+    };
+    let result = null;
+    let error = null;
+    try {
+      result = await runContext7({
+        home: '/fixture/home',
+        check: fixture === 'check',
+        fieldReader,
+        spawnChild,
+        environment: sourceEnvironment,
+        parent,
+      });
+    } catch (caught) {
+      error = caught.message;
+    }
+    const spawn = spawns[0] ?? null;
+    writeJson({
+      filtered_environment: context7Environment(sourceEnvironment, 'REDACTED'),
+      result,
+      error,
+      spawn_count: spawns.length,
+      command: spawn?.command ?? null,
+      args: spawn?.args ?? null,
+      stdio: spawn?.options?.stdio ?? null,
+      child_env_names: spawn ? Object.keys(spawn.options.env).sort() : [],
+      child_has_context7_key: spawn?.options?.env?.CONTEXT7_API_KEY === 'FERRY_CONTEXT7_KEY_CANARY',
+      child_has_parent_canary: spawn ? 'OPENAI_API_KEY' in spawn.options.env : false,
+      forwarded,
+      remaining_signal_listeners: parent.eventNames().length,
+    });
+    break;
+  }
   case 'readiness-static': {
     const fixture = argument;
     const fixtureArgs = process.argv.slice(3);
@@ -2356,12 +2682,27 @@ switch (mode) {
           ];
           return { status: JSON.stringify(args) === JSON.stringify(expected) ? 0 : 1, stdout: '' };
         }
+        const dataHome = process.env.XDG_DATA_HOME || join(home, '.local', 'share');
+        const context7Launcher = join(
+          dataHome,
+          'discord-ferry',
+          'reviewer-runtime',
+          'current',
+          'context7-mcp.mjs',
+        );
+        if (name === process.execPath
+            && args[0] === context7Launcher
+            && args[1] === '--check') {
+          return fixture === 'context7-unavailable'
+            ? { status: 1, stdout: '', stderr: 'FERRY_SECRET_CANARY' }
+            : { status: 0, stdout: 'context7 credential ready\n', stderr: '' };
+        }
         if (fixture === 'missing-codex' && name === 'codex') return { status: 1, stdout: '' };
         if (fixture === 'missing-client' && name === 'qwen') return { status: 1, stdout: '' };
         return { status: 0, stdout: `${name} fixture-version` };
       },
       now: () => 0,
-      runtimeCheck: async () => ({ release: 'fixture', files: 7 }),
+      runtimeCheck: async () => ({ release: 'fixture', files: 8 }),
     });
     writeJson(report);
     if (report.overall !== 'ready') process.exitCode = 1;
@@ -2380,9 +2721,9 @@ switch (mode) {
     const version = option('--version') ?? 'real';
     const files = mode === 'reviewer-runtime-fixture'
       ? Object.fromEntries([
-          'review-contract.mjs', 'proton-credential.mjs', 'vibe-review.mjs',
-          'qwen-review.mjs', 'claude-review.mjs', 'review-ensemble.mjs',
-          'review-verification.mjs',
+          'review-contract.mjs', 'proton-credential.mjs', 'context7-mcp.mjs',
+          'vibe-review.mjs', 'qwen-review.mjs', 'claude-review.mjs',
+          'review-ensemble.mjs', 'review-verification.mjs',
         ].map((name) => [name, `${name}:${version}\n`]))
       : undefined;
     try {

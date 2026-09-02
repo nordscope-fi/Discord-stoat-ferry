@@ -24,6 +24,7 @@ const sourceRoot = resolve(execFileSync(
 const projectRoot = canonicalCheckoutRoot(sourceRoot);
 const templateDir = join(sourceRoot, 'config', 'agent-compat');
 const home = process.env.HOME;
+const dataHome = process.env.XDG_DATA_HOME || join(home, '.local', 'share');
 
 // --- Helpers --------------------------------------------------------------------
 
@@ -31,6 +32,7 @@ function render(templateName, extraReplacements = {}) {
   let content = readFileSync(join(templateDir, templateName), 'utf8');
   content = content.replaceAll('__PROJECT_ROOT__', projectRoot);
   content = content.replaceAll('__HOME__', home);
+  content = content.replaceAll('__DATA_HOME__', dataHome);
   for (const [key, value] of Object.entries(extraReplacements)) {
     content = content.replaceAll(key, value);
   }
