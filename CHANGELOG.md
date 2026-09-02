@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Design critique now stops after three attempts.** The final attempt checks unresolved claims
+  against current sources, then returns the decision to the repository owner. Failed, timed-out,
+  and interrupted attempts count toward the same limit on every supported coding tool.
+
 - **Brainstorm recommendations now require independent evidence on Claude and Codex.** The workflow
   records real source reads and predeclared challenge results before it permits a selected approach.
   Prepared, suspended, cancelled, and unrelated work remain outside the recommendation gate.
