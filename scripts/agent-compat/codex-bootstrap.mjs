@@ -53,6 +53,7 @@ const CONTEXT7_FIELD = 'API Key';
 const CONTEXT7_TOKEN_FILE = 'context7-agent.pat';
 const CONTEXT7_STATE_FILE = 'context7-agent.json';
 const CONTEXT7_STATE_VERSION = 1;
+const CONTEXT7_PENDING_AGENT_ID = 'pending';
 export const REVIEWER_RUNTIME_FILES = [
   'review-contract.mjs',
   'proton-credential.mjs',
@@ -476,10 +477,18 @@ function context7GrantDigest() {
   })).digest('hex');
 }
 
-function context7Ownership(agent, state) {
+function context7AgentId(agent) {
+  const id = agent?.pat_id ?? agent?.id;
+  if (!['string', 'number'].includes(typeof id) || String(id).length === 0) {
+    throw new Error('Proton agent list returned an invalid Context7 identity');
+  }
+  return String(id);
+}
+
+function context7Ownership(agentId, state) {
   return {
     version: CONTEXT7_STATE_VERSION,
-    agent_id: String(agent.id),
+    agent_id: agentId,
     agent_name: CONTEXT7_AGENT,
     state,
     grant_sha256: context7GrantDigest(),
@@ -516,24 +525,8 @@ function readContext7Ownership(path) {
   return document;
 }
 
-function parseCreatedContext7Agent(stdout) {
-  let envelope;
-  try {
-    envelope = JSON.parse(stdout);
-  } catch {
-    throw new Error('Proton agent command returned an invalid Context7 identity');
-  }
-  const agent = envelope?.agent;
-  if (!agent || agent.name !== CONTEXT7_AGENT
-      || !['string', 'number'].includes(typeof agent.id)
-      || String(agent.id).length === 0) {
-    throw new Error('Proton agent command returned an invalid Context7 identity');
-  }
-  return { agent, token: parseAgentToken(stdout) };
-}
-
-function writeContext7Ownership(path, agent, state) {
-  writeAtomic(path, `${JSON.stringify(context7Ownership(agent, state))}\n`, null, 0o600);
+function writeContext7Ownership(path, agentId, state) {
+  writeAtomic(path, `${JSON.stringify(context7Ownership(agentId, state))}\n`, null, 0o600);
 }
 
 async function verifyContext7Field({ home, fieldReader }) {
@@ -556,11 +549,22 @@ async function createContext7Agent({
   ownershipPath,
   recovered,
 }) {
-  const created = parseCreatedContext7Agent(run(passCli, [
+  const created = run(passCli, [
     'agent', 'create', CONTEXT7_AGENT, '--expiration', '3m',
-  ]));
-  writeContext7Ownership(ownershipPath, created.agent, 'creating');
-  writeAtomic(tokenPath, created.token, null, 0o600);
+  ]);
+  const token = parseAgentToken(created);
+  writeContext7Ownership(ownershipPath, CONTEXT7_PENDING_AGENT_ID, 'creating');
+  writeAtomic(tokenPath, token, null, 0o600);
+  const agents = parseValueFreeList(
+    run(passCli, ['agent', 'list', '--output', 'json']),
+    'agent list',
+    'agents',
+  ).filter((agent) => agent?.name === CONTEXT7_AGENT);
+  if (agents.length !== 1) {
+    throw new Error('created Context7 agent could not be identified uniquely');
+  }
+  const agentId = context7AgentId(agents[0]);
+  writeContext7Ownership(ownershipPath, agentId, 'creating');
   run(passCli, [
     'agent', 'access', 'grant', CONTEXT7_AGENT,
     '--vault-name', CONTEXT7_VAULT,
@@ -568,7 +572,7 @@ async function createContext7Agent({
     '--role', 'viewer',
   ]);
   await verifyContext7Field({ home, fieldReader });
-  writeContext7Ownership(ownershipPath, created.agent, 'ready');
+  writeContext7Ownership(ownershipPath, agentId, 'ready');
   return { created: true, renewed: false, recovered };
 }
 
@@ -616,7 +620,10 @@ export async function provisionContext7Agent({
   const ownership = readContext7Ownership(ownershipPath);
   if (matchingAgents.length === 1) {
     const agent = matchingAgents[0];
-    if (!ownership || ownership.agent_id !== String(agent.id)) {
+    const agentId = context7AgentId(agent);
+    const pendingCreation = ownership?.state === 'creating'
+      && ownership.agent_id === CONTEXT7_PENDING_AGENT_ID;
+    if (!ownership || (!pendingCreation && ownership.agent_id !== agentId)) {
       throw new Error('Context7 agent exists without a matching ownership record');
     }
     if (ownership.state === 'creating') {
