@@ -145,6 +145,23 @@ def _worktree_contract_fixture(
     return script, include, agents, claude, ship
 
 
+def _critique_contract_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    skill = tmp_path / "df-critique.md"
+    skill.write_text(
+        "allowed-tools: Bash, Read, Grep, Glob\n"
+        "Run before it creates the fresh-context reviewer:\n"
+        "node scripts/agent-compat/critique-budget.mjs claim --design <path>\n"
+        "node scripts/agent-compat/critique-budget.mjs complete --design <path>\n"
+        "node scripts/agent-compat/critique-budget.mjs decide --design <path>\n"
+        "Round three uses evidence-investigation mode.\n"
+        "The owner choices are accept, return-to-design, and restart.\n"
+        "No fourth reviewer starts.\n"
+    )
+    command = tmp_path / "critique-budget.mjs"
+    shutil.copy2(REPO / "scripts/agent-compat/critique-budget.mjs", command)
+    return skill, command
+
+
 def _generated_host_snapshot(root: Path) -> dict[str, tuple[int, bytes] | None]:
     records: dict[str, tuple[int, bytes] | None] = {}
     for host in (".agents", ".codex", ".vibe", ".qwen"):
@@ -1353,6 +1370,89 @@ def test_focused_codex_hook_check_stops_when_path_is_missing() -> None:
     assert result.returncode == 1
     assert "--check-codex-hooks requires a path" in result.stdout
     assert "Warnings" not in result.stdout
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_focused_critique_contract_accepts_the_shared_policy(tmp_path: Path) -> None:
+    skill, command = _critique_contract_fixture(tmp_path)
+
+    result = _run(
+        "node",
+        "scripts/agent-compat/check.mjs",
+        "--check-critique-contract",
+        str(skill),
+        str(command),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "All checks passed" in result.stdout
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("limit", "three-attempt limit"),
+        ("claim", "pre-dispatch claim"),
+        ("bash", "shell access"),
+        ("evidence", "final evidence mode"),
+    ],
+)
+def test_focused_critique_contract_rejects_policy_drift(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+) -> None:
+    skill, command = _critique_contract_fixture(tmp_path)
+    if mutation == "limit":
+        command.write_text(
+            command.read_text().replace("CRITIQUE_BUDGET = 3", "CRITIQUE_BUDGET = 4")
+        )
+    else:
+        old, new = {
+            "claim": (" claim --design <path>", " inspect --design <path>"),
+            "bash": ("Bash, ", ""),
+            "evidence": ("evidence-investigation", "ordinary-review"),
+        }[mutation]
+        skill.write_text(skill.read_text().replace(old, new))
+
+    result = _run(
+        "node",
+        "scripts/agent-compat/check.mjs",
+        "--check-critique-contract",
+        str(skill),
+        str(command),
+    )
+
+    assert result.returncode == 1
+    assert expected in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_focused_critique_contract_rejects_a_missing_command(tmp_path: Path) -> None:
+    skill, command = _critique_contract_fixture(tmp_path)
+    command.unlink()
+
+    result = _run(
+        "node",
+        "scripts/agent-compat/check.mjs",
+        "--check-critique-contract",
+        str(skill),
+        str(command),
+    )
+
+    assert result.returncode == 1
+    assert "critique budget command missing" in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_installed_hosts_resolve_one_critique_skill() -> None:
+    shared = REPO / ".claude/skills/df-critique/SKILL.md"
+    bridge = REPO / ".agents/skills/df-critique/SKILL.md"
+    if not shared.exists() or not bridge.exists():
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+
+    assert bridge.resolve() == shared.resolve()
 
 
 def test_agent_check_requires_every_worktree_contract_path(tmp_path: Path) -> None:
