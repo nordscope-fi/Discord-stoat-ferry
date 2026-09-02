@@ -105,13 +105,20 @@ export async function readProtonField({
   tokenFile,
   vaultName,
   itemTitle,
+  shareId,
+  itemId,
   field,
   reason,
   home,
   run = runBoundedChild,
 }) {
-  if (![tokenFile, vaultName, itemTitle, field, reason, home].every(Boolean)) {
-    throw new Error('Proton field access requires token, vault, item, field, reason, and home');
+  if (![tokenFile, field, reason, home].every(Boolean)) {
+    throw new Error('Proton field access requires token, field, reason, and home');
+  }
+  const usesNames = Boolean(vaultName) && Boolean(itemTitle) && !shareId && !itemId;
+  const usesIds = Boolean(shareId) && Boolean(itemId) && !vaultName && !itemTitle;
+  if (!usesNames && !usesIds) {
+    throw new Error('Proton field access requires one complete item locator');
   }
   const tokenPath = join(home, '.config', 'discord-ferry', tokenFile);
   const tokenStat = lstatSync(tokenPath);
@@ -139,16 +146,10 @@ export async function readProtonField({
     }
     let value;
     try {
-      value = await run('pass-cli', [
-        'item',
-        'view',
-        '--vault-name',
-        vaultName,
-        '--item-title',
-        itemTitle,
-        '--field',
-        field,
-      ], {
+      const locator = usesIds
+        ? ['--share-id', shareId, '--item-id', itemId]
+        : ['--vault-name', vaultName, '--item-title', itemTitle];
+      value = await run('pass-cli', ['item', 'view', ...locator, '--field', field], {
         env: { ...environment, PROTON_PASS_AGENT_REASON: reason },
         timeoutMs: 30000,
       });

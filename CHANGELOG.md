@@ -165,6 +165,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.40.3] - 2026-09-02
+
+### Fixed
+
+- **Context7 now reads its item-only Proton grant by identifier.** Setup saves the item share and
+  item identifiers returned by Proton. The protected launcher uses them because an item-only
+  credential cannot find its grant through a vault-name search.
+
 ## [2.40.2] - 2026-09-02
 
 ### Fixed

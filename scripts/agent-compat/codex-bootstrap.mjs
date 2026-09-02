@@ -52,7 +52,7 @@ const CONTEXT7_ITEM = 'Context7 API Key';
 const CONTEXT7_FIELD = 'API Key';
 const CONTEXT7_TOKEN_FILE = 'context7-agent.pat';
 const CONTEXT7_STATE_FILE = 'context7-agent.json';
-const CONTEXT7_STATE_VERSION = 1;
+const CONTEXT7_STATE_VERSION = 2;
 const CONTEXT7_PENDING_AGENT_ID = 'pending';
 export const REVIEWER_RUNTIME_FILES = [
   'review-contract.mjs',
@@ -485,12 +485,14 @@ function context7AgentId(agent) {
   return String(id);
 }
 
-function context7Ownership(agentId, state) {
+function context7Ownership(agentId, state, access = null) {
   return {
     version: CONTEXT7_STATE_VERSION,
     agent_id: agentId,
     agent_name: CONTEXT7_AGENT,
     state,
+    share_id: access?.shareId ?? null,
+    item_id: access?.itemId ?? null,
     grant_sha256: context7GrantDigest(),
   };
 }
@@ -512,32 +514,75 @@ function readContext7Ownership(path) {
     throw new Error('Context7 ownership record is invalid');
   }
   const keys = Object.keys(document ?? {}).sort();
-  const expectedKeys = ['agent_id', 'agent_name', 'grant_sha256', 'state', 'version'];
+  const legacyKeys = ['agent_id', 'agent_name', 'grant_sha256', 'state', 'version'];
+  if (JSON.stringify(keys) === JSON.stringify(legacyKeys)
+      && document.version === 1
+      && document.agent_name === CONTEXT7_AGENT
+      && typeof document.agent_id === 'string'
+      && document.agent_id.length > 0
+      && ['creating', 'ready'].includes(document.state)
+      && document.grant_sha256 === context7GrantDigest()) {
+    return { ...document, version: CONTEXT7_STATE_VERSION, state: 'creating',
+      share_id: null, item_id: null };
+  }
+  const expectedKeys = [
+    'agent_id', 'agent_name', 'grant_sha256', 'item_id', 'share_id', 'state', 'version',
+  ];
+  const completeAccess = typeof document?.share_id === 'string'
+    && document.share_id.length > 0
+    && typeof document.item_id === 'string'
+    && document.item_id.length > 0;
+  const pendingAccess = document?.state === 'creating'
+    && document.share_id === null
+    && document.item_id === null;
   if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
       || document.version !== CONTEXT7_STATE_VERSION
       || typeof document.agent_id !== 'string'
       || document.agent_id.length === 0
       || document.agent_name !== CONTEXT7_AGENT
       || !['creating', 'ready'].includes(document.state)
+      || (!completeAccess && !pendingAccess)
       || document.grant_sha256 !== context7GrantDigest()) {
     throw new Error('Context7 ownership record is invalid');
   }
   return document;
 }
 
-function writeContext7Ownership(path, agentId, state) {
-  writeAtomic(path, `${JSON.stringify(context7Ownership(agentId, state))}\n`, null, 0o600);
+function writeContext7Ownership(path, agentId, state, access = null) {
+  writeAtomic(path, `${JSON.stringify(context7Ownership(agentId, state, access))}\n`, null, 0o600);
 }
 
-async function verifyContext7Field({ home, fieldReader }) {
+async function verifyContext7Field({ home, fieldReader, access }) {
   await fieldReader({
     tokenFile: CONTEXT7_TOKEN_FILE,
-    vaultName: CONTEXT7_VAULT,
-    itemTitle: CONTEXT7_ITEM,
+    shareId: access.shareId,
+    itemId: access.itemId,
     field: CONTEXT7_FIELD,
     reason: 'Verify Discord Ferry Context7 access',
     home,
   });
+}
+
+function readContext7AccessGrant(passCli, run) {
+  const grants = parseValueFreeList(run(passCli, [
+    'personal-access-token', 'access', 'list-access',
+    '--personal-access-token-name', CONTEXT7_AGENT,
+    '--output', 'json',
+  ]), 'access list', 'accesses');
+  if (grants.length !== 1) {
+    throw new Error('Context7 agent must have exactly one access grant');
+  }
+  const grant = grants[0];
+  if (grant?.type !== 'item'
+      || grant.item_title !== CONTEXT7_ITEM
+      || grant.role !== 'Viewer'
+      || typeof grant.share_id !== 'string'
+      || grant.share_id.length === 0
+      || typeof grant.item_id !== 'string'
+      || grant.item_id.length === 0) {
+    throw new Error('Context7 agent access grant is invalid');
+  }
+  return { shareId: grant.share_id, itemId: grant.item_id };
 }
 
 async function createContext7Agent({
@@ -571,8 +616,9 @@ async function createContext7Agent({
     '--item-title', CONTEXT7_ITEM,
     '--role', 'viewer',
   ]);
-  await verifyContext7Field({ home, fieldReader });
-  writeContext7Ownership(ownershipPath, agentId, 'ready');
+  const access = readContext7AccessGrant(passCli, run);
+  await verifyContext7Field({ home, fieldReader, access });
+  writeContext7Ownership(ownershipPath, agentId, 'ready', access);
   return { created: true, renewed: false, recovered };
 }
 
@@ -651,10 +697,16 @@ export async function provisionContext7Agent({
         'agent', 'renew', '--expiration', '3m', '--output', 'json', CONTEXT7_AGENT,
       ]);
       writeAtomic(tokenPath, parseAgentToken(renewed), null, 0o600);
-      await verifyContext7Field({ home, fieldReader });
+      await verifyContext7Field({ home, fieldReader, access: {
+        shareId: ownership.share_id,
+        itemId: ownership.item_id,
+      } });
       return { created: false, renewed: true, recovered: false };
     }
-    await verifyContext7Field({ home, fieldReader });
+    await verifyContext7Field({ home, fieldReader, access: {
+      shareId: ownership.share_id,
+      itemId: ownership.item_id,
+    } });
     return { created: false, renewed: false, recovered: false };
   }
   if (ownership || lstatOrNull(tokenPath)) {

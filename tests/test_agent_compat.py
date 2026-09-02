@@ -1990,10 +1990,12 @@ def test_context7_agent_is_item_limited_and_repeatable(tmp_path: Path) -> None:
     assert report["field_reads"] == 2
     assert report["token_mode"] == report["ownership_mode"] == 0o600
     assert report["ownership"] == {
-        "version": 1,
+        "version": 2,
         "agent_id": "context7-agent-id-1",
         "agent_name": "discord-ferry-context7",
         "state": "ready",
+        "share_id": "context7-item-share-id",
+        "item_id": "context7-item-id",
         "grant_sha256": report["ownership"]["grant_sha256"],
     }
     assert len(report["ownership"]["grant_sha256"]) == 64
@@ -2178,6 +2180,10 @@ def test_context7_launcher_passes_only_the_required_environment() -> None:
     ]
     assert report["child_has_context7_key"] is True
     assert report["child_has_parent_canary"] is False
+    assert report["field_descriptor"]["shareId"] == "context7-item-share-id"
+    assert report["field_descriptor"]["itemId"] == "context7-item-id"
+    assert "vaultName" not in report["field_descriptor"]
+    assert "itemTitle" not in report["field_descriptor"]
     assert report["result"] == {"status": 23, "signal": None, "ready": False}
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
@@ -2879,10 +2885,10 @@ def test_proton_field_reader_uses_the_caller_descriptor(tmp_path: Path) -> None:
         "context7_args": [
             "item",
             "view",
-            "--vault-name",
-            "Personal",
-            "--item-title",
-            "Context7 API Key",
+            "--share-id",
+            "context7-share-id",
+            "--item-id",
+            "context7-item-id",
             "--field",
             "API Key",
         ],

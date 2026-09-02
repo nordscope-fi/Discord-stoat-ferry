@@ -435,7 +435,7 @@ elif [ "$1 $2" = "agent list" ]; then
     separator=','
   fi
   if [ -f "$context7_state" ]; then
-    printf '%s{"id":"context7-id","name":"discord-ferry-context7","expire_time":1999999999}' "$separator"
+    printf '%s{"pat_id":"context7-id","name":"discord-ferry-context7","expire_time":1999999999}' "$separator"
   fi
   printf ']\\n'
 elif [ "$1 $2" = "agent create" ]; then
@@ -445,10 +445,12 @@ elif [ "$1 $2" = "agent create" ]; then
     printf '{"token":"PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_12345678901234567890123456789012"}\\n'
   else
     : > "$context7_state"
-    printf '{"agent":{"id":"context7-id","name":"discord-ferry-context7","credentials":{"token":"pst_abcdefghijklmnopqrstuvwxyz12345678901234"}}}\\n'
+    printf '{"token":"PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_abcdefghijklmnopqrstuvwxyz12345678901234","instruction":"fixture"}\\n'
   fi
 elif [ "$1 $2 $3" = "agent access grant" ]; then
   exit 0
+elif [ "$1 $2 $3" = "personal-access-token access list-access" ]; then
+  printf '[{"type":"item","item_title":"Context7 API Key","role":"Viewer","share_id":"context7-item-share-id","item_id":"context7-item-id"}]\\n'
 elif [ "$1" = "login" ]; then
   exit 0
 elif [ "$1 $2" = "item view" ]; then
@@ -760,8 +762,8 @@ switch (mode) {
     };
     await credential.readProtonField({
       tokenFile: 'context7-agent.pat',
-      vaultName: 'Personal',
-      itemTitle: 'Context7 API Key',
+      shareId: 'context7-share-id',
+      itemId: 'context7-item-id',
       field: 'API Key',
       reason: 'Start Context7',
       home,
@@ -2371,6 +2373,7 @@ switch (mode) {
           ]
         : [];
     let fieldReads = 0;
+    let accessGrants = [];
     let generation = 0;
     let failGrant = fixture === 'interrupted';
     let failPostCreateList = false;
@@ -2407,14 +2410,24 @@ switch (mode) {
           failGrant = false;
           throw new Error('grant failed');
         }
+        accessGrants = [{
+          type: 'item',
+          item_title: 'Context7 API Key',
+          role: 'Viewer',
+          share_id: 'context7-item-share-id',
+          item_id: 'context7-item-id',
+        }];
         return '';
       }
+      if (args[0] === 'personal-access-token' && args[1] === 'access'
+          && args[2] === 'list-access') return JSON.stringify(accessGrants);
       if (args[0] === 'agent' && args[1] === 'renew') {
         agents[0].expire_time = 1999999999;
         return JSON.stringify({ token: `pst_${'w'.repeat(40)}` });
       }
       if (args[0] === 'agent' && args[1] === 'delete') {
         agents = [];
+        accessGrants = [];
         return '';
       }
       throw new Error(`unexpected pass-cli call: ${args.join(' ')}`);
@@ -2422,8 +2435,8 @@ switch (mode) {
     const fieldReader = async (descriptor) => {
       fieldReads += 1;
       if (descriptor.tokenFile !== 'context7-agent.pat'
-          || descriptor.vaultName !== 'Personal'
-          || descriptor.itemTitle !== 'Context7 API Key'
+          || descriptor.shareId !== 'context7-item-share-id'
+          || descriptor.itemId !== 'context7-item-id'
           || descriptor.field !== 'API Key') {
         throw new Error('wrong Context7 field descriptor');
       }
@@ -2508,10 +2521,16 @@ switch (mode) {
       });
       return child;
     };
-    const fieldReader = async () => {
+    let fieldDescriptor = null;
+    const fieldReader = async (descriptor) => {
+      fieldDescriptor = descriptor;
       if (fixture === 'credential-failure') throw new Error('FERRY_SECRET_CANARY');
       return 'FERRY_CONTEXT7_KEY_CANARY';
     };
+    const accessReader = () => ({
+      shareId: 'context7-item-share-id',
+      itemId: 'context7-item-id',
+    });
     let result = null;
     let error = null;
     try {
@@ -2519,6 +2538,7 @@ switch (mode) {
         home: '/fixture/home',
         check: fixture === 'check',
         fieldReader,
+        accessReader,
         spawnChild,
         environment: sourceEnvironment,
         parent,
@@ -2538,6 +2558,7 @@ switch (mode) {
       child_env_names: spawn ? Object.keys(spawn.options.env).sort() : [],
       child_has_context7_key: spawn?.options?.env?.CONTEXT7_API_KEY === 'FERRY_CONTEXT7_KEY_CANARY',
       child_has_parent_canary: spawn ? 'OPENAI_API_KEY' in spawn.options.env : false,
+      field_descriptor: fieldDescriptor,
       forwarded,
       remaining_signal_listeners: parent.eventNames().length,
     });
