@@ -235,11 +235,17 @@ def test_adr_028_records_the_plain_english_host_contract() -> None:
 
 def test_codex_template_pins_runtime_and_live_servers() -> None:
     text = (REPO / "config/agent-compat/codex-config.toml").read_text()
-    assert 'model = "gpt-5.6-sol"' in text
-    assert 'model_reasoning_effort = "high"' in text
-    assert 'approval_policy = "on-request"' in text
-    assert 'sandbox_mode = "workspace-write"' in text
-    assert 'web_search = "disabled"' in text
+    config = tomllib.loads(text)
+    assert config["model"] == "gpt-5.6-sol"
+    assert config["model_reasoning_effort"] == "high"
+    assert config["approval_policy"] == "on-request"
+    assert config["sandbox_mode"] == "workspace-write"
+    assert config["web_search"] == "disabled"
+    assert config["sandbox_workspace_write"] == {"network_access": True}
+    assert config["features"]["network_proxy"] == {
+        "enabled": True,
+        "domains": {"api.github.com": "allow", "github.com": "allow"},
+    }
     assert "[mcp_servers.qmd]" in text
     assert "[mcp_servers.serena]" in text
     assert "[mcp_servers.context7]" in text
@@ -277,6 +283,12 @@ def test_installer_renders_project_pins_with_conflicting_global_defaults(
     assert 'model_reasoning_effort = "high"' in rendered
     assert 'sandbox_mode = "workspace-write"' in rendered
     assert 'web_search = "disabled"' in rendered
+    config = tomllib.loads(rendered)
+    assert config["sandbox_workspace_write"] == {"network_access": True}
+    assert config["features"]["network_proxy"] == {
+        "enabled": True,
+        "domains": {"api.github.com": "allow", "github.com": "allow"},
+    }
 
 
 def test_installer_routes_context7_through_the_protected_launcher(tmp_path: Path) -> None:
@@ -2248,6 +2260,10 @@ def test_static_readiness_returns_named_value_free_records(tmp_path: Path) -> No
         for record in report["records"]
     )
     records = {record["id"]: record for record in report["records"]}
+    assert records["project-config"]["details"] == {
+        "pins": 5,
+        "network_hosts": 2,
+    }
     assert records["hooks"]["details"] == {
         "native_chat_hooks": 2,
         "brainstorm_hooks": [
@@ -2387,6 +2403,11 @@ def test_static_readiness_accepts_semantic_single_quoted_trust(tmp_path: Path) -
         ("misdistributed-hook", "hooks"),
         ("stale-wrapper", "hooks"),
         ("commented-model", "project-config"),
+        ("missing-network-grant", "project-config"),
+        ("disabled-network-proxy", "project-config"),
+        ("incomplete-network-policy", "project-config"),
+        ("widened-network-policy", "project-config"),
+        ("local-binding-network-policy", "project-config"),
         ("missing-review-boundary", "instructions"),
     ],
 )

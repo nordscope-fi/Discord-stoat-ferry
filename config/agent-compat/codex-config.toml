@@ -9,9 +9,16 @@ approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
+[sandbox_workspace_write]
+network_access = true
+
 [features]
 hooks = true
 multi_agent = true
+
+[features.network_proxy]
+enabled = true
+domains = { "api.github.com" = "allow", "github.com" = "allow" }
 
 [agents]
 enabled = true
