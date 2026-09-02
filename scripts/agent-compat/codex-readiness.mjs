@@ -159,6 +159,35 @@ function hasActiveLine(source, expected) {
   return source.split(/\r?\n/u).some((line) => line.trim() === expected);
 }
 
+const GITHUB_NETWORK_DOMAINS =
+  'domains = { "api.github.com" = "allow", "github.com" = "allow" }';
+
+function activeTableLines(source, table) {
+  const lines = source.split(/\r?\n/u);
+  const header = `[${table}]`;
+  const starts = lines.flatMap((line, index) => line.trim() === header ? [index] : []);
+  if (starts.length !== 1) return [];
+  const start = starts[0];
+  const next = lines.findIndex((line, index) => index > start && /^\s*\[/u.test(line));
+  const end = next === -1 ? lines.length : next;
+  return lines.slice(start + 1, end)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
+}
+
+function hasExactGithubNetworkPolicy(source) {
+  const workspace = activeTableLines(source, 'sandbox_workspace_write');
+  const proxy = activeTableLines(source, 'features.network_proxy');
+  const grant = workspace.filter((line) => /^network_access\s*=/u.test(line));
+  const enabled = proxy.filter((line) => /^enabled\s*=/u.test(line));
+  const localBinding = proxy.filter((line) => /^allow_local_binding\s*=/u.test(line));
+  const domains = proxy.filter((line) => /^domains\s*=/u.test(line));
+  return grant.length === 1 && grant[0] === 'network_access = true' &&
+    enabled.length === 1 && enabled[0] === 'enabled = true' &&
+    localBinding.length === 0 &&
+    domains.length === 1 && domains[0] === GITHUB_NETWORK_DOMAINS;
+}
+
 function hasReviewBoundary(source) {
   const normalized = source.split(/\s+/u).join(' ').toLowerCase();
   return [
@@ -536,10 +565,11 @@ export async function runStaticReadiness({
       'sandbox_mode = "workspace-write"',
       'web_search = "disabled"',
     ];
-    if (required.some((entry) => !hasActiveLine(source, entry))) {
-      throw new Error('project pins missing');
+    if (required.some((entry) => !hasActiveLine(source, entry)) ||
+        !hasExactGithubNetworkPolicy(source)) {
+      throw new Error('project pins or network policy missing');
     }
-    return { pins: required.length };
+    return { pins: required.length, network_hosts: 2 };
   });
 
   await add({

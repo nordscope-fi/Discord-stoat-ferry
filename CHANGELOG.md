@@ -165,6 +165,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.40.4] - 2026-09-02
+
+### Fixed
+
+- **Codex GitHub commands now work inside the bounded workspace sandbox.** Generated setup enables
+  command networking through an exact `api.github.com` and `github.com` destination policy.
+  Readiness rejects missing or widened policy, and unrelated destinations remain denied.
+
 ## [2.40.3] - 2026-09-02
 
 ### Fixed

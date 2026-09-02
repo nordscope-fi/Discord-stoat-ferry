@@ -2573,6 +2573,18 @@ switch (mode) {
     };
     const root = option('--root');
     const home = option('--home');
+    const networkGrant = fixture === 'missing-network-grant'
+      ? []
+      : ['[sandbox_workspace_write]', 'network_access = true'];
+    const proxyEnabled = fixture === 'disabled-network-proxy'
+      ? 'enabled = false'
+      : 'enabled = true';
+    const proxyDomains = fixture === 'incomplete-network-policy'
+      ? 'domains = { "api.github.com" = "allow" }'
+      : fixture === 'widened-network-policy'
+        ? 'domains = { "api.github.com" = "allow", "github.com" = "allow", ' +
+          '"example.com" = "allow" }'
+        : 'domains = { "api.github.com" = "allow", "github.com" = "allow" }';
     const projectConfig = [
       fixture === 'commented-model'
         ? '# model = "gpt-5.6-sol"'
@@ -2581,6 +2593,15 @@ switch (mode) {
       'approval_policy = "on-request"',
       'sandbox_mode = "workspace-write"',
       'web_search = "disabled"',
+      ...networkGrant,
+      '[features]',
+      'hooks = true',
+      '[features.network_proxy]',
+      proxyEnabled,
+      ...(fixture === 'local-binding-network-policy'
+        ? ['allow_local_binding = true']
+        : []),
+      proxyDomains,
       '[mcp_servers.qmd]',
       '[mcp_servers.serena]',
       ...(fixture === 'missing-tool-server' ? [] : ['[mcp_servers.context7]']),
