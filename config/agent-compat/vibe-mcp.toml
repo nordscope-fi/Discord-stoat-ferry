@@ -19,8 +19,8 @@ args = ["mcp"]
 [[mcp_servers]]
 name = "context7"
 transport = "stdio"
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
+command = "node"
+args = ["__DATA_HOME__/discord-ferry/reviewer-runtime/current/context7-mcp.mjs"]
 
 # No second-opinion for Vibe. Vibe runs on Mistral, so asking Mistral
 # for a second opinion from within Mistral is circular.

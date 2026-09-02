@@ -18,6 +18,7 @@ import { pathToFileURL } from 'node:url';
 import {
   canonicalCheckoutRoot,
   inspectProjectTrustToml,
+  reviewerRuntimeRoot,
   verifyReviewerRuntime,
 } from './codex-bootstrap.mjs';
 import { brainstormRegistrationReport } from './check.mjs';
@@ -690,6 +691,20 @@ export async function runStaticReadiness({
     reason: 'The approved reviewer runtime is missing, stale, or writable',
     remediation: 'Run node scripts/agent-compat/codex-bootstrap.mjs.',
   }, () => runtimeCheck({ home, root: projectRoot, part: 'runtime' }));
+
+  await add({
+    id: 'context7-credential',
+    className: 'tool-servers',
+    reason: 'The protected Context7 credential or launcher is unavailable',
+    remediation: 'Run node scripts/agent-compat/codex-bootstrap.mjs.',
+  }, () => {
+    const launcher = join(reviewerRuntimeRoot(home), 'current', 'context7-mcp.mjs');
+    const result = command(process.execPath, [launcher, '--check'], { cwd: projectRoot });
+    if (result.status !== 0 || result.stdout.trim() !== 'context7 credential ready') {
+      throw new Error('Context7 credential check failed');
+    }
+    return { credential: 'ready' };
+  });
 
   await add({
     id: 'command-rules',
