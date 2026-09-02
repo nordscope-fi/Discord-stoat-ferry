@@ -59,6 +59,9 @@ const worktreeIncludePath = worktreeIndex === -1 ? null : args[worktreeIndex + 2
 const worktreeAgentsPath = worktreeIndex === -1 ? null : args[worktreeIndex + 3];
 const worktreeClaudePath = worktreeIndex === -1 ? null : args[worktreeIndex + 4];
 const worktreeShipSkillPath = worktreeIndex === -1 ? null : args[worktreeIndex + 5];
+const critiqueIndex = args.indexOf('--check-critique-contract');
+const critiqueSkillPath = critiqueIndex === -1 ? null : args[critiqueIndex + 1];
+const critiqueCommandPath = critiqueIndex === -1 ? null : args[critiqueIndex + 2];
 
 const failures = [];
 const warnings = [];
@@ -79,6 +82,10 @@ if (worktreeIndex !== -1 && [
   fail(
     '--check-worktree-contract requires script, include, AGENTS.md, CLAUDE.md, and ship skill paths',
   );
+}
+if (critiqueIndex !== -1 && [critiqueSkillPath, critiqueCommandPath]
+  .some(path => !path || path.startsWith('--'))) {
+  fail('--check-critique-contract requires skill and command paths');
 }
 
 function render(templateName, replacements = {}) {
@@ -586,6 +593,57 @@ function checkSkills() {
   }
 }
 
+export function critiqueContractReport(skillText, commandText) {
+  const missing = [];
+  const requireClause = (condition, name) => {
+    if (!condition) missing.push(name);
+  };
+  requireClause(
+    /export const CRITIQUE_BUDGET = 3;/u.test(commandText),
+    'three-attempt limit',
+  );
+  requireClause(
+    /export function claimAttempt\(/u.test(commandText)
+      && /export function completeAttempt\(/u.test(commandText)
+      && /export function decideCycle\(/u.test(commandText),
+    'claim, completion, and decision commands',
+  );
+  requireClause(/^allowed-tools:[^\n]*\bBash\b/mu.test(skillText), 'shell access');
+  requireClause(
+    /critique-budget\.mjs\s+claim\s+--design\s+<path>/u.test(skillText)
+      && /before it creates the fresh-context reviewer/iu.test(skillText),
+    'pre-dispatch claim',
+  );
+  requireClause(
+    /critique-budget\.mjs\s+complete\s+\\?\s*--design\s+<path>/u.test(skillText)
+      && /critique-budget\.mjs\s+decide\s+\\?\s*--design\s+<path>/u.test(skillText),
+    'completion and owner decision recording',
+  );
+  requireClause(/evidence-investigation/u.test(skillText), 'final evidence mode');
+  requireClause(
+    ['accept', 'return-to-design', 'restart'].every(choice => skillText.includes(choice)),
+    'owner choices',
+  );
+  requireClause(/no fourth reviewer starts/iu.test(skillText), 'fourth-review prohibition');
+  return { valid: missing.length === 0, missing };
+}
+
+function checkCritiqueContract(skillPath, commandPath) {
+  if (!existsSync(skillPath)) {
+    fail(`critique skill missing: ${skillPath}`);
+    return;
+  }
+  if (!existsSync(commandPath)) {
+    fail(`critique budget command missing: ${commandPath}`);
+    return;
+  }
+  const report = critiqueContractReport(
+    readFileSync(skillPath, 'utf8'),
+    readFileSync(commandPath, 'utf8'),
+  );
+  for (const clause of report.missing) fail(`critique contract missing: ${clause}`);
+}
+
 // --- Check: Hook parity ---------------------------------------------------------
 
 function checkHookParity() {
@@ -761,7 +819,9 @@ function checkTemplates() {
 // --- Main -----------------------------------------------------------------------
 
 function main() {
-  const plainEnglishRequired = worktreeIndex === -1 && (focusedIndex !== -1 || !ci);
+  const plainEnglishRequired = worktreeIndex === -1
+    && critiqueIndex === -1
+    && (focusedIndex !== -1 || !ci);
   if (failures.length === 0 && plainEnglishRequired) {
     try {
       requirePlainEnglish();
@@ -783,6 +843,10 @@ function main() {
         resolve(worktreeShipSkillPath),
       );
     }
+  } else if (critiqueIndex !== -1) {
+    if (critiqueSkillPath && critiqueCommandPath) {
+      checkCritiqueContract(resolve(critiqueSkillPath), resolve(critiqueCommandPath));
+    }
   } else if (focusedIndex !== -1) {
     if (focusedHookPath) checkCodexHooks(resolve(focusedHookPath));
   } else if (ci) {
@@ -798,6 +862,12 @@ function main() {
     checkPlainEnglishState();
     checkQwenState();
     checkSkills();
+    if (!generatedOnly) {
+      checkCritiqueContract(
+        join(projectRoot, '.claude', 'skills', 'df-critique', 'SKILL.md'),
+        join(sourceRoot, 'scripts', 'agent-compat', 'critique-budget.mjs'),
+      );
+    }
     const snapshotRoot = canonicalCheckoutRoot(projectRoot);
     checkWorktreeContract(
       join(snapshotRoot, '.claude', 'scripts', 'new-worktree.sh'),
