@@ -15,6 +15,17 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/codex-hook-adapter.mjs\" user-prompt",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": ".*",

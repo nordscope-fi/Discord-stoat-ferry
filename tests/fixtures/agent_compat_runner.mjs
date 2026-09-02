@@ -27,6 +27,7 @@ import {
   verifyReviewerRuntime,
 } from '../../scripts/agent-compat/codex-bootstrap.mjs';
 import {
+  runBrainstormEvidenceProbe,
   runLiveReadiness,
   runReviewerReadiness,
   runStaticReadiness,
@@ -37,7 +38,13 @@ import {
   generatedHostSecretViolations,
   runPlainEnglishInit,
 } from '../../scripts/agent-compat/check.mjs';
-import { routesFor } from '../../scripts/agent-compat/hook-parity.mjs';
+import {
+  HOOK_PARITY,
+  codexPostToolMatcher,
+  qwenPostToolMatcher,
+  routesFor,
+  vibePostToolMatcher,
+} from '../../scripts/agent-compat/hook-parity.mjs';
 import {
   UPSTREAM_CODEX_CHAT_COMMAND,
   canonicalCheckoutRoot,
@@ -92,6 +99,15 @@ function writeJson(value) {
 }
 
 function hookRoutes() {
+  const brainstormEntries = HOOK_PARITY
+    .filter(entry => entry.id.startsWith('project.brainstorm-'))
+    .map(entry => ({
+      id: entry.id,
+      event: entry.event,
+      codex_disposition: entry.disposition,
+      vibe_disposition: entry.vibeDisposition,
+      qwen_disposition: entry.qwenDisposition,
+    }));
   writeJson({
     codex_write: uniqueRoutes([
       routesFor('PreToolUse', 'apply_patch', 'codex'),
@@ -106,6 +122,20 @@ function hookRoutes() {
     codex_bash: routesFor('PreToolUse', 'Bash', 'codex'),
     vibe_bash: routesFor('PreToolUse', 'Bash', 'vibe'),
     qwen_bash: routesFor('PreToolUse', 'Bash', 'qwen'),
+    brainstorm_entries: brainstormEntries,
+    brainstorm_codex_external_before: routesFor(
+      'PreToolUse',
+      'mcp__context7__query-docs',
+      'codex',
+    ),
+    brainstorm_codex_external_after: routesFor(
+      'PostToolUse',
+      'mcp__context7__query-docs',
+      'codex',
+    ),
+    brainstorm_codex_post_matcher: codexPostToolMatcher(),
+    vibe_post_matcher: vibePostToolMatcher(),
+    qwen_post_matcher: qwenPostToolMatcher(),
   });
 }
 
@@ -121,9 +151,12 @@ function preToolTiming(policy) {
   }, route => routes.push(route));
   const durationMs = performance.now() - started;
   const plainEnglish = new Set(['docs', 'github-docs']);
+  const evidence = new Set(['brainstorm-evidence']);
   writeJson({
     plain_english_children: routes.filter(route => plainEnglish.has(route)).length,
-    security_children: routes.filter(route => !plainEnglish.has(route)),
+    evidence_children: routes.filter(route => evidence.has(route)),
+    security_children: routes.filter(route =>
+      !plainEnglish.has(route) && !evidence.has(route)),
     duration_ms: durationMs,
   });
 }
@@ -2203,26 +2236,54 @@ switch (mode) {
     const hookCommand = fixture === 'stale-wrapper'
       ? 'plain-english-chat-hook.mjs'
       : canonicalHookCommand;
-    const hooks = fixture === 'missing-hook'
-      ? { hooks: { Stop: [], SubagentStop: [] } }
-      : fixture === 'misdistributed-hook'
-        ? {
-            hooks: {
-              Stop: [{
-                hooks: [
-                  { command: canonicalHookCommand, timeout: 60 },
-                  { command: canonicalHookCommand, timeout: 60 },
-                ],
-              }],
-              SubagentStop: [],
-            },
-          }
-        : {
-          hooks: {
-            Stop: [{ hooks: [{ command: hookCommand, timeout: 60 }] }],
-            SubagentStop: [{ hooks: [{ command: hookCommand, timeout: 60 }] }],
-          },
-        };
+    const adapterCommand = (mode) =>
+      `node "${root}/scripts/agent-compat/codex-hook-adapter.mjs" ${mode}`;
+    const codexGroup = (event, mode, matcher = null) => ({
+      ...(matcher === null ? {} : { matcher }),
+      hooks: [{ type: 'command', command: adapterCommand(mode), timeout: 10 }],
+    });
+    const hooks = {
+      hooks: {
+        UserPromptSubmit: [codexGroup('UserPromptSubmit', 'user-prompt')],
+        PreToolUse: [codexGroup('PreToolUse', 'pre-tool', '.*')],
+        PostToolUse: [codexGroup('PostToolUse', 'post-tool', codexPostToolMatcher())],
+        Stop: [
+          { hooks: [{ command: hookCommand, timeout: 60 }] },
+          codexGroup('Stop', 'stop'),
+        ],
+        SubagentStop: [{ hooks: [{ command: hookCommand, timeout: 60 }] }],
+      },
+    };
+    if (fixture === 'missing-hook') {
+      hooks.hooks.Stop = [codexGroup('Stop', 'stop')];
+      hooks.hooks.SubagentStop = [];
+    }
+    if (fixture === 'misdistributed-hook') {
+      hooks.hooks.Stop[0].hooks.push({ command: canonicalHookCommand, timeout: 60 });
+      hooks.hooks.SubagentStop = [];
+    }
+    if (fixture === 'missing-brainstorm-prompt') hooks.hooks.UserPromptSubmit = [];
+    if (fixture === 'broken-brainstorm-matcher') {
+      hooks.hooks.PostToolUse[0].matcher = '^(Write)$';
+    }
+    const directBrainstorm =
+      'node "$CLAUDE_PROJECT_DIR/scripts/agent-compat/brainstorm-evidence.mjs" --host claude';
+    const claudeGroup = (matcher = null) => ({
+      ...(matcher === null ? {} : { matcher }),
+      hooks: [{ type: 'command', command: directBrainstorm, timeout: 10 }],
+    });
+    const claudeSettings = {
+      hooks: {
+        UserPromptSubmit: [claudeGroup()],
+        PreToolUse: [claudeGroup('.*')],
+        PostToolUse: [claudeGroup('.*')],
+        PostToolUseFailure: [claudeGroup('.*')],
+        Stop: [claudeGroup()],
+      },
+    };
+    if (fixture === 'missing-brainstorm-failed-tool') {
+      claudeSettings.hooks.PostToolUseFailure = [];
+    }
     const trust = fixture === 'single-quoted-trust'
       ? `[projects.'${root}']\ntrust_level = "trusted"\n`
       : `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`;
@@ -2254,6 +2315,7 @@ switch (mode) {
       [`${root}/AGENTS.md`, instructions],
       [`${root}/CLAUDE.md`, manifestWriter],
       [`${root}/.codex/hooks.json`, JSON.stringify(hooks)],
+      [`${root}/.claude/settings.json`, JSON.stringify(claudeSettings)],
       [`${root}/.claude/skills/df-start/SKILL.md`, '# start\n'],
       [`${root}/.agents/skills/df-start/SKILL.md`, '# start\n'],
       [`${root}/.worktreeinclude`, 'CLAUDE.md\n'],
@@ -2392,6 +2454,16 @@ switch (mode) {
     });
     writeJson(report);
     if (report.overall !== 'ready') process.exitCode = 1;
+    break;
+  }
+  case 'brainstorm-readiness-live': {
+    const rootIndex = process.argv.indexOf('--root');
+    const eventIndex = process.argv.indexOf('--event-cwd');
+    if (rootIndex < 0 || eventIndex < 0) throw new Error('root and event cwd are required');
+    writeJson(runBrainstormEvidenceProbe(
+      process.argv[rootIndex + 1],
+      process.argv[eventIndex + 1],
+    ));
     break;
   }
   case 'readiness-reviewers': {
@@ -2684,6 +2756,12 @@ switch (mode) {
         pre_tool_allow: 'ok',
         pre_tool_block: 'ok',
         post_tool: 'ok',
+        brainstorm_prompt: 'ok',
+        brainstorm_pre_tool: 'ok',
+        brainstorm_result: 'ok',
+        brainstorm_incomplete_stop: 'ok',
+        brainstorm_complete_stop: 'ok',
+        brainstorm_outside_directory: 'ok',
         stop_main: {
           status: 'ok',
           timeout_seconds: 60,
@@ -2710,6 +2788,11 @@ switch (mode) {
     };
     if (fixture === 'missing-links') evidence.worktree.markers = ['instructions'];
     if (fixture === 'hook-nonzero') evidence.hooks.post_tool = 'failed';
+    if (fixture === 'brainstorm-missing-prompt') evidence.hooks.brainstorm_prompt = 'failed';
+    if (fixture === 'brainstorm-broken-matcher') evidence.hooks.brainstorm_pre_tool = 'failed';
+    if (fixture === 'brainstorm-adapter-inside-repo') {
+      evidence.hooks.brainstorm_outside_directory = 'failed';
+    }
     if (fixture === 'stop-ten-second') evidence.hooks.stop_main.timeout_seconds = 10;
     if (fixture === 'stop-timeout') evidence.hooks.stop_child.duration_ms = 59_000;
     if (fixture === 'stop-event-inside-owner') {

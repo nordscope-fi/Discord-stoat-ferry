@@ -32,12 +32,15 @@ const QWEN_TOOL_MAP = Object.freeze({
 // --- Entry factories ------------------------------------------------------------
 
 function projectCommand(
-  id, event, matcher, commandId, disposition, codexTools, route, control, nativeHosts = [],
+  id, event, matcher, commandId, disposition, codexTools, route, control,
+  nativeHosts = [], hostOverrides = {},
 ) {
   return Object.freeze({
     id, source: 'project', event, matcher, handlerType: 'command', commandId,
     sha256: null, disposition, codexTools: Object.freeze(codexTools),
+    codexMatcher: hostOverrides.codexMatcher ?? null,
     route, control: control ?? null, evidence: null, nativeHosts: Object.freeze(nativeHosts),
+    hostOverrides: Object.freeze({ ...hostOverrides }),
   });
 }
 
@@ -69,6 +72,13 @@ function userPrompt(id, event, matcher, control) {
 }
 
 function deriveVibeFields(entry) {
+  if (entry.hostOverrides?.vibeDisposition) {
+    return {
+      ...entry,
+      vibeDisposition: entry.hostOverrides.vibeDisposition,
+      vibeTools: Object.freeze(entry.hostOverrides.vibeTools ?? []),
+    };
+  }
   if (entry.disposition === 'unsupported') {
     return { ...entry, vibeDisposition: 'unsupported', vibeTools: Object.freeze([]) };
   }
@@ -89,6 +99,13 @@ function deriveVibeFields(entry) {
 // equivalent (the plain-english chat gates) stay unsupported until plain-english
 // ships a qwen agent profile.
 function deriveQwenFields(entry) {
+  if (entry.hostOverrides?.qwenDisposition) {
+    return {
+      ...entry,
+      qwenDisposition: entry.hostOverrides.qwenDisposition,
+      qwenTools: Object.freeze(entry.hostOverrides.qwenTools ?? []),
+    };
+  }
   if (entry.handlerType === 'prompt') {
     const qwenDisposition = entry.source === 'project' ? 'compensated' : 'unsupported';
     return { ...entry, qwenDisposition, qwenTools: Object.freeze([]) };
@@ -127,6 +144,37 @@ const RAW_ENTRIES = [
   projectCommand('project.plain-english-chat-subagent', 'SubagentStop', null,
     'plain-english-chat.sh', 'unsupported', [], null,
     'SubagentStop has no Codex/Vibe equivalent'),
+  projectCommand('project.brainstorm-prompt', 'UserPromptSubmit', null,
+    'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
+    'activates or cancels the brainstorm evidence workflow', [],
+    { vibeDisposition: 'unsupported', qwenDisposition: 'unsupported' }),
+  projectCommand('project.brainstorm-before-tool', 'PreToolUse', '.*',
+    'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
+    'records eligible evidence before a tool runs', [],
+    {
+      codexMatcher: '.*',
+      vibeDisposition: 'unsupported',
+      qwenDisposition: 'unsupported',
+    }),
+  projectCommand('project.brainstorm-after-tool', 'PostToolUse', '.*',
+    'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
+    'completes eligible evidence after a tool succeeds', [],
+    {
+      codexMatcher: '.*',
+      vibeDisposition: 'unsupported',
+      qwenDisposition: 'unsupported',
+    }),
+  projectCommand('project.brainstorm-failed-tool', 'PostToolUseFailure', '.*',
+    'brainstorm-evidence.mjs', 'compensated', [], 'brainstorm-evidence',
+    'completes eligible challenge evidence after a tool fails', [],
+    {
+      vibeDisposition: 'unsupported',
+      qwenDisposition: 'unsupported',
+    }),
+  projectCommand('project.brainstorm-stop', 'Stop', null,
+    'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
+    'blocks a recommendation until all evidence is complete', [],
+    { vibeDisposition: 'unsupported', qwenDisposition: 'unsupported' }),
 
   // Local hooks (from .claude/settings.local.json)
   projectCommand('local.destructive-git', 'PreToolUse', 'Bash',
@@ -173,14 +221,38 @@ export const HOOK_PARITY = Object.freeze(RAW_ENTRIES.map(e => Object.freeze(deri
 
 // --- Query helpers --------------------------------------------------------------
 
+export function hostDisposition(entry, host) {
+  if (host === 'vibe') return entry.vibeDisposition;
+  if (host === 'qwen') return entry.qwenDisposition;
+  return entry.disposition;
+}
+
+export function hostTools(entry, host) {
+  if (host === 'vibe') return entry.vibeTools;
+  if (host === 'qwen') return entry.qwenTools;
+  return entry.codexTools;
+}
+
+export function entryMatchesTool(entry, toolName, host) {
+  const matcher = host === 'codex' ? entry.codexMatcher ?? null : null;
+  if (matcher !== null) {
+    return typeof toolName === 'string' && new RegExp(`^(?:${matcher})$`, 'u').test(toolName);
+  }
+  const tools = hostTools(entry, host);
+  return tools.length === 0
+    || tools.includes(toolName)
+    || entry.codexTools.includes(toolName);
+}
+
 export function routesFor(event, toolName, host, entries = HOOK_PARITY) {
   const routes = new Set();
   for (const e of entries) {
     if (e.event !== event) continue;
-    if (e.disposition !== 'ported' && e.disposition !== 'compensated') continue;
+    const disposition = hostDisposition(e, host);
+    if (disposition !== 'ported' && disposition !== 'compensated') continue;
     if (!e.route) continue;
     if (e.nativeHosts?.includes(host)) continue;
-    if (e.codexTools.length > 0 && !e.codexTools.includes(toolName)) continue;
+    if (!entryMatchesTool(e, toolName, host)) continue;
     routes.add(e.route);
   }
   return [...routes];
@@ -188,12 +260,18 @@ export function routesFor(event, toolName, host, entries = HOOK_PARITY) {
 
 export function codexPostToolMatcher(entries = HOOK_PARITY) {
   const tools = new Set();
+  const matchers = new Set();
   for (const e of entries) {
     if (e.event !== 'PostToolUse') continue;
-    if (e.disposition !== 'ported') continue;
+    if (hostDisposition(e, 'codex') !== 'ported') continue;
+    if (e.codexMatcher != null) matchers.add(e.codexMatcher);
     for (const t of e.codexTools) tools.add(t);
   }
-  return tools.size > 0 ? `^(${[...tools].join('|')})$` : '^$';
+  const alternatives = [
+    ...[...tools].map(tool => tool.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')),
+    ...matchers,
+  ];
+  return alternatives.length > 0 ? `^(${alternatives.join('|')})$` : '^$';
 }
 
 export function vibePostToolMatcher(entries = HOOK_PARITY) {

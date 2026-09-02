@@ -61,7 +61,9 @@ if (agent === 'codex') {
   const command = 'node "$(git rev-parse --show-toplevel)/.codex/hooks/' +
     'plain-english.mjs" hook chat --agent codex';
   for (const event of ['Stop', 'SubagentStop']) {
-    document.hooks[event] = [{
+    const ferry = (document.hooks[event] ?? []).filter((group) =>
+      !(group.hooks ?? []).some((hook) => hook.command?.includes('plain-english.mjs')));
+    document.hooks[event] = [...ferry, {
       matcher: '*', hooks: [{ type: 'command', command, timeout: 10 }],
     }];
   }
