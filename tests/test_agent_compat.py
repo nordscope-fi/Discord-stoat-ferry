@@ -2033,6 +2033,18 @@ def test_context7_agent_recovers_its_matching_interrupted_creation(tmp_path: Pat
     assert report["ownership"]["agent_id"] == "context7-agent-id-2"
 
 
+def test_context7_agent_recovers_when_post_create_list_fails(tmp_path: Path) -> None:
+    result = _context7_agent_fixture(tmp_path, "post-create-list-failure")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"] is None
+    assert report["second"] == {"created": True, "renewed": False, "recovered": True}
+    assert report["delete_calls"] == [["agent", "delete", "discord-ferry-context7"]]
+    assert report["create_count"] == 2
+    assert report["grant_count"] == 1
+    assert report["ownership"]["agent_id"] == "context7-agent-id-2"
+
+
 @pytest.mark.parametrize("fixture", ["unmanaged", "duplicate-agent", "duplicate-item"])
 def test_context7_agent_refuses_ambiguous_remote_state(tmp_path: Path, fixture: str) -> None:
     result = _context7_agent_fixture(tmp_path, fixture)

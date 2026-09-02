@@ -2347,6 +2347,7 @@ switch (mode) {
       'create-repeat',
       'expired',
       'interrupted',
+      'post-create-list-failure',
       'unmanaged',
       'duplicate-agent',
       'duplicate-item',
@@ -2362,16 +2363,17 @@ switch (mode) {
     );
     const calls = [];
     let agents = fixture === 'unmanaged'
-      ? [{ id: 'unmanaged-id', name: 'discord-ferry-context7', expire_time: 1999999999 }]
+      ? [{ pat_id: 'unmanaged-id', name: 'discord-ferry-context7', expire_time: 1999999999 }]
       : fixture === 'duplicate-agent'
         ? [
-            { id: 'duplicate-1', name: 'discord-ferry-context7' },
-            { id: 'duplicate-2', name: 'discord-ferry-context7' },
+            { pat_id: 'duplicate-1', name: 'discord-ferry-context7' },
+            { pat_id: 'duplicate-2', name: 'discord-ferry-context7' },
           ]
         : [];
     let fieldReads = 0;
     let generation = 0;
     let failGrant = fixture === 'interrupted';
+    let failPostCreateList = false;
     const run = (_passCli, args) => {
       calls.push(args);
       if (args.join(' ') === 'agent access grant --help') return '--item-title --role';
@@ -2379,21 +2381,25 @@ switch (mode) {
       if (args[0] === 'item') return JSON.stringify({ items: fixture === 'duplicate-item'
         ? [{ title: 'Context7 API Key' }, { title: 'Context7 API Key' }]
         : [{ title: 'Context7 API Key' }] });
-      if (args[0] === 'agent' && args[1] === 'list') return JSON.stringify({ agents });
+      if (args[0] === 'agent' && args[1] === 'list') {
+        if (failPostCreateList) {
+          failPostCreateList = false;
+          throw new Error('agent list failed');
+        }
+        return JSON.stringify({ agents });
+      }
       if (args[0] === 'agent' && args[1] === 'create') {
         generation += 1;
         const id = `context7-agent-id-${generation}`;
         agents = [{
-          id,
+          pat_id: id,
           name: 'discord-ferry-context7',
           expire_time: 1999999999,
         }];
+        failPostCreateList = fixture === 'post-create-list-failure' && generation === 1;
         return JSON.stringify({
-          agent: {
-            id,
-            name: 'discord-ferry-context7',
-            credentials: { token: `pst_${'n'.repeat(40)}` },
-          },
+          token: `PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_${'n'.repeat(40)}`,
+          instruction: 'Use this token with Proton Pass CLI.',
         });
       }
       if (args[0] === 'agent' && args[1] === 'access' && args[2] === 'grant') {
@@ -2443,7 +2449,7 @@ switch (mode) {
       const document = JSON.parse(readFileSync(ownershipPath, 'utf8'));
       writeFileSync(ownershipPath, JSON.stringify({ ...document, extra: true }), { mode: 0o600 });
     }
-    if (['create-repeat', 'expired', 'interrupted', 'unsafe-token',
+    if (['create-repeat', 'expired', 'interrupted', 'post-create-list-failure', 'unsafe-token',
       'unsafe-ownership', 'invalid-ownership'].includes(fixture)) {
       try {
         second = await provision();

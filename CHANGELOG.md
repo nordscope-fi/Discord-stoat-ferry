@@ -165,6 +165,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.40.2] - 2026-09-02
+
+### Fixed
+
+- **Context7 setup now accepts Proton Pass CLI's actual agent response.** Setup reads the token
+  from agent creation, then records the matching `pat_id` returned by the agent list. This fixes
+  first-run setup without exposing the token or granting broader access. A failed list call after
+  creation can be recovered on the next setup run.
+
 ## [2.40.1] - 2026-09-02
 
 ### Fixed
