@@ -3356,10 +3356,11 @@ def test_qwen_review_redacts_an_injected_response_and_error() -> None:
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
-def test_claude_review_requires_opus_5_without_mislabeling_sandbox_failure() -> None:
+def test_claude_review_requires_sonnet_5_without_mislabeling_sandbox_failure() -> None:
     result = _run("node", "scripts/agent-compat/claude-review.mjs", "--self-test")
     assert result.returncode == 0, result.stderr
-    assert "claude-opus-5" in result.stderr
+    assert "--model sonnet" in result.stderr
+    assert "claude-sonnet-5" in result.stderr
     assert "--effort medium" in result.stderr
     assert "--safe-mode --tools" in result.stderr
     assert "sandbox visibility" in result.stderr
