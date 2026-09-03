@@ -590,7 +590,38 @@ def test_agents_names_tested_mcp_calls_and_review_quorum() -> None:
     assert "at most two external plan-review attempts" in text
     assert "provider failure is advisory" in normalized
     assert "selected provider stays fixed" in normalized
-    assert "Opus 5 is an explicit owner-selected route" in text
+    assert "Sonnet 5 is an explicit owner-selected route" in text
+    assert "Every Sonnet call uses medium effort" in text
+
+
+def test_claude_policy_and_decision_select_sonnet_5() -> None:
+    settings_path = REPO / ".claude/settings.local.json"
+    agents_path = REPO / "AGENTS.md"
+    claude_path = REPO / "CLAUDE.md"
+    decision_path = REPO / "docs/architecture/adr/033-sonnet-5-df-workflow.md"
+    index_path = REPO / "docs/architecture/adr/README.md"
+    targets = [settings_path, agents_path, claude_path, decision_path, index_path]
+    if not all(target.exists() for target in targets):
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+
+    settings = json.loads(settings_path.read_text())
+    agents = agents_path.read_text()
+    claude = claude_path.read_text()
+    decision = decision_path.read_text()
+    index = index_path.read_text()
+
+    assert settings["model"] == "claude-sonnet-5"
+    assert settings["effortLevel"] == "medium"
+    assert 'latest Sonnet (model: "sonnet")' in agents
+    assert 'latest Sonnet (`model: "sonnet"`)' in claude
+    assert "**Status:** Accepted" in decision
+    assert "**Supersedes:** ADR-017's model choice" in decision
+    assert "[033](033-sonnet-5-df-workflow.md)" in index
+
+    live_policy = "\n".join([agents, claude, settings_path.read_text()])
+    assert "latest Opus" not in live_policy
+    assert "claude-opus-4-8" not in live_policy
+    assert "Opus 5 is an explicit owner-selected route" not in live_policy
 
 
 def test_codex_and_vibe_adapters_skip_native_plain_english_routes() -> None:
