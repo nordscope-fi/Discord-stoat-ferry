@@ -11,8 +11,8 @@ import {
   validateFindings,
 } from './review-contract.mjs';
 
-export const CLAUDE_MODEL_ALIAS = 'opus';
-export const CLAUDE_CANONICAL_MODEL = 'claude-opus-5';
+export const CLAUDE_MODEL_ALIAS = 'sonnet';
+export const CLAUDE_CANONICAL_MODEL = 'claude-sonnet-5';
 export const CLAUDE_EFFORT = 'medium';
 export const CLAUDE_REVIEW_ARGS = [
   '-p',
@@ -179,7 +179,7 @@ function childFailure(error) {
 
 export async function runClaudeReview({
   prompt,
-  slot = 'plan-opus',
+  slot = 'plan-sonnet',
   record = false,
   substitutionFor = null,
   substitutionReason = null,
@@ -251,14 +251,21 @@ async function selfTest() {
   const checks = [];
   const check = (name, ok) => checks.push({ name, ok });
   const argv = CLAUDE_REVIEW_ARGS.join(' ');
-  check('canonical model is claude-opus-5', CLAUDE_CANONICAL_MODEL === 'claude-opus-5');
+  check('argv has --model sonnet', argv.includes('--model sonnet'));
+  check('canonical model is claude-sonnet-5',
+    CLAUDE_CANONICAL_MODEL === 'claude-sonnet-5');
   check('argv has --effort medium', argv.includes('--effort medium'));
   check('argv has --safe-mode --tools', argv.includes('--safe-mode --tools'));
   check('valid envelope accepts ancillary model metadata',
     parseClaudeEnvelope(cleanEnvelope()).result.confidence === 'high');
   let wrongModel = false;
   try {
-    parseClaudeEnvelope(JSON.stringify({ result: '{}', modelUsage: {} }));
+    parseClaudeEnvelope(JSON.stringify({
+      result: JSON.stringify({ findings: [], summary: 'clean', confidence: 'high' }),
+      modelUsage: {
+        'claude-opus-5': { canonicalModel: 'claude-opus-5' },
+      },
+    }));
   } catch {
     wrongModel = true;
   }
@@ -288,7 +295,7 @@ async function selfTest() {
       ? { stdout: help }
       : { stdout: cleanEnvelope() },
   });
-  check('record proves Opus substitution and medium effort command',
+  check('record proves Sonnet substitution and medium effort command',
     recorded.resolved_model === CLAUDE_CANONICAL_MODEL
       && recorded.substitution_for === 'mistral-vibe');
   let sandboxSafe = false;
@@ -360,7 +367,7 @@ function parseArgs(argv) {
     mode: 'whole-branch',
     title: '',
     focus: '',
-    slot: 'plan-opus',
+    slot: 'plan-sonnet',
     substitutionFor: null,
     substitutionReason: null,
   };
