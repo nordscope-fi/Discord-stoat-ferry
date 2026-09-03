@@ -235,6 +235,8 @@ async function main() {
   console.log('\nDone. Generated files are gitignored.\n');
   console.log('Machine-wide trust and reviewer access are managed by scripts/codex-setup.sh.');
   console.log('Run scripts/codex-setup.sh --live when paid runtime probes are required.');
+  console.log('Vibe readiness: node scripts/agent-compat/vibe-readiness.mjs --root "$PWD"');
+  console.log('Vibe setup: bash scripts/vibe-setup.sh');
 }
 
 main().catch(err => {

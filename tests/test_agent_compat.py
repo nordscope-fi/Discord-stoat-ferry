@@ -4621,3 +4621,201 @@ def test_complete_verification_stops_and_names_the_failed_layer(failed_layer: st
     assert report["failed_check"]
     layers = ["compatibility", "project", "documentation", "helper-self-tests"]
     assert report["completed"] == layers[: layers.index(failed_layer)]
+
+
+# --- Vibe readiness and config tests -------------------------------------------
+
+
+def test_vibe_config_includes_bash_allowlist(tmp_path: Path) -> None:
+    root, _user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    config = (root / ".vibe/config.toml").read_text()
+    assert "[tools.bash]" in config
+    assert "allowlist" in config
+    assert '"git"' in config
+    assert '"uv"' in config
+    parsed = tomllib.loads(config)
+    assert "mcp_servers" in parsed
+    server_names = [s["name"] for s in parsed["mcp_servers"]]
+    assert "serena" in server_names
+    assert "qmd" in server_names
+    assert "context7" in server_names
+
+
+def test_vibe_readiness_self_test_passes() -> None:
+    result = _run("node", "scripts/agent-compat/vibe-readiness.mjs", "--self-test")
+    assert result.returncode == 0, result.stderr
+    assert "self-test: structural checks passed" in result.stdout
+
+
+def test_vibe_readiness_detects_missing_config(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    config_path = root / ".vibe/config.toml"
+    assert config_path.exists()
+    config_path.unlink()
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/vibe-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["overall"] == "incomplete"
+    ids = [r["id"] for r in report["records"] if r["status"] == "fail"]
+    assert "project-config" in ids
+
+
+def test_vibe_readiness_detects_missing_hooks(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    hooks_path = root / ".vibe/hooks.toml"
+    assert hooks_path.exists()
+    hooks_path.unlink()
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/vibe-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["overall"] == "incomplete"
+    ids = [r["id"] for r in report["records"] if r["status"] == "fail"]
+    assert "vibe-hooks" in ids
+
+
+def test_vibe_readiness_records_have_required_fields(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/vibe-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = json.loads(result.stdout)
+    assert "mode" in report
+    assert "overall" in report
+    assert "records" in report
+    for record in report["records"]:
+        assert "id" in record
+        assert "class" in record
+        assert "status" in record
+        assert "duration_ms" in record
+        assert record["status"] in ("ok", "fail", "warning")
+
+
+def test_vibe_readiness_lists_expected_check_ids(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/vibe-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = json.loads(result.stdout)
+    ids = {r["id"] for r in report["records"]}
+    expected = {
+        "vibe-version",
+        "project-config",
+        "vibe-trust",
+        "instructions",
+        "skills",
+        "vibe-hooks",
+        "mcp-registration",
+        "worktree-parity",
+        "reviewer-clients",
+        "reviewer-runtime",
+        "context7-credential",
+        "generated-state",
+    }
+    assert expected.issubset(ids), f"missing: {expected - ids}"
