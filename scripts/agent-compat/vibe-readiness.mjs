@@ -1,0 +1,301 @@
+// Discord Ferry — Vibe readiness checker.
+// Mirrors codex-readiness.mjs structure for the Vibe host. Reuses shared
+// checks (instructions, skills, worktree-parity, reviewer-clients,
+// reviewer-runtime, context7-credential, generated-state) and adds
+// Vibe-specific checks (version, config, trust, hooks, mcp-registration).
+//
+// Usage:
+//   node vibe-readiness.mjs --root <path> [--home <path>] [--json]
+//                          [--static] [--reviewers] [--self-test]
+
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { mkdtempSync } from 'node:fs';
+
+// --- Shared helpers (mirrors codex-readiness.mjs) -----------------------------
+
+function readinessRecord(id, className, status, durationMs, remediation, details) {
+  return {
+    id,
+    class: className,
+    status,
+    duration_ms: Math.max(0, Math.round(durationMs)),
+    remediation: remediation ?? null,
+    details: details ?? {},
+  };
+}
+
+function safeReadinessFailure(id, className, reason, remediation, durationMs) {
+  return readinessRecord(id, className, 'fail', durationMs, remediation, { reason });
+}
+
+async function checkRecord({ id, className, remediation, reason, now }, check) {
+  const started = now();
+  try {
+    const details = await check();
+    return readinessRecord(id, className, 'ok', now() - started, null, details ?? {});
+  } catch (err) {
+    const failure = safeReadinessFailure(id, className, reason, remediation, now() - started);
+    failure.details.error = err instanceof Error ? err.message : String(err);
+    return failure;
+  }
+}
+
+const defaultNow = () => performance.now();
+
+// --- Shared checks ------------------------------------------------------------
+
+function hasReviewBoundary(text) {
+  return text.includes('Host Compatibility')
+    && text.includes('Tool name mapping');
+}
+
+async function checkInstructions(root) {
+  const agents = join(root, 'AGENTS.md');
+  if (!existsSync(agents)) throw new Error('AGENTS.md not found');
+  const text = readFileSync(agents, 'utf8');
+  if (!hasReviewBoundary(text)) throw new Error('review boundary text missing');
+  return {};
+}
+
+async function checkSkills(root) {
+  const skillsDir = join(root, '.claude', 'skills');
+  const agentsDir = join(root, '.agents', 'skills');
+  if (!existsSync(skillsDir)) throw new Error('.claude/skills/ not found');
+  const skillNames = execFileSync('ls', [skillsDir], { encoding: 'utf8' })
+    .split('\n').filter(Boolean);
+  for (const name of skillNames) {
+    const link = join(agentsDir, name);
+    if (!existsSync(link)) throw new Error(`skill bridge missing: ${name}`);
+  }
+  return { skills: skillNames.length };
+}
+
+async function checkWorktreeParity(root) {
+  try {
+    execFileSync('node', [
+      join(root, 'scripts', 'agent-compat', 'check.mjs'),
+      '--check-worktree-contract',
+      '--root', root,
+    ], { encoding: 'utf8', stdio: 'pipe' });
+  } catch (err) {
+    throw new Error(err.stdout || err.message);
+  }
+  return {};
+}
+
+async function checkReviewerClients() {
+  const clients = ['vibe', 'qwen', 'claude'];
+  const found = {};
+  for (const cli of clients) {
+    try {
+      const version = execFileSync(cli, ['--version'], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
+      found[cli] = version.trim().split('\n')[0];
+    } catch {
+      throw new Error(`${cli} CLI not found`);
+    }
+  }
+  return found;
+}
+
+async function checkReviewerRuntime(root, home) {
+  const runtimeDir = join(home, '.local', 'share', 'discord-ferry', 'reviewer-runtime', 'current');
+  if (!existsSync(runtimeDir)) throw new Error('reviewer runtime not installed');
+  const manifestPath = join(runtimeDir, 'manifest.json');
+  if (!existsSync(manifestPath)) throw new Error('manifest.json not found');
+  return { path: runtimeDir };
+}
+
+async function checkContext7Credential(root, home) {
+  const launcher = join(home, '.local', 'share', 'discord-ferry', 'reviewer-runtime', 'current', 'context7-mcp.mjs');
+  if (!existsSync(launcher)) throw new Error('context7 launcher not found');
+  try {
+    const output = execFileSync('node', [launcher, '--check'], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 30000,
+      env: { ...process.env, VIBE_HOME: home },
+    });
+    if (!output.includes('context7 credential ready')) throw new Error('credential not ready');
+  } catch (err) {
+    throw new Error(err.stdout || err.message || 'context7 credential check failed');
+  }
+  return {};
+}
+
+async function checkGeneratedState(root) {
+  try {
+    execFileSync('node', [
+      join(root, 'scripts', 'agent-compat', 'check.mjs'),
+      '--strict',
+      '--root', root,
+    ], { encoding: 'utf8', stdio: 'pipe' });
+  } catch (err) {
+    throw new Error(err.stdout || err.message || 'generated-state drift detected');
+  }
+  return {};
+}
+
+// --- Vibe-specific checks ------------------------------------------------------
+
+async function checkVibeVersion() {
+  const version = execFileSync('vibe', ['--version'], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
+  return { version: version.trim().split('\n')[0] };
+}
+
+async function checkProjectConfig(root) {
+  const configPath = join(root, '.vibe', 'config.toml');
+  if (!existsSync(configPath)) throw new Error('.vibe/config.toml not found');
+  const text = readFileSync(configPath, 'utf8');
+  const requiredServers = ['serena', 'qmd', 'context7'];
+  for (const name of requiredServers) {
+    if (!text.includes(`name = "${name}"`)) throw new Error(`MCP server ${name} not registered`);
+  }
+  if (!text.includes('[tools.bash]')) throw new Error('bash allowlist missing');
+  if (!text.includes('allowlist')) throw new Error('bash allowlist empty');
+  return { servers: requiredServers.length };
+}
+
+async function checkVibeTrust(root, home) {
+  const trustPath = join(home, '.vibe', 'trusted_folders.toml');
+  if (!existsSync(trustPath)) throw new Error('trusted_folders.toml not found');
+  const text = readFileSync(trustPath, 'utf8');
+  const canonical = resolve(root);
+  if (!text.includes(canonical) && !text.includes(root)) {
+    throw new Error(`project path not trusted: ${canonical}`);
+  }
+  return { path: canonical };
+}
+
+async function checkVibeHooks(root) {
+  const hooksPath = join(root, '.vibe', 'hooks.toml');
+  if (!existsSync(hooksPath)) throw new Error('.vibe/hooks.toml not found');
+  const text = readFileSync(hooksPath, 'utf8');
+  const requiredHooks = ['ferry-pre-tool', 'ferry-post-tool', 'ferry-post-agent'];
+  for (const name of requiredHooks) {
+    if (!text.includes(`name = "${name}"`)) throw new Error(`hook ${name} not registered`);
+  }
+  return { hooks: requiredHooks.length };
+}
+
+async function checkMcpRegistration(root) {
+  const configPath = join(root, '.vibe', 'config.toml');
+  if (!existsSync(configPath)) throw new Error('.vibe/config.toml not found');
+  const text = readFileSync(configPath, 'utf8');
+  const required = ['serena', 'qmd', 'context7'];
+  for (const name of required) {
+    if (!text.includes(`name = "${name}"`)) throw new Error(`MCP server ${name} not registered`);
+  }
+  return { servers: required };
+}
+
+// --- Static readiness ----------------------------------------------------------
+
+export async function runStaticReadiness({ root, home, now = defaultNow } = {}) {
+  const projectRoot = root ?? process.cwd();
+  const homeDir = home ?? process.env.HOME;
+  const records = [];
+
+  const checks = [
+    { id: 'vibe-version', className: 'runtime', reason: 'vibe CLI not found', remediation: 'Install Vibe: uv tool install mistral-vibe', check: checkVibeVersion },
+    { id: 'project-config', className: 'configuration', reason: '.vibe/config.toml missing required fields', remediation: 'Run ./scripts/agent-install.sh to regenerate', check: () => checkProjectConfig(projectRoot) },
+    { id: 'vibe-trust', className: 'configuration', reason: 'project folder not trusted', remediation: `Trust the folder: run vibe in ${projectRoot} and accept the trust prompt`, check: () => checkVibeTrust(projectRoot, homeDir) },
+    { id: 'instructions', className: 'instructions', reason: 'AGENTS.md review boundary text missing', remediation: 'Restore AGENTS.md from the repository', check: () => checkInstructions(projectRoot) },
+    { id: 'skills', className: 'instructions', reason: 'skill bridge incomplete', remediation: 'Run ./scripts/agent-install.sh to rebuild skill symlinks', check: () => checkSkills(projectRoot) },
+    { id: 'vibe-hooks', className: 'hooks', reason: '.vibe/hooks.toml missing required hooks', remediation: 'Run ./scripts/agent-install.sh to regenerate hooks', check: () => checkVibeHooks(projectRoot) },
+    { id: 'mcp-registration', className: 'tool-servers', reason: 'required MCP servers not registered', remediation: 'Run ./scripts/agent-install.sh to restore MCP servers', check: () => checkMcpRegistration(projectRoot) },
+    { id: 'worktree-parity', className: 'worktrees', reason: 'worktree link contract violated', remediation: 'Run .claude/scripts/new-worktree.sh to repair links', check: () => checkWorktreeParity(projectRoot) },
+    { id: 'reviewer-clients', className: 'reviewers', reason: 'reviewer CLI not found', remediation: 'Install the missing CLI tool', check: checkReviewerClients },
+    { id: 'reviewer-runtime', className: 'reviewers', reason: 'reviewer runtime not installed', remediation: 'Run scripts/codex-setup.sh to install the shared reviewer runtime', check: () => checkReviewerRuntime(projectRoot, homeDir) },
+    { id: 'context7-credential', className: 'tool-servers', reason: 'context7 credential not available', remediation: 'Check Context7 API key provisioning', check: () => checkContext7Credential(projectRoot, homeDir) },
+    { id: 'generated-state', className: 'configuration', reason: 'generated-state drift detected', remediation: 'Run ./scripts/agent-install.sh to regenerate', check: () => checkGeneratedState(projectRoot) },
+  ];
+
+  for (const def of checks) {
+    const { check, ...meta } = def;
+    records.push(await checkRecord({ ...meta, now }, check));
+  }
+
+  const overall = records.every(r => r.status === 'ok') ? 'ready' : 'incomplete';
+  return { mode: 'static', overall, records };
+}
+
+// --- Re-export shared reviewer readiness --------------------------------------
+
+export { runReviewerReadiness } from './codex-readiness.mjs';
+
+// --- CLI entry point -----------------------------------------------------------
+
+function invokedAsMain() {
+  return import.meta.url === `file://${resolve(process.argv[1])}`;
+}
+
+function parseArgs(argv) {
+  const args = { root: process.cwd(), home: process.env.HOME, json: false, mode: 'static' };
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--root' || arg === '--project-root') { args.root = argv[++i]; }
+    else if (arg === '--home') { args.home = argv[++i]; }
+    else if (arg === '--json') { args.json = true; }
+    else if (arg === '--static') { args.mode = 'static'; }
+    else if (arg === '--reviewers') { args.mode = args.mode === 'static' ? 'reviewers' : `${args.mode}+reviewers`; }
+    else if (arg === '--self-test') { args.mode = 'self-test'; }
+    else throw new Error(`unknown argument: ${arg}`);
+  }
+  return args;
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+
+  if (args.mode === 'self-test') {
+    const report = await runStaticReadiness({ root: args.root, home: args.home });
+    const structural = report.records.filter(
+      r => ['vibe-version', 'project-config', 'vibe-trust', 'instructions',
+        'skills', 'vibe-hooks', 'mcp-registration'].includes(r.id),
+    );
+    const allStructuralPass = structural.every(r => r.status === 'ok');
+    if (!allStructuralPass) {
+      console.error('vibe-readiness self-test: FAILED');
+      for (const r of structural) {
+        if (r.status !== 'ok') console.error(`  ${r.status.toUpperCase()} ${r.id}: ${r.details?.error ?? r.details?.reason ?? ''}`);
+      }
+      process.exit(1);
+    }
+    console.log('vibe-readiness self-test: all structural checks passed');
+    return;
+  }
+
+  const reports = [];
+  if (args.mode.includes('static')) {
+    reports.push(await runStaticReadiness({ root: args.root, home: args.home }));
+  }
+  if (args.mode.includes('reviewers')) {
+    const { runReviewerReadiness } = await import('./codex-readiness.mjs');
+    reports.push(await runReviewerReadiness({ root: args.root, home: args.home }));
+  }
+
+  const allRecords = reports.flatMap(r => r.records);
+  const overall = allRecords.every(r => r.status === 'ok') ? 'ready' : 'incomplete';
+  const report = {
+    mode: reports.map(r => r.mode).join('+'),
+    overall,
+    records: allRecords,
+  };
+
+  if (args.json) {
+    console.log(JSON.stringify(report));
+  } else {
+    for (const r of report.records) {
+      console.log(`${r.status.toUpperCase()} ${r.id}`);
+    }
+  }
+  if (overall !== 'ready') process.exit(1);
+}
+
+if (invokedAsMain()) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

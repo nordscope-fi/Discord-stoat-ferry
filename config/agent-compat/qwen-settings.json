@@ -107,7 +107,7 @@
     },
     "serena": {
       "command": "serena",
-      "args": ["start-mcp-server", "--context", "vibe", "--project-from-cwd"],
+      "args": ["start-mcp-server", "--context", "qwen", "--project-from-cwd"],
       "timeout": 30000
     },
     "context7": {

@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Vibe readiness checker and setup entrypoint.** `vibe-readiness.mjs` runs 12 static
+  checks mirroring the Codex readiness structure, and `vibe-setup.sh` orchestrates install
+  and readiness. The installer now mentions both paths.
+
+- **Vibe config now includes a bash allowlist.** The Vibe config template auto-approves
+  the same commands Qwen's permission list covers.
+
+- **Vibe support gap investigation and fixes.** Fixed 15+ Claude-only tool name references
+  in skills and rules, replaced CLAUDE.md atomicity rule references with AGENTS.md, reworded
+  Claude hook references as host-specific, documented the fresh-context reviewer limitation,
+  and added cross-references for operational guidance.
+
+### Fixed
+
+- **Qwen serena context was set to "vibe" instead of "qwen".** Copy-paste from the Vibe
+  template. Serena accepts the qwen context, satisfying ADR-026 re-evaluation trigger 2.
+
 - **Workflow routing now follows verified risk instead of file count.** Narrow reversible fixes use
   one approved bounded path even when release support touches several files. Unknown causes are
   investigated first, high-risk contracts keep the complete design and review chain, and optional
