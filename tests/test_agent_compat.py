@@ -581,9 +581,14 @@ def test_agents_names_tested_mcp_calls_and_review_quorum() -> None:
     normalized = " ".join(text.split()).lower()
     assert "qmd health: call `status` with `{}`" in text
     assert "codex requests escalated execution on the first attempt" in normalized
+    assert "intrinsically authorizes" in normalized
+    assert "each new required payload" in normalized
+    assert "fixed vibe and qwen" in normalized
     assert "never tries the workspace sandbox first" in normalized
     assert "never runs a separate credential login" in normalized
     assert "verdict evaluation stay in the workspace sandbox" in normalized
+    assert "optional providers" in normalized
+    assert "new destinations" in normalized
     assert "Serena overview: call `get_symbols_overview`" in text
     assert "Context7 documentation: call `resolve-library-id`" in text
     assert "provider failures are recorded" in normalized
@@ -1879,128 +1884,169 @@ def test_codex_bootstrap_owns_globals_for_the_primary_checkout(tmp_path: Path) -
     assert str(worktree) not in config
 
 
-def test_bootstrap_creates_one_vault_scoped_reviewer_agent(tmp_path: Path) -> None:
-    fake = tmp_path / "pass-cli"
-    log = tmp_path / "calls"
-    state = tmp_path / "agent-created"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> {log}\n"
-        "if [ \"$1 $2 $3\" = 'agent create --help' ]; then "
-        "printf 'NAME --expiration 3m --vault'; "
-        "elif [ \"$1 $2\" = 'vault list' ]; then "
-        'printf \'{"vaults":[{"name":"PortalPilot"}]}\'; '
-        "elif [ \"$1 $2\" = 'agent list' ]; then "
-        f"if [ -f {state} ]; then "
-        'printf \'[{"name":"discord-ferry-reviewers","expire_time":1999999999}]\'; '
-        "else printf '[]'; fi; "
-        "elif [ \"$1 $2\" = 'agent create' ]; then "
-        f"touch {state}; "
-        'printf \'{"agent":{"credentials":{"token":"'
-        'pst_testfixture12345678901234567890::tokenkey"}},"instruction":"test"}\'; fi\n'
-    )
-    fake.chmod(0o755)
-    home = tmp_path / "home"
-    command = [
+def _reviewer_agent_fixture(tmp_path: Path, fixture: str) -> subprocess.CompletedProcess[str]:
+    return _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
-        "bootstrap-proton",
+        "reviewer-agent",
+        fixture,
         "--home",
-        str(home),
-        "--root",
-        str(REPO),
-        "--pass-cli",
-        str(fake),
-        "--json",
-    ]
-    first = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
-    second = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
-    assert first.returncode == second.returncode == 0
-    calls = log.read_text()
-    assert (
-        calls.count("agent create discord-ferry-reviewers --expiration 3m --vault PortalPilot") == 1
-    )
-    token = home / ".config/discord-ferry/reviewer-agent.pat"
-    assert token.stat().st_mode & 0o777 == 0o600
-    assert "pst_testfixture" not in first.stdout + first.stderr + second.stdout + second.stderr
-
-
-def test_bootstrap_renews_an_expired_reviewer_agent(tmp_path: Path) -> None:
-    fake = tmp_path / "pass-cli"
-    log = tmp_path / "calls"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$*\" >> {log}\n"
-        "if [ \"$1 $2 $3\" = 'agent create --help' ]; then "
-        "printf 'NAME --expiration 3m --vault'; "
-        "elif [ \"$1 $2\" = 'vault list' ]; then "
-        'printf \'[{"name":"PortalPilot"}]\'; '
-        "elif [ \"$1 $2\" = 'agent list' ]; then "
-        'printf \'[{"name":"discord-ferry-reviewers","expire_time":1}]\'; '
-        "elif [ \"$1 $2\" = 'agent renew' ]; then "
-        'printf \'{"token":"pst_newfixture123456789012345678901234567890"}\'; fi\n'
-    )
-    fake.chmod(0o755)
-    home = tmp_path / "home"
-    token = home / ".config/discord-ferry/reviewer-agent.pat"
-    token.parent.mkdir(parents=True)
-    token.write_text("pst_oldfixture123456789012345678901234567890")
-
-    result = _run(
-        "node",
-        "tests/fixtures/agent_compat_runner.mjs",
-        "bootstrap-proton",
-        "--home",
-        str(home),
-        "--root",
-        str(REPO),
-        "--pass-cli",
-        str(fake),
+        str(tmp_path),
         "--json",
     )
 
+
+def test_reviewer_fresh_identity_binds_before_exact_grants(tmp_path: Path) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "fresh-repeat")
     assert result.returncode == 0, result.stderr
-    assert "agent renew --expiration 3m --output json discord-ferry-reviewers" in log.read_text()
-    assert token.read_text().startswith("pst_newfixture")
-    assert "pst_newfixture" not in result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"] == {
+        "created": True,
+        "renewed": False,
+        "migrated": False,
+        "recovered": False,
+    }
+    assert report["second"] == {
+        "created": False,
+        "renewed": False,
+        "migrated": False,
+        "recovered": False,
+    }
+    assert report["mutations"] == [
+        "agent create discord-ferry-reviewers --expiration 3m",
+        "agent renew --expiration 3m --output json discord-ferry-reviewers",
+        "agent access grant discord-ferry-reviewers --vault-name Personal "
+        "--item-title Mistral Vibe API Key --role viewer",
+        "agent access grant discord-ferry-reviewers --vault-name Personal "
+        "--item-title QwenCloud API Key --role viewer",
+    ]
+    assert report["field_reads"] == 4
+    assert report["authentications"] == 1
+    assert report["authenticated_bound_token"] is True
+    assert report["token_mode"] == report["state_mode"] == 0o600
+    assert report["staging_exists"] is False
+    assert report["ownership"]["state"] == "ready"
 
 
-def test_bootstrap_refuses_an_orphaned_reviewer_token(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    token = home / ".config/discord-ferry/reviewer-agent.pat"
-    token.parent.mkdir(parents=True)
-    token.write_text("pst_testfixture12345678901234567890::tokenkey")
-    fake = tmp_path / "pass-cli"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1 $2 $3\" = 'agent create --help' ]; then "
-        "printf 'NAME --expiration 3m --vault'; "
-        "elif [ \"$1 $2\" = 'vault list' ]; then "
-        'printf \'[{"name":"PortalPilot"}]\'; '
-        "elif [ \"$1 $2\" = 'agent list' ]; then printf '[]'; fi\n"
+def test_reviewer_grant_reconciliation_adds_only_the_missing_item(tmp_path: Path) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "one-grant")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"] is None
+    assert report["mutations"] == [
+        "agent access grant discord-ferry-reviewers --vault-name Personal "
+        "--item-title QwenCloud API Key --role viewer"
+    ]
+    assert report["ownership"]["state"] == "ready"
+    assert report["field_reads"] == 2
+
+
+def test_reviewer_healthy_and_renewal_paths_verify_both_fields(tmp_path: Path) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "expired")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"]["renewed"] is True
+    assert report["second"] == {
+        "created": False,
+        "renewed": False,
+        "migrated": False,
+        "recovered": False,
+    }
+    assert report["mutations"] == [
+        "agent renew --expiration 3m --output json discord-ferry-reviewers"
+    ]
+    assert report["field_reads"] == 4
+
+
+def test_reviewer_legacy_fingerprint_migrates_then_revokes_exact_share(
+    tmp_path: Path,
+) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "legacy")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"]["migrated"] is True
+    assert report["mutations"][-1] == (
+        "agent access revoke --share-id legacy-share discord-ferry-reviewers"
     )
-    fake.chmod(0o755)
-    result = subprocess.run(
-        [
-            "node",
-            "tests/fixtures/agent_compat_runner.mjs",
-            "bootstrap-proton",
-            "--home",
-            str(home),
-            "--root",
-            str(REPO),
-            "--pass-cli",
-            str(fake),
-            "--json",
-        ],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert "pass-cli agent renew" in result.stderr
-    assert "pst_testfixture" not in result.stdout + result.stderr
+    assert report["ownership"]["state"] == "ready"
+    assert report["ownership"]["legacy_share_id"] is None
+    assert {grant["type"] for grant in report["grants"]} == {"item"}
+
+
+def test_reviewer_interrupted_after_legacy_revoke_converges(tmp_path: Path) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "post-revoke-recovery")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"] is None
+    assert report["mutations"] == []
+    assert report["field_reads"] == 2
+    assert report["ownership"]["state"] == "ready"
+    assert report["ownership"]["legacy_share_id"] is None
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["legacy-revoke-failure", "legacy-revoke-persistence", "legacy-wrong-share"],
+)
+def test_reviewer_legacy_revoke_stops_on_unverified_remote_state(
+    tmp_path: Path, fixture: str
+) -> None:
+    result = _reviewer_agent_fixture(tmp_path, fixture)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"]
+    assert report["ownership"]["state"] == "provisioning"
+    assert report["ownership"]["legacy_share_id"] == "legacy-share"
+
+
+def test_reviewer_staged_recovery_binds_without_new_creation(tmp_path: Path) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "staged-recovery")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["first"]["recovered"] is True
+    assert not any(call.startswith("agent create ") for call in report["mutations"])
+    assert report["mutations"] == [
+        "agent renew --expiration 3m --output json discord-ferry-reviewers",
+        "agent access grant discord-ferry-reviewers --vault-name Personal "
+        "--item-title Mistral Vibe API Key --role viewer",
+        "agent access grant discord-ferry-reviewers --vault-name Personal "
+        "--item-title QwenCloud API Key --role viewer",
+    ]
+    assert report["authentications"] == 1
+    assert report["authenticated_bound_token"] is True
+    assert report["staging_exists"] is False
+
+
+def test_reviewer_rejects_same_named_item_from_another_vault(tmp_path: Path) -> None:
+    result = _reviewer_agent_fixture(tmp_path, "wrong-vault-item")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"] == "Reviewer access grants are invalid"
+    assert report["mutations"] == []
+    assert report["field_reads"] == 0
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "duplicate-grant",
+        "unknown-grant",
+        "field-failure",
+        "unsafe-staging",
+        "ambiguous-staged",
+        "orphan-token",
+    ],
+)
+def test_reviewer_unbound_or_unsafe_state_stops_without_unsafe_mutation(
+    tmp_path: Path, fixture: str
+) -> None:
+    result = _reviewer_agent_fixture(tmp_path, fixture)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["error"]
+    if fixture in {"unsafe-staging", "ambiguous-staged", "orphan-token"}:
+        assert report["mutations"] == []
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
 def test_context7_agent_is_item_limited_and_repeatable(tmp_path: Path) -> None:
@@ -2922,6 +2968,50 @@ def test_proton_helper_uses_isolated_session_and_returns_only_the_field(
     assert "all checks passed" in result.stderr
 
 
+@pytest.mark.parametrize("fixture", ["ready", "provisioning"])
+def test_reviewer_ownership_accepts_valid_lifecycle_records(tmp_path: Path, fixture: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "reviewer-ownership",
+        fixture,
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    ownership = json.loads(result.stdout)["ownership"]
+    assert ownership["state"] == fixture
+    assert set(ownership["items"]) == {"vibe", "qwen"}
+
+
+@pytest.mark.parametrize(
+    "fixture, expected",
+    [
+        ("malformed", "Reviewer ownership record is invalid"),
+        ("wrong-version", "Reviewer ownership record is invalid"),
+        ("wrong-digest", "Reviewer ownership record is invalid"),
+        ("extra-key", "Reviewer ownership record is invalid"),
+        ("symbolic", "reviewer-agent.json must be a regular file"),
+        ("wrong-mode", "reviewer-agent.json must have mode 0600"),
+    ],
+)
+def test_reviewer_ownership_rejects_unsafe_or_unknown_records(
+    tmp_path: Path, fixture: str, expected: str
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "reviewer-ownership",
+        fixture,
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"error": expected}
+
+
 def test_proton_field_reader_uses_the_caller_descriptor(tmp_path: Path) -> None:
     result = _run(
         "node",
@@ -2944,9 +3034,21 @@ def test_proton_field_reader_uses_the_caller_descriptor(tmp_path: Path) -> None:
             "--field",
             "API Key",
         ],
+        "context7_login_timeout_ms": 30_000,
         "context7_token_selected": True,
-        "reviewer_vault": "PortalPilot",
+        "reviewer_args": [
+            "item",
+            "view",
+            "--share-id",
+            "vibe-share-id",
+            "--item-id",
+            "vibe-item-id",
+            "--field",
+            "API Key",
+        ],
+        "reviewer_login_timeout_ms": 30_000,
         "reviewer_token_selected": True,
+        "invalid_provider_error": "Reviewer provider is invalid",
         "sessions_removed": True,
     }
 
@@ -2965,6 +3067,41 @@ def test_proton_helper_redacts_injected_child_streams(tmp_path: Path) -> None:
     report = json.loads(result.stdout)
     assert report["stage"] in {"login", "field-read"}
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_proton_helper_retries_only_transport_login_failures(tmp_path: Path) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "proton-login-retry",
+        "--home",
+        str(tmp_path),
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "error": None,
+        "login_calls": 3,
+        "login_timeouts": [30_000, 30_000, 30_000],
+        "item_calls": 1,
+        "value_present": True,
+    }
+
+
+def test_proton_child_classifies_transport_timeout_without_child_output() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "proton-transport-classification",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "message": "child failed",
+        "status": 1,
+        "transient_network": True,
+    }
+    assert "error during transmission" not in result.stdout + result.stderr
 
 
 def test_proton_helper_rejects_a_symbolic_token_before_login(tmp_path: Path) -> None:
@@ -2991,6 +3128,17 @@ def test_vibe_review_pins_glm_and_disables_tools() -> None:
     assert "zai-glm-5-2" in result.stderr
     assert "--enabled-tools __none__" in result.stderr
     assert "--disabled-tools re:.*" in result.stderr
+
+
+def test_reviewer_adapters_select_their_exact_provider_locator() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "reviewer-provider-routing",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"providers": ["vibe", "qwen"]}
 
 
 def test_vibe_review_rejects_a_tool_call_in_the_history() -> None:

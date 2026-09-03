@@ -3,9 +3,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -15,9 +18,17 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readProtonField } from './proton-credential.mjs';
+import {
+  REVIEWER_PROVIDERS,
+  REVIEWER_STATE_FILE,
+  REVIEWER_STATE_VERSION,
+  readProtonField,
+  readReviewerOwnership,
+  reviewerGrantDigest,
+} from './proton-credential.mjs';
 
 const TOML_TRUST_PROBE = String.raw`
 import json
@@ -45,7 +56,15 @@ sys.stdout.write(json.dumps({
 `;
 
 const REVIEWER_AGENT = 'discord-ferry-reviewers';
-const REVIEWER_VAULT = 'PortalPilot';
+const REVIEWER_VAULT = 'Personal';
+const REVIEWER_LEGACY_VAULT = 'PortalPilot';
+const REVIEWER_TOKEN_FILE = 'reviewer-agent.pat';
+const REVIEWER_STAGING_FILE = 'reviewer-agent.create.json';
+const REVIEWER_FIELD = 'API Key';
+const REVIEWER_ITEMS = Object.freeze({
+  vibe: 'Mistral Vibe API Key',
+  qwen: 'QwenCloud API Key',
+});
 const CONTEXT7_AGENT = 'discord-ferry-context7';
 const CONTEXT7_VAULT = 'Personal';
 const CONTEXT7_ITEM = 'Context7 API Key';
@@ -400,6 +419,29 @@ function runPassCli(passCli, args) {
   return result.stdout;
 }
 
+function runPassCliToFile(passCli, args, outputPath) {
+  mkdirSync(dirname(outputPath), { recursive: true });
+  const output = openSync(outputPath, 'wx', 0o600);
+  let result;
+  try {
+    result = spawnSync(passCli, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', output, 'pipe'],
+      env: {
+        ...process.env,
+        PROTON_PASS_AGENT_REASON: 'Configure Discord Ferry reviewer access',
+      },
+      maxBuffer: 2 * 1024 * 1024,
+    });
+  } finally {
+    closeSync(output);
+  }
+  if (result.status !== 0) {
+    rmSync(outputPath, { force: true });
+    throw new Error(`pass-cli command failed: ${args.slice(0, 2).join(' ')}`);
+  }
+}
+
 function parseValueFreeList(stdout, label, envelopeKey) {
   try {
     const value = JSON.parse(stdout);
@@ -411,62 +453,366 @@ function parseValueFreeList(stdout, label, envelopeKey) {
   }
 }
 
-export async function provisionReviewerAgent({ home, passCli }) {
-  if (!home || !passCli) throw new Error('reviewer agent setup requires home and pass-cli');
-  const help = runPassCli(passCli, ['agent', 'create', '--help']);
-  if (!/\bNAME\b/u.test(help) || !help.includes('--expiration') ||
-      !/\b3m\b/u.test(help) || !help.includes('--vault')) {
-    throw new Error('installed pass-cli does not support the required scoped agent command');
+function reviewerAgentId(agent) {
+  const id = agent?.pat_id ?? agent?.id;
+  if (!['string', 'number'].includes(typeof id) || String(id).length === 0) {
+    throw new Error('Proton agent list returned an invalid reviewer identity');
   }
+  return String(id);
+}
 
-  const vaults = parseValueFreeList(
-    runPassCli(passCli, ['vault', 'list', '--output', 'json']),
-    'vault list',
-    'vaults',
+function emptyReviewerItems() {
+  return Object.fromEntries(REVIEWER_PROVIDERS.map((provider) => [
+    provider, { share_id: null, item_id: null },
+  ]));
+}
+
+function reviewerOwnership(agentId, state, items, legacyShareId = null) {
+  return {
+    version: REVIEWER_STATE_VERSION,
+    agent_id: agentId,
+    agent_name: REVIEWER_AGENT,
+    state,
+    grant_sha256: reviewerGrantDigest(),
+    legacy_share_id: legacyShareId,
+    items,
+  };
+}
+
+function writeReviewerOwnership(path, agentId, state, items, legacyShareId = null) {
+  const document = reviewerOwnership(agentId, state, items, legacyShareId);
+  writeAtomic(path, `${JSON.stringify(document)}\n`, null, 0o600);
+  return document;
+}
+
+function readReviewerCreation(path) {
+  secureRegularFile(path, REVIEWER_STAGING_FILE);
+  let document;
+  try {
+    document = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error('Reviewer creation response is invalid');
+  }
+  if (JSON.stringify(Object.keys(document ?? {}).sort()) !==
+      JSON.stringify(['instruction', 'token'])
+      || typeof document.instruction !== 'string'
+      || document.instruction.length === 0) {
+    throw new Error('Reviewer creation response is invalid');
+  }
+  return parseAgentToken(JSON.stringify(document));
+}
+
+async function authenticateReviewerToken(passCli, token) {
+  const sessionDirectory = mkdtempSync(join(tmpdir(), 'ferry-reviewer-auth-'));
+  try {
+    const result = spawnSync(passCli, ['login'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'ignore'],
+      env: {
+        PATH: process.env.PATH ?? '',
+        PROTON_PASS_SESSION_DIR: sessionDirectory,
+        PROTON_PASS_PERSONAL_ACCESS_TOKEN: token,
+      },
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (result.status !== 0) throw new Error('Reviewer creation token could not authenticate');
+  } finally {
+    rmSync(sessionDirectory, { recursive: true, force: true });
+  }
+}
+
+function listReviewerAccess(passCli, run) {
+  return parseValueFreeList(run(passCli, [
+    'personal-access-token', 'access', 'list-access',
+    '--personal-access-token-name', REVIEWER_AGENT,
+    '--output', 'json',
+  ]), 'access list', 'accesses');
+}
+
+function inspectReviewerAccess(
+  grants,
+  expectedItemIds,
+  legacyShareId = null,
+  allowMissingLegacy = false,
+) {
+  const items = emptyReviewerItems();
+  let legacySeen = false;
+  for (const grant of grants) {
+    const provider = REVIEWER_PROVIDERS.find(
+      (candidate) => REVIEWER_ITEMS[candidate] === grant?.item_title,
+    );
+    if (provider && grant?.type === 'item' && grant?.role === 'Viewer'
+        && grant?.item_id === expectedItemIds[provider]
+        && typeof grant.share_id === 'string' && grant.share_id.length > 0
+        && typeof grant.item_id === 'string' && grant.item_id.length > 0) {
+      if (items[provider].share_id !== null) {
+        throw new Error('Reviewer access grants are ambiguous');
+      }
+      items[provider] = { share_id: grant.share_id, item_id: grant.item_id };
+      continue;
+    }
+    if (legacyShareId !== null
+        && grant?.type === 'vault'
+        && grant?.role === 'Viewer'
+        && grant?.vault_name === REVIEWER_LEGACY_VAULT
+        && grant?.share_id === legacyShareId
+        && !legacySeen) {
+      legacySeen = true;
+      continue;
+    }
+    throw new Error('Reviewer access grants are invalid');
+  }
+  if (legacyShareId !== null && !legacySeen && !allowMissingLegacy) {
+    throw new Error('Reviewer legacy access grant is missing');
+  }
+  return items;
+}
+
+function reviewerLocatorsComplete(items) {
+  return REVIEWER_PROVIDERS.every((provider) => items[provider].share_id !== null);
+}
+
+function reviewerLegacyShare(grants) {
+  if (grants.length !== 1) return null;
+  const grant = grants[0];
+  if (grant?.type !== 'vault'
+      || grant?.role !== 'Viewer'
+      || grant?.vault_name !== REVIEWER_LEGACY_VAULT
+      || typeof grant?.share_id !== 'string'
+      || grant.share_id.length === 0) return null;
+  return grant.share_id;
+}
+
+function assertSavedReviewerLocators(ownership, items) {
+  for (const provider of REVIEWER_PROVIDERS) {
+    const saved = ownership.items[provider];
+    const actual = items[provider];
+    if (saved.share_id !== null
+        && (saved.share_id !== actual.share_id || saved.item_id !== actual.item_id)) {
+      throw new Error('Reviewer access identifiers changed');
+    }
+  }
+}
+
+async function verifyReviewerFields({ home, fieldReader, items }) {
+  for (const provider of REVIEWER_PROVIDERS) {
+    const locator = items[provider];
+    await fieldReader({
+      tokenFile: REVIEWER_TOKEN_FILE,
+      shareId: locator.share_id,
+      itemId: locator.item_id,
+      field: REVIEWER_FIELD,
+      reason: `Verify Discord Ferry ${provider} reviewer access`,
+      home,
+    });
+  }
+}
+
+async function reconcileReviewerGrants({
+  home,
+  passCli,
+  run,
+  fieldReader,
+  ownershipPath,
+  ownership,
+  expectedItemIds,
+}) {
+  let grants = listReviewerAccess(passCli, run);
+  const legacyMayAlreadyBeRevoked = ownership.legacy_share_id !== null
+    && reviewerLocatorsComplete(ownership.items);
+  let legacyPresent = ownership.legacy_share_id !== null
+    && grants.some((grant) => grant?.share_id === ownership.legacy_share_id);
+  let items = inspectReviewerAccess(
+    grants, expectedItemIds, ownership.legacy_share_id, legacyMayAlreadyBeRevoked,
   );
-  if (vaults.filter((vault) => vault?.name === REVIEWER_VAULT).length !== 1) {
-    throw new Error('pass-cli must expose exactly one PortalPilot vault');
+  assertSavedReviewerLocators(ownership, items);
+  for (const provider of REVIEWER_PROVIDERS) {
+    if (items[provider].share_id !== null) continue;
+    run(passCli, [
+      'agent', 'access', 'grant', REVIEWER_AGENT,
+      '--vault-name', REVIEWER_VAULT,
+      '--item-title', REVIEWER_ITEMS[provider],
+      '--role', 'viewer',
+    ]);
   }
-
-  const agents = parseValueFreeList(
-    runPassCli(passCli, ['agent', 'list', '--output', 'json']),
-    'agent list',
-    'agents',
+  grants = listReviewerAccess(passCli, run);
+  legacyPresent = ownership.legacy_share_id !== null
+    && grants.some((grant) => grant?.share_id === ownership.legacy_share_id);
+  items = inspectReviewerAccess(
+    grants, expectedItemIds, ownership.legacy_share_id, legacyMayAlreadyBeRevoked,
   );
-  const matchingAgents = agents.filter((agent) => agent?.name === REVIEWER_AGENT);
-  if (matchingAgents.length > 1) {
-    throw new Error('multiple discord-ferry-reviewers agents exist; remove duplicates before setup');
+  if (!reviewerLocatorsComplete(items)) {
+    throw new Error('Reviewer item access grant is missing');
   }
-  const agentExists = matchingAgents.length === 1;
-  const tokenPath = join(home, '.config', 'discord-ferry', 'reviewer-agent.pat');
-  const tokenExists = existsSync(tokenPath);
-  const expireTime = Number(matchingAgents[0]?.expire_time);
-  const agentExpired = agentExists && Number.isFinite(expireTime)
-    && expireTime <= Math.floor(Date.now() / 1000);
-
-  if (agentExists && tokenExists && !agentExpired) return { created: false, renewed: false };
-  if (agentExists !== tokenExists) {
-    throw new Error(
-      'reviewer agent state is incomplete; run: pass-cli agent renew --expiration 3m ' +
-      '--output json discord-ferry-reviewers',
+  assertSavedReviewerLocators(ownership, items);
+  const provisioning = reviewerOwnership(
+    ownership.agent_id, 'provisioning', items, ownership.legacy_share_id,
+  );
+  if (JSON.stringify(ownership) !== JSON.stringify(provisioning)) {
+    writeReviewerOwnership(
+      ownershipPath, ownership.agent_id, 'provisioning', items, ownership.legacy_share_id,
     );
   }
-
-  if (agentExpired) {
-    const renewed = runPassCli(passCli, [
-      'agent', 'renew', '--expiration', '3m', '--output', 'json', REVIEWER_AGENT,
+  await verifyReviewerFields({ home, fieldReader, items });
+  if (legacyPresent) {
+    run(passCli, [
+      'agent', 'access', 'revoke', '--share-id', ownership.legacy_share_id, REVIEWER_AGENT,
     ]);
-    const token = parseAgentToken(renewed);
-    writeAtomic(tokenPath, token, null);
-    return { created: false, renewed: true };
+    const afterRevoke = listReviewerAccess(passCli, run);
+    const finalItems = inspectReviewerAccess(afterRevoke, expectedItemIds);
+    if (!reviewerLocatorsComplete(finalItems)) {
+      throw new Error('Reviewer item access grant is missing after legacy revocation');
+    }
+    items = finalItems;
+  }
+  writeReviewerOwnership(ownershipPath, ownership.agent_id, 'ready', items);
+  return items;
+}
+
+export async function provisionReviewerAgent({
+  home,
+  passCli,
+  run = runPassCli,
+  createRunner = runPassCliToFile,
+  fieldReader = readProtonField,
+  tokenAuthenticator = authenticateReviewerToken,
+  now = () => Date.now(),
+}) {
+  if (!home || !passCli) throw new Error('reviewer agent setup requires home and pass-cli');
+  const createHelp = run(passCli, ['agent', 'create', '--help']);
+  const grantHelp = run(passCli, ['agent', 'access', 'grant', '--help']);
+  if (!/\bNAME\b/u.test(createHelp) || !createHelp.includes('--expiration')
+      || !grantHelp.includes('--item-title') || !grantHelp.includes('--role')) {
+    throw new Error('installed pass-cli does not support exact reviewer item access');
+  }
+  const vaults = parseValueFreeList(
+    run(passCli, ['vault', 'list', '--output', 'json']), 'vault list', 'vaults',
+  );
+  if (vaults.filter((vault) => vault?.name === REVIEWER_VAULT).length !== 1) {
+    throw new Error('pass-cli must expose exactly one Personal vault');
+  }
+  const availableItems = parseValueFreeList(
+    run(passCli, ['item', 'list', '--vault-name', REVIEWER_VAULT, '--output', 'json']),
+    'item list',
+    'items',
+  );
+  const expectedItemIds = {};
+  for (const provider of REVIEWER_PROVIDERS) {
+    const title = REVIEWER_ITEMS[provider];
+    const matches = availableItems.filter((item) => item?.title === title);
+    if (matches.length !== 1 || typeof matches[0]?.id !== 'string' || !matches[0].id) {
+      throw new Error(`pass-cli must expose exactly one identifiable ${title} item`);
+    }
+    expectedItemIds[provider] = matches[0].id;
   }
 
-  const created = runPassCli(passCli, [
-    'agent', 'create', REVIEWER_AGENT, '--expiration', '3m', '--vault', REVIEWER_VAULT,
-  ]);
-  const token = parseAgentToken(created);
-  writeAtomic(tokenPath, token, null);
-  return { created: true, renewed: false };
+  const directory = join(home, '.config', 'discord-ferry');
+  const tokenPath = join(directory, REVIEWER_TOKEN_FILE);
+  const ownershipPath = join(directory, REVIEWER_STATE_FILE);
+  const stagingPath = join(directory, REVIEWER_STAGING_FILE);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  let agents = parseValueFreeList(
+    run(passCli, ['agent', 'list', '--output', 'json']), 'agent list', 'agents',
+  ).filter((agent) => agent?.name === REVIEWER_AGENT);
+  if (agents.length > 1) {
+    throw new Error('multiple discord-ferry-reviewers agents exist; remove duplicates before setup');
+  }
+  const ownershipEntry = lstatOrNull(ownershipPath);
+  let ownership = ownershipEntry ? readReviewerOwnership(home) : null;
+  const tokenEntry = secureRegularFile(tokenPath, REVIEWER_TOKEN_FILE);
+  const stagingEntry = lstatOrNull(stagingPath);
+  let created = false;
+  let recovered = false;
+  let migrated = false;
+
+  if (stagingEntry) {
+    const stagedToken = readReviewerCreation(stagingPath);
+    if (ownership || agents.length !== 1) {
+      throw new Error('Reviewer staged creation cannot be bound safely');
+    }
+    if (tokenEntry && readFileSync(tokenPath, 'utf8').trim() !== stagedToken) {
+      throw new Error('Reviewer staged token does not match local state');
+    }
+    const agentId = reviewerAgentId(agents[0]);
+    const reboundToken = parseAgentToken(run(passCli, [
+      'agent', 'renew', '--expiration', '3m', '--output', 'json', REVIEWER_AGENT,
+    ]));
+    await tokenAuthenticator(passCli, reboundToken);
+    writeAtomic(tokenPath, reboundToken, null, 0o600);
+    ownership = writeReviewerOwnership(
+      ownershipPath, agentId, 'provisioning', emptyReviewerItems(),
+    );
+    rmSync(stagingPath, { force: true });
+    recovered = true;
+  } else if (agents.length === 0) {
+    if (ownership || tokenEntry) {
+      throw new Error('Reviewer local credential state has no matching agent');
+    }
+    createRunner(passCli, [
+      'agent', 'create', REVIEWER_AGENT, '--expiration', '3m',
+    ], stagingPath);
+    readReviewerCreation(stagingPath);
+    agents = parseValueFreeList(
+      run(passCli, ['agent', 'list', '--output', 'json']), 'agent list', 'agents',
+    ).filter((agent) => agent?.name === REVIEWER_AGENT);
+    if (agents.length !== 1) {
+      throw new Error('Created reviewer agent could not be identified uniquely');
+    }
+    const agentId = reviewerAgentId(agents[0]);
+    const reboundToken = parseAgentToken(run(passCli, [
+      'agent', 'renew', '--expiration', '3m', '--output', 'json', REVIEWER_AGENT,
+    ]));
+    await tokenAuthenticator(passCli, reboundToken);
+    writeAtomic(tokenPath, reboundToken, null, 0o600);
+    ownership = writeReviewerOwnership(
+      ownershipPath, agentId, 'provisioning', emptyReviewerItems(),
+    );
+    rmSync(stagingPath, { force: true });
+    created = true;
+  } else {
+    const agentId = reviewerAgentId(agents[0]);
+    if (!tokenEntry) throw new Error('Reviewer token file is missing');
+    if (!ownership) {
+      const legacyShareId = reviewerLegacyShare(listReviewerAccess(passCli, run));
+      if (legacyShareId === null) {
+        throw new Error('Reviewer agent exists without a matching ownership record');
+      }
+      ownership = writeReviewerOwnership(
+        ownershipPath, agentId, 'provisioning', emptyReviewerItems(), legacyShareId,
+      );
+      migrated = true;
+    } else if (ownership.agent_id !== agentId) {
+      throw new Error('Reviewer agent does not match its ownership record');
+    }
+  }
+
+  const expireTime = Number(agents[0]?.expire_time);
+  const expired = Number.isFinite(expireTime) && expireTime <= Math.floor(now() / 1000);
+  let renewed = false;
+  if (expired) {
+    const response = run(passCli, [
+      'agent', 'renew', '--expiration', '3m', '--output', 'json', REVIEWER_AGENT,
+    ]);
+    writeAtomic(tokenPath, parseAgentToken(response), null, 0o600);
+    renewed = true;
+  }
+
+  const grants = listReviewerAccess(passCli, run);
+  const legacyMayAlreadyBeRevoked = ownership.legacy_share_id !== null
+    && reviewerLocatorsComplete(ownership.items);
+  const currentItems = inspectReviewerAccess(
+    grants, expectedItemIds, ownership.legacy_share_id, legacyMayAlreadyBeRevoked,
+  );
+  assertSavedReviewerLocators(ownership, currentItems);
+  const complete = reviewerLocatorsComplete(currentItems);
+  if (ownership.state === 'ready' && ownership.legacy_share_id === null && complete) {
+    await verifyReviewerFields({ home, fieldReader, items: currentItems });
+  } else {
+    await reconcileReviewerGrants({
+      home, passCli, run, fieldReader, ownershipPath, ownership, expectedItemIds,
+    });
+  }
+  return { created, renewed, migrated, recovered };
 }
 
 function context7GrantDigest() {

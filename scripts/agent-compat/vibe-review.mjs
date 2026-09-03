@@ -187,7 +187,7 @@ async function withVibeInvocation({ home, credential, run, action }) {
     }
     requireVibeHelp(help.stdout);
     const apiKey = await credential({
-      itemTitle: 'Mistral Vibe API Key',
+      provider: 'vibe',
       reason: 'Review Discord Ferry code with the fixed Vibe slot',
       home,
     });

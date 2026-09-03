@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -18,6 +19,79 @@ import { pathToFileURL } from 'node:url';
 import { classifyReviewFailure, safeChildFailure } from './review-contract.mjs';
 
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
+const LOGIN_ATTEMPT_TIMEOUT_MS = 30000;
+export const REVIEWER_STATE_FILE = 'reviewer-agent.json';
+export const REVIEWER_STATE_VERSION = 1;
+export const REVIEWER_PROVIDERS = Object.freeze(['vibe', 'qwen']);
+const REVIEWER_AGENT = 'discord-ferry-reviewers';
+const REVIEWER_GRANTS = Object.freeze({
+  vibe: Object.freeze({ vault: 'Personal', item: 'Mistral Vibe API Key', role: 'viewer' }),
+  qwen: Object.freeze({ vault: 'Personal', item: 'QwenCloud API Key', role: 'viewer' }),
+});
+
+export function reviewerGrantDigest() {
+  const grants = REVIEWER_PROVIDERS.map((provider) => ({
+    provider,
+    ...REVIEWER_GRANTS[provider],
+  }));
+  return createHash('sha256').update(JSON.stringify(grants)).digest('hex');
+}
+
+function validLocator(locator) {
+  if (!locator || typeof locator !== 'object' || Array.isArray(locator)) return false;
+  if (JSON.stringify(Object.keys(locator).sort()) !== JSON.stringify(['item_id', 'share_id'])) {
+    return false;
+  }
+  const complete = typeof locator.share_id === 'string' && locator.share_id.length > 0
+    && typeof locator.item_id === 'string' && locator.item_id.length > 0;
+  const pending = locator.share_id === null && locator.item_id === null;
+  return complete || pending;
+}
+
+export function readReviewerOwnership(home) {
+  const path = join(home, '.config', 'discord-ferry', REVIEWER_STATE_FILE);
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new Error(`${REVIEWER_STATE_FILE} must be a regular file`);
+  }
+  if ((info.mode & 0o777) !== 0o600) {
+    throw new Error(`${REVIEWER_STATE_FILE} must have mode 0600`);
+  }
+  let document;
+  try {
+    document = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error('Reviewer ownership record is invalid');
+  }
+  const expectedKeys = [
+    'agent_id', 'agent_name', 'grant_sha256', 'items', 'legacy_share_id', 'state', 'version',
+  ];
+  const itemKeys = Object.keys(document?.items ?? {}).sort();
+  const allLocatorsValid = REVIEWER_PROVIDERS.every(
+    (provider) => validLocator(document?.items?.[provider]),
+  );
+  const allLocatorsComplete = REVIEWER_PROVIDERS.every(
+    (provider) => typeof document?.items?.[provider]?.share_id === 'string',
+  );
+  const legacyValid = document?.legacy_share_id === null
+    || (document?.state === 'provisioning'
+      && typeof document?.legacy_share_id === 'string'
+      && document.legacy_share_id.length > 0);
+  if (JSON.stringify(Object.keys(document ?? {}).sort()) !== JSON.stringify(expectedKeys)
+      || document.version !== REVIEWER_STATE_VERSION
+      || typeof document.agent_id !== 'string'
+      || document.agent_id.length === 0
+      || document.agent_name !== REVIEWER_AGENT
+      || !['provisioning', 'ready'].includes(document.state)
+      || document.grant_sha256 !== reviewerGrantDigest()
+      || JSON.stringify(itemKeys) !== JSON.stringify([...REVIEWER_PROVIDERS].sort())
+      || !allLocatorsValid
+      || !legacyValid
+      || (document.state === 'ready' && (!allLocatorsComplete || document.legacy_share_id !== null))) {
+    throw new Error('Reviewer ownership record is invalid');
+  }
+  return document;
+}
 
 function stopProcessGroup(child, signal) {
   if (!child.pid) return;
@@ -39,6 +113,7 @@ export function runBoundedChild(command, args, { env, timeoutMs }) {
     let timedOut = false;
     let overflowed = false;
     let spawnError = null;
+    let transientNetwork = false;
     let killTimer = null;
 
     child.stdout.setEncoding('utf8');
@@ -51,7 +126,12 @@ export function runBoundedChild(command, args, { env, timeoutMs }) {
         stopProcessGroup(child, 'SIGTERM');
       }
     });
-    child.stderr.resume();
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      if (/transmission:\s+timed out|network|connection reset|temporarily unavailable/iu.test(chunk)) {
+        transientNetwork = true;
+      }
+    });
     child.once('error', (error) => {
       spawnError = error;
     });
@@ -73,6 +153,7 @@ export function runBoundedChild(command, args, { env, timeoutMs }) {
       if (timedOut) {
         const error = new Error('child timed out');
         error.name = 'TimeoutError';
+        error.transientNetwork = true;
         reject(error);
         return;
       }
@@ -86,12 +167,29 @@ export function runBoundedChild(command, args, { env, timeoutMs }) {
         const error = new Error('child failed');
         error.status = status;
         error.signal = signal;
+        error.transientNetwork = transientNetwork;
         reject(error);
         return;
       }
       resolve({ stdout });
     });
   });
+}
+
+async function loginWithTransportRetry(run, environment) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await run('pass-cli', ['login'], {
+        env: environment,
+        timeoutMs: LOGIN_ATTEMPT_TIMEOUT_MS,
+      });
+    } catch (error) {
+      lastError = error;
+      if (!error.transientNetwork) throw error;
+    }
+  }
+  throw lastError;
 }
 
 function stageFailure(stage, error) {
@@ -137,10 +235,7 @@ export async function readProtonField({
   };
   try {
     try {
-      await run('pass-cli', ['login'], {
-        env: environment,
-        timeoutMs: 30000,
-      });
+      await loginWithTransportRetry(run, environment);
     } catch (error) {
       throw stageFailure('login', error);
     }
@@ -168,11 +263,20 @@ export async function readProtonField({
 }
 
 export function readReviewerField(options) {
+  if (!REVIEWER_PROVIDERS.includes(options.provider)) {
+    throw new Error('Reviewer provider is invalid');
+  }
+  const ownership = readReviewerOwnership(options.home);
+  if (ownership.state !== 'ready') throw new Error('Reviewer credential is not ready');
+  const locator = ownership.items[options.provider];
   return readProtonField({
-    ...options,
     tokenFile: 'reviewer-agent.pat',
-    vaultName: 'PortalPilot',
+    shareId: locator.share_id,
+    itemId: locator.item_id,
     field: options.field ?? 'API Key',
+    reason: options.reason,
+    home: options.home,
+    run: options.run,
   });
 }
 
@@ -189,6 +293,18 @@ async function selfTest(basePath) {
   try {
     mkdirSync(tokenDirectory, { recursive: true });
     writeFileSync(tokenPath, `pst_${'t'.repeat(40)}\n`, { mode: 0o600 });
+    writeFileSync(join(tokenDirectory, REVIEWER_STATE_FILE), `${JSON.stringify({
+      version: REVIEWER_STATE_VERSION,
+      agent_id: 'self-test-reviewer',
+      agent_name: REVIEWER_AGENT,
+      state: 'ready',
+      grant_sha256: reviewerGrantDigest(),
+      legacy_share_id: null,
+      items: {
+        vibe: { share_id: 'self-test-vibe-share', item_id: 'self-test-vibe-item' },
+        qwen: { share_id: 'self-test-qwen-share', item_id: 'self-test-qwen-item' },
+      },
+    })}\n`, { mode: 0o600 });
     writeFileSync(fakePassCli, `#!/bin/sh
 if [ -z "$PROTON_PASS_SESSION_DIR" ] || [ ! -d "$PROTON_PASS_SESSION_DIR" ]; then exit 71; fi
 if [ -z "$PROTON_PASS_PERSONAL_ACCESS_TOKEN" ]; then exit 72; fi
@@ -207,7 +323,7 @@ exit 73
       return runBoundedChild(fakePassCli, args, options);
     };
     const value = await readReviewerField({
-      itemTitle: 'Mistral Vibe API Key',
+      provider: 'vibe',
       reason: 'Review Ferry code',
       home,
       run,
@@ -230,7 +346,7 @@ exit 73
     let rejectedMode = false;
     try {
       await readReviewerField({
-        itemTitle: 'Mistral Vibe API Key',
+        provider: 'vibe',
         reason: 'Review Ferry code',
         home,
         run,
