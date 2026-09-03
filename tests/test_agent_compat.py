@@ -3923,6 +3923,8 @@ def test_ship_routes_the_two_provider_ensemble_from_the_final_diff() -> None:
     )
     assert "automatic sonnet" not in normalized
     assert "Second Opinion: skipped (unavailable)" not in text
+    assert "Co-Authored-By: Claude Sonnet 5 (1M context)" in text
+    assert "Co-Authored-By: Claude Opus" not in text
 
 
 def test_writing_plans_requires_qwen_before_user_approval() -> None:
@@ -3936,8 +3938,10 @@ def test_writing_plans_requires_qwen_before_user_approval() -> None:
     assert "--plan-id" in text
     assert "--plan-ledger" in text
     assert "qwen3.8-max" in text
-    assert "--plan-provider opus" in text
-    assert "claude-opus-5" in text
+    assert "--plan-provider sonnet" in text
+    assert "claude-sonnet-5" in text
+    assert "--plan-provider opus" not in text
+    assert "claude-opus-5" not in text
     assert "medium effort" in normalized
     assert "only the owner may choose" in normalized
     assert "never starts the other provider" in normalized
