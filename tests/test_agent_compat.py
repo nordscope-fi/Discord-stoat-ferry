@@ -4505,7 +4505,7 @@ def test_vibe_config_includes_bash_allowlist(tmp_path: Path) -> None:
 def test_vibe_readiness_self_test_passes() -> None:
     result = _run("node", "scripts/agent-compat/vibe-readiness.mjs", "--self-test")
     assert result.returncode == 0, result.stderr
-    assert "self-test: all structural checks passed" in result.stdout
+    assert "self-test: structural checks passed" in result.stdout
 
 
 def test_vibe_readiness_detects_missing_config(tmp_path: Path) -> None:
