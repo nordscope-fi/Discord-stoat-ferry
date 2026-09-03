@@ -170,6 +170,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.40.5] - 2026-09-03
+
+### Fixed
+
+- **Every live Claude path in the df workflow now uses Sonnet 5.** Claude sessions,
+  implementation guidance, external reviews, plan-review records, and shipping attribution agree
+  on the same tier. Qwen remains the default plan reviewer, and review effort, safety controls,
+  attempt budgets, provider locking, advisory failures, and verdict rules retain their behavior.
+
 ## [2.40.4] - 2026-09-02
 
 ### Fixed
