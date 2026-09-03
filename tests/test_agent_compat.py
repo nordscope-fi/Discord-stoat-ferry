@@ -3840,7 +3840,7 @@ def test_reviewer_runtime_readiness_rejects_a_writable_release_file(
     assert "writable" in checked.stderr.lower()
 
 
-def test_chunk_review_uses_the_two_provider_ensemble() -> None:
+def test_chunk_review_uses_full_route_provider_ensemble() -> None:
     skill = REPO / ".claude/skills/df-chunk-review/SKILL.md"
     if not skill.exists():
         pytest.skip("snapshot-backed instruction layer is absent in CI")
@@ -3850,18 +3850,23 @@ def test_chunk_review_uses_the_two_provider_ensemble() -> None:
     assert "FERRY_REVIEWER_RUNTIME" in text
     assert "node scripts/agent-compat/review-ensemble.mjs" not in text
     assert "node scripts/agent-compat/review-verification.mjs" not in text
-    assert 'review-verification.mjs" --gate --threshold 10' in text
+    assert 'review-verification.mjs" --gate --threshold' not in text
+    assert "use this skill only for multipart full-route work" in normalized
+    assert "file and line counts never skip this review" in normalized
     assert 'review-verification.mjs" --context-tier' in text
     assert 'review-verification.mjs" --authorize-finding' in text
     assert 'review-verification.mjs" --classify-files' in text
     assert "require_escalated" in text
     assert "never try the workspace sandbox first" in normalized
     assert "provider availability does not block the chunk" in normalized
-    assert "confirmed critical finding blocks the chunk" in normalized
+    assert (
+        "confirmed critical finding blocks the chunk only when it also passes "
+        "all four authority tests" in normalized
+    )
     assert "automatic opus" not in normalized
 
 
-def test_ship_uses_the_same_two_provider_ensemble() -> None:
+def test_ship_routes_the_two_provider_ensemble_from_the_final_diff() -> None:
     skill = REPO / ".claude/skills/df-ship/SKILL.md"
     if not skill.exists():
         pytest.skip("snapshot-backed instruction layer is absent in CI")
@@ -3871,13 +3876,19 @@ def test_ship_uses_the_same_two_provider_ensemble() -> None:
     assert "FERRY_REVIEWER_RUNTIME" in text
     assert "node scripts/agent-compat/review-ensemble.mjs" not in text
     assert "node scripts/agent-compat/review-verification.mjs" not in text
-    assert 'review-verification.mjs" --gate --threshold 20' in text
+    assert 'review-verification.mjs" --gate --threshold' not in text
+    assert "derive the final route" in normalized
+    assert "direct and bounded work do not run fixed external providers" in normalized
+    assert "full work always attempts both fixed provider slots" in normalized
     assert 'review-verification.mjs" --authorize-finding' in text
     assert 'review-verification.mjs" --classify-files' in text
     assert "require_escalated" in text
     assert "never try the workspace sandbox first" in normalized
     assert "provider availability does not block shipping" in normalized
-    assert "confirmed critical finding blocks shipping" in normalized
+    assert (
+        "confirmed critical finding that passes all four authority tests blocks shipping"
+        in normalized
+    )
     assert "automatic opus" not in normalized
     assert "Second Opinion: skipped (unavailable)" not in text
 
