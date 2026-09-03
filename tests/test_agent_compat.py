@@ -2483,7 +2483,7 @@ def test_live_readiness_keeps_failures_on_their_named_record(
     assert [(record["id"], record["status"]) for record in changed] == [(record_id, status)]
 
 
-def test_reviewer_readiness_names_vibe_and_qwen_without_opus() -> None:
+def test_reviewer_readiness_names_vibe_and_qwen_without_claude() -> None:
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
@@ -2498,7 +2498,7 @@ def test_reviewer_readiness_names_vibe_and_qwen_without_opus() -> None:
     assert records["vibe-reviewer"]["details"] == {"model": "zai-glm-5-2"}
     assert records["qwen-reviewer"]["details"] == {"model": "qwen3.8-max"}
     assert report["calls"] == {"vibe": 1, "qwen": 1}
-    assert "opus" not in result.stdout.lower()
+    assert "sonnet" not in result.stdout.lower()
     assert "claude" not in result.stdout.lower()
 
 
@@ -3338,7 +3338,7 @@ def test_failure_reason_is_null_outside_qwen_schema_failures() -> None:
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["vibe_schema"]["failure_reason"] is None
-    assert report["opus_schema"]["failure_reason"] is None
+    assert report["sonnet_schema"]["failure_reason"] is None
     assert "failure_reason" not in report["qwen_valid"]
     assert "failure_reason" not in report["vibe_valid"]
 
@@ -3384,7 +3384,7 @@ def test_claude_review_redacts_an_injected_host_child_failure() -> None:
     ("fixture", "valid_slots"),
     [("both-primary", 2), ("vibe-fails", 1), ("both-fail", 0)],
 )
-def test_review_ensemble_records_provider_availability_without_opus(
+def test_review_ensemble_records_provider_availability_without_sonnet(
     fixture: str, valid_slots: int
 ) -> None:
     result = _run(
@@ -3398,24 +3398,24 @@ def test_review_ensemble_records_provider_availability_without_opus(
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["automatic_opus_calls"] == 0
+    assert report["automatic_sonnet_calls"] == 0
     assert set(report["slots"]) == {"mistral-vibe", "qwen"}
     assert report["valid_slots"] == valid_slots
     assert report["availability_blocks"] is False
 
 
-def test_review_ensemble_never_calls_the_optional_opus_adapter() -> None:
+def test_review_ensemble_never_calls_the_optional_sonnet_adapter() -> None:
     result = _run(
         "node",
         "tests/fixtures/agent_compat_runner.mjs",
-        "ensemble-no-opus",
+        "ensemble-no-sonnet",
         "both-fail",
         "--mode",
         "whole-branch",
         "--json",
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["opus_calls"] == 0
+    assert json.loads(result.stdout)["sonnet_calls"] == 0
 
 
 def test_vibe_credential_failure_crosses_adapter_and_gate_boundaries() -> None:
@@ -3864,7 +3864,7 @@ def test_chunk_review_uses_full_route_provider_ensemble() -> None:
         "confirmed critical finding blocks the chunk only when it also passes "
         "all four authority tests" in normalized
     )
-    assert "automatic opus" not in normalized
+    assert "automatic sonnet" not in normalized
 
 
 def test_ship_routes_the_two_provider_ensemble_from_the_final_diff() -> None:
@@ -3890,7 +3890,7 @@ def test_ship_routes_the_two_provider_ensemble_from_the_final_diff() -> None:
         "confirmed critical finding that passes all four authority tests blocks shipping"
         in normalized
     )
-    assert "automatic opus" not in normalized
+    assert "automatic sonnet" not in normalized
     assert "Second Opinion: skipped (unavailable)" not in text
 
 
@@ -3940,17 +3940,17 @@ def test_critique_separates_provider_collection_from_local_verification() -> Non
 
 
 @pytest.mark.parametrize(
-    ("fixture", "slot", "qwen_calls", "opus_calls", "model", "owner_calls"),
+    ("fixture", "slot", "qwen_calls", "sonnet_calls", "model", "owner_calls"),
     [
         ("qwen-valid", "plan-qwen", 1, 0, "qwen3.8-max", 0),
-        ("opus-valid", "plan-opus", 0, 1, "claude-opus-5", 1),
+        ("sonnet-valid", "plan-sonnet", 0, 1, "claude-sonnet-5", 1),
     ],
 )
 def test_plan_route_uses_only_selected_provider(
     fixture: str,
     slot: str,
     qwen_calls: int,
-    opus_calls: int,
+    sonnet_calls: int,
     model: str,
     owner_calls: int,
 ) -> None:
@@ -3965,26 +3965,26 @@ def test_plan_route_uses_only_selected_provider(
     report = json.loads(result.stdout)
     assert report["attempt_slots"] == [slot]
     assert report["qwen_calls"] == qwen_calls
-    assert report["opus_calls"] == opus_calls
+    assert report["sonnet_calls"] == sonnet_calls
     assert report["accepted_model"] == model
-    assert report["automatic_opus_calls"] == 0
-    assert report["owner_selected_opus_calls"] == owner_calls
-    assert report["opus_record"] == (True if fixture == "opus-valid" else None)
+    assert report["automatic_sonnet_calls"] == 0
+    assert report["owner_selected_sonnet_calls"] == owner_calls
+    assert report["sonnet_record"] == (True if fixture == "sonnet-valid" else None)
 
 
 @pytest.mark.parametrize(
-    ("fixture", "slot", "qwen_calls", "opus_calls", "failure_class"),
+    ("fixture", "slot", "qwen_calls", "sonnet_calls", "failure_class"),
     [
         ("qwen-fails", "plan-qwen", 1, 0, "credential"),
-        ("opus-fails", "plan-opus", 0, 1, "child-exit"),
-        ("opus-schema", "plan-opus", 0, 1, "schema"),
+        ("sonnet-fails", "plan-sonnet", 0, 1, "child-exit"),
+        ("sonnet-schema", "plan-sonnet", 0, 1, "schema"),
     ],
 )
 def test_plan_route_failure_blocks_without_calling_unselected_provider(
     fixture: str,
     slot: str,
     qwen_calls: int,
-    opus_calls: int,
+    sonnet_calls: int,
     failure_class: str,
 ) -> None:
     result = _run(
@@ -3998,8 +3998,8 @@ def test_plan_route_failure_blocks_without_calling_unselected_provider(
     report = json.loads(result.stdout)
     assert report["attempt_slots"] == [slot]
     assert report["qwen_calls"] == qwen_calls
-    assert report["opus_calls"] == opus_calls
-    assert report["automatic_opus_calls"] == 0
+    assert report["sonnet_calls"] == sonnet_calls
+    assert report["automatic_sonnet_calls"] == 0
     assert report["failure_class"] == failure_class
     assert report["ready"] is False
 
@@ -4007,7 +4007,7 @@ def test_plan_route_failure_blocks_without_calling_unselected_provider(
 @pytest.mark.parametrize(
     "fixture",
     [
-        "unselected-opus",
+        "unselected-sonnet",
         "mixed-attempts",
         "substituted",
         "wrong-selected-model",
@@ -4026,6 +4026,26 @@ def test_plan_route_rejects_altered_or_mismatched_evidence(fixture: str) -> None
     assert json.loads(result.stdout)["ready"] is False
 
 
+@pytest.mark.parametrize(
+    "fixture",
+    ["legacy-opus-slot", "legacy-opus-model", "legacy-ledger-policy"],
+)
+def test_plan_gate_rejects_legacy_opus_evidence_before_provider_dispatch(
+    fixture: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "plan-budget-gate",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["decision"]["ready"] is False
+    assert report["provider_calls"] == 0
+
+
 def test_plan_budget_rejects_a_third_attempt_before_calling_a_reviewer(
     tmp_path: Path,
 ) -> None:
@@ -4042,7 +4062,7 @@ def test_plan_budget_rejects_a_third_attempt_before_calling_a_reviewer(
     report = json.loads(result.stdout)
     assert report["rounds"] == [1, 2]
     assert report["qwen_calls"] == 2
-    assert report["opus_calls"] == 0
+    assert report["sonnet_calls"] == 0
     assert report["rejected"] == "plan review budget exhausted"
     assert len(report["ledger"]["attempts"]) == 2
 
@@ -4061,7 +4081,7 @@ def test_plan_budget_locks_the_first_selected_reviewer(tmp_path: Path) -> None:
     report = json.loads(result.stdout)
     assert report["rounds"] == [1]
     assert report["qwen_calls"] == 1
-    assert report["opus_calls"] == 0
+    assert report["sonnet_calls"] == 0
     assert report["rejected"] == "plan review provider is locked to qwen"
 
 
@@ -4288,7 +4308,7 @@ def test_plan_gate_rejects_route_evidence_altered_after_ledger_write() -> None:
 
 @pytest.mark.parametrize(
     ("fixture", "provider"),
-    [("default", "qwen"), ("opus", "opus")],
+    [("default", "qwen"), ("sonnet", "sonnet")],
 )
 def test_plan_provider_argument_requires_plan_mode(
     fixture: str,
@@ -4315,10 +4335,11 @@ def test_plan_provider_argument_requires_plan_mode(
     "fixture",
     [
         "invalid",
+        "legacy-opus-provider",
         "missing-id",
         "missing-ledger",
         "without-plan-qwen",
-        "without-plan-opus",
+        "without-plan-sonnet",
     ],
 )
 def test_plan_provider_argument_rejects_invalid_context(fixture: str) -> None:
@@ -4347,7 +4368,7 @@ def test_plan_revision_gets_a_fresh_qwen_review_before_approval() -> None:
     assert len(report["session_ids"]) == len(set(report["session_ids"])) == 2
     assert report["withheld_versions"] == [1]
     assert report["approval_version"] == 2
-    assert report["opus_calls"] == 0
+    assert report["sonnet_calls"] == 0
 
 
 def test_complete_verification_runs_every_layer_in_order() -> None:

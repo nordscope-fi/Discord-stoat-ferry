@@ -48,16 +48,16 @@ const PLAN_PROVIDERS = Object.freeze({
     requestedModel: 'qwen3.8-max',
     call: 'qwen',
   },
-  opus: {
-    slot: 'plan-opus',
+  sonnet: {
+    slot: 'plan-sonnet',
     adapter: 'claude',
-    requestedModel: 'opus',
-    resolvedModel: 'claude-opus-5',
-    call: 'opus',
+    requestedModel: 'sonnet',
+    resolvedModel: 'claude-sonnet-5',
+    call: 'sonnet',
   },
 });
 const PLAN_REVIEW_BUDGET = 2;
-const PLAN_LEDGER_POLICY = 'ferry-plan-review-budget-v1';
+const PLAN_LEDGER_POLICY = 'ferry-plan-review-budget-v2';
 const INPUT_DIGEST = /^[a-f0-9]{64}$/u;
 
 function pathStaysInside(root, target) {
@@ -104,7 +104,7 @@ function parsePlanLedger(source) {
   const attempts = ledger?.attempts;
   const valid = ledger?.policy === PLAN_LEDGER_POLICY
     && typeof ledger.plan_id === 'string'
-    && ['qwen', 'opus'].includes(ledger.selected_provider)
+    && ['qwen', 'sonnet'].includes(ledger.selected_provider)
     && Array.isArray(attempts)
     && attempts.length <= PLAN_REVIEW_BUDGET
     && attempts.every((attempt, index) =>
@@ -154,7 +154,7 @@ export function claimPlanReviewAttempt({
   if (!INPUT_DIGEST.test(inputSha256 ?? '')) {
     throw new Error('plan review requires an input digest');
   }
-  if (!PLAN_PROVIDERS[selectedProvider]) throw new Error('plan provider must be qwen or opus');
+  if (!PLAN_PROVIDERS[selectedProvider]) throw new Error('plan provider must be qwen or sonnet');
   const checkedId = checkedPlanId(planId);
   const checkedPath = checkedLedgerPath(root, ledgerPath);
   return withPlanLedgerLock(checkedPath, () => {
@@ -222,7 +222,7 @@ async function attemptProvider(provider, request, adapters) {
     const result = await adapters[provider.call]({
       ...request,
       slot: provider.slot,
-      ...(provider.call === 'opus' ? { record: true } : {}),
+      ...(provider.call === 'sonnet' ? { record: true } : {}),
     });
     return validProviderRecord(result, provider)
       ? result
@@ -287,7 +287,7 @@ export async function runEnsemble(request, adapters) {
   return {
     policy: 'ferry-two-provider-advisory-v2',
     valid_slots: validSlots,
-    automatic_opus_calls: 0,
+    automatic_sonnet_calls: 0,
     availability_blocks: false,
     slots,
   };
@@ -303,7 +303,7 @@ export async function runPlanReview({
     throw new Error('plan review requires an input digest');
   }
   const provider = PLAN_PROVIDERS[selectedProvider];
-  if (!provider) throw new Error('plan provider must be qwen or opus');
+  if (!provider) throw new Error('plan provider must be qwen or sonnet');
   const record = await attemptProvider(provider, request, adapters);
   return {
     policy: 'ferry-selected-plan-v3',
@@ -311,8 +311,8 @@ export async function runPlanReview({
     attempts: [record],
     accepted: record.status === 'valid' ? record : null,
     input_sha256: inputSha256,
-    automatic_opus_calls: 0,
-    owner_selected_opus_calls: selectedProvider === 'opus' ? 1 : 0,
+    automatic_sonnet_calls: 0,
+    owner_selected_sonnet_calls: selectedProvider === 'sonnet' ? 1 : 0,
   };
 }
 
@@ -380,8 +380,8 @@ export function parseArgs(argv) {
   if (!['chunk', 'whole-branch'].includes(args.mode)) {
     throw new Error('mode must be chunk or whole-branch');
   }
-  if (args.planProvider !== 'qwen' && args.planProvider !== 'opus') {
-    throw new Error('plan provider must be qwen or opus');
+  if (args.planProvider !== 'qwen' && args.planProvider !== 'sonnet') {
+    throw new Error('plan provider must be qwen or sonnet');
   }
   if (!args.plan && planProviderProvided) {
     throw new Error('--plan-provider requires --plan');
@@ -418,7 +418,7 @@ async function selfTest() {
   const clean = await runEnsemble({ prompt: 'fixture' }, adapters);
   record('both fixed providers are valid', clean.valid_slots === 2);
   record('availability is advisory', clean.availability_blocks === false);
-  record('automatic Opus calls are zero', clean.automatic_opus_calls === 0);
+  record('automatic Sonnet calls are zero', clean.automatic_sonnet_calls === 0);
 
   const oneFailure = await runEnsemble({ prompt: 'fixture' }, {
     ...adapters,
@@ -445,15 +445,15 @@ async function selfTest() {
   });
   record('malformed result is rejected', malformed.slots.qwen.failure_class === 'schema');
 
-  let opusCalls = 0;
+  let sonnetCalls = 0;
   const bothFail = await runEnsemble({ prompt: 'fixture' }, {
     vibe: async () => { throw new Error('vibe failure'); },
     qwen: async () => { throw new Error('qwen failure'); },
-    opus: async () => { opusCalls += 1; },
+    sonnet: async () => { sonnetCalls += 1; },
   });
   record('dual failure remains nonblocking',
     bothFail.valid_slots === 0 && bothFail.availability_blocks === false);
-  record('optional Opus adapter is never called', opusCalls === 0);
+  record('optional Sonnet adapter is never called', sonnetCalls === 0);
 
   const plan = await runPlanReview({
     request: { prompt: 'fixture' },
@@ -466,23 +466,23 @@ async function selfTest() {
   });
   record('plan route uses Qwen only',
     plan.accepted?.slot === 'plan-qwen'
-      && plan.automatic_opus_calls === 0
-      && plan.owner_selected_opus_calls === 0);
+      && plan.automatic_sonnet_calls === 0
+      && plan.owner_selected_sonnet_calls === 0);
 
-  const opusPlan = await runPlanReview({
+  const sonnetPlan = await runPlanReview({
     request: { prompt: 'fixture' },
     inputSha256: reviewInputDigest('fixture'),
-    selectedProvider: 'opus',
-    adapters: { opus: async () => makeReviewRecord({
-      adapter: 'claude', slot: 'plan-opus', requestedModel: 'opus',
-      resolvedModel: 'claude-opus-5', sessionId: 'opus-plan-session', durationMs: 1,
+    selectedProvider: 'sonnet',
+    adapters: { sonnet: async () => makeReviewRecord({
+      adapter: 'claude', slot: 'plan-sonnet', requestedModel: 'sonnet',
+      resolvedModel: 'claude-sonnet-5', sessionId: 'sonnet-plan-session', durationMs: 1,
       status: 'valid', result: { findings: [], summary: 'clean', confidence: 'high' },
     }) },
   });
-  record('owner-selected plan route uses Opus only',
-    opusPlan.accepted?.slot === 'plan-opus'
-      && opusPlan.automatic_opus_calls === 0
-      && opusPlan.owner_selected_opus_calls === 1);
+  record('owner-selected plan route uses Sonnet only',
+    sonnetPlan.accepted?.slot === 'plan-sonnet'
+      && sonnetPlan.automatic_sonnet_calls === 0
+      && sonnetPlan.owner_selected_sonnet_calls === 1);
 
   const failed = checks.filter((check) => !check.ok);
   for (const check of checks) {
@@ -509,7 +509,7 @@ async function main() {
         selectedProvider: args.planProvider,
         planId: args.planId,
         ledgerPath: args.planLedger,
-        adapters: { qwen: runQwenReview, opus: runClaudeReview },
+        adapters: { qwen: runQwenReview, sonnet: runClaudeReview },
       })
     : await runEnsemble(
         { prompt, home: process.env.HOME },

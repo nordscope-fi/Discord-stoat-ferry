@@ -141,15 +141,15 @@ const FAILURE_CLASSES = new Set([
 ]);
 const PLAN_MODELS = new Map([
   ['plan-qwen', 'qwen3.8-max'],
-  ['plan-opus', 'claude-opus-5'],
+  ['plan-sonnet', 'claude-sonnet-5'],
 ]);
 const PLAN_REQUESTED_MODELS = new Map([
   ['plan-qwen', 'qwen3.8-max'],
-  ['plan-opus', 'opus'],
+  ['plan-sonnet', 'sonnet'],
 ]);
 const PLAN_SLOTS = new Map([
   ['qwen', 'plan-qwen'],
-  ['opus', 'plan-opus'],
+  ['sonnet', 'plan-sonnet'],
 ]);
 const FINDING_KEYS = new Set([
   'severity',
@@ -353,7 +353,7 @@ function validPlanLedger(route, ledger) {
   if (!ledger || route?.policy !== 'ferry-bounded-plan-v4') return false;
   const attempts = ledger.attempts;
   const round = route.review_round;
-  if (ledger.policy !== 'ferry-plan-review-budget-v1'
+  if (ledger.policy !== 'ferry-plan-review-budget-v2'
       || ledger.plan_id !== route.plan_id
       || ledger.selected_provider !== route.selected_provider
       || !Array.isArray(attempts)
@@ -397,8 +397,8 @@ function validFailedPlanRecord(route, record) {
     && record.substitution_reason === null
     && FAILURE_CLASSES.has(record.failure_class)
     && validFailureReason
-    && route.automatic_opus_calls === 0
-    && route.owner_selected_opus_calls === (route.selected_provider === 'opus' ? 1 : 0);
+    && route.automatic_sonnet_calls === 0
+    && route.owner_selected_sonnet_calls === (route.selected_provider === 'sonnet' ? 1 : 0);
 }
 
 function matchesOwnerDecision(ownerDecision, route, blocking) {
@@ -463,8 +463,8 @@ export function evaluatePlanGate(
     && attempts[0]?.substitution_reason === null
     && record.substitution_for === null
     && record.substitution_reason === null
-    && route.automatic_opus_calls === 0
-    && route.owner_selected_opus_calls === (route.selected_provider === 'opus' ? 1 : 0);
+    && route.automatic_sonnet_calls === 0
+    && route.owner_selected_sonnet_calls === (route.selected_provider === 'sonnet' ? 1 : 0);
   if (
     record?.status !== 'valid'
     || record.requested_model !== expectedRequestedModel
@@ -585,27 +585,27 @@ function selfTest() {
   }
   record('JSON parser redacts malformed input', malformedSafe);
 
-  const validOpus = makeReviewRecord({
-    adapter: 'claude', slot: 'plan-opus', requestedModel: 'opus',
-    resolvedModel: 'claude-opus-5', sessionId: 'opus-1', durationMs: 1,
+  const validSonnet = makeReviewRecord({
+    adapter: 'claude', slot: 'plan-sonnet', requestedModel: 'sonnet',
+    resolvedModel: 'claude-sonnet-5', sessionId: 'sonnet-1', durationMs: 1,
     status: 'valid', result: clean,
   });
-  const failedOpus = makeReviewRecord({
-    adapter: 'claude', slot: 'plan-opus', requestedModel: 'opus',
-    sessionId: 'opus-failed', durationMs: 1, status: 'failed',
+  const failedSonnet = makeReviewRecord({
+    adapter: 'claude', slot: 'plan-sonnet', requestedModel: 'sonnet',
+    sessionId: 'sonnet-failed', durationMs: 1, status: 'failed',
   });
-  const timedOutOpus = makeReviewRecord({
-    adapter: 'claude', slot: 'plan-opus', requestedModel: 'opus',
-    sessionId: 'opus-timeout', durationMs: 1, status: 'timed_out',
+  const timedOutSonnet = makeReviewRecord({
+    adapter: 'claude', slot: 'plan-sonnet', requestedModel: 'sonnet',
+    sessionId: 'sonnet-timeout', durationMs: 1, status: 'timed_out',
   });
   const validQwen = makeReviewRecord({
     adapter: 'qwen', slot: 'plan-qwen', requestedModel: 'qwen3.8-max',
     resolvedModel: 'qwen3.8-max', sessionId: 'qwen-1', durationMs: 1,
     status: 'valid', result: clean,
   });
-  record('record accepts valid status', validOpus.status === 'valid');
-  record('record accepts failed status', failedOpus.status === 'failed');
-  record('record accepts timed out status', timedOutOpus.status === 'timed_out');
+  record('record accepts valid status', validSonnet.status === 'valid');
+  record('record accepts failed status', failedSonnet.status === 'failed');
+  record('record accepts timed out status', timedOutSonnet.status === 'timed_out');
   let badStatus = false;
   try {
     makeReviewRecord({ status: 'maybe' });
@@ -617,7 +617,7 @@ function selfTest() {
   try {
     makeReviewRecord({
       adapter: 'qwen', slot: 'plan-qwen', requestedModel: 'qwen3.8-max',
-      substitutionFor: 'plan-opus', sessionId: 'x', durationMs: 1,
+      substitutionFor: 'plan-sonnet', sessionId: 'x', durationMs: 1,
       status: 'valid', result: clean,
     });
   } catch {
@@ -631,8 +631,8 @@ function selfTest() {
     accepted,
     attempts,
     input_sha256: planDigest,
-    automatic_opus_calls: 0,
-    owner_selected_opus_calls: selectedProvider === 'opus' ? 1 : 0,
+    automatic_sonnet_calls: 0,
+    owner_selected_sonnet_calls: selectedProvider === 'sonnet' ? 1 : 0,
   });
   const primaryRoute = routeFor('qwen', validQwen);
   record('plan primary route passes clean result',
@@ -651,17 +651,17 @@ function selfTest() {
   record('plan route blocks missing verdict', !evaluatePlanGate(
     routeFor('qwen', blockingQwen), [], planDigest,
   ).ready);
-  record('plan accepts owner-selected Opus',
-    evaluatePlanGate(routeFor('opus', validOpus), [], planDigest).ready);
-  record('plan rejects Opus under Qwen selection', !evaluatePlanGate(
-    routeFor('qwen', validOpus), [], planDigest,
+  record('plan accepts owner-selected Sonnet',
+    evaluatePlanGate(routeFor('sonnet', validSonnet), [], planDigest).ready);
+  record('plan rejects Sonnet under Qwen selection', !evaluatePlanGate(
+    routeFor('qwen', validSonnet), [], planDigest,
   ).ready);
   record('plan rejects substituted Qwen', !evaluatePlanGate(
     routeFor('qwen', {
       ...validQwen,
-      substitution_for: 'plan-opus',
+      substitution_for: 'plan-sonnet',
       substitution_reason: 'timeout',
-    }, [timedOutOpus, validQwen]), [], planDigest,
+    }, [timedOutSonnet, validQwen]), [], planDigest,
   ).ready);
   record('failure classifier identifies every structural class', [
     classifyReviewFailure({ code: 'CREDENTIAL' }),

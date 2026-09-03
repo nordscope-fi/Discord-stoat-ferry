@@ -1297,18 +1297,18 @@ switch (mode) {
       vibe: async () => vibeRecord(),
       qwen: async () => qwenRecord(),
     });
-    const failedOpus = await runPlanReview({
+    const failedSonnet = await runPlanReview({
       request: { prompt: 'fixture' },
       inputSha256: reviewInputDigest('fixture'),
-      selectedProvider: 'opus',
+      selectedProvider: 'sonnet',
       adapters: {
-        opus: async () => ({
+        sonnet: async () => ({
           ...makeReviewRecord({
             adapter: 'claude',
-            slot: 'plan-opus',
-            requestedModel: 'opus',
-            resolvedModel: 'claude-opus-5',
-            sessionId: 'opus-session',
+            slot: 'plan-sonnet',
+            requestedModel: 'sonnet',
+            resolvedModel: 'claude-sonnet-5',
+            sessionId: 'sonnet-session',
             durationMs: 1,
             status: 'valid',
             result: clean,
@@ -1319,7 +1319,7 @@ switch (mode) {
     });
     writeJson({
       vibe_schema: failedVibe.slots['mistral-vibe'],
-      opus_schema: failedOpus.attempts[0],
+      sonnet_schema: failedSonnet.attempts[0],
       qwen_valid: failedVibe.slots.qwen,
       vibe_valid: validProviders.slots['mistral-vibe'],
     });
@@ -1349,7 +1349,7 @@ switch (mode) {
     break;
   }
   case 'ensemble':
-  case 'ensemble-no-opus':
+  case 'ensemble-no-sonnet':
   case 'ensemble-boundary': {
     const providerRecord = (slot) => {
       const qwen = slot === 'qwen';
@@ -1365,7 +1365,7 @@ switch (mode) {
         result: { findings: [], summary: 'clean', confidence: 'high' },
       });
     };
-    let opusCalls = 0;
+    let sonnetCalls = 0;
     const vibeFails = argument === 'vibe-fails'
       || argument === 'both-fail'
       || argument === 'vibe-credential-fails';
@@ -1381,10 +1381,10 @@ switch (mode) {
         if (qwenFails) throw new Error('FERRY_SECRET_CANARY');
         return providerRecord('qwen');
       },
-      opus: async () => { opusCalls += 1; },
+      sonnet: async () => { sonnetCalls += 1; },
     };
     const report = await runEnsemble({ prompt: 'fixture' }, adapters);
-    writeJson(mode === 'ensemble-no-opus' ? { ...report, opus_calls: opusCalls } : report);
+    writeJson(mode === 'ensemble-no-sonnet' ? { ...report, sonnet_calls: sonnetCalls } : report);
     break;
   }
   case 'review-verification': {
@@ -1738,20 +1738,20 @@ switch (mode) {
   }
   case 'plan-route': {
     let qwenCalls = 0;
-    let opusCalls = 0;
-    let opusRecord = null;
+    let sonnetCalls = 0;
+    let sonnetRecord = null;
     const recordFor = (provider) => makeReviewRecord({
       adapter: provider === 'qwen' ? 'qwen-api' : 'claude',
-      slot: provider === 'qwen' ? 'plan-qwen' : 'plan-opus',
-      requestedModel: provider === 'qwen' ? 'qwen3.8-max' : 'opus',
-      resolvedModel: provider === 'qwen' ? 'qwen3.8-max' : 'claude-opus-5',
+      slot: provider === 'qwen' ? 'plan-qwen' : 'plan-sonnet',
+      requestedModel: provider === 'qwen' ? 'qwen3.8-max' : 'sonnet',
+      resolvedModel: provider === 'qwen' ? 'qwen3.8-max' : 'claude-sonnet-5',
       sessionId: `plan-${provider}-session`,
       durationMs: 1,
       status: 'valid',
       result: { findings: [], summary: 'clean', confidence: 'high' },
     });
-    const selectedProvider = argument.startsWith('opus') || argument === 'unselected-opus'
-      ? 'opus'
+    const selectedProvider = argument.startsWith('sonnet') || argument === 'unselected-sonnet'
+      ? 'sonnet'
       : 'qwen';
     const route = await runPlanReview({
       request: { prompt: 'fixture' },
@@ -1770,25 +1770,25 @@ switch (mode) {
           }
           return recordFor('qwen');
         },
-        opus: async (options) => {
-          opusCalls += 1;
-          opusRecord = options.record ?? null;
-          if (argument === 'opus-fails') {
+        sonnet: async (options) => {
+          sonnetCalls += 1;
+          sonnetRecord = options.record ?? null;
+          if (argument === 'sonnet-fails') {
             const error = new Error('FERRY_SECRET_CANARY');
             error.code = 'ENOENT';
             throw error;
           }
-          if (argument === 'opus-schema') {
-            return { ...recordFor('opus'), confidence: 'certain' };
+          if (argument === 'sonnet-schema') {
+            return { ...recordFor('sonnet'), confidence: 'certain' };
           }
-          return recordFor('opus');
+          return recordFor('sonnet');
         },
       },
     });
-    if (argument === 'unselected-opus') route.selected_provider = 'qwen';
-    if (argument === 'mixed-attempts') route.attempts.push(recordFor('opus'));
+    if (argument === 'unselected-sonnet') route.selected_provider = 'qwen';
+    if (argument === 'mixed-attempts') route.attempts.push(recordFor('sonnet'));
     if (argument === 'substituted' && route.accepted) {
-      route.accepted.substitution_for = 'plan-opus';
+      route.accepted.substitution_for = 'plan-sonnet';
       route.accepted.substitution_reason = 'timeout';
     }
     if (argument === 'wrong-requested-model' && route.accepted) {
@@ -1798,13 +1798,13 @@ switch (mode) {
     writeJson({
       attempt_slots: route.attempts.map((record) => record.slot),
       qwen_calls: qwenCalls,
-      opus_calls: opusCalls,
-      opus_record: opusRecord,
+      sonnet_calls: sonnetCalls,
+      sonnet_record: sonnetRecord,
       selected_provider: route.selected_provider ?? null,
       accepted_model: route.accepted?.resolved_model ?? null,
       failure_class: route.attempts[0]?.failure_class ?? null,
-      automatic_opus_calls: route.automatic_opus_calls,
-      owner_selected_opus_calls: route.owner_selected_opus_calls ?? null,
+      automatic_sonnet_calls: route.automatic_sonnet_calls,
+      owner_selected_sonnet_calls: route.owner_selected_sonnet_calls ?? null,
       ready: decision.ready,
     });
     if (!decision.ready) process.exitCode = 1;
@@ -1818,7 +1818,7 @@ switch (mode) {
     const planId = 'docs/plans/fixture.md';
     const inputSha256 = reviewInputDigest('fixture');
     let qwenCalls = 0;
-    let opusCalls = 0;
+    let sonnetCalls = 0;
     const adapters = {
       qwen: async () => {
         qwenCalls += 1;
@@ -1838,14 +1838,14 @@ switch (mode) {
           result: { findings: [], summary: 'clean', confidence: 'high' },
         });
       },
-      opus: async () => {
-        opusCalls += 1;
+      sonnet: async () => {
+        sonnetCalls += 1;
         return makeReviewRecord({
           adapter: 'claude',
-          slot: 'plan-opus',
-          requestedModel: 'opus',
-          resolvedModel: 'claude-opus-5',
-          sessionId: `opus-${opusCalls}`,
+          slot: 'plan-sonnet',
+          requestedModel: 'sonnet',
+          resolvedModel: 'claude-sonnet-5',
+          sessionId: `sonnet-${sonnetCalls}`,
           durationMs: 1,
           status: 'valid',
           result: { findings: [], summary: 'clean', confidence: 'high' },
@@ -1875,7 +1875,7 @@ switch (mode) {
       rounds.push((await run()).review_round);
     }
     try {
-      rounds.push((await run(argument === 'provider-lock' ? 'opus' : 'qwen')).review_round);
+      rounds.push((await run(argument === 'provider-lock' ? 'sonnet' : 'qwen')).review_round);
     } catch (error) {
       rejected = error.message;
     }
@@ -1889,7 +1889,7 @@ switch (mode) {
     writeJson({
       rounds,
       qwen_calls: qwenCalls,
-      opus_calls: opusCalls,
+      sonnet_calls: sonnetCalls,
       rejected,
       ledger: JSON.parse(readFileSync(ledgerPath, 'utf8')),
     });
@@ -1942,7 +1942,7 @@ switch (mode) {
           result: { findings: [], summary: 'clean', confidence: 'high' },
         });
       },
-      opus: async () => null,
+      sonnet: async () => null,
     };
     const options = {
       request: { prompt: 'fixture' },
@@ -2033,8 +2033,8 @@ switch (mode) {
       attempts: [selectedRecord],
       accepted: selectedRecord.status === 'valid' ? selectedRecord : null,
       input_sha256: inputSha256,
-      automatic_opus_calls: 0,
-      owner_selected_opus_calls: 0,
+      automatic_sonnet_calls: 0,
+      owner_selected_sonnet_calls: 0,
     };
     const toLedgerAttempt = (record, attemptRound, digest) => ({
       round: attemptRound,
@@ -2049,7 +2049,7 @@ switch (mode) {
       record_sha256: createHash('sha256').update(JSON.stringify(record)).digest('hex'),
     });
     const ledger = {
-      policy: 'ferry-plan-review-budget-v1',
+      policy: 'ferry-plan-review-budget-v2',
       plan_id: planId,
       selected_provider: 'qwen',
       attempts: round === 1
@@ -2099,6 +2099,28 @@ switch (mode) {
       ledger.attempts[0].record_sha256 = createHash('sha256')
         .update(JSON.stringify(selectedRecord)).digest('hex');
     }
+    const legacyVariants = new Set([
+      'legacy-opus-slot',
+      'legacy-opus-model',
+      'legacy-ledger-policy',
+    ]);
+    if (argument === 'legacy-opus-slot') {
+      selectedRecord.slot = 'plan-opus';
+      ledger.attempts.at(-1).slot = selectedRecord.slot;
+      ledger.attempts.at(-1).record_sha256 = createHash('sha256')
+        .update(JSON.stringify(selectedRecord)).digest('hex');
+    }
+    if (argument === 'legacy-opus-model') {
+      selectedRecord.requested_model = 'opus';
+      selectedRecord.resolved_model = 'claude-opus-5';
+      ledger.attempts.at(-1).requested_model = selectedRecord.requested_model;
+      ledger.attempts.at(-1).resolved_model = selectedRecord.resolved_model;
+      ledger.attempts.at(-1).record_sha256 = createHash('sha256')
+        .update(JSON.stringify(selectedRecord)).digest('hex');
+    }
+    if (argument === 'legacy-ledger-policy') {
+      ledger.policy = 'ferry-plan-review-budget-v1';
+    }
     const decision = evaluatePlanGate(
       route,
       selectedRecord.status === 'valid'
@@ -2112,7 +2134,9 @@ switch (mode) {
       'altered-failure-reason',
       'missing-failure-reason',
     ]);
-    writeJson(failureVariants.has(argument)
+    writeJson(legacyVariants.has(argument)
+      ? { decision, provider_calls: 0 }
+      : failureVariants.has(argument)
       ? {
           decision,
           ...(ledgerOutputVariants.has(argument)
@@ -2131,12 +2155,13 @@ switch (mode) {
     ];
     const variants = {
       default: ['--plan', ...bounded],
-      opus: ['--plan', '--plan-provider', 'opus', ...bounded],
+      sonnet: ['--plan', '--plan-provider', 'sonnet', ...bounded],
+      'legacy-opus-provider': ['--plan', '--plan-provider', 'opus', ...bounded],
       invalid: ['--plan', '--plan-provider', 'other', ...bounded],
       'missing-id': ['--plan', '--plan-ledger', 'docs/plans/.review/fixture-ledger.json'],
       'missing-ledger': ['--plan', '--plan-id', 'docs/plans/fixture.md'],
       'without-plan-qwen': ['--plan-provider', 'qwen'],
-      'without-plan-opus': ['--plan-provider', 'opus'],
+      'without-plan-sonnet': ['--plan-provider', 'sonnet'],
     };
     try {
       const parsed = parseReviewArgs(variants[argument] ?? []);
@@ -2176,7 +2201,7 @@ switch (mode) {
   }
   case 'plan-revision-loop': {
     let qwenCalls = 0;
-    let opusCalls = 0;
+    let sonnetCalls = 0;
     const sessionIds = [];
     const attemptSlots = [];
     const withheldVersions = [];
@@ -2224,7 +2249,7 @@ switch (mode) {
               },
             });
           },
-          opus: async () => { opusCalls += 1; },
+          sonnet: async () => { sonnetCalls += 1; },
         },
       });
       attemptSlots.push(route.attempts.map((record) => record.slot));
@@ -2243,7 +2268,7 @@ switch (mode) {
       session_ids: sessionIds,
       withheld_versions: withheldVersions,
       approval_version: approvalVersion,
-      opus_calls: opusCalls,
+      sonnet_calls: sonnetCalls,
     });
     break;
   }
