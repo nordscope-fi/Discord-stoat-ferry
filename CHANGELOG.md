@@ -170,6 +170,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   asserting the old path, so `agent-check.sh` failed on every checkout. The check now matches
   `.vibe/config.toml`.
 
+## [2.40.6] - 2026-09-03
+
+### Fixed
+
+- **Required review collection no longer asks for approval on every payload.** Entering a Ferry
+  plan, chunk, or shipping review gate authorizes its fixed Vibe and Qwen calls. Codex starts those
+  calls through the external route, while optional destinations and local finding work stay
+  outside that authorization.
+
+- **Vibe and Qwen reviewer credentials now use verified item-only access.** Setup replaces the
+  former empty-vault grant with exact Viewer grants for the two required key items. It checks both
+  fields on creation, repeat runs, and renewal, gives protected login enough bounded time for the
+  live account, and can narrow the exact former installation or recover a safely bound interrupted
+  creation.
+
 ## [2.40.5] - 2026-09-03
 
 ### Fixed

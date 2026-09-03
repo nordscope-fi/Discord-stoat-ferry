@@ -191,6 +191,10 @@ function hasExactGithubNetworkPolicy(source) {
 function hasReviewBoundary(source) {
   const normalized = source.split(/\s+/u).join(' ').toLowerCase();
   return [
+    'intrinsically authorizes each new required payload',
+    'fixed vibe and qwen destinations',
+    'excludes optional providers',
+    'new destinations',
     'live provider collection uses',
     'codex requests escalated execution on the first attempt',
     'never tries the workspace sandbox first',
@@ -594,7 +598,12 @@ export async function runStaticReadiness({
     if (!source.includes('Host Compatibility') || !hasReviewBoundary(source)) {
       throw new Error('contract missing');
     }
-    return { shared_contract: true, review_boundary: true };
+    return {
+      shared_contract: true,
+      review_boundary: true,
+      required_collection_authorized: true,
+      approval_prompt_expected: false,
+    };
   });
 
   await add({

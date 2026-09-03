@@ -336,7 +336,7 @@ export async function runQwenReview({
   try {
     const operation = (async () => {
       const apiKey = await credential({
-        itemTitle: 'QwenCloud API Key',
+        provider: 'qwen',
         reason: 'Review Discord Ferry code with the fixed Qwen slot',
         home,
       });
