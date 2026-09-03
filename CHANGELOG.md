@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Workflow routing now follows verified risk instead of file count.** Narrow reversible fixes use
+  one approved bounded path even when release support touches several files. Unknown causes are
+  investigated first, high-risk contracts keep the complete design and review chain, and optional
+  agent or reviewer ideas wait for owner-selected triage.
+
 - **Design critique now stops after three attempts.** The final attempt checks unresolved claims
   against current sources, then returns the decision to the repository owner. Failed, timed-out,
   and interrupted attempts count toward the same limit on every supported coding tool.
