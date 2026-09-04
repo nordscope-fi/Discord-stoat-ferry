@@ -126,7 +126,7 @@ export function brainstormRegistrationReport(
   document,
   { host, root, postToolMatcher = codexPostToolMatcher() },
 ) {
-  const definitions = host === 'claude'
+  const definitions = host === 'claude' || host === 'qwen'
     ? [
         ['UserPromptSubmit', null, 'brainstorm-evidence.mjs', null],
         ['PreToolUse', '.*', 'brainstorm-evidence.mjs', null],
@@ -140,7 +140,7 @@ export function brainstormRegistrationReport(
         ['PostToolUse', postToolMatcher, 'codex-hook-adapter.mjs', 'post-tool'],
         ['Stop', null, 'codex-hook-adapter.mjs', 'stop'],
       ];
-  if (!['claude', 'codex'].includes(host) || document === null || typeof document !== 'object') {
+  if (!['claude', 'codex', 'qwen'].includes(host) || document === null || typeof document !== 'object') {
     return { valid: false, events: [], missing: definitions.map(([event]) => event) };
   }
   const expectedClaudeCommand =
@@ -150,7 +150,9 @@ export function brainstormRegistrationReport(
   for (const [event, matcher, script, mode] of definitions) {
     const expectedCommand = host === 'claude'
       ? expectedClaudeCommand
-      : `node "${root}/scripts/agent-compat/${script}" ${mode}`;
+      : host === 'qwen'
+        ? `node "${root}/scripts/agent-compat/${script}" --host qwen`
+        : `node "${root}/scripts/agent-compat/${script}" ${mode}`;
     const matches = (document.hooks?.[event] ?? []).flatMap((group) =>
       (group.hooks ?? []).map((hook) => ({ group, hook })))
       .filter(({ hook }) => hook.command === expectedCommand);
@@ -382,7 +384,7 @@ export function checkWorktreeContract(
   const required = [
     'for host_dir in .agents .codex .vibe .qwen; do',
     'ln -s "../../$host_dir" "$WT/$host_dir"',
-    'for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents .codex .vibe .qwen; do',
+    'for link in CLAUDE.md QWEN.md .claude/rules .claude/skills AGENTS.md .agents .codex .vibe .qwen; do',
   ];
   if (copiedHosts.length > 0 || required.some((line) => !script.includes(line))) {
     fail('worktree contract must use four canonical host links and copy none of their state');
@@ -714,6 +716,22 @@ function checkClaudeBrainstormState() {
   }
 }
 
+function checkQwenBrainstormState() {
+  const settingsPath = join(projectRoot, '.qwen', 'settings.json');
+  if (!existsSync(settingsPath)) {
+    fail('.qwen/settings.json is missing. Run ./scripts/agent-install.sh');
+    return;
+  }
+  try {
+    checkBrainstormDocument(JSON.parse(readFileSync(settingsPath, 'utf8')), {
+      host: 'qwen',
+      root: projectRoot,
+    });
+  } catch (error) {
+    fail(`.qwen/settings.json is invalid: ${error.message}`);
+  }
+}
+
 // --- Check: Config safety -------------------------------------------------------
 
 function checkConfigSafety() {
@@ -864,6 +882,7 @@ function main() {
     checkVibeState();
     checkPlainEnglishState();
     checkQwenState();
+    checkQwenBrainstormState();
     checkSkills();
     if (!generatedOnly) {
       checkCritiqueContract(

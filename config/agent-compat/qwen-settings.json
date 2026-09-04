@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/brainstorm-evidence.mjs\" --host qwen",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact",
@@ -73,6 +84,16 @@
             "timeout": 8000
           }
         ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/brainstorm-evidence.mjs\" --host qwen",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -85,6 +106,28 @@
             "timeout": 10000
           }
         ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/brainstorm-evidence.mjs\" --host qwen",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/brainstorm-evidence.mjs\" --host qwen",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -94,6 +137,15 @@
             "type": "command",
             "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/qwen-stop-guard.mjs\"",
             "timeout": 5000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__PROJECT_ROOT__/scripts/agent-compat/brainstorm-evidence.mjs\" --host qwen",
+            "timeout": 10
           }
         ]
       }
@@ -114,6 +166,12 @@
       "command": "node",
       "args": ["__DATA_HOME__/discord-ferry/reviewer-runtime/current/context7-mcp.mjs"],
       "timeout": 30000
+    },
+    "second-opinion": {
+      "command": "node",
+      "args": ["__PROJECT_ROOT__/scripts/agent-compat/second-opinion-mcp.mjs"],
+      "timeout": 30000,
+      "discoveryTimeoutMs": 120000
     }
   },
   "modelProviders": {
@@ -159,6 +217,9 @@
       "Bash(uv *)",
       "Bash(gh *)",
       "Bash(node scripts/*)",
+      "Bash(FERRY_REVIEWER_RUNTIME=\"${XDG_DATA_HOME:-$HOME/.local/share}/discord-ferry/reviewer-runtime/current\"*)",
+      "Bash(node \"$FERRY_REVIEWER_RUNTIME/review-ensemble.mjs\" *)",
+      "Bash(node \"$FERRY_REVIEWER_RUNTIME/review-verification.mjs\" *)",
       "Bash(plain-english *)",
       "Bash(npx --no-install plain-english *)",
       "Bash(python3 *)",

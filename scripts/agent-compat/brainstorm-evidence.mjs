@@ -231,11 +231,27 @@ export function classifyPrompt(prompt, _ledger = null) {
   return 'other';
 }
 
+// Qwen hook payloads carry no prompt_id or turn_id, so the qwen host derives
+// a deterministic turn identity from the fields the envelope does carry.
+// Markers match on host+session for every non-codex host, so the value only
+// has to be stable enough to record.
+function qwenTurnId(input) {
+  if (typeof input?.turn_id === 'string' && input.turn_id.length > 0) return input.turn_id;
+  if (typeof input?.prompt_id === 'string' && input.prompt_id.length > 0) return input.prompt_id;
+  const sessionId = typeof input?.session_id === 'string' ? input.session_id : '';
+  const event = typeof input?.hook_event_name === 'string' ? input.hook_event_name : 'event';
+  return `qwen-turn-${sha256(`${sessionId}\0${event}`).slice(0, 16)}`;
+}
+
 export function promptIdentity(input, host) {
   const sessionId = input?.session_id;
-  const turnId = host === 'claude' ? input?.prompt_id : input?.turn_id;
+  const turnId = host === 'claude'
+    ? input?.prompt_id
+    : host === 'codex'
+      ? input?.turn_id
+      : qwenTurnId(input);
   if (
-    !['claude', 'codex'].includes(host)
+    !['claude', 'codex', 'qwen'].includes(host)
     || typeof sessionId !== 'string'
     || sessionId.length === 0
     || typeof turnId !== 'string'
@@ -632,7 +648,7 @@ function normalizedChallengeDeclaration(challenge, input, { root, ledger }) {
     return null;
   }
   const toolName = input?.tool_name;
-  if (!['Bash', 'bash', 'exec_command'].includes(toolName)) return null;
+  if (!['Bash', 'bash', 'exec_command', 'run_shell_command'].includes(toolName)) return null;
   const arguments_ = literalArguments(input?.tool_input?.command ?? input?.tool_input?.cmd);
   if (arguments_ === null) return null;
   const paths = brainstormPaths(root);
@@ -735,7 +751,7 @@ export function normalizeSourceCall(input, { root, ledger }) {
   if (['Grep', 'grep', 'grep_search'].includes(toolName)) {
     return repositorySource(root, ledger, toolInput.path ?? toolInput.file_path);
   }
-  if (['Bash', 'bash', 'exec_command'].includes(toolName)) {
+  if (['Bash', 'bash', 'exec_command', 'run_shell_command'].includes(toolName)) {
     return commandSource(root, ledger, toolInput.command ?? toolInput.cmd);
   }
   if (['WebFetch', 'web_fetch'].includes(toolName)) {
@@ -813,7 +829,7 @@ function responseText(value) {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(responseText).filter(Boolean).join('\n');
   if (value === null || typeof value !== 'object') return '';
-  for (const key of ['text', 'output', 'stdout', 'content', 'result']) {
+  for (const key of ['text', 'output', 'stdout', 'content', 'result', 'result_display']) {
     if (key in value) {
       const text = responseText(value[key]);
       if (text !== '') return text;
@@ -834,10 +850,34 @@ function normalizedResult(value) {
   };
 }
 
-export function normalizeToolOutcome(input, eventName, _host) {
+// Qwen's tool_response envelope carries no integer exit code. Its shell
+// display text renders an authoritative "Exit Code: N" status line after the
+// output and error sections, so the last occurrence wins: quoted program
+// output can embed its own "Exit Code:" text ahead of the status line.
+// Without a status line a response carrying an error counts as exit 1, and
+// anything else as 0.
+function qwenExitCode(response) {
+  if (Number.isInteger(response.exit_code)) return response.exit_code;
+  const display = typeof response.result_display === 'string' ? response.result_display : '';
+  const matches = [...display.matchAll(/Exit Code:\s*(-?\d+)/gu)];
+  if (matches.length > 0) {
+    return Number.parseInt(matches[matches.length - 1][1], 10);
+  }
+  if (typeof response.error === 'string' && response.error.length > 0) return 1;
+  if (
+    typeof response.execution_status === 'string'
+    && response.execution_status !== 'completed'
+    && response.execution_status !== 'success'
+  ) {
+    return 1;
+  }
+  return 0;
+}
+
+export function normalizeToolOutcome(input, eventName, host) {
   const response = input?.tool_response;
   if (response === null || typeof response !== 'object') return null;
-  const exitCode = response.exit_code;
+  const exitCode = host === 'qwen' ? qwenExitCode(response) : response.exit_code;
   if (!Number.isInteger(exitCode)) return null;
   if (eventName === 'PostToolUseFailure' && exitCode === 0) return null;
   return {
