@@ -25,7 +25,7 @@ _DARWIN_BRANCH = '\nif sys.platform == "darwin":'
 def test_feedback_minor_release_surfaces_agree() -> None:
     """The feature release and its public promises move as one contract."""
 
-    expected = "2.40.6"
+    expected = "2.41.0"
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
     runtime = (_REPO_ROOT / "src" / "discord_ferry" / "__init__.py").read_text(encoding="utf-8")
@@ -37,7 +37,7 @@ def test_feedback_minor_release_surfaces_agree() -> None:
     assert len(root_records) == 1
     assert root_records[0]["version"] == expected
 
-    added_source = changelog.split("## [Unreleased]", 1)[1].split("### Changed", 1)[0]
+    added_source = changelog.split(f"## [{expected}]", 1)[1].split("### Changed", 1)[0]
     added = " ".join(added_source.casefold().split())
     for promise in (
         "feedback",

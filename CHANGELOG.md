@@ -4,13 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.41.0] - 2026-09-04
 
 ### Added
 
 - **Vibe readiness checker and setup entrypoint.** `vibe-readiness.mjs` runs 12 static
   checks mirroring the Codex readiness structure, and `vibe-setup.sh` orchestrates install
   and readiness. The installer now mentions both paths.
+
+- **Qwen readiness checker and setup entrypoint.** `qwen-readiness.mjs` runs 12 static
+  checks mirroring the Vibe readiness structure, and `qwen-setup.sh` orchestrates install
+  and readiness. The installer now mentions both the Vibe and Qwen paths.
+
+- **Qwen Code now gets its own instruction file.** `QWEN.md` carries the project rules for
+  the Qwen host, the way `CLAUDE.md` does for Claude. It is gitignored, linked into
+  `new-worktree.sh` worktrees, copied by `.worktreeinclude`, named in `AGENTS.md`, and the
+  worktree contract check now requires the link.
+
+- **Brainstorm evidence now runs on the Qwen host.** `.qwen/settings.json` registers the
+  evidence guard on all five hook events, the guard derives its own turn identity because Qwen
+  payloads carry none, and challenge results read the shell exit code from Qwen's rendered
+  result display. The parity ledger records the five routes as ported, and ADR-031 names the
+  host.
+
+- **Second-opinion Mistral access on Qwen no longer waits on the launch environment.**
+  `second-opinion-mcp.mjs` reads the Mistral key from the existing item-limited Proton grant at
+  server startup and injects it into the second-opinion server, and the Qwen template registers
+  the launcher so it overrides the shared `.mcp.json` entry on this host. ADR-035 records the
+  change and amends the ADR-026 key step.
 
 - **Vibe config now includes a bash allowlist.** The Vibe config template auto-approves
   the same commands Qwen's permission list covers.
@@ -25,6 +46,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Qwen serena context was set to "vibe" instead of "qwen".** Copy-paste from the Vibe
   template. Serena accepts the qwen context, satisfying ADR-026 re-evaluation trigger 2.
 
+- **Readiness worktree checks now pass the contract paths.** The Vibe and Qwen readiness
+  checkers called `check.mjs --check-worktree-contract` with a `--root` flag that this mode
+  rejects, so the check failed on every real checkout. Both now pass the five contract paths
+  the way Codex readiness does.
+
+- **Qwen sessions can now dispatch the reviewer runtime.** The Qwen permission list allows
+  the reviewer-runtime ensemble and verification commands that `/df-ship` and `/df-chunk-review`
+  run from the shared runtime directory, so required reviews do not stop at a permission prompt
+  on this host.
+
 - **Workflow routing now follows verified risk instead of file count.** Narrow reversible fixes use
   one approved bounded path even when release support touches several files. Unknown causes are
   investigated first, high-risk contracts keep the complete design and review chain, and optional
@@ -34,9 +65,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   against current sources, then returns the decision to the repository owner. Failed, timed-out,
   and interrupted attempts count toward the same limit on every supported coding tool.
 
-- **Brainstorm recommendations now require independent evidence on Claude and Codex.** The workflow
-  records real source reads and predeclared challenge results before it permits a selected approach.
-  Prepared, suspended, cancelled, and unrelated work remain outside the recommendation gate.
+- **Brainstorm recommendations now require independent evidence on Claude, Codex, and Qwen
+  Code.** The workflow records real source reads and predeclared challenge results before it
+  permits a selected approach. Prepared, suspended, cancelled, and unrelated work remain outside
+  the recommendation gate.
 
 - **Account-free feedback now starts inside Ferry.** The app and the new `ferry feedback` command
   collect Bug, Idea, or General reports without a GitHub account. Both routes show an exact public
