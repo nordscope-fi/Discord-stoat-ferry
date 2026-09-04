@@ -93,7 +93,11 @@ def submit_prompt_for_host(root: Path, host: str, prompt: str) -> None:
         "session_id": "session-1",
         "prompt": prompt,
     }
-    payload["prompt_id" if host == "claude" else "turn_id"] = "turn-1"
+    if host == "claude":
+        payload["prompt_id"] = "turn-1"
+    elif host == "codex":
+        payload["turn_id"] = "turn-1"
+    # Qwen sends neither field; the module derives its own turn identity.
     result = run_hook(root, host, payload)
     assert result.returncode == 0, result.stderr
 
@@ -120,18 +124,16 @@ def before_tool(
     tool_use_id: str = "source-1",
     host: str = "claude",
 ) -> subprocess.CompletedProcess[str]:
-    result = run_hook(
-        root,
-        host,
-        {
-            "hook_event_name": "PreToolUse",
-            "session_id": "session-1",
-            "turn_id": "turn-1",
-            "tool_use_id": tool_use_id,
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-        },
-    )
+    payload: dict[str, object] = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session-1",
+        "tool_use_id": tool_use_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    }
+    if host != "qwen":
+        payload["turn_id"] = "turn-1"
+    result = run_hook(root, host, payload)
     assert result.returncode == 0, result.stderr
     return result
 
@@ -146,19 +148,17 @@ def after_tool(
     host: str = "claude",
     event_name: str = "PostToolUse",
 ) -> subprocess.CompletedProcess[str]:
-    result = run_hook(
-        root,
-        host,
-        {
-            "hook_event_name": event_name,
-            "session_id": "session-1",
-            "turn_id": "turn-1",
-            "tool_use_id": tool_use_id,
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-            "tool_response": tool_response,
-        },
-    )
+    payload: dict[str, object] = {
+        "hook_event_name": event_name,
+        "session_id": "session-1",
+        "tool_use_id": tool_use_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_response": tool_response,
+    }
+    if host != "qwen":
+        payload["turn_id"] = "turn-1"
+    result = run_hook(root, host, payload)
     assert result.returncode == 0, result.stderr
     return result
 
@@ -382,7 +382,7 @@ def test_exploration_response_allows_and_consumes_marker(tmp_path: Path) -> None
     assert list((root / PROMPT_MARKERS).iterdir()) == []
 
 
-@pytest.mark.parametrize("host", ["claude", "codex"])
+@pytest.mark.parametrize("host", ["claude", "codex", "qwen"])
 def test_unrelated_active_turn_does_not_trigger_recommendation_gate(
     tmp_path: Path, host: str
 ) -> None:
@@ -1150,12 +1150,12 @@ def test_recommendation_receipt_edit_event_invalidates_agent_written_record(
 
 def test_recommendation_coverage_both_hosts_name_same_missing_check(tmp_path: Path) -> None:
     reasons = []
-    for host in ("claude", "codex"):
+    for host in ("claude", "codex", "qwen"):
         root, _, _ = complete_recommendation_coverage(tmp_path / host)
         ledger = read_ledger(root)
         ledger["drawback_resolutions"] = []
         write_ledger(root, ledger)
-        if host == "codex":
+        if host in ("codex", "qwen"):
             for marker in receipt_files(root, PROMPT_MARKERS):
                 marker.unlink()
             submit_prompt_for_host(root, host, "continue")
@@ -1166,4 +1166,181 @@ def test_recommendation_coverage_both_hosts_name_same_missing_check(tmp_path: Pa
         assert "drawback-a1" in decision["reason"]
         reasons.append(decision["reason"])
 
-    assert reasons[0] == reasons[1]
+    assert reasons[0] == reasons[1] == reasons[2]
+
+
+def qwen_active_checkout(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    source = root / "docs/reference.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# Reference\n\nAtomic rename replaces a file.\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "docs/reference.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Ferry Test",
+            "-c",
+            "user.email=ferry@example.invalid",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+        check=True,
+    )
+    post_edit(root, "docs/plans/specs/feature.md", "# Requirements\n")
+    submit_prompt_for_host(root, "qwen", "continue")
+    return root, source
+
+
+def test_qwen_activation_records_host_without_prompt_or_turn_fields(
+    tmp_path: Path,
+) -> None:
+    root, source = qwen_active_checkout(tmp_path)
+
+    active = read_ledger(root)
+    assert active["state"] == "active"
+    assert active["activation"]["host"] == "qwen"
+    assert active["activation"]["session_id"] == "session-1"
+    assert active["activation"]["kind"] == "continue"
+
+    source_input = {"file_path": str(source)}
+    before_tool(root, "read_file", source_input, tool_use_id="qwen-source", host="qwen")
+    after_tool(
+        root,
+        "read_file",
+        source_input,
+        {
+            "result_display": "Atomic rename replaces a file.",
+            "execution_status": "completed",
+        },
+        tool_use_id="qwen-source",
+        host="qwen",
+    )
+
+    receipt = json.loads(receipt_files(root, COMPLETED_RECEIPTS)[0].read_text())
+    assert receipt["kind"] == "source"
+    assert receipt["host"] == "qwen"
+
+
+def test_qwen_challenge_failed_tool_event_completes_receipt(tmp_path: Path) -> None:
+    root, _ = qwen_active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    challenge["falsifying_outcome"] = {"exit_code": 2}
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-failed", host="qwen")
+
+    after_tool(
+        root,
+        "run_shell_command",
+        tool_input,
+        {
+            "result_display": "Traceback most recent call\nExit Code: 2",
+            "error": "command failed",
+            "error_type": "execution_failed",
+            "execution_status": "failed",
+        },
+        tool_use_id="qwen-failed",
+        host="qwen",
+        event_name="PostToolUseFailure",
+    )
+
+    receipt = json.loads(receipt_files(root, COMPLETED_RECEIPTS)[0].read_text())
+    assert receipt["actual_result"] == {"exit_code": 2, "status": "failure"}
+    assert receipt["falsified"] is True
+
+
+def test_qwen_stop_blocks_recommendation_with_missing_evidence(tmp_path: Path) -> None:
+    root, _ = qwen_active_checkout(tmp_path)
+
+    result = stop_turn_for_host(root, "qwen", "## Recommendation\n\nUse the file approach.")
+
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block"
+    assert decision["reason"]
+
+
+def test_qwen_exit_code_uses_the_final_status_line(tmp_path: Path) -> None:
+    root, _ = qwen_active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    challenge["falsifying_outcome"] = {"exit_code": 2}
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-shadow", host="qwen")
+
+    after_tool(
+        root,
+        "run_shell_command",
+        tool_input,
+        {
+            "result_display": "captured log said Exit Code: 5\nExit Code: 2",
+            "error": "command failed",
+            "execution_status": "failed",
+        },
+        tool_use_id="qwen-shadow",
+        host="qwen",
+        event_name="PostToolUseFailure",
+    )
+
+    receipt = json.loads(receipt_files(root, COMPLETED_RECEIPTS)[0].read_text())
+    assert receipt["actual_result"] == {"exit_code": 2, "status": "failure"}
+    assert receipt["falsified"] is True
+
+
+def test_second_opinion_launcher_filters_child_environment(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    server_dir = home / "Documents/GitHub/portalpilot/second-opinion"
+    (server_dir / ".venv/bin").mkdir(parents=True)
+    (server_dir / ".venv/bin/python3").write_text("#!/bin/sh\n")
+    (server_dir / "main.py").write_text("# fixture server\n")
+
+    script = f"""
+import {{ runSecondOpinion }} from '{REPO}/scripts/agent-compat/second-opinion-mcp.mjs';
+const observed = {{}};
+const fakeChild = {{
+  once: (event, handler) => {{
+    if (event === 'close') setImmediate(() => handler(0, null));
+  }},
+  kill: () => {{}},
+}};
+const result = await runSecondOpinion({{
+  home: {json.dumps(str(home))},
+  fieldReader: async () => 'fixture-mistral-key',
+  environment: {{
+    PATH: '/usr/bin',
+    HOME: {json.dumps(str(home))},
+    GEMINI_API_KEY: 'fixture-gemini-key',
+    SOME_PARENT_SECRET: 'parent-canary',
+  }},
+  spawnChild: (command, args, options) => {{
+    observed.command = command;
+    observed.args = args;
+    observed.env = options.env;
+    return fakeChild;
+  }},
+  parent: {{ on: () => {{}}, removeListener: () => {{}} }},
+}});
+observed.status = result.status;
+process.stdout.write(JSON.stringify(observed));
+"""
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed["status"] == 0
+    assert observed["command"].endswith(".venv/bin/python3")
+    assert observed["args"] == [str(server_dir / "main.py")]
+    env = observed["env"]
+    assert env["MISTRAL_API_KEY"] == "fixture-mistral-key"
+    assert env["GEMINI_API_KEY"] == "fixture-gemini-key"
+    assert env["PATH"] == "/usr/bin"
+    assert "SOME_PARENT_SECRET" not in env

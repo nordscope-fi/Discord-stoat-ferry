@@ -42,6 +42,7 @@ ferry-output/
 .claude/
 .claude-session-lock
 CLAUDE.md
+QWEN.md
 claude_log/
 .mcp.json
 

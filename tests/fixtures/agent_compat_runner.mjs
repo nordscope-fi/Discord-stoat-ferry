@@ -3431,6 +3431,7 @@ switch (mode) {
     cpSync(join(source, '.claude', 'scripts', 'new-worktree.sh'), helper);
     chmodSync(helper, 0o755);
     writeFileSync(join(root, 'CLAUDE.md'), '# Original writer\n');
+    writeFileSync(join(root, 'QWEN.md'), '# Original writer\n');
     writeFileSync(join(root, 'AGENTS.md'), '# Original writer\n');
     writeFileSync(join(root, '.claude', 'rules', 'fixture.md'), '# Shared rule\n');
     writeFileSync(
@@ -3489,6 +3490,7 @@ switch (mode) {
 
       const sharedLinks = [
         join(first, 'CLAUDE.md'),
+        join(first, 'QWEN.md'),
         join(first, 'AGENTS.md'),
         join(first, '.claude'),
         join(first, '.agents'),

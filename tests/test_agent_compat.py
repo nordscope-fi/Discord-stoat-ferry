@@ -87,8 +87,8 @@ def _installer_checkout(
         "for host_dir in .agents .codex .vibe .qwen; do\n"
         'ln -s "../../$host_dir" "$WT/$host_dir"\n'
         "done\n"
-        "for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents "
-        ".codex .vibe .qwen; do\n"
+        "for link in CLAUDE.md QWEN.md .claude/rules .claude/skills AGENTS.md "
+        ".agents .codex .vibe .qwen; do\n"
         "done\n"
     )
     (root / ".worktreeinclude").write_text("\n")
@@ -124,8 +124,8 @@ def _worktree_contract_fixture(
         "for host_dir in .agents .codex .vibe .qwen; do\n"
         'ln -s "../../$host_dir" "$WT/$host_dir"\n'
         "done\n"
-        "for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents "
-        ".codex .vibe .qwen; do\n"
+        "for link in CLAUDE.md QWEN.md .claude/rules .claude/skills AGENTS.md "
+        ".agents .codex .vibe .qwen; do\n"
         "done\n"
     )
     include = tmp_path / ".worktreeinclude"
@@ -673,7 +673,7 @@ def test_brainstorm_hook_parity_names_all_five_events_and_host_dispositions() ->
         "ported",
     ]
     assert {entry["vibe_disposition"] for entry in entries} == {"unsupported"}
-    assert {entry["qwen_disposition"] for entry in entries} == {"unsupported"}
+    assert {entry["qwen_disposition"] for entry in entries} == {"ported"}
 
 
 def test_brainstorm_hook_parity_matches_open_ended_codex_tools_only() -> None:
@@ -1157,9 +1157,10 @@ def test_worktree_script_names_codex_and_vibe_links() -> None:
     assert "for host_dir in .agents .codex .vibe .qwen" in text
     assert 'ln -s "../../$host_dir" "$WT/$host_dir"' in text
     assert (
-        "for link in CLAUDE.md .claude/rules .claude/skills AGENTS.md .agents "
-        ".codex .vibe .qwen" in text
+        "for link in CLAUDE.md QWEN.md .claude/rules .claude/skills AGENTS.md "
+        ".agents .codex .vibe .qwen" in text
     )
+    assert 'ln -s ../../QWEN.md "$WT/QWEN.md"' in text
 
 
 def test_worktreeinclude_does_not_copy_canonical_host_directories() -> None:
@@ -1168,6 +1169,19 @@ def test_worktreeinclude_does_not_copy_canonical_host_directories() -> None:
         pytest.skip("snapshot-backed instruction layer is absent in CI")
     entries = set(include.read_text().splitlines())
     assert {".agents/**", ".codex/**", ".vibe/**", ".qwen/**"}.isdisjoint(entries)
+
+
+def test_worktreeinclude_copies_qwen_instructions() -> None:
+    include = _canonical_repo() / ".worktreeinclude"
+    if not include.exists():
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+    entries = set(include.read_text().splitlines())
+    assert "QWEN.md" in entries
+
+
+def test_gitignore_covers_qwen_instructions() -> None:
+    result = _run("git", "check-ignore", "QWEN.md")
+    assert result.returncode == 0, "QWEN.md must be gitignored like CLAUDE.md"
 
 
 def test_installer_skips_linked_host_directories() -> None:
@@ -4819,3 +4833,252 @@ def test_vibe_readiness_lists_expected_check_ids(tmp_path: Path) -> None:
         "generated-state",
     }
     assert expected.issubset(ids), f"missing: {expected - ids}"
+
+
+def test_qwen_readiness_self_test_passes() -> None:
+    result = _run("node", "scripts/agent-compat/qwen-readiness.mjs", "--self-test")
+    assert result.returncode == 0, result.stderr
+    assert "self-test: structural checks passed" in result.stdout
+
+
+def test_qwen_readiness_detects_missing_config(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    config_path = root / ".qwen/settings.json"
+    assert config_path.exists()
+    config_path.unlink()
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/qwen-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["overall"] == "incomplete"
+    ids = [r["id"] for r in report["records"] if r["status"] == "fail"]
+    assert "project-config" in ids
+
+
+def test_qwen_readiness_detects_missing_hooks(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    config_path = root / ".qwen/settings.json"
+    assert config_path.exists()
+    settings = json.loads(config_path.read_text())
+    settings["hooks"] = {}
+    config_path.write_text(json.dumps(settings))
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/qwen-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["overall"] == "incomplete"
+    ids = [r["id"] for r in report["records"] if r["status"] == "fail"]
+    assert "qwen-hooks" in ids
+
+
+def test_qwen_readiness_records_have_required_fields(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/qwen-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = json.loads(result.stdout)
+    assert "mode" in report
+    assert "overall" in report
+    assert "records" in report
+    for record in report["records"]:
+        assert "id" in record
+        assert "class" in record
+        assert "status" in record
+        assert "duration_ms" in record
+        assert record["status"] in ("ok", "fail", "warning")
+
+
+def test_qwen_readiness_lists_expected_check_ids(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    result = subprocess.run(
+        [
+            NODE,
+            "scripts/agent-compat/qwen-readiness.mjs",
+            "--root",
+            str(root),
+            "--home",
+            str(user_home),
+            "--json",
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = json.loads(result.stdout)
+    ids = {r["id"] for r in report["records"]}
+    expected = {
+        "qwen-version",
+        "project-config",
+        "qwen-trust",
+        "instructions",
+        "skills",
+        "qwen-hooks",
+        "mcp-registration",
+        "worktree-parity",
+        "reviewer-clients",
+        "reviewer-runtime",
+        "context7-credential",
+        "generated-state",
+    }
+    assert expected.issubset(ids), f"missing: {expected - ids}"
+
+
+def test_qwen_settings_register_brainstorm_hooks(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    settings = json.loads((root / ".qwen/settings.json").read_text())
+    hooks = settings["hooks"]
+    command = f'node "{root}/scripts/agent-compat/brainstorm-evidence.mjs" --host qwen'
+    for event in (
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+    ):
+        groups = hooks.get(event, [])
+        registered = [
+            hook
+            for group in groups
+            for hook in group.get("hooks", [])
+            if hook.get("command") == command
+        ]
+        assert len(registered) == 1, f"brainstorm hook missing for {event}"
+        assert registered[0]["timeout"] == 10
+
+
+def test_qwen_template_allows_the_reviewer_runtime_commands() -> None:
+    template = (REPO / "config/agent-compat/qwen-settings.json").read_text()
+    settings = json.loads(template)
+    allow = settings["permissions"]["allow"]
+    joined = "\n".join(allow)
+    assert "review-ensemble.mjs" in joined
+    assert "review-verification.mjs" in joined
+
+
+def test_qwen_settings_register_second_opinion_launcher(tmp_path: Path) -> None:
+    root, user_home, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    settings = json.loads((root / ".qwen/settings.json").read_text())
+    server = settings["mcpServers"]["second-opinion"]
+    assert server["command"] == "node"
+    assert server["args"] == [f"{root}/scripts/agent-compat/second-opinion-mcp.mjs"]
+
+
+def test_second_opinion_launcher_fails_clean_without_the_server(
+    tmp_path: Path,
+) -> None:
+    launcher = REPO / "scripts/agent-compat/second-opinion-mcp.mjs"
+    result = subprocess.run(
+        [NODE, str(launcher), "--check"],
+        env={**os.environ, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "second-opinion" in result.stderr
+    assert "MISTRAL" not in result.stdout
