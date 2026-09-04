@@ -147,14 +147,13 @@ const RAW_ENTRIES = [
   projectCommand('project.brainstorm-prompt', 'UserPromptSubmit', null,
     'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
     'activates or cancels the brainstorm evidence workflow', [],
-    { vibeDisposition: 'unsupported', qwenDisposition: 'unsupported' }),
+    { vibeDisposition: 'unsupported' }),
   projectCommand('project.brainstorm-before-tool', 'PreToolUse', '.*',
     'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
     'records eligible evidence before a tool runs', [],
     {
       codexMatcher: '.*',
       vibeDisposition: 'unsupported',
-      qwenDisposition: 'unsupported',
     }),
   projectCommand('project.brainstorm-after-tool', 'PostToolUse', '.*',
     'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
@@ -162,19 +161,18 @@ const RAW_ENTRIES = [
     {
       codexMatcher: '.*',
       vibeDisposition: 'unsupported',
-      qwenDisposition: 'unsupported',
     }),
   projectCommand('project.brainstorm-failed-tool', 'PostToolUseFailure', '.*',
     'brainstorm-evidence.mjs', 'compensated', [], 'brainstorm-evidence',
     'completes eligible challenge evidence after a tool fails', [],
     {
       vibeDisposition: 'unsupported',
-      qwenDisposition: 'unsupported',
+      qwenDisposition: 'ported',
     }),
   projectCommand('project.brainstorm-stop', 'Stop', null,
     'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
     'blocks a recommendation until all evidence is complete', [],
-    { vibeDisposition: 'unsupported', qwenDisposition: 'unsupported' }),
+    { vibeDisposition: 'unsupported' }),
 
   // Local hooks (from .claude/settings.local.json)
   projectCommand('local.destructive-git', 'PreToolUse', 'Bash',

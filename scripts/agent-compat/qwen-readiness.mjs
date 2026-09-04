@@ -1,21 +1,19 @@
-// Discord Ferry — Vibe readiness checker.
-// Mirrors codex-readiness.mjs structure for the Vibe host. Reuses shared
+// Discord Ferry — Qwen readiness checker.
+// Mirrors vibe-readiness.mjs structure for the Qwen Code host. Reuses shared
 // checks (instructions, skills, worktree-parity, reviewer-clients,
 // reviewer-runtime, context7-credential, generated-state) and adds
-// Vibe-specific checks (version, config, trust, hooks, mcp-registration).
+// Qwen-specific checks (version, config, trust, hooks, mcp-registration).
 //
 // Usage:
-//   node vibe-readiness.mjs --root <path> [--home <path>] [--json]
+//   node qwen-readiness.mjs --root <path> [--home <path>] [--json]
 //                          [--static] [--reviewers] [--self-test]
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
-import { mkdtempSync } from 'node:fs';
 import { canonicalCheckoutRoot } from './plain-english-contract.mjs';
 
-// --- Shared helpers (mirrors codex-readiness.mjs) -----------------------------
+// --- Shared helpers (mirrors vibe-readiness.mjs) ------------------------------
 
 function readinessRecord(id, className, status, durationMs, remediation, details) {
   return {
@@ -46,7 +44,7 @@ async function checkRecord({ id, className, remediation, reason, now }, check) {
 
 const defaultNow = () => performance.now();
 
-// --- Shared checks ------------------------------------------------------------
+// --- Shared checks -------------------------------------------------------------
 
 function hasReviewBoundary(text) {
   return text.includes('Host Compatibility')
@@ -125,7 +123,7 @@ async function checkContext7Credential(root, home) {
   try {
     const output = execFileSync('node', [launcher, '--check'], {
       encoding: 'utf8', stdio: 'pipe', timeout: 120000,
-      env: { ...process.env, VIBE_HOME: home },
+      env: { ...process.env, HOME: home },
     });
     if (!output.includes('context7 credential ready')) throw new Error('credential not ready');
   } catch (err) {
@@ -147,29 +145,42 @@ async function checkGeneratedState(root) {
   return {};
 }
 
-// --- Vibe-specific checks ------------------------------------------------------
+// --- Qwen-specific checks -------------------------------------------------------
 
-async function checkVibeVersion() {
-  const version = execFileSync('vibe', ['--version'], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
+async function checkQwenVersion() {
+  const version = execFileSync('qwen', ['--version'], { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
   return { version: version.trim().split('\n')[0] };
 }
 
-async function checkProjectConfig(root) {
-  const configPath = join(root, '.vibe', 'config.toml');
-  if (!existsSync(configPath)) throw new Error('.vibe/config.toml not found');
-  const text = readFileSync(configPath, 'utf8');
-  const requiredServers = ['serena', 'qmd', 'context7'];
-  for (const name of requiredServers) {
-    if (!text.includes(`name = "${name}"`)) throw new Error(`MCP server ${name} not registered`);
+function readQwenSettings(root) {
+  const configPath = join(root, '.qwen', 'settings.json');
+  if (!existsSync(configPath)) throw new Error('.qwen/settings.json not found');
+  try {
+    return JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    throw new Error(`.qwen/settings.json does not parse: ${err.message}`);
   }
-  if (!text.includes('[tools.bash]')) throw new Error('bash allowlist missing');
-  if (!text.includes('allowlist')) throw new Error('bash allowlist empty');
-  return { servers: requiredServers.length };
 }
 
-async function checkVibeTrust(root, home) {
-  const trustPath = join(home, '.vibe', 'trusted_folders.toml');
-  if (!existsSync(trustPath)) throw new Error('trusted_folders.toml not found');
+async function checkProjectConfig(root) {
+  const settings = readQwenSettings(root);
+  const servers = settings.mcpServers ?? {};
+  for (const name of ['serena', 'qmd', 'context7']) {
+    if (!servers[name]) throw new Error(`MCP server ${name} not registered`);
+  }
+  const hooks = settings.hooks ?? {};
+  if (Object.keys(hooks).length === 0) throw new Error('hooks missing');
+  const allow = settings.permissions?.allow;
+  if (!Array.isArray(allow) || allow.length === 0) throw new Error('permissions allowlist empty');
+  return { servers: Object.keys(servers).length };
+}
+
+async function checkQwenTrust(root, home) {
+  // Qwen records folder trust in ~/.qwen/trustedFolders.json when the file
+  // exists. This Qwen release also runs folders without that file (trust is
+  // granted outside the file), so an absent file is reported, not failed.
+  const trustPath = join(home, '.qwen', 'trustedFolders.json');
+  if (!existsSync(trustPath)) return { fileBased: false };
   const text = readFileSync(trustPath, 'utf8');
   const canonical = resolve(root);
   if (!text.includes(canonical) && !text.includes(root)) {
@@ -178,29 +189,36 @@ async function checkVibeTrust(root, home) {
   return { path: canonical };
 }
 
-async function checkVibeHooks(root) {
-  const hooksPath = join(root, '.vibe', 'hooks.toml');
-  if (!existsSync(hooksPath)) throw new Error('.vibe/hooks.toml not found');
-  const text = readFileSync(hooksPath, 'utf8');
-  const requiredHooks = ['ferry-pre-tool', 'ferry-post-tool', 'ferry-post-agent'];
-  for (const name of requiredHooks) {
-    if (!text.includes(`name = "${name}"`)) throw new Error(`hook ${name} not registered`);
+async function checkQwenHooks(root) {
+  const settings = readQwenSettings(root);
+  const hooks = settings.hooks;
+  if (!hooks || typeof hooks !== 'object' || Object.keys(hooks).length === 0) {
+    throw new Error('hooks missing');
   }
-  return { hooks: requiredHooks.length };
+  const text = JSON.stringify(hooks);
+  const requiredGuards = [
+    'credential-guard.sh',
+    'destructive-git-guard.mjs',
+    'qwen-session-start.mjs',
+    'qwen-stop-guard.mjs',
+  ];
+  for (const guard of requiredGuards) {
+    if (!text.includes(guard)) throw new Error(`hook ${guard} not registered`);
+  }
+  return { hooks: requiredGuards.length };
 }
 
 async function checkMcpRegistration(root) {
-  const configPath = join(root, '.vibe', 'config.toml');
-  if (!existsSync(configPath)) throw new Error('.vibe/config.toml not found');
-  const text = readFileSync(configPath, 'utf8');
+  const settings = readQwenSettings(root);
+  const servers = settings.mcpServers ?? {};
   const required = ['serena', 'qmd', 'context7'];
   for (const name of required) {
-    if (!text.includes(`name = "${name}"`)) throw new Error(`MCP server ${name} not registered`);
+    if (!servers[name]) throw new Error(`MCP server ${name} not registered`);
   }
   return { servers: required };
 }
 
-// --- Static readiness ----------------------------------------------------------
+// --- Static readiness -----------------------------------------------------------
 
 export async function runStaticReadiness({ root, home, now = defaultNow } = {}) {
   const projectRoot = root ?? process.cwd();
@@ -208,12 +226,12 @@ export async function runStaticReadiness({ root, home, now = defaultNow } = {}) 
   const records = [];
 
   const checks = [
-    { id: 'vibe-version', className: 'runtime', reason: 'vibe CLI not found', remediation: 'Install Vibe: uv tool install mistral-vibe', check: checkVibeVersion },
-    { id: 'project-config', className: 'configuration', reason: '.vibe/config.toml missing required fields', remediation: 'Run ./scripts/agent-install.sh to regenerate', check: () => checkProjectConfig(projectRoot) },
-    { id: 'vibe-trust', className: 'configuration', reason: 'project folder not trusted', remediation: `Trust the folder: run vibe in ${projectRoot} and accept the trust prompt`, check: () => checkVibeTrust(projectRoot, homeDir) },
+    { id: 'qwen-version', className: 'runtime', reason: 'qwen CLI not found', remediation: 'Install Qwen Code: npm install -g @qwen-code/qwen-code', check: checkQwenVersion },
+    { id: 'project-config', className: 'configuration', reason: '.qwen/settings.json missing required fields', remediation: 'Run ./scripts/agent-install.sh to regenerate', check: () => checkProjectConfig(projectRoot) },
+    { id: 'qwen-trust', className: 'configuration', reason: 'project folder not trusted', remediation: `Trust the folder: run qwen in ${projectRoot} and accept the trust prompt`, check: () => checkQwenTrust(projectRoot, homeDir) },
     { id: 'instructions', className: 'instructions', reason: 'AGENTS.md review boundary text missing', remediation: 'Restore AGENTS.md from the repository', check: () => checkInstructions(projectRoot) },
     { id: 'skills', className: 'instructions', reason: 'skill bridge incomplete', remediation: 'Run ./scripts/agent-install.sh to rebuild skill symlinks', check: () => checkSkills(projectRoot) },
-    { id: 'vibe-hooks', className: 'hooks', reason: '.vibe/hooks.toml missing required hooks', remediation: 'Run ./scripts/agent-install.sh to regenerate hooks', check: () => checkVibeHooks(projectRoot) },
+    { id: 'qwen-hooks', className: 'hooks', reason: '.qwen/settings.json missing required hooks', remediation: 'Run ./scripts/agent-install.sh to regenerate hooks', check: () => checkQwenHooks(projectRoot) },
     { id: 'mcp-registration', className: 'tool-servers', reason: 'required MCP servers not registered', remediation: 'Run ./scripts/agent-install.sh to restore MCP servers', check: () => checkMcpRegistration(projectRoot) },
     { id: 'worktree-parity', className: 'worktrees', reason: 'worktree link contract violated', remediation: 'Run .claude/scripts/new-worktree.sh to repair links', check: () => checkWorktreeParity(projectRoot) },
     { id: 'reviewer-clients', className: 'reviewers', reason: 'reviewer CLI not found', remediation: 'Install the missing CLI tool', check: checkReviewerClients },
@@ -231,11 +249,11 @@ export async function runStaticReadiness({ root, home, now = defaultNow } = {}) 
   return { mode: 'static', overall, records };
 }
 
-// --- Re-export shared reviewer readiness --------------------------------------
+// --- Re-export shared reviewer readiness ----------------------------------------
 
 export { runReviewerReadiness } from './codex-readiness.mjs';
 
-// --- CLI entry point -----------------------------------------------------------
+// --- CLI entry point --------------------------------------------------------------
 
 function invokedAsMain() {
   return import.meta.url === `file://${resolve(process.argv[1])}`;
@@ -261,18 +279,18 @@ async function main() {
 
   if (args.mode === 'self-test') {
     // Self-test verifies the module's own structure, not the local environment.
-    // CI has no vibe binary, no .vibe/, no .claude/. Just confirm the exports
-    // are callable and return the expected shape.
+    // CI has no qwen binary state it can rely on. Just confirm the exports are
+    // callable and return the expected shape.
     const report = await runStaticReadiness({ root: args.root, home: args.home });
     const ok = report.mode === 'static'
       && Array.isArray(report.records)
       && report.records.length > 0
       && report.records.every(r => r.id && r.class && r.status);
     if (!ok) {
-      console.error('vibe-readiness self-test: FAILED');
+      console.error('qwen-readiness self-test: FAILED');
       process.exit(1);
     }
-    console.log('vibe-readiness self-test: structural checks passed');
+    console.log('qwen-readiness self-test: structural checks passed');
     return;
   }
 

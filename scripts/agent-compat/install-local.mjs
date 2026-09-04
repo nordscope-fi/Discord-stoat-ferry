@@ -237,6 +237,8 @@ async function main() {
   console.log('Run scripts/codex-setup.sh --live when paid runtime probes are required.');
   console.log('Vibe readiness: node scripts/agent-compat/vibe-readiness.mjs --root "$PWD"');
   console.log('Vibe setup: bash scripts/vibe-setup.sh');
+  console.log('Qwen readiness: node scripts/agent-compat/qwen-readiness.mjs --root "$PWD"');
+  console.log('Qwen setup: bash scripts/qwen-setup.sh');
 }
 
 main().catch(err => {
