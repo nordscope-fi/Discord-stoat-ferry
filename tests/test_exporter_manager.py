@@ -665,9 +665,9 @@ async def test_a_refused_proxy_names_the_proxy(tmp_path, fake_proxy, proxy_env, 
             patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
             patch("discord_ferry.exporter.manager.asyncio.sleep", new_callable=AsyncMock) as slept,
+            pytest.raises(DCENotFoundError) as caught,
         ):
-            with pytest.raises(DCENotFoundError) as caught:
-                await download_dce(lambda _e: None)
+            await download_dce(lambda _e: None)
 
     message = str(caught.value)
     assert "Network error downloading DCE" in message
@@ -699,9 +699,9 @@ async def test_a_proxy_502_still_retries(tmp_path, fake_proxy, proxy_env, os_pro
             patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
             patch("discord_ferry.exporter.manager.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(DCENotFoundError) as caught,
         ):
-            with pytest.raises(DCENotFoundError) as caught:
-                await download_dce(lambda _e: None)
+            await download_dce(lambda _e: None)
 
     assert len(captured) >= 2, "the 502 was treated as permanent and never retried"
     assert f"The request to api.github.com went through the proxy at 127.0.0.1:{port}" in str(

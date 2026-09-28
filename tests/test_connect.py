@@ -197,9 +197,12 @@ async def test_a_refused_proxy_names_the_proxy_discovering_autumn(
     server = await make(b"403 Forbidden")
     port = server.sockets[0].getsockname()[1]
     async with server:
-        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"):
-            with pytest.raises(StoatConnectionError) as caught:
-                await run_connect(_make_config(tmp_path), MigrationState(), [], lambda e: None)
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            pytest.raises(StoatConnectionError) as caught,
+        ):
+            await run_connect(_make_config(tmp_path), MigrationState(), [], lambda e: None)
 
     message = str(caught.value)
     # The site marker first: it passes under the wiring mutant, so the proxy
@@ -233,11 +236,14 @@ async def test_a_refused_proxy_names_the_proxy_verifying_the_token(
     server = await make(b"403 Forbidden")
     port = server.sockets[0].getsockname()[1]
     async with server:
-        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"):
-            with aioresponses(passthrough=[f"{STOAT_URL}/users/@me"]) as m:
-                m.get(f"{STOAT_URL}/", payload=_API_ROOT_RESPONSE)
-                with pytest.raises(StoatConnectionError) as caught:
-                    await run_connect(_make_config(tmp_path), MigrationState(), [], lambda e: None)
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            aioresponses(passthrough=[f"{STOAT_URL}/users/@me"]) as m,
+        ):
+            m.get(f"{STOAT_URL}/", payload=_API_ROOT_RESPONSE)
+            with pytest.raises(StoatConnectionError) as caught:
+                await run_connect(_make_config(tmp_path), MigrationState(), [], lambda e: None)
 
     message = str(caught.value)
     assert "Token verification" in message
