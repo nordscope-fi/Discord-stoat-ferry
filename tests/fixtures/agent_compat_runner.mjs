@@ -348,7 +348,18 @@ function installLinkedHosts() {
   for (const host of hosts) {
     const owner = join(primary, host);
     if (host === '.agents') {
-      cpSync(join(repo, host), owner, { recursive: true, dereference: true });
+      // Keep the skill links as links, the way a real primary checkout holds them. A
+      // dereferenced copy turns each into a real directory, which the skill topology
+      // check refuses before the installer reaches the write-through guard (#948).
+      cpSync(realpathSync(join(repo, '.claude', 'skills')), join(primary, '.claude', 'skills'), {
+        recursive: true,
+        verbatimSymlinks: true,
+      });
+      cpSync(realpathSync(join(repo, host)), owner, { recursive: true, verbatimSymlinks: true });
+      // Leave one link missing so the plan has a create-link operation. With every link
+      // already correct the plan is empty, and an installer that wrote through the linked
+      // host would change nothing, so this test could not fail.
+      unlinkSync(join(owner, 'skills', readdirSync(join(owner, 'skills')).sort()[0]));
     } else {
       mkdirSync(owner, { recursive: true });
     }
