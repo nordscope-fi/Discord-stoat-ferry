@@ -15,6 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   nested `with` blocks in the proxy and message tests, so each inner block joins its outer one.
   The context managers enter in the same order, so the tests check the same thing.
 
+### Fixed
+
+- **The linked-hosts installer test runs again (#948).** Its fixture copied `.agents` with the
+  skill links turned into real directories, so the skill topology check stopped the installer
+  before the write-through guard was ever exercised. The fixture now keeps the links as links,
+  gives the fake primary checkout its own skills, and leaves one link missing so the installer
+  has work it must not write through. Removing the installer's linked-host skip now fails the
+  test. CI skips this test, so the failure only showed locally.
+
 ## [2.41.0] - 2026-09-04
 
 ### Added
