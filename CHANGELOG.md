@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- **Weekly dependency group update (Dependabot #947).** Runtime-facing: `nicegui` 3.16.0 →
+  3.17.1 (the GUI shell), `multidict` 6.7.1 → 6.9.0 and `yarl` 1.24.5 → 1.25.1 (both under
+  `aiohttp`). Toolchain and build: `ruff` 0.16.5 → 0.16.8 and `pyinstaller` 6.22.2 → 6.22.3
+  (with `pyinstaller-hooks-contrib` 2026.6 → 2026.7). Ruff 0.16.8 now reports `SIM117` on six
+  nested `with` blocks in the proxy and message tests, so each inner block joins its outer one.
+  The context managers enter in the same order, so the tests check the same thing.
+
 ## [2.41.0] - 2026-09-04
 
 ### Added

@@ -3949,17 +3949,19 @@ async def test_partial_send_retry_path_commits_then_reraises(tmp_path: Path) -> 
         return {"_id": f"stoat-{key}"}
 
     async with aiohttp.ClientSession() as session:
-        with patch("discord_ferry.migrator.messages.api_send_message", fail_on_second):
-            with pytest.raises(MigrationError):
-                await _process_message(
-                    msg=msg,
-                    stoat_channel_id="stoat_ch1",
-                    config=config,
-                    state=state,
-                    session=session,
-                    on_event=lambda e: None,
-                    channel_result=None,
-                )
+        with (
+            patch("discord_ferry.migrator.messages.api_send_message", fail_on_second),
+            pytest.raises(MigrationError),
+        ):
+            await _process_message(
+                msg=msg,
+                stoat_channel_id="stoat_ch1",
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda e: None,
+                channel_result=None,
+            )
 
     assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
     assert len(state.failed_messages) == 1

@@ -879,9 +879,12 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
     server = await make(b"403 Forbidden")
     port = server.sockets[0].getsockname()[1]
     async with server:
-        with os_proxy({}), proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"):
-            with pytest.raises(DiscordAuthError) as caught:
-                await validate_discord_token("dt")
+        with (
+            os_proxy({}),
+            proxy_env(HTTPS_PROXY=f"http://127.0.0.1:{port}"),
+            pytest.raises(DiscordAuthError) as caught,
+        ):
+            await validate_discord_token("dt")
 
     message = str(caught.value)
     assert "Cannot reach Discord API" in message
