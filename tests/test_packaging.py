@@ -25,19 +25,22 @@ _DARWIN_BRANCH = '\nif sys.platform == "darwin":'
 def test_feedback_minor_release_surfaces_agree() -> None:
     """The feature release and its public promises move as one contract."""
 
-    expected = "2.41.0"
+    # The promise list belongs to the feedback release's changelog section. The
+    # four version files must agree with each other at whatever the current
+    # version is, so the current version is read, not pinned here.
+    feedback_release = "2.41.0"
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
     runtime = (_REPO_ROOT / "src" / "discord_ferry" / "__init__.py").read_text(encoding="utf-8")
     changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert pyproject["project"]["version"] == expected
+    expected = pyproject["project"]["version"]
     assert f'__version__ = "{expected}"' in runtime
     root_records = [item for item in lock["package"] if item["name"] == "discord-ferry"]
     assert len(root_records) == 1
     assert root_records[0]["version"] == expected
 
-    added_source = changelog.split(f"## [{expected}]", 1)[1].split("### Changed", 1)[0]
+    added_source = changelog.split(f"## [{feedback_release}]", 1)[1].split("### Changed", 1)[0]
     added = " ".join(added_source.casefold().split())
     for promise in (
         "feedback",
