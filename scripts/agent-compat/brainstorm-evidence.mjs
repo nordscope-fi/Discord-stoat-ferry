@@ -829,7 +829,12 @@ function responseText(value) {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(responseText).filter(Boolean).join('\n');
   if (value === null || typeof value !== 'object') return '';
-  for (const key of ['text', 'output', 'stdout', 'content', 'result', 'result_display']) {
+  // Qwen's PostToolUse payload carries the tool result under camelCase fields
+  // (llmContent, returnDisplay); the snake_case keys serve Claude and Codex.
+  for (const key of [
+    'text', 'output', 'stdout', 'content', 'result', 'result_display',
+    'llmContent', 'returnDisplay',
+  ]) {
     if (key in value) {
       const text = responseText(value[key]);
       if (text !== '') return text;

@@ -561,6 +561,15 @@ def test_source_receipt_rejects_new_or_excluded_repository_source(tmp_path: Path
             "web",
         ),
         (
+            "run_shell_command",
+            {"command": "sed -n '1,3p' docs/reference.md"},
+            {
+                "llmContent": "# Reference\nAtomic rename replaces a file.",
+                "returnDisplay": "Output:\n# Reference\nAtomic rename replaces a file.",
+            },
+            "repository",
+        ),
+        (
             "mcp__context7__query-docs",
             {"libraryId": "/nodejs/node", "query": "atomic file replacement"},
             {"content": [{"type": "text", "text": "Atomic rename replaces a file."}]},
