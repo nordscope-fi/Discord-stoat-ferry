@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.3] - 2026-10-04
+
+### Fixed
+
+- **Message-phase consumers warn on escaped media instead of uploading it (chunk 3 of
+  #955/#956).** Attachment, sticker, embed, and masquerade routes now skip export-supplied
+  paths that fail the containment check, emit an `unsafe_media_path` warning through the
+  correct per-channel or state accumulator, and count skipped attachments. `_build_masquerade`
+  returns an escape flag so both send routes (per-message and merged-thread) record the
+  warning. Escaped skips never enter `failed_messages`, so resume does not retry them.
+  Note for resumed runs: the upload cache key moved to resolved path spellings in chunks 2
+  and 3, so a migration interrupted before this release re-uploads its cached files once
+  (#1038).
+
 ## [2.41.2] - 2026-10-04
 
 ### Fixed

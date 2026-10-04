@@ -14,6 +14,7 @@ from discord_ferry.errors import DuplicateSendError
 from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
 from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
+from discord_ferry.parser.media_paths import contained_media_path, is_media_escape
 from discord_ferry.parser.transforms import (
     convert_spoilers,
     flatten_embed,
@@ -740,7 +741,29 @@ async def _merge_threads(
                 # to be promoted here too -- otherwise a forward inside a merged thread
                 # is sent as an empty message with no warning.
                 content = _build_content(_merge_forwarded(msg), state)
-                masquerade = await _build_masquerade(msg.author, session, state, config)
+                masquerade, masq_escaped = await _build_masquerade(
+                    msg.author, session, state, config
+                )
+                if masq_escaped:
+                    state.warnings.append(
+                        {
+                            "phase": "messages",
+                            "type": "unsafe_media_path",
+                            "message": (
+                                f"Masquerade avatar for {msg.author.name} failed the "
+                                "export-root containment check — skipped."
+                            ),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="messages",
+                            status="warning",
+                            message=(
+                                f"Masquerade avatar for {msg.author.name} unsafe path — skipped."
+                            ),
+                        )
+                    )
                 parts = _split_message(content)
 
                 _msg_failed = False
@@ -1323,6 +1346,23 @@ async def _process_message(
 
     # Step 1b: Upload sticker images as additional attachments.
     _, sticker_paths, _escaped_stickers = handle_stickers(msg.stickers, config.export_dir)
+    for _escaped_name in _escaped_stickers:
+        acc_warnings.append(
+            {
+                "phase": "messages",
+                "type": "unsafe_media_path",
+                "message": (
+                    f"Sticker {_escaped_name!r} failed the export-root containment check — skipped."
+                ),
+            }
+        )
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="warning",
+                message=f"Sticker {_escaped_name!r} unsafe path — skipped.",
+            )
+        )
     for sticker_path in sticker_paths:
         if len(autumn_ids) >= 5:
             break
@@ -1361,7 +1401,25 @@ async def _process_message(
         content = content + "\n" + "\n".join(attachment_placeholders)
 
     # Step 3: Build masquerade dict.
-    masquerade = await _build_masquerade(msg.author, session, state, config)
+    masquerade, masq_escaped = await _build_masquerade(msg.author, session, state, config)
+    if masq_escaped:
+        acc_warnings.append(
+            {
+                "phase": "messages",
+                "type": "unsafe_media_path",
+                "message": (
+                    f"Masquerade avatar for {msg.author.name} failed the export-root "
+                    "containment check — skipped."
+                ),
+            }
+        )
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="warning",
+                message=f"Masquerade avatar for {msg.author.name} unsafe path — skipped.",
+            )
+        )
 
     # Step 4: Flatten embeds (max 5, only those with title or description).
     stoat_embeds: list[dict[str, Any]] = []
@@ -1369,6 +1427,24 @@ async def _process_message(
     for raw_embed in msg.embeds[:5]:
         flat, embed_media_path, _embed_escaped = flatten_embed(raw_embed, config.export_dir)
         if flat.get("description") or flat.get("title"):
+            if _embed_escaped:
+                acc_warnings.append(
+                    {
+                        "phase": "messages",
+                        "type": "unsafe_media_path",
+                        "message": (
+                            f"Embed media in msg {msg.id} failed the export-root "
+                            "containment check — skipped."
+                        ),
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="messages",
+                        status="warning",
+                        message=f"Embed media in msg {msg.id} unsafe path — skipped.",
+                    )
+                )
             # Upload embed media (thumbnail/image) if a local file is available.
             if embed_media_path is not None:
                 try:
@@ -1804,7 +1880,7 @@ def _resolve_attachment_path(export_dir: Path, url: str) -> Path | None:
     """
     if url.startswith(("http://", "https://")):
         return None
-    return export_dir / url
+    return contained_media_path(export_dir, url)
 
 
 def _merge_forwarded(msg: DCEMessage) -> DCEMessage:
@@ -1969,6 +2045,29 @@ async def _upload_attachments(
 
         local_path = _resolve_attachment_path(config.export_dir, att.url)
         if local_path is None or not local_path.exists() or not local_path.is_file():
+            if local_path is None and is_media_escape(config.export_dir, att.url):
+                skip_message = (
+                    f"Attachment {att.id!r} ({att.file_name!r}) "
+                    "failed the export-root containment check — skipped."
+                )
+                if channel_result is not None:
+                    channel_result.attachments_skipped += 1
+                    channel_result.warnings.append(
+                        {"phase": "messages", "type": "unsafe_media_path", "message": skip_message}
+                    )
+                else:
+                    state.attachments_skipped += 1
+                    state.warnings.append(
+                        {"phase": "messages", "type": "unsafe_media_path", "message": skip_message}
+                    )
+                on_event(
+                    MigrationEvent(
+                        phase="messages",
+                        status="warning",
+                        message=f"Attachment {att.file_name!r} unsafe path — skipped.",
+                    )
+                )
+                continue
             if check_cdn_url_expiry(att.url) is True:
                 reason = f"Attachment expired: {att.file_name}"
                 if channel_result is not None:
@@ -2070,7 +2169,7 @@ async def _build_masquerade(
     session: aiohttp.ClientSession,
     state: MigrationState,
     config: FerryConfig,
-) -> dict[str, str | None]:
+) -> tuple[dict[str, str | None], bool]:
     """Build a Stoat masquerade dict for a message author.
 
     Uploads the author's avatar to Autumn if not already cached.  Avatar upload
@@ -2083,16 +2182,21 @@ async def _build_masquerade(
         config: Ferry run configuration.
 
     Returns:
-        Masquerade dict with ``name``, ``avatar`` (URL or None), and ``colour`` (or None).
+        Tuple of (masquerade dict with ``name``, ``avatar`` (URL or None), and
+        ``colour`` (or None), escaped) where escaped is True when the author's
+        local avatar url failed the export-root containment check.
     """
     name = truncate_name(author.nickname or author.name, author_id=author.id)
     avatar_url: str | None = None
+    escaped = False
 
     if author.id in state.avatar_cache:
         avatar_url = f"{state.autumn_url}/avatars/{state.avatar_cache[author.id]}"
     elif author.avatar_url and not author.avatar_url.startswith(("http://", "https://")):
-        local = config.export_dir / author.avatar_url
-        if local.exists():
+        local = contained_media_path(config.export_dir, author.avatar_url)
+        if local is None:
+            escaped = True
+        elif local.exists():
             try:
                 file_id = await upload_with_cache(
                     session,
@@ -2116,4 +2220,4 @@ async def _build_masquerade(
         result["avatar"] = avatar_url
     if colour is not None:
         result["colour"] = colour
-    return result
+    return result, escaped

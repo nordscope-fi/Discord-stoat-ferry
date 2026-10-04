@@ -1822,3 +1822,44 @@ async def test_a_thread_with_no_resolvable_parent_is_skipped_before_the_suppress
     assert [w for w in state.warnings if w.get("type") == "merge_parent_not_found"], (
         f"the pre-existing warning must still fire: {state.warnings}"
     )
+
+
+async def test_merge_route_masquerade_escape_warns_to_state(tmp_path: Path) -> None:
+    """Chunk 3 (#1024): the merged-thread masquerade route warns on escaped avatars."""
+    marker = tmp_path.parent / (tmp_path.name + "-marker.png")
+    marker.write_bytes(b"MARKER")
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+
+    author = DCEAuthor(id="u9", name="Esc", avatar_url=f"../{marker.name}")
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[_make_message("m1", "parent msg")],
+        message_count=1,
+    )
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "thread msg", author=author)],
+        message_count=1,
+    )
+
+    sent: list[dict[str, object]] = []
+
+    async def capture(
+        session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
+    ) -> dict[str, object]:
+        sent.append(kwargs)
+        return {"_id": f"stoat-{len(sent)}"}
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture):
+        await run_messages(config, state, [parent, thread], lambda e: None)
+
+    merged = [k for k in sent if "thread msg" in str(k.get("content") or "")]
+    assert merged, sent
+    assert (merged[0].get("masquerade") or {}).get("avatar") is None
+    assert [w for w in state.warnings if w.get("type") == "unsafe_media_path"]

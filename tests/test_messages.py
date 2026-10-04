@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -38,8 +39,6 @@ from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from discord_ferry.core.events import MigrationEvent
 
 BASE_URL = "https://stoat.test"
@@ -380,7 +379,7 @@ async def test_build_masquerade_uses_nickname_over_name(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(name="Alice", nickname="Ally")
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert result["name"] == "Ally"
 
 
@@ -390,7 +389,7 @@ async def test_build_masquerade_falls_back_to_name(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(name="Bob", nickname="")
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert result["name"] == "Bob"
 
 
@@ -400,7 +399,7 @@ async def test_build_masquerade_colour_passthrough(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(color="#ff0000")
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert result["colour"] == "#ff0000"
 
 
@@ -410,7 +409,7 @@ async def test_build_masquerade_no_colour_omitted(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(color=None)
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert "colour" not in result
 
 
@@ -420,7 +419,7 @@ async def test_build_masquerade_avatar_cache_hit(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(id="auth1")
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert result["avatar"] == f"{AUTUMN_URL}/avatars/cached_file_id"
 
 
@@ -438,7 +437,7 @@ async def test_build_masquerade_avatar_upload_and_cache(
     author = _make_author(id="auth1", avatar_url="avatar.png")
 
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
 
     assert result["avatar"] == f"{AUTUMN_URL}/avatars/new_avatar_id"
     assert state.avatar_cache["auth1"] == "new_avatar_id"
@@ -450,7 +449,7 @@ async def test_build_masquerade_missing_avatar_graceful(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(id="auth1", avatar_url="nonexistent_avatar.png")
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert "avatar" not in result
 
 
@@ -461,7 +460,7 @@ async def test_build_masquerade_truncates_long_name(tmp_path: Path) -> None:
     long_name = "a" * 50
     author = _make_author(id="auth1", name=long_name)
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert len(result["name"]) == 32
 
 
@@ -471,7 +470,7 @@ async def test_build_masquerade_http_avatar_skipped(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     author = _make_author(avatar_url="https://cdn.discord.com/avatars/user1/abc.png")
     async with aiohttp.ClientSession() as session:
-        result = await _build_masquerade(author, session, state, config)
+        result, _escaped = await _build_masquerade(author, session, state, config)
     assert "avatar" not in result
 
 
@@ -4270,3 +4269,213 @@ async def test_attachment_upload_passes_skip_cache(tmp_path: Path) -> None:
         assert call["kwargs"].get("skip_cache") is True, (
             f"upload_with_cache called without skip_cache=True: {call['kwargs']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Chunk 3 (#1022): containment warnings at the message-phase consumers
+# ---------------------------------------------------------------------------
+
+
+def _outside_marker(tmp_path: Path) -> Path:
+    marker = tmp_path.parent / (tmp_path.name + "-marker.png")
+    marker.write_bytes(b"MARKER")
+    return marker
+
+
+def _recording_uploads(uploads: list[tuple[str, Path]]) -> Any:
+    async def _upload(
+        session: Any,
+        autumn_url: Any,
+        tag: Any,
+        path: Any,
+        token: Any,
+        cache: Any,
+        delay: Any,
+        **kw: Any,
+    ) -> str:
+        uploads.append((tag, Path(path)))
+        return f"autumn-{len(uploads)}"
+
+    return _upload
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["parent", "absolute", "symlink"],
+)
+async def test_attachment_escape_warns_and_skips_upload(tmp_path: Path, variant: str) -> None:
+    marker = _outside_marker(tmp_path)
+    if variant == "parent":
+        url = f"../{marker.name}"
+    elif variant == "absolute":
+        url = str(marker)
+    else:
+        (tmp_path / "link-marker.png").symlink_to(marker)
+        url = "link-marker.png"
+    msg = _make_message(
+        id="m-esc-att",
+        attachments=[DCEAttachment(id="a1", file_name="x.png", url=url, file_size_bytes=10)],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert uploads == []
+    assert len(sent) == 1
+    unsafe = [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
+    assert len(unsafe) == 1
+    assert state.attachments_skipped == 1
+    assert state.failed_messages == []
+
+
+async def test_sticker_escape_warns_and_sends_text_fallback(tmp_path: Path) -> None:
+    marker = _outside_marker(tmp_path)
+    msg = _make_message(id="m-esc-stk", stickers=[{"name": "s", "sourceUrl": f"../{marker.name}"}])
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert uploads == []
+    assert "[Sticker: s]" in sent[0].get("content", "")
+    assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
+
+
+async def test_embed_escape_warns_and_migrates_without_media(tmp_path: Path) -> None:
+    marker = _outside_marker(tmp_path)
+    msg = _make_message(
+        id="m-esc-emb", embeds=[{"title": "T", "thumbnail": {"url": f"../{marker.name}"}}]
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert uploads == []
+    embeds = sent[0].get("embeds") or []
+    assert embeds and "media" not in embeds[0]
+    assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
+
+
+async def test_embed_mixed_escape_uploads_in_root_and_warns_once(tmp_path: Path) -> None:
+    marker = _outside_marker(tmp_path)
+    (tmp_path / "inside.png").write_bytes(b"x")
+    msg = _make_message(
+        id="m-mix-emb",
+        embeds=[
+            {
+                "title": "T",
+                "thumbnail": {"url": f"../{marker.name}"},
+                "image": {"url": "inside.png"},
+            }
+        ],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert [tag for tag, _ in uploads] == ["attachments"]
+    assert uploads[0][1] == (tmp_path / "inside.png").resolve()
+    assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
+    embeds = sent[0].get("embeds") or []
+    assert embeds and embeds[0].get("media")
+
+
+async def test_masquerade_escape_sends_without_avatar_and_warns(tmp_path: Path) -> None:
+    marker = _outside_marker(tmp_path)
+    msg = _make_message(id="m-esc-masq", author=_make_author(avatar_url=f"../{marker.name}"))
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert uploads == []
+    masquerade = sent[0].get("masquerade") or {}
+    assert masquerade.get("avatar") is None
+    assert masquerade.get("name")
+    assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
+
+
+async def test_build_masquerade_local_avatar_escape_returns_flag(tmp_path: Path) -> None:
+    _outside_marker(tmp_path)
+    author = _make_author(avatar_url="../x-marker.png")
+    config = _make_config(tmp_path)
+    state = _make_state()
+    uploads: list[tuple[str, Path]] = []
+    with patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)):
+        result, escaped = await _build_masquerade(author, None, state, config)
+    assert escaped is True
+    assert result.get("avatar") is None
+    assert uploads == []
+
+
+async def test_build_masquerade_local_avatar_in_root_not_escaped(tmp_path: Path) -> None:
+    (tmp_path / "av.png").write_bytes(b"x")
+    author = _make_author(avatar_url="av.png")
+    config = _make_config(tmp_path)
+    state = _make_state()
+    uploads: list[tuple[str, Path]] = []
+    with patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)):
+        result, escaped = await _build_masquerade(author, None, state, config)
+    assert escaped is False
+    assert result.get("avatar")
+    assert len(uploads) == 1
+
+
+async def test_second_pass_repeats_skip_warnings_without_failed_messages(tmp_path: Path) -> None:
+    marker = _outside_marker(tmp_path)
+    (tmp_path / "inside.png").write_bytes(b"x")
+    msg = _make_message(
+        id="m-cache",
+        attachments=[
+            DCEAttachment(id="a1", file_name="x.png", url=f"../{marker.name}", file_size_bytes=3)
+        ],
+    )
+    export = _make_export(messages=[msg])
+    config = _make_config(tmp_path)
+    state = _make_state()
+    sent: list[dict[str, Any]] = []
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)),
+        patch("discord_ferry.migrator.messages.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_messages(config, state, [export], lambda e: None)
+        await run_messages(config, state, [export], lambda e: None)
+
+    unsafe = [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
+    assert len(unsafe) == 2, "each pass repeats the skip warning"
+    assert uploads == [], "an escaped attachment never uploads on any pass"
+    assert state.failed_messages == []
