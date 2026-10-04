@@ -12,6 +12,7 @@ import aiohttp
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.migrator.api import get_session
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.parser.media_paths import contained_media_path, is_safe_filename_component
 from discord_ferry.state import save_state
 from discord_ferry.uploader.autumn import upload_with_cache
 
@@ -64,6 +65,8 @@ async def _download_remote_avatar(
         Tuple of (path to downloaded file or ``None``, failure reason or empty
         string on success).
     """
+    if not is_safe_filename_component(author_id):
+        return None, f"unsafe author id {author_id!r}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
@@ -86,6 +89,10 @@ async def _download_remote_avatar(
             avatar_dir = output_dir / "avatars"
             avatar_dir.mkdir(parents=True, exist_ok=True)
             dest = avatar_dir / f"{author_id}{ext}"
+            # Compare against the resolved output root so a symlinked avatars
+            # directory cannot redirect the write outside output_dir.
+            if not dest.resolve().is_relative_to(output_dir.resolve() / "avatars"):
+                return None, "avatar download destination escapes the avatars folder"
 
             data = await resp.read()
             dest.write_bytes(data)
@@ -187,10 +194,16 @@ async def run_avatars(
                         session, avatar_url, config.output_dir, author_id
                     )
                     if file_path is None:
+                        warn_type = (
+                            "unsafe_media_path"
+                            if fail_reason.startswith("unsafe author id")
+                            or fail_reason.startswith("avatar download destination")
+                            else "avatar_download_failed"
+                        )
                         state.warnings.append(
                             {
                                 "phase": "avatars",
-                                "type": "avatar_download_failed",
+                                "type": warn_type,
                                 "message": (
                                     f"Failed to download avatar for {author.name} ({fail_reason})"
                                 ),
@@ -200,7 +213,20 @@ async def run_avatars(
                         continue
                 else:
                     # Local path — resolve against export_dir.
-                    file_path = config.export_dir / avatar_url
+                    file_path = contained_media_path(config.export_dir, avatar_url)
+                    if file_path is None:
+                        state.warnings.append(
+                            {
+                                "phase": "avatars",
+                                "type": "unsafe_media_path",
+                                "message": (
+                                    f"Avatar path for {author.name} failed the export-root "
+                                    "containment check — skipped."
+                                ),
+                            }
+                        )
+                        failed += 1
+                        continue
                     if not file_path.exists():
                         state.warnings.append(
                             {

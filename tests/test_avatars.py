@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
+import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.migrator.avatars import run_avatars
+from discord_ferry.migrator.avatars import _download_remote_avatar, run_avatars
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
@@ -20,8 +22,6 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import MigrationState
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from discord_ferry.core.events import MigrationEvent
 
 BASE_URL = "https://stoat.test"
@@ -503,3 +503,156 @@ async def test_download_failure_includes_specific_reason(tmp_path: Path) -> None
     assert len(state.warnings) >= 1
     warning_msg = state.warnings[0]["message"]
     assert "HTTP 404" in warning_msg
+
+
+# ---------------------------------------------------------------------------
+# Chunk 4 (#1025): avatar-phase containment and downloader author-id policy
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    status = 200
+    headers = {"Content-Type": "image/png"}
+
+    async def read(self) -> bytes:
+        return b"PNG-DUMMY-BYTES"
+
+    async def __aenter__(self) -> _FakeResp:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeSession:
+    def get(self, url: object, timeout: object = None) -> _FakeResp:
+        return _FakeResp()
+
+
+class _FakeSessionCM:
+    async def __aenter__(self) -> _FakeSession:
+        return _FakeSession()
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+def _recording_uploads(uploads: list[tuple[str, Path]]) -> Any:
+    async def _upload(
+        session: Any,
+        autumn_url: Any,
+        tag: Any,
+        path: Any,
+        token: Any,
+        cache: Any,
+        delay: Any,
+        **kw: Any,
+    ) -> str:
+        uploads.append((tag, Path(path)))
+        return f"autumn-{len(uploads)}"
+
+    return _upload
+
+
+def _export_with_author(author: DCEAuthor) -> DCEExport:
+    return DCEExport(
+        guild=DCEGuild(id="g1", name="G"),
+        channel=DCEChannel(id="c1", type=0, name="general"),
+        messages=[_make_message("m1", author=author)],
+    )
+
+
+async def test_avatar_phase_local_escape_warns_and_skips(tmp_path: Path) -> None:
+    marker = tmp_path.parent / (tmp_path.name + "-marker.png")
+    marker.write_bytes(b"MARKER")
+    author = _make_author(avatar_url=f"../{marker.name}")
+    config = _make_config(tmp_path)
+    state = _make_state()
+    uploads: list[tuple[str, Path]] = []
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.avatars.upload_with_cache", _recording_uploads(uploads)):
+        await run_avatars(config, state, [_export_with_author(author)], events.append)
+
+    assert uploads == []
+    unsafe = [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
+    assert len(unsafe) == 1
+    assert unsafe[0].get("phase") == "avatars"
+    assert marker.read_bytes() == b"MARKER"
+    completed = [e for e in events if e.status == "completed"]
+    assert completed and "1 failed" in completed[0].message
+
+
+async def test_avatar_phase_in_folder_control_uploads(tmp_path: Path) -> None:
+    (tmp_path / "av.png").write_bytes(b"x")
+    author = _make_author(avatar_url="av.png")
+    config = _make_config(tmp_path)
+    state = _make_state()
+    uploads: list[tuple[str, Path]] = []
+    with patch("discord_ferry.migrator.avatars.upload_with_cache", _recording_uploads(uploads)):
+        await run_avatars(config, state, [_export_with_author(author)], lambda e: None)
+
+    assert [tag for tag, _ in uploads] == ["avatars"]
+    assert uploads[0][1] == (tmp_path / "av.png").resolve()
+    assert state.avatar_cache.get("user1")
+
+
+@pytest.mark.parametrize("author_id", ["../../outside-marker", "/abs/outside-marker"])
+async def test_downloader_rejects_unsafe_author_id(tmp_path: Path, author_id: str) -> None:
+    marker = tmp_path / "outside-marker.png"
+    marker.write_bytes(b"MARKER")
+    dest, reason = await _download_remote_avatar(
+        _FakeSession(), "https://cdn.invalid/a.png", tmp_path, author_id
+    )
+    assert dest is None
+    assert reason
+    assert marker.read_bytes() == b"MARKER"
+
+
+async def test_downloader_snowflake_destination_unchanged(tmp_path: Path) -> None:
+    dest, reason = await _download_remote_avatar(
+        _FakeSession(), "https://cdn.invalid/a.png", tmp_path, "1234567890"
+    )
+    assert reason == ""
+    assert dest == (tmp_path / "avatars" / "1234567890.png").resolve()
+    assert dest.read_bytes() == b"PNG-DUMMY-BYTES"
+
+
+async def test_avatar_phase_crafted_id_leaves_marker_untouched(tmp_path: Path) -> None:
+    marker = tmp_path / "output" / "outside-marker.png"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_bytes(b"MARKER")
+    (tmp_path / "safe.png").write_bytes(b"x")
+    crafted = _make_author(author_id="../../outside-marker", avatar_url="https://cdn.invalid/a.png")
+    safe = _make_author(author_id="555", name="Safe", avatar_url="https://cdn.invalid/b.png")
+    config = _make_config(tmp_path)
+    state = _make_state()
+    export = DCEExport(
+        guild=DCEGuild(id="g1", name="G"),
+        channel=DCEChannel(id="c1", type=0, name="general"),
+        messages=[_make_message("m1", author=crafted), _make_message("m2", author=safe)],
+    )
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.avatars.get_session", lambda _cfg: _FakeSessionCM()),
+        patch("discord_ferry.migrator.avatars.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_avatars(config, state, [export], lambda e: None)
+
+    assert marker.read_bytes() == b"MARKER"
+    unsafe = [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
+    assert len(unsafe) == 1
+    assert [tag for tag, _ in uploads] == ["avatars"], "the safe author still uploads"
+
+
+async def test_downloader_rejects_escaped_avatars_directory(tmp_path: Path) -> None:
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir(exist_ok=True)
+    output = tmp_path / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "avatars").symlink_to(outside, target_is_directory=True)
+    dest, reason = await _download_remote_avatar(
+        _FakeSession(), "https://cdn.invalid/a.png", output, "1234567890"
+    )
+    assert dest is None
+    assert reason
+    assert list(outside.iterdir()) == []
