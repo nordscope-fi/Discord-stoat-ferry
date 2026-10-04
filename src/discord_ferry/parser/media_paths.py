@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import re
 from pathlib import Path
 
@@ -16,10 +17,18 @@ def contained_media_path(root: Path, relative: str) -> Path | None:
         resolved_root = root.resolve()
         candidate = (resolved_root / relative).resolve()
     except (OSError, RuntimeError):
-        # pathlib raises RuntimeError, not OSError, on symlink loops.
+        # pathlib raises RuntimeError, not OSError, on symlink loops before 3.13.
         return None
     if not candidate.is_relative_to(resolved_root):
         return None
+    try:
+        candidate.stat()
+    except RuntimeError:
+        return None
+    except OSError as exc:
+        # 3.13 resolves symlink loops without raising; stat reports ELOOP.
+        if exc.errno == errno.ELOOP:
+            return None
     return candidate
 
 
