@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.2] - 2026-10-04
+
+### Fixed
+
+- **Sticker and embed media honour the export-root containment (chunk 2 of #955/#956).**
+  `flatten_embed` and `handle_stickers` drop local candidates that escape the export root and
+  report the escapes to their callers; all 46 unpack sites moved to the three-value returns.
+  Escaped sticker and embed media can no longer reach the upload boundary. The per-consumer
+  warnings arrive with chunk 3.
+
 ## [2.41.1] - 2026-10-04
 
 ### Changed
