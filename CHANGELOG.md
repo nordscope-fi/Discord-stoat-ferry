@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.4] - 2026-10-04
+
+### Fixed
+
+- **Avatar phase and downloader enforce containment (chunk 4 of #955/#956).** Local avatar paths
+  that escape the export root are skipped with an `unsafe_media_path` warning and counted as
+  failed, and the remote avatar downloader rejects author ids that are not safe filename
+  components before any request, plus a resolved-destination check against the output root so a
+  symlinked avatars directory cannot redirect writes. Cached authors short-circuit before both
+  checks, so resume behaviour is unchanged.
+
 ## [2.41.3] - 2026-10-04
 
 ### Fixed
