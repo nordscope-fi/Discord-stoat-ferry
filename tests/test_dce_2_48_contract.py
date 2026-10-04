@@ -148,12 +148,12 @@ def test_attachment_embed_and_sticker_behaviors_execute() -> None:
     raw_message = _raw_message()
     assert message.embeds == raw_message["embeds"]
     assert message.stickers == raw_message["stickers"]
-    flattened, media_path = flatten_embed(message.embeds[0])
+    flattened, media_path, _ = flatten_embed(message.embeds[0])
     assert media_path is None
     assert flattened["title"] == "Poll closed"
     assert flattened["colour"] == "#5865f2"
     assert "42 votes" in str(flattened["description"])
-    sticker_text, sticker_paths = handle_stickers(message.stickers)
+    sticker_text, sticker_paths, _ = handle_stickers(message.stickers)
     assert sticker_text == "\n[Sticker: Approved]"
     assert sticker_paths == []
 
@@ -190,7 +190,7 @@ def test_reaction_mention_reference_and_forward_parse() -> None:
     assert isinstance(raw_forward, dict)
     assert message.forwarded_message.embeds == raw_forward["embeds"]
     assert message.forwarded_message.stickers == raw_forward["stickers"]
-    forwarded_embed, _ = flatten_embed(message.forwarded_message.embeds[0])
+    forwarded_embed, _, _ = flatten_embed(message.forwarded_message.embeds[0])
     assert forwarded_embed["title"] == "Forwarded embed"
 
 

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry
+from discord_ferry.parser.media_paths import contained_media_path
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,7 @@ def _flush_inline_row(row: list[tuple[str, str]], parts: list[str]) -> None:
 def flatten_embed(
     embed: dict[str, object],
     export_dir: Path | None = None,
-) -> tuple[dict[str, object], Path | None]:
+) -> tuple[dict[str, object], Path | None, bool]:
     """Convert a Discord embed dict to a Stoat-compatible SendableEmbed dict.
 
     Stoat supports title, description, url, icon_url, colour, and media.
@@ -182,8 +183,10 @@ def flatten_embed(
         export_dir: Root export directory for resolving local media paths.
 
     Returns:
-        Tuple of (embed dict, local media path or None). The media path is set
-        when a thumbnail or image has a local file (downloaded via ``--media``).
+        Tuple of (embed dict, local media path or None, escaped). The media path
+        is set when a thumbnail or image has a local file (downloaded via
+        ``--media``). escaped is True when any local media url failed the
+        export-root containment check.
     """
     parts: list[str] = []
 
@@ -266,16 +269,22 @@ def flatten_embed(
 
     # Extract media path from thumbnail or image (local files from --media export).
     media_path: Path | None = None
+    escaped_media = False
     if export_dir is not None:
         for media_key in ("thumbnail", "image"):
             media_obj = embed.get(media_key)
             if isinstance(media_obj, dict):
                 media_url = media_obj.get("url", "")
-                if isinstance(media_url, str) and not media_url.startswith(("http://", "https://")):
-                    candidate = export_dir / media_url
-                    if candidate.exists():
+                if (
+                    isinstance(media_url, str)
+                    and media_url
+                    and not media_url.startswith(("http://", "https://"))
+                ):
+                    candidate = contained_media_path(export_dir, media_url)
+                    if candidate is None:
+                        escaped_media = True
+                    elif media_path is None and candidate.exists():
                         media_path = candidate
-                        break
 
     # Check remote Discord CDN URLs for expiry (only if no local file was found).
     if media_path is None:
@@ -292,7 +301,7 @@ def flatten_embed(
                     logger.warning("Expired embed media URL stripped: %s", media_url)
                     break  # Don't set media_path — expired URL stripped
 
-    return result, media_path
+    return result, media_path, escaped_media
 
 
 def format_original_timestamp(iso_timestamp: str) -> str:
@@ -317,7 +326,7 @@ def format_original_timestamp(iso_timestamp: str) -> str:
 def handle_stickers(
     stickers: list[dict[str, str]],
     export_dir: Path | None = None,
-) -> tuple[str, list[Path]]:
+) -> tuple[str, list[Path], list[str]]:
     """Build a string representation of Discord stickers and collect local image paths.
 
     Args:
@@ -326,10 +335,13 @@ def handle_stickers(
         export_dir: Root export directory for resolving local sticker images.
 
     Returns:
-        Tuple of (text fallback, list of local image paths to upload as attachments).
+        Tuple of (text fallback, list of local image paths to upload as
+        attachments, list of sticker names whose sourceUrl failed the
+        export-root containment check).
     """
     text_parts: list[str] = []
     image_paths: list[Path] = []
+    escaped_names: list[str] = []
     for sticker in stickers:
         name = sticker.get("name") or "unknown"
         text_parts.append(f"\n[Sticker: {name}]")
@@ -338,11 +350,13 @@ def handle_stickers(
         if export_dir is not None:
             source_url = sticker.get("sourceUrl", "")
             if source_url and not source_url.startswith(("http://", "https://")):
-                local = export_dir / source_url
-                if local.exists():
+                local = contained_media_path(export_dir, source_url)
+                if local is None:
+                    escaped_names.append(str(sticker.get("name") or source_url))
+                elif local.exists():
                     image_paths.append(local)
 
-    return "".join(text_parts), image_paths
+    return "".join(text_parts), image_paths, escaped_names
 
 
 def strip_underline(content: str) -> str:

@@ -1322,7 +1322,7 @@ async def _process_message(
     )
 
     # Step 1b: Upload sticker images as additional attachments.
-    _, sticker_paths = handle_stickers(msg.stickers, config.export_dir)
+    _, sticker_paths, _escaped_stickers = handle_stickers(msg.stickers, config.export_dir)
     for sticker_path in sticker_paths:
         if len(autumn_ids) >= 5:
             break
@@ -1367,7 +1367,7 @@ async def _process_message(
     stoat_embeds: list[dict[str, Any]] = []
     embed_media_ids: list[str] = []
     for raw_embed in msg.embeds[:5]:
-        flat, embed_media_path = flatten_embed(raw_embed, config.export_dir)
+        flat, embed_media_path, _embed_escaped = flatten_embed(raw_embed, config.export_dir)
         if flat.get("description") or flat.get("title"):
             # Upload embed media (thumbnail/image) if a local file is available.
             if embed_media_path is not None:
@@ -1911,7 +1911,7 @@ def _build_content(msg: DCEMessage, state: MigrationState) -> str:
         content += _EDITED_MARKER
 
     # Append sticker representations (text only — images uploaded separately).
-    sticker_text, _ = handle_stickers(msg.stickers)
+    sticker_text, _, _ = handle_stickers(msg.stickers)
     content += sticker_text
 
     return content
