@@ -587,3 +587,29 @@ async def test_dry_run_lists_an_outstanding_resume_record(tmp_path: Path) -> Non
     row = next(r for r in outcome.recreated_emoji if r["discord_id"] == EMOJI_ID)
     assert row["new_id"] == NEW_ID
     assert row["messages_rewritten"] == 1  # would finish the stranded message
+
+
+async def test_repair_skips_escaped_emoji_image(tmp_path: Path) -> None:
+    """Chunk 5 (#1029): an escaped repair image_url skips recreation with a warning."""
+    marker = tmp_path.parent / (tmp_path.name + "-marker.png")
+    marker.write_bytes(b"MARKER")
+    emoji = DCEEmoji(id=EMOJI_ID, name="smile", image_url=f"../{marker.name}")
+    msg = DCEMessage(
+        id="m1",
+        type="Default",
+        timestamp="2024-01-01T00:00:00Z",
+        content="hi <:smile:123>",
+        author=DCEAuthor(id="u", name="U"),
+        reactions=[DCEReaction(emoji=emoji, count=1)],
+    )
+    config = _config(tmp_path)
+    state = _state()
+    upload = AsyncMock(return_value=(NEW_ID, "smile"))
+    with patch(_CHECK, return_value=_missing_report()), patch(_UPLOAD, upload):
+        outcome = await run_repair(config, state, [_export([msg])], lambda e: None)
+
+    upload.assert_not_awaited()
+    assert outcome.recreated_emoji == []
+    warnings = [w for w in state.warnings if w.get("type") == "emoji_missing_media"]
+    assert len(warnings) == 1
+    assert marker.read_bytes() == b"MARKER"
