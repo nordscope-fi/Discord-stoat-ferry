@@ -83,6 +83,7 @@ from discord_ferry.migrator.structure import (
     run_server,
 )
 from discord_ferry.parser.dce_parser import parse_export_directory, stream_messages, validate_export
+from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCEExport, DCEMessage
 from discord_ferry.reporter import generate_markdown_report, generate_report
 from discord_ferry.review import (
@@ -2311,8 +2312,8 @@ async def _run_emoji_repair_pass(
             on_event(MigrationEvent(phase="repair", status="warning", message=message))
             continue
 
-        file_path = config.export_dir / record["image_url"]
-        if not file_path.exists():
+        file_path = contained_media_path(config.export_dir, record["image_url"])
+        if file_path is None or not file_path.exists():
             message = f"Cannot recreate emoji :{record['name']}: — image file not found."
             state.warnings.append(
                 {"phase": "repair", "type": "emoji_missing_media", "message": message}

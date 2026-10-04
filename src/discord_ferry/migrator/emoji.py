@@ -12,6 +12,7 @@ from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_create_emoji, get_session
 from discord_ferry.migrator.sanitize import sanitize_emoji_name
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCEEmoji
 from discord_ferry.uploader.autumn import upload_with_cache
 
@@ -413,9 +414,8 @@ async def run_emoji(
                 )
                 continue
 
-            export_root = config.export_dir.resolve()
-            file_path: Path = (export_root / image_url).resolve()
-            if not file_path.is_relative_to(export_root):
+            file_path = contained_media_path(config.export_dir, image_url)
+            if file_path is None:
                 reason = "path outside export directory"
                 state.warnings.append(
                     {
