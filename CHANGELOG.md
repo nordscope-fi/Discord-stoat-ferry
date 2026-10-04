@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.41.1] - 2026-10-04
 
 ### Changed
 
@@ -23,6 +23,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   gives the fake primary checkout its own skills, and leaves one link missing so the installer
   has work it must not write through. Removing the installer's linked-host skip now fails the
   test. CI skips this test, so the failure only showed locally.
+
+- **Export-supplied local media paths now validate against the export root (chunk 1 of
+  #955/#956).** The new `discord_ferry.parser.media_paths` module resolves the root and the
+  candidate, rejects absolute strings and symlink escapes, including symlink loops where pathlib
+  raises RuntimeError, and returns the contained path or None. No consumer adopts it yet in this
+  chunk; chunks 2 to 5 switch the seven join sites.
+
+- **The brainstorm evidence guard reads Qwen hook payloads.** Qwen's PostToolUse carries the tool
+  result under `llmContent` and `returnDisplay` while the guard read only snake_case keys, so
+  source receipts on this host hashed empty text and no recommendation could quote a line. The
+  two keys append after the existing six, leaving Claude and Codex behaviour unchanged, with a
+  regression test that feeds a Qwen-shaped payload.
 
 ## [2.41.0] - 2026-09-04
 
