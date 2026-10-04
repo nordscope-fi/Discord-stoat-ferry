@@ -214,7 +214,7 @@ def test_flatten_embed_full() -> None:
         ],
         "footer": {"text": "Footer text"},
     }
-    result, media_path = flatten_embed(embed)
+    result, media_path, _ = flatten_embed(embed)
 
     assert result["title"] == "My Title"
     assert result["url"] == "https://example.com"
@@ -236,7 +236,7 @@ def test_flatten_embed_full() -> None:
 
 def test_flatten_embed_color_to_colour() -> None:
     embed: dict[str, object] = {"color": 255}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert "colour" in result
     assert result["colour"] == 255
     assert "color" not in result
@@ -244,7 +244,7 @@ def test_flatten_embed_color_to_colour() -> None:
 
 def test_flatten_embed_minimal() -> None:
     embed: dict[str, object] = {"title": "Only Title"}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert result["title"] == "Only Title"
     # description should be absent or empty when there's no content to flatten
     assert result.get("description") is None or result.get("description") == ""
@@ -252,7 +252,7 @@ def test_flatten_embed_minimal() -> None:
 
 def test_flatten_embed_empty() -> None:
     embed: dict[str, object] = {}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     # No keys with None values
     for v in result.values():
         assert v is not None
@@ -260,7 +260,7 @@ def test_flatten_embed_empty() -> None:
 
 def test_flatten_embed_no_author_icon() -> None:
     embed: dict[str, object] = {"author": {"name": "Just Name"}}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert "icon_url" not in result or result["icon_url"] is None
 
 
@@ -271,7 +271,7 @@ def test_flatten_embed_fields_order() -> None:
         "fields": [{"name": "F1", "value": "V1"}],
         "footer": {"text": "Foot"},
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     # Author before description before fields before footer
     assert desc.index("**Auth**") < desc.index("Desc")
@@ -287,7 +287,7 @@ def test_flatten_embed_with_local_thumbnail(tmp_path: Path) -> None:
         "title": "With Thumb",
         "thumbnail": {"url": "thumb.png"},
     }
-    result, media_path = flatten_embed(embed, export_dir=tmp_path)
+    result, media_path, _ = flatten_embed(embed, export_dir=tmp_path)
     assert result["title"] == "With Thumb"
     assert media_path == thumb_file
 
@@ -298,7 +298,7 @@ def test_flatten_embed_with_remote_thumbnail() -> None:
         "title": "Remote",
         "thumbnail": {"url": "https://cdn.discord.com/thumb.png"},
     }
-    result, media_path = flatten_embed(embed, export_dir=Path("/tmp"))
+    result, media_path, _ = flatten_embed(embed, export_dir=Path("/tmp"))
     assert media_path is None
 
 
@@ -310,7 +310,7 @@ def test_flatten_embed_with_remote_thumbnail() -> None:
 def test_flatten_embed_empty_title_stripped() -> None:
     """An embed with an empty-string title produces no 'title' key (S1)."""
     embed: dict[str, object] = {"title": "", "description": "text"}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert "title" not in result
     assert result["description"] == "text"
 
@@ -318,14 +318,14 @@ def test_flatten_embed_empty_title_stripped() -> None:
 def test_flatten_embed_whitespace_title_stripped() -> None:
     """An embed with whitespace-only title produces no 'title' key (S1)."""
     embed: dict[str, object] = {"title": "   ", "description": "text"}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert "title" not in result
 
 
 def test_flatten_embed_valid_title_kept() -> None:
     """A non-empty title is kept unchanged (S1 regression guard)."""
     embed: dict[str, object] = {"title": "Valid Title"}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert result["title"] == "Valid Title"
 
 
@@ -333,7 +333,7 @@ def test_flatten_embed_long_description_truncated() -> None:
     """A description over 2000 chars is truncated to 1994 + ' [...]' (S2)."""
     long_text = "A" * 3000
     embed: dict[str, object] = {"description": long_text}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = result["description"]
     assert isinstance(desc, str)
     assert len(desc) == 2000
@@ -345,7 +345,7 @@ def test_flatten_embed_exact_2000_description_unchanged() -> None:
     """A description of exactly 2000 chars is not truncated (S2)."""
     text = "B" * 2000
     embed: dict[str, object] = {"description": text}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert result["description"] == text
 
 
@@ -353,7 +353,7 @@ def test_flatten_embed_short_description_unchanged() -> None:
     """A description under 2000 chars is unchanged (S2)."""
     text = "C" * 500
     embed: dict[str, object] = {"description": text}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert result["description"] == text
 
 
@@ -361,7 +361,7 @@ def test_flatten_embed_long_title_truncated() -> None:
     """A title over 100 chars is truncated to 97 + '...' (S4)."""
     long_title = "T" * 150
     embed: dict[str, object] = {"title": long_title}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     title = result["title"]
     assert isinstance(title, str)
     assert len(title) == 100
@@ -373,7 +373,7 @@ def test_flatten_embed_exact_100_title_unchanged() -> None:
     """A title of exactly 100 chars is not truncated (S4)."""
     title = "U" * 100
     embed: dict[str, object] = {"title": title}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert result["title"] == title
 
 
@@ -381,7 +381,7 @@ def test_flatten_embed_short_title_unchanged() -> None:
     """A title under 100 chars is unchanged (S4)."""
     title = "V" * 50
     embed: dict[str, object] = {"title": title}
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     assert result["title"] == title
 
 
@@ -394,7 +394,7 @@ def test_all_inline_fields_in_rows() -> None:
             {"name": "ATK", "value": "25", "isInline": True},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "**HP** | **MP** | **ATK**" in desc
     assert "100 | 50 | 25" in desc
@@ -414,7 +414,7 @@ def test_embed_field_inline_grouping_uses_dce_key() -> None:
             {"name": "B", "value": "2", "isInline": True},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     # If the parser reads the wrong key, both fields collapse to non-inline blocks
     # (`**A**\n1\n\n**B**\n2`), and `**A** | **B**` is absent.
@@ -429,7 +429,7 @@ def test_non_inline_field_own_line() -> None:
             {"name": "Description", "value": "Long text", "isInline": False},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "**Description**\nLong text" in desc
     assert "|" not in desc
@@ -446,7 +446,7 @@ def test_mixed_inline_breaks_rows() -> None:
             {"name": "E", "value": "5", "isInline": True},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     # First inline row: A | B
     assert "**A** | **B**" in desc
@@ -470,7 +470,7 @@ def test_max_three_inline_per_row() -> None:
             {"name": "F", "value": "6", "isInline": True},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "**A** | **B** | **C**" in desc
     assert "1 | 2 | 3" in desc
@@ -486,7 +486,7 @@ def test_empty_field_skipped() -> None:
             {"name": "Visible", "value": "Yes"},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "**Visible**" in desc
     # Only one field section in the description
@@ -500,7 +500,7 @@ def test_field_name_only_no_value() -> None:
             {"name": "Score", "value": ""},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "**Score**" in desc
     assert desc.strip() == "**Score**"
@@ -513,7 +513,7 @@ def test_no_inline_key_defaults_to_block() -> None:
             {"name": "Key", "value": "Val"},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "**Key**\nVal" in desc
     assert "|" not in desc
@@ -527,7 +527,7 @@ def test_unicode_field_names_preserved() -> None:
             {"name": "\u2694\ufe0f Attack", "value": "\u2b50 50", "isInline": True},
         ],
     }
-    result, _ = flatten_embed(embed)
+    result, _, _ = flatten_embed(embed)
     desc = str(result["description"])
     assert "\u2764\ufe0f Health" in desc
     assert "\u2694\ufe0f Attack" in desc
@@ -565,27 +565,27 @@ def test_format_timestamp_with_microseconds() -> None:
 
 def test_handle_stickers_single() -> None:
     stickers = [{"name": "wave"}]
-    text, paths = handle_stickers(stickers)
+    text, paths, _ = handle_stickers(stickers)
     assert "[Sticker: wave]" in text
     assert paths == []
 
 
 def test_handle_stickers_multiple() -> None:
     stickers = [{"name": "wave"}, {"name": "tada"}]
-    text, _ = handle_stickers(stickers)
+    text, _, _ = handle_stickers(stickers)
     assert "[Sticker: wave]" in text
     assert "[Sticker: tada]" in text
 
 
 def test_handle_stickers_empty() -> None:
-    text, paths = handle_stickers([])
+    text, paths, _ = handle_stickers([])
     assert text == ""
     assert paths == []
 
 
 def test_handle_stickers_no_name() -> None:
     stickers: list[dict[str, str]] = [{}]
-    text, _ = handle_stickers(stickers)
+    text, _, _ = handle_stickers(stickers)
     assert "[Sticker: unknown]" in text
 
 
@@ -594,7 +594,7 @@ def test_handle_stickers_with_local_image(tmp_path: Path) -> None:
     sticker_file = tmp_path / "sticker.png"
     sticker_file.write_bytes(b"PNG")
     stickers = [{"name": "wave", "sourceUrl": "sticker.png"}]
-    text, paths = handle_stickers(stickers, export_dir=tmp_path)
+    text, paths, _ = handle_stickers(stickers, export_dir=tmp_path)
     assert "[Sticker: wave]" in text
     assert paths == [sticker_file]
 
@@ -602,7 +602,7 @@ def test_handle_stickers_with_local_image(tmp_path: Path) -> None:
 def test_handle_stickers_remote_url_no_path() -> None:
     """Sticker with a remote sourceUrl returns no image path."""
     stickers = [{"name": "wave", "sourceUrl": "https://cdn.discord.com/sticker.png"}]
-    text, paths = handle_stickers(stickers, export_dir=Path("/tmp"))
+    text, paths, _ = handle_stickers(stickers, export_dir=Path("/tmp"))
     assert "[Sticker: wave]" in text
     assert paths == []
 
@@ -671,7 +671,7 @@ def test_expired_cdn_embed_media_stripped() -> None:
         "title": "Post",
         "thumbnail": {"url": "https://cdn.discordapp.com/img.png?ex=60000000"},
     }
-    result, media_path = flatten_embed(embed)
+    result, media_path, _ = flatten_embed(embed)
     assert media_path is None
 
 
@@ -680,7 +680,7 @@ def test_valid_cdn_embed_url_not_stripped() -> None:
     embed: dict[str, object] = {
         "image": {"url": "https://cdn.discordapp.com/img.png?ex=ffffffff"},
     }
-    result, media_path = flatten_embed(embed)
+    result, media_path, _ = flatten_embed(embed)
     assert media_path is None  # Still None — it's remote
 
 
@@ -689,7 +689,7 @@ def test_non_discord_embed_url_untouched() -> None:
     embed: dict[str, object] = {
         "thumbnail": {"url": "https://example.com/img.png"},
     }
-    result, media_path = flatten_embed(embed)
+    result, media_path, _ = flatten_embed(embed)
     assert media_path is None
 
 
@@ -699,7 +699,7 @@ def test_local_media_path_still_works(tmp_path: Path) -> None:
     local.parent.mkdir(parents=True, exist_ok=True)
     local.write_bytes(b"PNG")
     embed: dict[str, object] = {"image": {"url": "media/img.png"}}
-    result, media_path = flatten_embed(embed, export_dir=tmp_path)
+    result, media_path, _ = flatten_embed(embed, export_dir=tmp_path)
     assert media_path == local
 
 
@@ -708,7 +708,7 @@ def test_unknown_cdn_format_preserved() -> None:
     embed: dict[str, object] = {
         "thumbnail": {"url": "https://cdn.discordapp.com/img.png"},
     }
-    result, media_path = flatten_embed(embed)
+    result, media_path, _ = flatten_embed(embed)
     assert media_path is None  # Remote, but no expiry warning
 
 
@@ -717,7 +717,7 @@ def test_media_discordapp_net_checked() -> None:
     embed: dict[str, object] = {
         "image": {"url": "https://media.discordapp.net/img.png?ex=60000000"},
     }
-    result, media_path = flatten_embed(embed)
+    result, media_path, _ = flatten_embed(embed)
     assert media_path is None  # Expired, stripped
 
 
@@ -895,7 +895,7 @@ def test_media_discordapp_net_is_consulted_for_expiry(tmp_path: Path) -> None:
     with patch(
         "discord_ferry.parser.transforms.check_cdn_url_expiry", return_value=True
     ) as checked:
-        _result, media_path = flatten_embed({"image": {"url": url}}, export_dir=tmp_path)
+        _result, media_path, _ = flatten_embed({"image": {"url": url}}, export_dir=tmp_path)
 
     checked.assert_called_once_with(url)
     assert media_path is None, "an expired URL must not be offered as usable media"
@@ -920,9 +920,66 @@ def test_local_embed_media_resolves_whatever_the_dce_hash_spelling(tmp_path: Pat
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        _result, media_path = flatten_embed({"image": {"url": rel}}, export_dir=tmp_path)
+        _result, media_path, _ = flatten_embed({"image": {"url": rel}}, export_dir=tmp_path)
 
         assert media_path == target, (
             f"a DCE asset named with the {hash_form!r} hash form did not resolve; "
             "Ferry must read the path from the JSON rather than matching the name"
         )
+
+
+def test_flatten_embed_drops_escaped_media_and_reports(tmp_path: Path) -> None:
+    marker = tmp_path.parent / (tmp_path.name + "-marker.png")
+    marker.write_bytes(b"M")
+    (tmp_path / "inside.png").write_bytes(b"x")
+    (tmp_path / "link-marker.png").symlink_to(marker)
+    embed = {
+        "title": "t",
+        "thumbnail": {"url": "link-marker.png"},
+        "image": {"url": "inside.png"},
+    }
+    flat, media_path, escaped = flatten_embed(embed, tmp_path)
+    assert escaped is True
+    assert media_path == (tmp_path / "inside.png").resolve()
+    assert "media" not in flat
+
+
+def test_flatten_embed_empty_media_url_is_absent(tmp_path: Path) -> None:
+    flat, media_path, escaped = flatten_embed({"title": "t", "thumbnail": {"url": ""}}, tmp_path)
+    assert media_path is None
+    assert escaped is False
+    assert flat["title"] == "t"
+
+
+def test_handle_stickers_reports_escaped_names(tmp_path: Path) -> None:
+    (tmp_path / "s.png").write_bytes(b"x")
+    stickers = [
+        {"name": "ok", "sourceUrl": "s.png"},
+        {"name": "bad", "sourceUrl": "../../s.png"},
+    ]
+    text, paths, escaped_names = handle_stickers(stickers, tmp_path)
+    assert paths == [(tmp_path / "s.png").resolve()]
+    assert escaped_names == ["bad"]
+    assert "[Sticker: ok]" in text
+    assert "[Sticker: bad]" in text
+
+
+def test_handle_stickers_nameless_escape_reports_source_url(tmp_path: Path) -> None:
+    _, _, escaped_names = handle_stickers([{"sourceUrl": "../../x.png"}], tmp_path)
+    assert escaped_names == ["../../x.png"]
+
+
+def test_flatten_embed_safe_then_escaped_reports_escape(tmp_path: Path) -> None:
+    marker = tmp_path.parent / (tmp_path.name + "-marker2.png")
+    marker.write_bytes(b"M")
+    (tmp_path / "inside.png").write_bytes(b"x")
+    (tmp_path / "link-marker.png").symlink_to(marker)
+    embed = {
+        "title": "t",
+        "thumbnail": {"url": "inside.png"},
+        "image": {"url": "link-marker.png"},
+    }
+    flat, media_path, escaped = flatten_embed(embed, tmp_path)
+    assert escaped is True
+    assert media_path == (tmp_path / "inside.png").resolve()
+    assert flat["title"] == "t"
