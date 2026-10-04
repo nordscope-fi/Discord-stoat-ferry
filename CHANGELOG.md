@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.5] - 2026-10-04
+
+### Fixed
+
+- **Repair and emoji routes enforce containment (chunk 5 of #955/#956).** The repair emoji join
+  uses the shared containment helper, so an escaped `image_url` skips recreation with the
+  existing `emoji_missing_media` warning instead of uploading the outside file. The emoji route
+  swaps its inline resolve-and-check block for the helper, which additionally rejects
+  absolute-inside-root paths and survives symlink loops that previously crashed the phase.
+  `tests/test_emoji.py` is unchanged and green as the refactor guard.
+
 ## [2.41.4] - 2026-10-04
 
 ### Fixed
