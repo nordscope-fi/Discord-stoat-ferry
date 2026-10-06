@@ -48,6 +48,7 @@ from discord_ferry.migrator.api import (
     api_search_pinned_messages,
     api_send_message,
     api_set_role_permissions,
+    api_set_server_default_permissions,
     api_upsert_categories,
     get_session,
     init_request_semaphore,
@@ -70,6 +71,7 @@ from discord_ferry.migrator.messages import (
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.structure import (
+    FERRY_MIN_PERMISSIONS,
     _generate_category_id,
     _role_from_metadata,
     _stoat_channel_type,
@@ -2586,8 +2588,10 @@ async def run_repair(
 
     if structure_work:
         # Only when something is actually being recreated. A repair with nothing
-        # to create should not spend a request on the /servers bucket, and a
-        # test asserts that.
+        # to create should not spend a request on the /servers bucket for
+        # recreation work, and a test asserts that. The #957 convergence check
+        # below is the one deliberate exception: it spends a single GET on every
+        # non-dry repair so pre-fix servers are detected even when complete.
         own_session = session is None
         sess = session or new_session()
         try:
@@ -2757,6 +2761,93 @@ async def run_repair(
         finally:
             if own_session:
                 await sess.close()
+
+    # Convergence check for the pre-fix server-default floor (#957). Runs on
+    # every non-dry repair, including structure-free ones: one GET on the
+    # /servers bucket is the price of detecting a shared-default overgrant on
+    # servers that are otherwise complete.
+    if state.stoat_server_id and not config.dry_run:
+        own_conv_session = session is None
+        conv_sess = session or new_session()
+        try:
+            convergence_metadata = load_discord_metadata(config.output_dir)
+            server_doc = await api_fetch_server(
+                conv_sess, config.stoat_url, config.token, state.stoat_server_id
+            )
+            raw_default = server_doc.get("default_permissions")
+            stored = raw_default if isinstance(raw_default, int) else None
+            mask = (
+                convergence_metadata.server_default_permissions
+                if convergence_metadata is not None
+                else 0
+            )
+            floor = FERRY_MIN_PERMISSIONS
+            if stored is None:
+                state.warnings.append(
+                    {
+                        "phase": "repair",
+                        "type": "server_default_check_failed",
+                        "message": "Server default permissions missing or not an integer.",
+                    }
+                )
+            elif stored == mask:
+                pass
+            elif mask and stored == mask | floor:
+                await api_set_server_default_permissions(
+                    conv_sess,
+                    config.stoat_url,
+                    config.token,
+                    state.stoat_server_id,
+                    permissions=mask,
+                )
+                await asyncio.sleep(config.upload_delay)
+                state.warnings.append(
+                    {
+                        "phase": "repair",
+                        "type": "server_default_reset",
+                        "message": (
+                            f"Removed the migration floor from server "
+                            f"{state.stoat_server_id} default permissions (#957)."
+                        ),
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="repair",
+                        status="warning",
+                        message="Server default permissions converged (#957).",
+                    )
+                )
+            elif stored & floor == floor:
+                state.warnings.append(
+                    {
+                        "phase": "repair",
+                        "type": "server_default_manual",
+                        "message": (
+                            f"Server {state.stoat_server_id} default permissions still "
+                            "carry the migration floor but differ from the recorded "
+                            "mask; review and edit them in Stoat server settings."
+                        ),
+                    }
+                )
+                on_event(
+                    MigrationEvent(
+                        phase="repair",
+                        status="warning",
+                        message="Server default permissions need manual review (#957).",
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            state.warnings.append(
+                {
+                    "phase": "repair",
+                    "type": "server_default_check_failed",
+                    "message": f"Server default convergence check failed: {exc}",
+                }
+            )
+        finally:
+            if own_conv_session:
+                await conv_sess.close()
 
     # Forum-index repair (#311). Its own session block, like every other work list:
     # run_repair opens a session per non-empty list, and _live_server_view is fetched

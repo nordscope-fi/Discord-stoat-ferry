@@ -25,6 +25,7 @@ from discord_ferry.core.engine import (
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import CheckError, DuplicateSendError, MigrationError
 from discord_ferry.migrator import messages as messages_module
+from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
 from discord_ferry.migrator.verify import CheckReport, RepairOutcome
 from discord_ferry.parser.models import (
     DCEAuthor,
@@ -2832,7 +2833,15 @@ async def test_repair_runs_the_check_when_the_state_was_never_rolled_back(
         seen["called"] = True
         return CheckReport()
 
-    with patch("discord_ferry.migrator.verify.run_check", new=_fake_check):
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        aioresponses() as m,
+    ):
+        m.get(
+            f"{BASE_URL}/servers/{R_SERVER}",
+            payload={"id": R_SERVER, "default_permissions": 0},
+            repeat=True,
+        )
         await run_repair(config, state, [], events.append)
 
     assert seen.get("called"), "repair refused a state that was never rolled back"
@@ -2846,7 +2855,15 @@ async def test_run_repair_returns_a_repair_outcome(tmp_path: Path) -> None:
     async def _fake_check(*_a: Any, **_k: Any) -> Any:
         return CheckReport()
 
-    with patch("discord_ferry.migrator.verify.run_check", new=_fake_check):
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        aioresponses() as m,
+    ):
+        m.get(
+            f"{BASE_URL}/servers/{R_SERVER}",
+            payload={"id": R_SERVER, "default_permissions": 0},
+            repeat=True,
+        )
         outcome = await run_repair(config, state, [], lambda _e: None)
 
     assert isinstance(outcome, RepairOutcome)
@@ -3063,6 +3080,13 @@ async def _repair_with_report(
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         aioresponses() as m,
     ):
+        # The #957 convergence check spends one GET on every non-dry repair;
+        # a stored default of 0 with no metadata makes it a no-op.
+        m.get(
+            f"{BASE_URL}/servers/{R_SERVER}",
+            payload={"id": R_SERVER, "default_permissions": 0},
+            repeat=True,
+        )
         await run_repair(config, state, [], events.append)
         requests = list(m.requests)
     return state, requests, events
@@ -3086,7 +3110,10 @@ async def test_repair_never_acts_on_an_unverifiable_result(tmp_path: Path, kind:
     sent something and then failed.
     """
     _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, "unverifiable"))
-    assert requests == [], f"repair acted on an unverifiable {kind}"
+    assert len(requests) == 1, f"repair sent more than the convergence GET: {requests}"
+    assert [r for r in requests if "include_channels" in str(r[1])] == [], (
+        f"repair acted on an unverifiable {kind}"
+    )
     assert _partition_counts(events) == (0, 0), f"an unverifiable {kind} entered the work lists"
 
 
@@ -3098,7 +3125,10 @@ async def test_repair_never_acts_on_a_warn_result(tmp_path: Path, kind: str) -> 
     overruled, which is why warn is excluded and fail is not.
     """
     _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, "warn"))
-    assert requests == [], f"repair acted on a warn: {kind}"
+    assert len(requests) == 1, f"repair sent more than the convergence GET: {requests}"
+    assert [r for r in requests if "include_channels" in str(r[1])] == [], (
+        f"repair acted on a warn: {kind}"
+    )
     assert _partition_counts(events) == (0, 0), f"a warn {kind} entered the work lists"
 
 
@@ -3116,7 +3146,10 @@ async def test_repair_never_acts_on_a_non_actionable_tail_kind(tmp_path: Path, k
     """Only tail_absent and tail_and_after_absent are repairable tails."""
     status = "fail" if kind == "channel_empty" else "ok"
     _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, status))
-    assert requests == [], f"repair acted on a non-actionable tail kind: {kind}"
+    assert len(requests) == 1, f"repair sent more than the convergence GET: {requests}"
+    assert [r for r in requests if "include_channels" in str(r[1])] == [], (
+        f"repair acted on a non-actionable tail kind: {kind}"
+    )
     assert _partition_counts(events) == (0, 0), f"{kind} entered the work lists"
 
 
@@ -3431,7 +3464,10 @@ async def test_the_collision_set_skips_an_entry_it_cannot_read(tmp_path: Path) -
 
 
 async def test_repair_fetches_the_collision_set_only_when_recreating(tmp_path: Path) -> None:
-    """No structure work, no request on the /servers bucket.
+    """No structure work, no recreation request on the /servers bucket.
+
+    The #957 convergence check still spends its single GET here; that is the
+    documented exception.
 
     Paired with the test below, which is what stops this one passing against a
     repair that never fetches at all.
@@ -3861,6 +3897,18 @@ async def _repair_with_metadata(
             payload=_server_with_channels(),
             repeat=True,
         )
+        # The #957 convergence check fetches the bare server document on every
+        # non-dry repair. An owner-edited default (floor plus an extra bit) must
+        # produce the manual-review warning and no write, so this test cannot
+        # pass by way of a failed fetch.
+        m.get(
+            f"{BASE_URL}/servers/{R_SERVER}",
+            payload={
+                "id": R_SERVER,
+                "default_permissions": 4_194_304 | FERRY_MIN_PERMISSIONS | (1 << 34),
+            },
+            repeat=True,
+        )
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -3906,10 +3954,13 @@ async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) ->
         discord_id=D_ROLE,
         stoat_id=S_ROLE_OLD,
     )
-    _, urls, _ = await _repair_with_metadata(tmp_path, report)
+    state, urls, _ = await _repair_with_metadata(tmp_path, report)
     server_default = [u for u in urls if u.endswith(f"/servers/{R_SERVER}/permissions/default")]
     assert server_default == [], (
         f"repair re-applied the server default mask, which every member holds: {server_default}"
+    )
+    assert [w for w in state.warnings if w.get("type") == "server_default_manual"], (
+        "an owner-edited default must warn for manual review, not fail silently"
     )
     assert any(u.endswith(f"/servers/{R_SERVER}/permissions/{S_ROLE_NEW}") for u in urls), (
         f"the recreated role's own permissions were not applied: {urls}"
@@ -5283,3 +5334,151 @@ async def test_run_build_non_voice_channel_failure_propagates() -> None:
         pytest.raises(MigrationError),
     ):
         await run_build("http://x", "t", bp, lambda _e: None)
+
+
+# ---------------------------------------------------------------------------
+# Chunk 2 (#1050): repair convergence for the pre-fix server default (#957)
+# ---------------------------------------------------------------------------
+
+
+async def _repair_with_server_default(
+    tmp_path: Path,
+    *,
+    stored: object,
+    mask: int | None = 4_194_304,
+    write_metadata: bool = True,
+    server_status: int = 200,
+    put_status: int = 200,
+    dry_run: bool = False,
+) -> tuple[MigrationState, list[str], list[dict], list[MigrationEvent]]:
+    config = _make_repair_config(tmp_path, dry_run=dry_run)
+    if write_metadata:
+        _write_discord_metadata(config.output_dir, server_default=mask or 0)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    events: list[MigrationEvent] = []
+    put_bodies: list[dict] = []
+    server_urls: list[str] = []
+
+    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+        return CheckReport()
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        aioresponses() as m,
+    ):
+        payload: dict[str, object] = {"id": R_SERVER}
+        if stored is not None:
+            payload["default_permissions"] = stored
+        m.get(f"{BASE_URL}/servers/{R_SERVER}", payload=payload, status=server_status)
+        m.put(
+            f"{BASE_URL}/servers/{R_SERVER}/permissions/default",
+            payload={},
+            status=put_status,
+            callback=lambda url, **kw: put_bodies.append(kw.get("json", {})),
+        )
+        await run_repair(config, state, [], events.append)
+        for (method, url), _calls in m.requests.items():
+            if method == "GET" and str(url).endswith(f"/servers/{R_SERVER}"):
+                server_urls.append(str(url))
+    return state, server_urls, put_bodies, events
+
+
+def _warnings_of(state: MigrationState, *types: str) -> list[dict]:
+    return [w for w in state.warnings if w.get("type") in types]
+
+
+async def test_repair_convergence_resets_exact_prefix_default(tmp_path: Path) -> None:
+    mask = 4_194_304
+    state, gets, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=mask | FERRY_MIN_PERMISSIONS, mask=mask
+    )
+    assert puts == [{"permissions": mask}]
+    assert len(_warnings_of(state, "server_default_reset")) == 1
+    assert len(gets) == 1
+
+
+async def test_repair_convergence_noop_when_stored_equals_mask(tmp_path: Path) -> None:
+    mask = 4_194_304
+    state, _, puts, _ = await _repair_with_server_default(tmp_path, stored=mask, mask=mask)
+    assert puts == []
+    assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
+
+
+async def test_repair_convergence_noop_for_administrator_mask(tmp_path: Path) -> None:
+    from discord_ferry.discord.permissions import translate_permissions
+
+    mask = translate_permissions(1 << 3)
+    state, _, puts, _ = await _repair_with_server_default(tmp_path, stored=mask, mask=mask)
+    assert puts == []
+    assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
+
+
+async def test_repair_convergence_warns_on_owner_edited_default(tmp_path: Path) -> None:
+    mask = 4_194_304
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=mask | FERRY_MIN_PERMISSIONS | (1 << 34), mask=mask
+    )
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_manual")) == 1
+
+
+async def test_repair_convergence_warns_without_metadata(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=FERRY_MIN_PERMISSIONS, write_metadata=False
+    )
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_manual")) == 1
+
+
+async def test_repair_convergence_warns_on_zero_mask(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=FERRY_MIN_PERMISSIONS, mask=0
+    )
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_manual")) == 1
+
+
+async def test_repair_convergence_ignores_stock_default(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=1_048_576, mask=4_194_304
+    )
+    assert puts == []
+    assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
+
+
+async def test_repair_convergence_fetch_failure_nonfatal(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=4_194_304, server_status=500
+    )
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_check_failed")) == 1
+
+
+async def test_repair_convergence_put_failure_nonfatal(tmp_path: Path) -> None:
+    mask = 4_194_304
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=mask | FERRY_MIN_PERMISSIONS, mask=mask, put_status=500
+    )
+    assert len(_warnings_of(state, "server_default_check_failed")) == 1
+
+
+async def test_repair_convergence_non_integer_stored(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(tmp_path, stored="1022361624")
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_check_failed")) == 1
+
+
+async def test_repair_convergence_structure_free_single_get(tmp_path: Path) -> None:
+    state, gets, _, _ = await _repair_with_server_default(tmp_path, stored=4_194_304)
+    assert len(gets) == 1
+    assert _warnings_of(state, "server_default_check_failed") == []
+
+
+async def test_repair_convergence_skips_dry_run(tmp_path: Path) -> None:
+    state, gets, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=4_194_304 | FERRY_MIN_PERMISSIONS, dry_run=True
+    )
+    assert gets == []
+    assert puts == []
+    assert state.warnings == []
