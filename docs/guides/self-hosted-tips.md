@@ -119,7 +119,7 @@ Stoat does not have an "Administrator" permission that grants everything at once
 
 If you are running Ferry with an account that is not the server owner, that account's role must have the following permissions on the server and on each channel.
 
-**Core set** — always required, and the same 10 bits Ferry sets as the server default (`FERRY_MIN_PERMISSIONS = 1,022,361,624`, see the [pre-flight checklist](pre-flight-checklist.md#4-grant-the-required-permissions) for the authoritative bitmap):
+**Core set** — always required on the Ferry account's own role (`FERRY_MIN_PERMISSIONS = 1,022,361,624`, see the [pre-flight checklist](pre-flight-checklist.md#4-grant-the-required-permissions) for the authoritative bitmap). Older Ferry versions also wrote these bits to the server default; since 2.41.6 they belong to the account alone (#957):
 
 | Permission | Required for |
 |------------|-------------|

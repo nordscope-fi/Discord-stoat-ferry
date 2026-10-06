@@ -219,6 +219,11 @@ FERRY_PERMISSIONS = (
 # == 1_022_361_624
 ```
 
+These bits belong on the Ferry account's role, or on ownership when Ferry creates the server.
+Ferry must not write them to the server default: Stoat seeds every member's effective
+permissions from that field, so a floor placed there grants it to all of them (#957, removed
+in 2.41.6, repair convergence in 2.41.7).
+
 ---
 
 ## Masquerade
