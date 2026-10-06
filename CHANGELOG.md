@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.7] - 2026-10-06
+
+### Fixed
+
+- **Repair converges servers that still carry the migration floor (chunk 2 of #957).** Every
+  non-dry repair now fetches the stored server default and, when it equals exactly the
+  translated mask OR the migration floor, rewrites it to the mask alone with a
+  `server_default_reset` warning. Owner-edited defaults and metadata-less output directories
+  warn `server_default_manual` without writing, because zeroing the field would drop members
+  below Stoat's stock default. Converged and Administrator-mask servers take no action. Fetch,
+  coercion and write failures warn `server_default_check_failed` and never abort the repair.
+
 ## [2.41.6] - 2026-10-06
 
 ### Fixed
