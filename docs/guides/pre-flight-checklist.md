@@ -46,7 +46,7 @@ Check that your Stoat instance can accept the files in your export:
 
 ## 4. Grant the required permissions
 
-The Stoat account running Ferry needs Masquerade and ManageRole permissions at minimum, plus several others for full functionality. The minimum permission value covering all required bits is **`1,022,361,624`**.
+The Stoat account running Ferry needs Masquerade and ManageRole permissions at minimum, plus several others for full functionality. The minimum permission value covering all required bits is **`1,022,361,624`**. Grant them on a role assigned to the Ferry account, or run Ferry as the server owner. Never put them in the server's default permissions: Stoat applies that mask to every member, so a floor placed there becomes authority for all of them (#957). Ferry has not merged the floor into the server default since 2.41.6, and `ferry repair` on 2.41.7 or later strips it from servers migrated by older versions. The ROLES phase still restores the source Discord @everyone mask onto the server default during metadata-backed migrations; that is a faithful restore of what Discord had, not a grant of the migration floor.
 
 **Why:** Without Masquerade, messages cannot display the original Discord author's name and avatar. Without ManageRole, masquerade colours will not work. See the full permission table in [Self-Hosted Tips](self-hosted-tips.md#permissions).
 
@@ -156,7 +156,7 @@ Copy this condensed checklist for quick use:
 - [ ] Discord server set to read-only
 - [ ] DCE export completed with `--markdown false --media`
 - [ ] Stoat file size limits verified
-- [ ] Ferry account has required permissions (`1,022,361,624`)
+- [ ] Ferry account has required permissions (`1,022,361,624`) on its own role or via ownership, not on the server default
 - [ ] Migration duration estimated and time blocked
 - [ ] Channel count within Stoat limits (or limits raised)
 - [ ] Private channels identified; Discord token ready if needed

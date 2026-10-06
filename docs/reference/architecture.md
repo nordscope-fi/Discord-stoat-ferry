@@ -450,8 +450,11 @@ Collects `author_names` in a single pass to avoid re-scanning later.
 set, verifies the server is accessible (best-effort, non-fatal on failure).
 
 **SERVER** (Phase 3): Creates a new server via `POST /servers` (or verifies the existing one).
-Uploads the guild icon to Autumn and applies it. Sets server default permissions to
-`FERRY_MIN_PERMISSIONS` (1,022,361,624) to ensure the Ferry account can operate.
+Uploads the guild icon to Autumn and applies it. Versions before 2.41.6 also set the server
+default permissions to `FERRY_MIN_PERMISSIONS` (1,022,361,624); that write was removed because
+Stoat seeds every member's effective permissions from the server default (#957). The Ferry
+account's bits come from owner grants or ownership instead, and `ferry repair` on 2.41.7 or
+later converges servers migrated by older versions.
 
 **ROLES** (Phase 4): Iterates all exports to collect unique role IDs (skipping @everyone where
 `role_id == guild_id`). The create call carries **name only**. A second attributes pass applies
