@@ -3886,13 +3886,14 @@ async def test_a_recreated_channel_gets_its_recorded_overrides(tmp_path: Path) -
 async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) -> None:
     """SC-4.6, and the highest-consequence assertion in this chunk.
 
-    api_set_server_default_permissions merges the recorded server defaults with
-    FERRY_MIN_PERMISSIONS onto the SERVER'S DEFAULT ROLE, which every member
-    holds. It is server-wide and tied to no single recreated entity, and it sits
-    AFTER the per-role loop in run_roles, which is why chunk 1 extracted only
-    the loop body. Re-firing it during a one-role repair would re-impose a mask
-    on a server whose defaults may have changed since the migration: the class
-    of defect batch 5 of #107 existed to fix.
+    The roles phase restores the translated Discord @everyone mask onto the
+    SERVER'S DEFAULT ROLE, which every member holds (#957 removed the floor
+    merge from that write). It is server-wide and tied to no single recreated
+    entity, and it sits AFTER the per-role loop in run_roles, which is why
+    chunk 1 extracted only the loop body. Re-firing a floor merge during a
+    one-role repair would re-impose authority on every member on a server
+    whose defaults may have changed since the migration: the class of defect
+    batch 5 of #107 existed to fix, extended by #957 to the floor itself.
 
     Asserted by URL and as a count of ZERO, not by inspecting output.
     """
