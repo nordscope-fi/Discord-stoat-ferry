@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.6] - 2026-10-06
+
+### Fixed
+
+- **The migration floor no longer lands on the shared server default (chunk 1 of #957).** The
+  server-phase bootstrap write is deleted and the roles phase restores the translated Discord
+  @everyone mask alone. Every member of a migrated server previously inherited ManageRole,
+  ManageCustomisation, ManageMessages, Masquerade and six more bits intended for the migration
+  account; the floor is now an account-side grant only. Repair convergence for servers migrated
+  before this release lands in 2.41.7.
+
 ## [2.41.5] - 2026-10-04
 
 ### Fixed

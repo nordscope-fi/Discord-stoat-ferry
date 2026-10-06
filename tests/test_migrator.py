@@ -155,17 +155,16 @@ async def test_incremental_still_accepts_a_real_prior_state(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — Permission bootstrap warning (server phase)
+# Test 3 — Server phase never writes the shared default (#957)
 # ---------------------------------------------------------------------------
 
 
-async def test_permission_bootstrap_failure_is_warned_not_fatal(tmp_path: Path) -> None:
-    """When default_permissions PATCH fails, the migration continues with a warning."""
+async def test_server_phase_never_sends_default_permissions(tmp_path: Path) -> None:
+    """#957: the migration floor must not reach the server default role."""
     from aioresponses import aioresponses
 
     config = _make_config(tmp_path)
 
-    # Only override connect with noop — let run_server use its real implementation.
     structure_noops: dict[str, PhaseFunction] = {
         "connect": _noop_phase,
         "roles": _noop_phase,
@@ -180,27 +179,28 @@ async def test_permission_bootstrap_failure_is_warned_not_fatal(tmp_path: Path) 
     events: list[MigrationEvent] = []
 
     with aioresponses() as m:
-        # Server creation succeeds.
         m.post(
             f"{config.stoat_url}/servers/create",
             payload={"server": {"_id": "stoat-server-001"}, "channels": []},
         )
-        # Icon upload and PATCH icon — skip (no icon in fixture guild without a real file).
-        # First PATCH (icon) is never reached since guild_icon.png doesn't exist locally.
-        # Second PATCH (default_permissions bootstrap) returns 403 — simulates missing perms.
         m.patch(
             f"{config.stoat_url}/servers/stoat-server-001",
-            status=403,
-            payload={"type": "Forbidden"},
+            payload={},
+            repeat=True,
         )
 
         state = await run_migration(config, events.append, phase_overrides=structure_noops)
 
-    warning_messages = [w["message"] for w in state.warnings if w.get("phase") == "server"]
-    assert any("permission" in msg.lower() or "Could not set" in msg for msg in warning_messages), (
-        f"Expected a permissions warning in state.warnings, got: {warning_messages}"
+    sent_bodies = [
+        call.kwargs.get("json") or {}
+        for key, calls in m.requests.items()
+        for call in calls
+        if key[0] in ("PATCH", "PUT")
+    ]
+    assert all("default_permissions" not in body for body in sent_bodies), (
+        f"server phase wrote the shared default: {sent_bodies}"
     )
-    # Migration must NOT have raised — it completed successfully.
+    assert not [w for w in state.warnings if w.get("type") == "permission_bootstrap"]
     assert state.completed_at != ""
 
 

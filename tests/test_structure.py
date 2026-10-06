@@ -1927,7 +1927,7 @@ def test_ferry_min_permissions_value_pinned() -> None:
 
 
 async def test_run_roles_applies_server_defaults(tmp_path: Path) -> None:
-    """ROLES phase applies server default permissions merged with FERRY_MIN_PERMISSIONS."""
+    """ROLES phase applies the translated server default permissions exactly."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -1959,7 +1959,45 @@ async def test_run_roles_applies_server_defaults(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert len(default_perm_bodies) == 1
-    expected = discord_default | FERRY_MIN_PERMISSIONS
+    expected = discord_default
+    assert default_perm_bodies[0] == {"permissions": expected}
+
+
+async def test_run_roles_administrator_mask_passes_through_unmerged(tmp_path: Path) -> None:
+    """SC-2.3: an Administrator-translated mask (every Stoat bit) is written as-is."""
+    from discord_ferry.discord.permissions import translate_permissions
+
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    expected = translate_permissions(1 << 3)  # ADMINISTRATOR translates to all Stoat bits
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=expected,
+        role_permissions={},
+        channel_metadata={},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    role = DCERole(id="r1", name="Mod")
+    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=[role])])]
+
+    default_perm_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
+        m.put(
+            f"{STOAT_URL}/servers/srv1/permissions/default",
+            payload={},
+            callback=lambda url, **kwargs: default_perm_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_roles(config, state, exports, events.append)
+
+    assert len(default_perm_bodies) == 1
     assert default_perm_bodies[0] == {"permissions": expected}
 
 
@@ -3002,8 +3040,8 @@ async def test_lock_marker_adds_no_extra_server_patch(tmp_path: Path) -> None:
         await run_server(config, state, [_make_export()], lambda e: None)
     # Exactly one description-bearing PATCH (the marker is folded in, not a separate call).
     assert len([b for b in bodies if "description" in b]) == 1
-    # The permission-bootstrap PATCH (default_permissions only) carries no description.
-    assert any("default_permissions" in b and "description" not in b for b in bodies)
+    # #957: the migration floor must never reach the shared server default.
+    assert not any("default_permissions" in b for b in bodies)
 
 
 async def test_create_path_description_has_no_lock_marker(tmp_path: Path) -> None:

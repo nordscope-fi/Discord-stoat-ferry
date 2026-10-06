@@ -333,45 +333,6 @@ async def run_server(
                 }
             )
 
-        # Bootstrap minimum permissions on the server's default role.
-        try:
-            await api_edit_server(
-                session,
-                config.stoat_url,
-                config.token,
-                state.stoat_server_id,
-                default_permissions=FERRY_MIN_PERMISSIONS,
-            )
-            on_event(
-                MigrationEvent(
-                    phase="server",
-                    status="progress",
-                    message="Set server permissions for migration",
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            state.warnings.append(
-                {
-                    "phase": "server",
-                    "type": "permission_bootstrap",
-                    "message": (
-                        f"Could not set server permissions: {exc}. "
-                        "Masquerade colours require ManageRole (bit 3). "
-                        "Grant permissions manually if needed."
-                    ),
-                }
-            )
-            on_event(
-                MigrationEvent(
-                    phase="server",
-                    status="warning",
-                    message=(
-                        f"Permission bootstrap failed: {exc}. "
-                        "Grant ManageRole manually for masquerade colours."
-                    ),
-                )
-            )
-
 
 async def _resolve_role_icon(
     session: aiohttp.ClientSession,
@@ -546,11 +507,12 @@ async def apply_role_permissions(
     Deliberately scoped to one role. The ``api_set_server_default_permissions``
     call that follows the loop this was extracted from is NOT included, and that
     boundary is the point of the extraction rather than an accident of it: that
-    call merges ``server_default_permissions | FERRY_MIN_PERMISSIONS`` onto the
-    server's DEFAULT ROLE, so it is server-wide and tied to no single recreated
-    entity. A repair that re-fired it would re-impose a mask on a server whose
-    defaults may have changed since the migration, which is the class of defect
-    batch 5 of #107 existed to fix.
+    call restores the translated Discord @everyone mask onto the server's
+    DEFAULT ROLE, so it is server-wide and tied to no single recreated entity.
+    It no longer merges the migration floor (#957): the floor belongs to the
+    migration account's own grants, and a repair that re-fired a floor merge
+    would re-impose authority on every member, the class of defect batch 5 of
+    #107 existed to fix and #957 extends to the floor itself.
 
     The ``roles_finalized`` and ``role_map`` guards stay at the call site. They
     decide WHETHER to apply, which is caller policy, not application.
@@ -978,16 +940,17 @@ async def run_roles(
                     phase="roles",
                 )
 
-            # Apply @everyone server default permissions (merged with ferry minimum).
+            # Apply @everyone server default permissions exactly as the source
+            # had them. The migration floor is no longer merged here (#957): it
+            # belongs to the migration account's own grants, not to every member.
             if discord_metadata.server_default_permissions:
-                merged = discord_metadata.server_default_permissions | FERRY_MIN_PERMISSIONS
                 try:
                     await api_set_server_default_permissions(
                         session,
                         config.stoat_url,
                         config.token,
                         state.stoat_server_id,
-                        permissions=merged,
+                        permissions=discord_metadata.server_default_permissions,
                     )
                 except Exception as exc:  # noqa: BLE001
                     state.warnings.append(
