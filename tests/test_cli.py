@@ -3050,6 +3050,21 @@ def test_repair_exits_non_zero_when_a_role_attribute_edit_failed(
     )
 
 
+def test_repair_exits_non_zero_when_channel_attributes_could_not_be_restored(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A failed slowmode or voice-limit edit leaves the channel incomplete (#1062)."""
+    outcome = RepairOutcome(
+        declined=[
+            {"type": "channel_attributes_failed", "message": "Could not restore channel settings"}
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 1, (
+        f"a failed channel attribute repair exited {result.exit_code}, which reads as success"
+    )
+
+
 def test_repair_exits_zero_when_only_role_attributes_were_not_restored(
     runner: CliRunner, tmp_path: Path
 ) -> None:

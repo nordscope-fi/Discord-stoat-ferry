@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.9] - 2026-10-07
+
+### Fixed
+
+- Repair now reports failure when it cannot restore a recreated channel's delay between
+  messages (slowmode) or voice participant limit (#1062). The command line exits 1 and the
+  repair page reports outstanding problems. Previously both reported success despite the
+  warning. This applies ADR-036's existing rule for attempted operations that failed.
+
 ## [2.41.8] - 2026-10-07
 
 ### Fixed

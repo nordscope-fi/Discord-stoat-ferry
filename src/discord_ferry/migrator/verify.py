@@ -175,6 +175,9 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         "role_attributes_failed",
         "role_icon_download_failed",
         "role_icon_upload_failed",
+        # ADR-036 case 1: repair tried to restore slowmode or the voice user limit
+        # and the edit failed, leaving the recreated channel incomplete (#1062).
+        "channel_attributes_failed",
         # The #957 server-default convergence step, where repair read the stored
         # default and then either could not act or could not read. Both entries
         # are failed operations, not degradations a re-run cures.
