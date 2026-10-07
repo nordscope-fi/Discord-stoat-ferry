@@ -48,6 +48,8 @@ def test_repair_failure_set_is_shared_and_exact() -> None:
                 "role_attributes_failed",
                 "role_icon_download_failed",
                 "role_icon_upload_failed",
+                # #1062: restoring a recreated channel's slowmode or voice limit failed.
+                "channel_attributes_failed",
                 # #1060 server-default convergence: an owner edit is outstanding,
                 # or the check could not read the stored default. Both are failed
                 # operations. server_default_reset is excluded because it records
