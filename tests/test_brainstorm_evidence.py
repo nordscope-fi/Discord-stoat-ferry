@@ -1223,10 +1223,7 @@ def test_qwen_activation_records_host_without_prompt_or_turn_fields(
         root,
         "read_file",
         source_input,
-        {
-            "result_display": "Atomic rename replaces a file.",
-            "execution_status": "completed",
-        },
+        {"llmContent": "Atomic rename replaces a file.", "returnDisplay": ""},
         tool_use_id="qwen-source",
         host="qwen",
     )
@@ -1236,32 +1233,137 @@ def test_qwen_activation_records_host_without_prompt_or_turn_fields(
     assert receipt["host"] == "qwen"
 
 
-def test_qwen_challenge_failed_tool_event_completes_receipt(tmp_path: Path) -> None:
-    root, _ = qwen_active_checkout(tmp_path)
-    challenge, command = challenge_case(root, "test_runner")
-    challenge["falsifying_outcome"] = {"exit_code": 2}
-    add_challenge(root, challenge)
-    tool_input = {"command": command}
-    before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-failed", host="qwen")
-
-    after_tool(
-        root,
-        "run_shell_command",
-        tool_input,
-        {
-            "result_display": "Traceback most recent call\nExit Code: 2",
-            "error": "command failed",
-            "error_type": "execution_failed",
-            "execution_status": "failed",
-        },
-        tool_use_id="qwen-failed",
-        host="qwen",
-        event_name="PostToolUseFailure",
+def qwen_shell_text(command: str, output: str, exit_code: int) -> str:
+    # The text Qwen's run_shell_command builds for a finished command (qwen-code 0.25.0).
+    return "\n".join(
+        [
+            f"Command: {command}",
+            "Directory: (root)",
+            f"Output: {output}",
+            "Error: (none)",
+            f"Exit Code: {exit_code}",
+            "Signal: (none)",
+            "Process Group PGID: 4242",
+        ]
     )
 
-    receipt = json.loads(receipt_files(root, COMPLETED_RECEIPTS)[0].read_text())
-    assert receipt["actual_result"] == {"exit_code": 2, "status": "failure"}
+
+def qwen_shell_result(
+    root: Path,
+    tool_input: dict[str, object],
+    text: str,
+    *,
+    tool_use_id: str,
+    failed: bool,
+    is_interrupt: bool = False,
+) -> None:
+    # Qwen sends PostToolUse with {llmContent, returnDisplay} for a command it treats as
+    # successful, and PostToolUseFailure with a top-level error and no tool_response for a
+    # non-zero exit (exit 1 from grep, rg, diff and test still counts as success).
+    payload: dict[str, object] = {
+        "session_id": "session-1",
+        "tool_use_id": tool_use_id,
+        "tool_name": "run_shell_command",
+        "tool_input": tool_input,
+    }
+    if failed:
+        payload |= {
+            "hook_event_name": "PostToolUseFailure",
+            "error": text,
+            "is_interrupt": is_interrupt,
+        }
+    else:
+        payload |= {
+            "hook_event_name": "PostToolUse",
+            "tool_response": {"llmContent": text, "returnDisplay": ""},
+        }
+    result = run_hook(root, "qwen", payload)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("failed", "exit_code", "status"),
+    [
+        (False, 0, "success"),
+        (False, 1, "failure"),
+        (True, 2, "failure"),
+    ],
+)
+def test_qwen_shell_result_completes_receipt_with_its_exit_code(
+    tmp_path: Path, failed: bool, exit_code: int, status: str
+) -> None:
+    root, _ = qwen_active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    challenge["falsifying_outcome"] = {"exit_code": exit_code}
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-shell", host="qwen")
+
+    qwen_shell_result(
+        root,
+        tool_input,
+        qwen_shell_text(command, "test output", exit_code),
+        tool_use_id="qwen-shell",
+        failed=failed,
+    )
+
+    [receipt_path] = receipt_files(root, COMPLETED_RECEIPTS)
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["actual_result"] == {"exit_code": exit_code, "status": status}
     assert receipt["falsified"] is True
+
+
+@pytest.mark.parametrize(
+    ("failed", "text"),
+    [
+        (True, "Command timed out after 1000ms before it could complete."),
+        (
+            True,
+            "Command: x\nOutput: (empty)\nError: (none)\nExit Code: (none)\nSignal: SIGKILL",
+        ),
+        (False, "Background shell started.\nid: bg_ab12cd34"),
+    ],
+    ids=["timeout", "signal", "background"],
+)
+def test_qwen_shell_result_without_exit_code_completes_no_receipt(
+    tmp_path: Path, failed: bool, text: str
+) -> None:
+    # A command that never reported an exit code has no outcome; recording a default
+    # code would let a challenge expecting exactly that code pass without running.
+    root, _ = qwen_active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    challenge["falsifying_outcome"] = {"exit_code": 1 if failed else 0}
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-no-code", host="qwen")
+    assert receipt_files(root, PENDING_RECEIPTS)
+
+    qwen_shell_result(root, tool_input, text, tool_use_id="qwen-no-code", failed=failed)
+
+    assert receipt_files(root, COMPLETED_RECEIPTS) == []
+    assert receipt_files(root, PENDING_RECEIPTS) == []
+
+
+def test_qwen_interrupted_shell_command_completes_no_receipt(tmp_path: Path) -> None:
+    root, _ = qwen_active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-cancel", host="qwen")
+    assert receipt_files(root, PENDING_RECEIPTS)
+
+    qwen_shell_result(
+        root,
+        tool_input,
+        "Command was cancelled by user before it could complete. "
+        "Below is the output before it was cancelled:\nprevious run: Exit Code: 1",
+        tool_use_id="qwen-cancel",
+        failed=True,
+        is_interrupt=True,
+    )
+
+    assert receipt_files(root, COMPLETED_RECEIPTS) == []
+    assert receipt_files(root, PENDING_RECEIPTS) == []
 
 
 def test_qwen_stop_blocks_recommendation_with_missing_evidence(tmp_path: Path) -> None:
@@ -1282,21 +1384,16 @@ def test_qwen_exit_code_uses_the_final_status_line(tmp_path: Path) -> None:
     tool_input = {"command": command}
     before_tool(root, "run_shell_command", tool_input, tool_use_id="qwen-shadow", host="qwen")
 
-    after_tool(
+    qwen_shell_result(
         root,
-        "run_shell_command",
         tool_input,
-        {
-            "result_display": "captured log said Exit Code: 5\nExit Code: 2",
-            "error": "command failed",
-            "execution_status": "failed",
-        },
+        qwen_shell_text(command, "captured log said Exit Code: 5", 2),
         tool_use_id="qwen-shadow",
-        host="qwen",
-        event_name="PostToolUseFailure",
+        failed=True,
     )
 
-    receipt = json.loads(receipt_files(root, COMPLETED_RECEIPTS)[0].read_text())
+    [receipt_path] = receipt_files(root, COMPLETED_RECEIPTS)
+    receipt = json.loads(receipt_path.read_text())
     assert receipt["actual_result"] == {"exit_code": 2, "status": "failure"}
     assert receipt["falsified"] is True
 

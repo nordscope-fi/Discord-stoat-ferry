@@ -855,34 +855,30 @@ function normalizedResult(value) {
   };
 }
 
-// Qwen's tool_response envelope carries no integer exit code. Its shell
-// display text renders an authoritative "Exit Code: N" status line after the
-// output and error sections, so the last occurrence wins: quoted program
-// output can embed its own "Exit Code:" text ahead of the status line.
-// Without a status line a response carrying an error counts as exit 1, and
-// anything else as 0.
-function qwenExitCode(response) {
-  if (Number.isInteger(response.exit_code)) return response.exit_code;
-  const display = typeof response.result_display === 'string' ? response.result_display : '';
-  const matches = [...display.matchAll(/Exit Code:\s*(-?\d+)/gu)];
-  if (matches.length > 0) {
-    return Number.parseInt(matches[matches.length - 1][1], 10);
-  }
-  if (typeof response.error === 'string' && response.error.length > 0) return 1;
-  if (
-    typeof response.execution_status === 'string'
-    && response.execution_status !== 'completed'
-    && response.execution_status !== 'success'
-  ) {
-    return 1;
-  }
-  return 0;
+// Qwen sends no integer exit code. Its shell text ends with an authoritative
+// "Exit Code: N" status line, found in tool_response.llmContent on PostToolUse
+// and in the top-level error string on PostToolUseFailure, which carries no
+// tool_response at all. Qwen fires the failure event for any non-zero exit
+// except exit 1 from grep, rg, diff and test. The last occurrence wins:
+// quoted program output can embed its own "Exit Code:" text ahead of the
+// status line. A result with no numeric status line (a timeout, a signal,
+// a background start) is not an outcome, and neither is a user interrupt,
+// whose message can quote partial output that contains "Exit Code:" text.
+function qwenExitCode(input, eventName) {
+  const failed = eventName === 'PostToolUseFailure';
+  if (failed && input?.is_interrupt === true) return null;
+  const response = input?.tool_response;
+  if (!failed && (response === null || typeof response !== 'object')) return null;
+  const text = failed ? input?.error : response.llmContent;
+  const matches = typeof text === 'string' ? [...text.matchAll(/Exit Code:\s*(-?\d+)/gu)] : [];
+  if (matches.length === 0) return null;
+  return Number.parseInt(matches[matches.length - 1][1], 10);
 }
 
 export function normalizeToolOutcome(input, eventName, host) {
   const response = input?.tool_response;
-  if (response === null || typeof response !== 'object') return null;
-  const exitCode = host === 'qwen' ? qwenExitCode(response) : response.exit_code;
+  if (host !== 'qwen' && (response === null || typeof response !== 'object')) return null;
+  const exitCode = host === 'qwen' ? qwenExitCode(input, eventName) : response.exit_code;
   if (!Number.isInteger(exitCode)) return null;
   if (eventName === 'PostToolUseFailure' && exitCode === 0) return null;
   return {

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.10] - 2026-10-07
+
+### Fixed
+
+- **The brainstorm evidence guard reads Qwen shell exit codes (#1036, #1037).** Qwen sends no
+  integer exit code. Its shell text ends with an `Exit Code: N` status line, which arrives in
+  `tool_response.llmContent` in the hook event that follows a successful tool call
+  (PostToolUse) and in the top-level `error` string in the event that follows a failed one
+  (PostToolUseFailure). A failure event has no `tool_response` at all. The guard read neither
+  place. A failing challenge command on Qwen therefore never completed its receipt, which left
+  the recommendation blocked, and every successful event recorded exit 0. That included exit 1
+  from `grep`, `rg`, `diff` and `test`, which Qwen counts as success. The guard now reads the
+  last status line from the right field. A result with no numeric status line records no
+  outcome, because a default code would let a challenge expecting that code pass without the
+  command finishing. Examples are a timeout, a signal kill and a background start. A user
+  interrupt also records no outcome. The Qwen tests now send the payload shapes found in the
+  qwen-code 0.25.0 source and run as the Qwen host from start to finish (#1040). They
+  previously used fields Qwen never sends, which is why the defect passed. Claude and Codex
+  behaviour is unchanged.
+
 ## [2.41.9] - 2026-10-07
 
 ### Fixed
