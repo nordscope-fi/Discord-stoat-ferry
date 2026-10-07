@@ -1690,9 +1690,11 @@ def repair_cmd(
     #
     # "Non-zero when any defect remains", and a defect repair DECLINED remains
     # just as surely as a message that would not send. A channel with no
-    # recorded name, one missing from the export, and a forum index are all
-    # cases repair cannot fix, and exiting 0 on them would tell a script the
-    # server is whole when it is not.
+    # recorded name, one missing from the export, a forum index repair cannot
+    # rebuild, and a server default repair could not read or must leave to an
+    # owner all belong here, because exiting 0 on them would tell a script the
+    # server is whole when it is not. ADR-036 is the record that decides which
+    # warning types belong.
     #
     # merge_thread_content_not_restored is deliberately NOT here: that names a
     # partial restore of something repair DID fix, and failing every merge
