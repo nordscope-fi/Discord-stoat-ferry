@@ -130,12 +130,14 @@ class CheckResult:
     found: str | None = None
 
 
-#: Warning types repair cannot fix, so the migration is not whole while any
-#: remains. merge_thread_content_not_restored and no_discord_metadata are
-#: deliberately excluded: the first names a partial restore of something repair
-#: DID fix, and failing every merge repair on it would make the code useless;
-#: the second is a degradation rather than an unrepaired defect. Shared by the
-#: CLI repair exit code and the GUI repair page so they cannot diverge.
+#: Warning types that leave the migration not whole, so repair exits non-zero while
+#: any remains. The dividing line is ADR-036: a failed operation or an unrepaired
+#: defect goes in; a completed fix, a degradation whose remedy is a re-run, and a
+#: Stoat limitation stay out. merge_thread_content_not_restored and
+#: no_discord_metadata sit on the excluded side: the first names a partial restore
+#: of something repair DID fix, and failing every merge repair on it would make the
+#: code useless; the second is a degradation rather than an unrepaired defect.
+#: Shared by the CLI repair exit code and the GUI repair page so they cannot diverge.
 UNREPAIRED_WARNING_TYPES = frozenset(
     {
         "no_recorded_name",
@@ -173,6 +175,21 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         "role_attributes_failed",
         "role_icon_download_failed",
         "role_icon_upload_failed",
+        # The #957 server-default convergence step, where repair read the stored
+        # default and then either could not act or could not read. Both entries
+        # are failed operations, not degradations a re-run cures.
+        # server_default_manual: the floor is still merged in but the value
+        # differs from the recorded mask, so repair deliberately writes nothing.
+        # The remedy is an owner edit in Stoat server settings, which no re-run
+        # performs, so an outstanding owner action must not exit 0.
+        # server_default_check_failed: the GET raised or the stored value was not
+        # an integer, so repair never learned whether the server is whole. The
+        # same shape as role_icon_download_failed, and exiting 0 on it would
+        # report a whole server whose state was never read (#344's false green).
+        # server_default_reset is deliberately ABSENT: it records a convergence
+        # repair COMPLETED, so gating on it would fail the successful path (#1060).
+        "server_default_manual",
+        "server_default_check_failed",
     }
 )
 

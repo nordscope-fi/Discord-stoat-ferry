@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.8] - 2026-10-07
+
+### Fixed
+
+- **Repair no longer exits 0 on a server default it could not converge (#1060).** The two
+  convergence warnings that leave work outstanding, `server_default_manual` and
+  `server_default_check_failed`, now gate the repair exit code, so the CLI and the GUI repair
+  page both report a server that still needs an owner edit in Stoat server settings, or whose
+  stored default repair could not read at all. Previously both printed a warning and exited 0,
+  which told a script the server was whole. `server_default_reset` stays out of the gate: it
+  records a convergence repair completed, and gating on it would fail the successful path. The
+  dividing line, a failed operation gates and a re-run-curable degradation does not, is recorded
+  in ADR-036. That record backfills a contract the registry had been extended against three
+  times already (#307, #311, #344) with no written rule. One cost is explicit: a transient
+  failure while reading the stored default now exits 1 where 2.41.7 exited 0, and a re-run
+  clears it. That is intended, since the alternative is a green light on a run that never read
+  the server.
+
 ## [2.41.7] - 2026-10-06
 
 ### Fixed

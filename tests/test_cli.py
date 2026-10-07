@@ -3070,6 +3070,80 @@ def test_repair_exits_zero_when_only_role_attributes_were_not_restored(
     )
 
 
+def test_repair_exits_non_zero_when_the_server_default_needs_an_owner_edit(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """server_default_manual leaves the floor in place for an owner to remove (#1060).
+
+    Repair read the stored default, saw the migration floor still merged into it,
+    and deliberately wrote nothing because the value differs from the recorded
+    mask. No re-run clears it: the remedy is an edit in Stoat server settings.
+    Exiting 0 would tell a script the server is whole while an owner action stays
+    outstanding.
+    """
+    outcome = RepairOutcome(
+        declined=[
+            {
+                "type": "server_default_manual",
+                "message": "Server default permissions still carry the migration floor",
+            }
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 1, (
+        f"an owner-edit server default exited {result.exit_code}, which reads as success"
+    )
+
+
+def test_repair_exits_non_zero_when_the_server_default_check_failed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """server_default_check_failed means repair never learned the answer (#1060).
+
+    The convergence GET raised, or the stored default was not an integer, so
+    repair could not tell whether the floor is still merged in. That is a failed
+    operation, the same shape as role_icon_download_failed, and not a degradation
+    a re-run cures. Exiting 0 here reports a whole server whose state was never
+    read, which is the false green #344 was filed to remove.
+    """
+    outcome = RepairOutcome(
+        declined=[
+            {
+                "type": "server_default_check_failed",
+                "message": "Server default convergence check failed",
+            }
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 1, (
+        f"an unread server default exited {result.exit_code}, which reads as success"
+    )
+
+
+def test_repair_exits_zero_when_the_server_default_was_reset(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """server_default_reset records a completed fix, not something outstanding (#1060).
+
+    Repair rewrote the stored default to the recorded mask and removed the
+    migration floor. Nothing remains broken, so the warning is a receipt. Gating
+    on it would make the successful convergence path exit non-zero and read as a
+    failure.
+    """
+    outcome = RepairOutcome(
+        declined=[
+            {
+                "type": "server_default_reset",
+                "message": "Removed the migration floor from server default permissions",
+            }
+        ]
+    )
+    result = _invoke_repair(runner, tmp_path, outcome)
+    assert result.exit_code == 0, (
+        f"a completed convergence exited {result.exit_code}, which reads as a defect"
+    )
+
+
 def test_repair_exits_non_zero_when_an_emoji_rewrite_failed(
     runner: CliRunner, tmp_path: Path
 ) -> None:
