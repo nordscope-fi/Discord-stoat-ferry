@@ -3828,6 +3828,8 @@ def _write_discord_metadata(
     role_id: str = D_ROLE,
     with_channel_override: bool = True,
     server_default: int = 4_194_304,
+    default_allow: int = 1_048_576,
+    role_allow: int = 2_097_152,
 ) -> None:
     """Write a real discord_metadata.json, round-tripped through the codec.
 
@@ -3845,8 +3847,10 @@ def _write_discord_metadata(
 
     channel_meta = ChannelMeta(
         nsfw=False,
-        default_override=PermissionPair(allow=1_048_576, deny=0) if with_channel_override else None,
-        role_overrides=[RoleOverride(discord_role_id=role_id, allow=2_097_152, deny=8)]
+        default_override=PermissionPair(allow=default_allow, deny=0)
+        if with_channel_override
+        else None,
+        role_overrides=[RoleOverride(discord_role_id=role_id, allow=role_allow, deny=8)]
         if with_channel_override
         else [],
     )
@@ -3869,8 +3873,21 @@ def _permission_calls(mock: aioresponses) -> list[str]:
     ]
 
 
+def _permission_bodies(mock: aioresponses) -> dict[str, Any]:
+    """The JSON body of the first request to each permission URL the run touched."""
+    return {
+        str(url): calls[0].kwargs.get("json")
+        for (_method, url), calls in mock.requests.items()
+        if "/permissions/" in str(url)
+    }
+
+
 async def _repair_with_metadata(
-    tmp_path: Path, report: CheckReport, *, write_metadata: bool = True
+    tmp_path: Path,
+    report: CheckReport,
+    *,
+    write_metadata: bool = True,
+    bodies_out: dict[str, Any] | None = None,
 ) -> tuple[MigrationState, list[str], list[MigrationEvent]]:
     config = _make_repair_config(tmp_path)
     if write_metadata:
@@ -3917,6 +3934,8 @@ async def _repair_with_metadata(
         m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
         await run_repair(config, state, [_export_for(R_D_CHANNEL)], events.append)
         urls = _permission_calls(m)
+        if bodies_out is not None:
+            bodies_out.update(_permission_bodies(m))
     return state, urls, events
 
 
@@ -3929,6 +3948,28 @@ async def test_a_recreated_channel_gets_its_recorded_overrides(tmp_path: Path) -
     assert any(
         u.endswith(f"/channels/01JSTOATCHN000000000NEW/permissions/{S_ROLE_OLD}") for u in urls
     ), f"the role override was not applied: {urls}"
+
+
+async def test_repair_sends_no_allow_for_an_inflated_saved_overwrite(tmp_path: Path) -> None:
+    """SC-2.10 (#986). v2.6.15 to v2.9.x saved 0x3ff00cdf for an ADMINISTRATOR overwrite."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True)
+    _write_discord_metadata(output_dir, default_allow=0x3FF00CDF, role_allow=0x3FF00CDF)
+    bodies: dict[str, Any] = {}
+    state, _, _ = await _repair_with_metadata(
+        tmp_path,
+        _report_with("channel_missing", "fail"),
+        write_metadata=False,
+        bodies_out=bodies,
+    )
+    new_channel = "/channels/01JSTOATCHN000000000NEW/permissions/"
+    default_bodies = [b for u, b in bodies.items() if u.endswith(new_channel + "default")]
+    role_bodies = [b for u, b in bodies.items() if u.endswith(new_channel + S_ROLE_OLD)]
+    assert default_bodies == [{"permissions": {"allow": 0, "deny": 0}}]
+    assert role_bodies == [{"permissions": {"allow": 0, "deny": 8}}]
+    inflated = [w for w in state.warnings if w.get("type") == "channel_override_admin_inflated"]
+    assert len(inflated) == 1
+    assert inflated[0]["phase"] == "repair"
 
 
 async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) -> None:
