@@ -3218,6 +3218,12 @@ def test_vibe_review_runs_every_child_in_an_empty_directory_outside_the_checkout
     assert all(w == {"outside_checkout": True, "empty": True} for w in workdirs)
 
 
+def test_vibe_child_starts_in_the_directory_it_is_given() -> None:
+    result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-child-cwd", "--json")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"started_in_target": True}
+
+
 def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
     result = _run(
         "node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", "prose-without-json"

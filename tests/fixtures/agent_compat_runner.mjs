@@ -8,6 +8,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -18,6 +19,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { dispatchCodexPreTool } from '../../scripts/agent-compat/codex-hook-adapter.mjs';
@@ -78,7 +80,7 @@ import {
   verifyFindings,
 } from '../../scripts/agent-compat/review-verification.mjs';
 import { readReviewerField } from '../../scripts/agent-compat/proton-credential.mjs';
-import { runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
+import { runVibeChild, runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
 import {
   parseQwenResponse,
   requestQwen,
@@ -1053,6 +1055,21 @@ switch (mode) {
       }),
     });
     writeJson({ providers: calls.map((call) => call.provider) });
+    break;
+  }
+  case 'vibe-child-cwd': {
+    // The real spawner, not a stand-in: a child must start in the cwd it is given.
+    const target = realpathSync(mkdtempSync(join(tmpdir(), 'ferry-vibe-cwd-')));
+    try {
+      const { stdout } = await runVibeChild(
+        process.execPath,
+        ['-e', 'process.stdout.write(process.cwd())'],
+        { cwd: target, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10000 },
+      );
+      writeJson({ started_in_target: realpathSync(stdout) === target });
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
     break;
   }
   case 'vibe-review': {

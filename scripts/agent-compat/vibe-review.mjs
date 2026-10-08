@@ -175,7 +175,7 @@ async function withVibeInvocation({ home, credential, run, action }) {
   // directory's .vibe hooks, tools, skills and plugins, and walks up from it
   // for AGENTS.md. Run every child in an empty directory so none of the
   // checkout's agent setup reaches the reviewer. The checkout's plain-English
-  // stop hook used to inject a rewrite request into the review, which spent
+  // post-agent hook used to inject a rewrite request into the review, which spent
   // the single allowed turn and made Vibe exit with "Turn limit of 1 reached".
   const cwd = join(vibeHome, 'workdir');
   try {
