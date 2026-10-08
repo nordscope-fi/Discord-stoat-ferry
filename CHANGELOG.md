@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Run the main test suite on Windows with Python 3.12, replacing the four-file Windows
   atomic-write job (#174). The three Linux Python versions and the separate exporter contract
   job remain in place.
+- Accept the Windows console attribute's type-check suppression on both Windows and other
+  platforms, so Windows type checking can reach the test step.
 
 ## [2.41.18] - 2026-10-08
 

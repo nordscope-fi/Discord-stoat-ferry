@@ -49,7 +49,8 @@ def _attach_parent_console() -> bool:
     import ctypes
 
     attach_parent_process = -1
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]  # win32-only attribute
+    # The attribute exists in Windows stubs, so the ignore is unused on Windows.
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined, unused-ignore]
     if not kernel32.AttachConsole(attach_parent_process):
         return False
 
