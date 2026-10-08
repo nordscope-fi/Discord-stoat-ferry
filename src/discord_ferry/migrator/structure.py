@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -43,11 +42,14 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
+from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCERole
 from discord_ferry.state import save_state
 from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEChannel, DCEExport
@@ -193,8 +195,64 @@ async def run_server(
         if exports:
             icon_url = exports[0].guild.icon_url
             if icon_url:
-                icon_path = Path(icon_url)
-                if icon_path.exists():
+                guild_name = exports[0].guild.name
+                icon_path: Path | None = None
+                if icon_url.startswith(("http://", "https://")):
+                    # A remote spelling is not a local file. contained_media_path would
+                    # join it to <export_dir>/https:/... and is_media_escape calls that
+                    # contained, so an is_file gate alone would tell the operator that a
+                    # file is missing which was never in the export.
+                    pass
+                else:
+                    icon_path = contained_media_path(config.export_dir, icon_url)
+                    if icon_path is None:
+                        state.warnings.append(
+                            {
+                                "phase": "server",
+                                "type": "unsafe_media_path",
+                                "message": (
+                                    f"Guild icon path for server {guild_name} failed the "
+                                    f"export-root containment check — {repr(icon_url)[:120]}"
+                                    " — skipped. Re-export with media attached, or set the "
+                                    "icon in Stoat server settings."
+                                ),
+                            }
+                        )
+                        on_event(
+                            MigrationEvent(
+                                phase="server",
+                                status="warning",
+                                message=(
+                                    f"Guild icon path for server {guild_name} failed the "
+                                    "export-root containment check — skipped"
+                                ),
+                            )
+                        )
+                    elif not icon_path.is_file():
+                        state.warnings.append(
+                            {
+                                "phase": "server",
+                                "type": "icon_file_missing",
+                                "message": (
+                                    f"Guild icon file for server {guild_name} is not present "
+                                    f"in the export — {repr(icon_url)[:120]} — so no icon was "
+                                    "applied. The export is incomplete. Re-export with media "
+                                    "attached, or set the icon in Stoat server settings."
+                                ),
+                            }
+                        )
+                        on_event(
+                            MigrationEvent(
+                                phase="server",
+                                status="warning",
+                                message=(
+                                    f"Guild icon file for server {guild_name} is missing "
+                                    "from the export — no icon applied"
+                                ),
+                            )
+                        )
+                        icon_path = None
+                if icon_path is not None:
                     try:
                         icon_id = await upload_with_cache(
                             session,

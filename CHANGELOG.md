@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.18] - 2026-10-08
+
+### Fixed
+
+- **The guild icon path is resolved against the export folder (#1041).** It was resolved against
+  the process working directory instead, so an export-relative `iconUrl`, which is what every DCE
+  export writes, did not exist and the icon was skipped. Server icons have therefore never been
+  migrated from a genuine export. Servers migrated before this release keep no icon; set one in
+  Stoat server settings.
+- **A crafted export can no longer read a guild icon from outside the export folder (#1041).** The
+  icon path is now checked against the export root like the seven other media read sites, so an
+  absolute or parent-traversal `iconUrl` is refused with an `unsafe_media_path` warning instead of
+  being uploaded. A named icon that is not present now warns `icon_file_missing` instead of being
+  skipped with no output at all, which is what kept the resolution bug invisible for as long as it
+  did. A remote `http` or `https` spelling is skipped with no warning, because it was never a local
+  file and reporting it missing would name a path that is not in the export.
+- **Both existing guild icon tests asserted too little to notice a rejection.** One checked only
+  that some event message contained the substring `icon` and the other only that some event had
+  status `warning`, so any icon warning satisfied both. They now name the outcome: the success
+  event and the absence of icon warnings, and for the failure case the `icon_upload_failed` type.
+  Nine further cases cover the escapes, a missing file, a directory, a remote spelling, a hostile
+  spelling, and the working-directory regression.
+
+### Added
+
+- **Server icons now appear on the destination server.** This is the user-visible half of the
+  resolution fix above, and it is listed here as well because it is behaviour no previous release
+  produced. It restores what the icon upload code was always meant to do rather than adding a new
+  capability, which is why this release is a patch bump.
+- **A third security probe.** `tests/security_probes/probe_1041.py` drives the real `run_server`
+  under `sandbox-exec` and reports whether bytes from outside the export root reached the upload
+  boundary. Its runner follows the same argument and exit-code contract as `run-955.sh`, so exit 1
+  means regression and the scratch directory is a required argument. It reuses `sandbox-955.sb`
+  rather than adding a third copy of the profile.
+
 ## [2.41.17] - 2026-10-08
 
 ### Fixed

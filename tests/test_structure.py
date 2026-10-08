@@ -272,14 +272,22 @@ async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
 
 
 async def test_run_server_uploads_icon(tmp_path: Path) -> None:
-    """SERVER phase uploads the guild icon and applies it to the server."""
+    """SERVER phase uploads the guild icon and applies it to the server.
+
+    The icon is addressed relative to the export root, which is how every DCE
+    export spells it. The assertions name the success event and require no
+    warnings, because asserting only that some event mentions "icon" is also
+    satisfied by a containment warning, and so this test passed while the icon
+    was being rejected and nothing was uploaded.
+    """
     events: list[MigrationEvent] = []
-    icon_file = tmp_path / "icon.png"
+    icon_file = tmp_path / "media" / "icon.png"
+    icon_file.parent.mkdir(parents=True)
     icon_file.write_bytes(b"PNG")
 
     config = _make_config(tmp_path)
     state = MigrationState(autumn_url=AUTUMN_URL)
-    exports = [_make_export(guild_icon_url=str(icon_file))]
+    exports = [_make_export(guild_icon_url="media/icon.png")]
 
     with aioresponses() as m:
         m.post(
@@ -292,19 +300,20 @@ async def test_run_server_uploads_icon(tmp_path: Path) -> None:
         await run_server(config, state, exports, events.append)
 
     assert state.stoat_server_id == "srv1"
-    messages = _collect_events(events)
-    assert any("icon" in msg.lower() for msg in messages)
+    assert _icon_warnings(state) == [], f"the icon was rejected: {_icon_warnings(state)}"
+    assert any(e.message == "Applied server icon" for e in events)
 
 
 async def test_run_server_icon_upload_failure_is_non_fatal(tmp_path: Path) -> None:
     """SERVER phase logs a warning and continues if the icon upload fails."""
     events: list[MigrationEvent] = []
-    icon_file = tmp_path / "icon.png"
+    icon_file = tmp_path / "media" / "icon.png"
+    icon_file.parent.mkdir(parents=True)
     icon_file.write_bytes(b"PNG")
 
     config = _make_config(tmp_path)
     state = MigrationState(autumn_url=AUTUMN_URL)
-    exports = [_make_export(guild_icon_url=str(icon_file))]
+    exports = [_make_export(guild_icon_url="media/icon.png")]
 
     with aioresponses() as m:
         m.post(
@@ -318,8 +327,226 @@ async def test_run_server_icon_upload_failure_is_non_fatal(tmp_path: Path) -> No
         await run_server(config, state, exports, events.append)
 
     assert state.stoat_server_id == "srv1"
-    statuses = [e.status for e in events]
-    assert "warning" in statuses
+    types = [w["type"] for w in state.warnings]
+    assert "icon_upload_failed" in types, f"expected an upload failure, got {types}"
+    assert "unsafe_media_path" not in types
+    assert "icon_file_missing" not in types
+
+
+def _mock_server_create_and_edit(m: aioresponses, *, icons: bool = False) -> None:
+    """Register the server phase endpoints. The icons tag is opt-in.
+
+    Leaving the Autumn icons endpoint unregistered is what makes "no upload was
+    attempted" observable: an attempt would fail against an unmatched URL and
+    surface as icon_upload_failed, so asserting that type is absent proves the
+    upload never happened rather than merely that it did not succeed.
+    """
+    m.post(
+        f"{STOAT_URL}/servers/create",
+        payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+    )
+    if icons:
+        m.post(f"{AUTUMN_URL}/icons", payload={"id": "icon-autumn-id"})
+    m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+
+
+def _icon_setup(
+    tmp_path: Path, icon_url: str
+) -> tuple[FerryConfig, MigrationState, list[DCEExport]]:
+    config = _make_config(tmp_path)
+    state = MigrationState(autumn_url=AUTUMN_URL)
+    exports = [_make_export(guild_icon_url=icon_url)]
+    return config, state, exports
+
+
+_ICON_WARNING_TYPES = frozenset({"unsafe_media_path", "icon_file_missing", "icon_upload_failed"})
+
+
+def _icon_warnings(state: MigrationState) -> list[dict[str, str]]:
+    """Only the warnings that concern the guild icon.
+
+    The server phase also appends server_meta_skipped when Discord metadata is
+    absent, which these tests do not provide, so asserting on state.warnings
+    directly fails on a warning that has nothing to do with the icon.
+    """
+    return [w for w in state.warnings if w["type"] in _ICON_WARNING_TYPES]
+
+
+async def test_run_server_absolute_icon_path_is_rejected(tmp_path: Path) -> None:
+    """An absolute iconUrl is refused even when the file exists (#1041, SC-1.2)."""
+    events: list[MigrationEvent] = []
+    outside = tmp_path.parent / "outside-icon.png"
+    outside.write_bytes(b"OUTSIDE-MARKER")
+    config, state, exports = _icon_setup(tmp_path, str(outside))
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    types = [w["type"] for w in state.warnings]
+    assert "unsafe_media_path" in types
+    assert "icon_upload_failed" not in types, "an upload was attempted"
+    assert not any(e.message == "Applied server icon" for e in events)
+
+
+async def test_run_server_traversal_icon_path_is_rejected(tmp_path: Path) -> None:
+    """A ../ iconUrl is refused even when it resolves to a real file (#1041, SC-1.3)."""
+    events: list[MigrationEvent] = []
+    outside = tmp_path.parent / "outside-icon.png"
+    outside.write_bytes(b"OUTSIDE-MARKER")
+    config, state, exports = _icon_setup(tmp_path, "../outside-icon.png")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    types = [w["type"] for w in state.warnings]
+    assert "unsafe_media_path" in types
+    assert "icon_upload_failed" not in types, "an upload was attempted"
+    assert not any(e.message == "Applied server icon" for e in events)
+
+
+async def test_run_server_symlinked_icon_escaping_root_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """A symlink inside the export that points outside is refused (#1041, SC-1.4)."""
+    events: list[MigrationEvent] = []
+    outside = tmp_path.parent / "outside-icon.png"
+    outside.write_bytes(b"OUTSIDE-MARKER")
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "icon.png").symlink_to(outside)
+    config, state, exports = _icon_setup(tmp_path, "media/icon.png")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    types = [w["type"] for w in state.warnings]
+    assert "unsafe_media_path" in types
+    assert "icon_upload_failed" not in types, "an upload was attempted"
+
+
+async def test_run_server_missing_icon_file_warns_icon_file_missing(
+    tmp_path: Path,
+) -> None:
+    """A named icon that is absent warns instead of being skipped (#1041, SC-3.2)."""
+    events: list[MigrationEvent] = []
+    config, state, exports = _icon_setup(tmp_path, "media/icon.png")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    warns = [w for w in state.warnings if w["type"] == "icon_file_missing"]
+    assert len(warns) == 1
+    assert warns[0]["phase"] == "server"
+    assert "media/icon.png" in warns[0]["message"]
+    assert "Stoat server settings" in warns[0]["message"]
+    assert "icon_upload_failed" not in [w["type"] for w in state.warnings]
+
+
+async def test_run_server_icon_directory_warns_and_does_not_upload(
+    tmp_path: Path,
+) -> None:
+    """A directory where the icon should be warns and never uploads (#1041, SC-3.3)."""
+    events: list[MigrationEvent] = []
+    (tmp_path / "media" / "icon.png").mkdir(parents=True)
+    config, state, exports = _icon_setup(tmp_path, "media/icon.png")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    types = [w["type"] for w in state.warnings]
+    assert "icon_file_missing" in types
+    assert "icon_upload_failed" not in types, "a directory reached the uploader"
+
+
+async def test_run_server_remote_icon_url_is_skipped_without_a_missing_warning(
+    tmp_path: Path,
+) -> None:
+    """A remote spelling is not a local file and is not reported missing (#1041, SC-3.5).
+
+    contained_media_path joins a remote spelling to <root>/https:/... and
+    is_media_escape calls that contained, so an is_file gate alone would tell the
+    operator a file is missing that was never in the export.
+    """
+    events: list[MigrationEvent] = []
+    config, state, exports = _icon_setup(tmp_path, "https://example.com/icon.png")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    types = [w["type"] for w in state.warnings]
+    assert "icon_file_missing" not in types
+    assert "unsafe_media_path" not in types
+    assert "icon_upload_failed" not in types
+    assert not any(e.message == "Applied server icon" for e in events)
+
+
+async def test_run_server_empty_icon_url_warns_nothing(tmp_path: Path) -> None:
+    """An export with no icon is not reported as defective (#1041, SC-3.1)."""
+    events: list[MigrationEvent] = []
+    config, state, exports = _icon_setup(tmp_path, "")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    assert _icon_warnings(state) == []
+
+
+async def test_run_server_icon_warning_bounds_a_hostile_spelling(
+    tmp_path: Path,
+) -> None:
+    """The raw spelling is repr-escaped and length-bounded (#1041, SC-2.4).
+
+    migration_report.md applies secret masking only and strips no control
+    characters, so the escaping has to happen where the message is written.
+    """
+    events: list[MigrationEvent] = []
+    hostile = "../" + "\x1b[31m" + "[bold]" + "x" * 4000 + "\n"
+    config, state, exports = _icon_setup(tmp_path, hostile)
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    warns = [w for w in state.warnings if w["type"] == "unsafe_media_path"]
+    assert len(warns) == 1
+    message = warns[0]["message"]
+    assert "\x1b" not in message, "a raw escape byte reached the warning"
+    assert "\n" not in message, "a raw newline reached the warning"
+    assert len(message) < 400, "an unbounded iconUrl inflated the warning"
+    assert "tok" not in message, "the token leaked into the warning"
+
+
+async def test_run_server_icon_uploads_from_a_foreign_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The icon resolves against export_dir, not the process cwd (#1041, SC-1.5).
+
+    This is the regression that stayed invisible. Pre-fix source resolved the
+    relative spelling against the cwd, so a real export uploaded its icon only
+    when ferry happened to run from inside the export folder.
+    """
+    events: list[MigrationEvent] = []
+    icon_file = tmp_path / "media" / "icon.png"
+    icon_file.parent.mkdir(parents=True)
+    icon_file.write_bytes(b"PNG")
+    elsewhere = tmp_path.parent / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    config, state, exports = _icon_setup(tmp_path, "media/icon.png")
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m, icons=True)
+        await run_server(config, state, exports, events.append)
+
+    assert _icon_warnings(state) == [], f"the icon was rejected: {_icon_warnings(state)}"
+    assert any(e.message == "Applied server icon" for e in events)
 
 
 # ---------------------------------------------------------------------------
