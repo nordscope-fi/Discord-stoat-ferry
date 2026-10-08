@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Run the main test suite on Windows with Python 3.12, replacing the four-file Windows
+  atomic-write job (#174). The three Linux Python versions and the separate exporter contract
+  job remain in place.
+
 ## [2.41.18] - 2026-10-08
 
 ### Fixed
