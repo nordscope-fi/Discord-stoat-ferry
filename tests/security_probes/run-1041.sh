@@ -9,7 +9,7 @@
 # Argument order matches run-955.sh and run-956.sh: scratch first.
 # Restored to .qwen/tmp/probe-1041/ on 2026-10-07 after /tmp was cleaned.
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SCRATCH="${1:-$HERE/scratch}"
+SCRATCH="${1:?usage: run-1041.sh <scratch-dir> [repo-root]}"
 REPO_ROOT="${2:-$(cd "$HERE/../.." && pwd)}"
 rm -rf "$SCRATCH"
 mkdir -p "$SCRATCH/tmp"
