@@ -1173,8 +1173,8 @@ async def apply_channel_permissions(
                 "type": "channel_override_admin_inflated",
                 "message": (
                     f"Saved permission overwrite for '{label}' granted every permission, "
-                    "which Discord never grants inside an overwrite. Ferry sent it with "
-                    "no allowed permissions."
+                    "which Discord never grants inside an overwrite. Ferry removed its "
+                    "allowed permissions and kept its denied ones."
                 ),
             }
         )
