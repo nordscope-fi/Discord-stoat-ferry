@@ -18,9 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   JSON string never matches, because a fence boundary needs a real line break. Replies that start
   with JSON or with a fence are read exactly as before. The findings check still runs on whatever
   is read, and a reply with no JSON at all is still rejected.
-- A second Vibe failure is not fixed here: the Vibe program sometimes exits with "Turn limit of 1
-  reached" and no output, which the ensemble records at stage `vibe-child`. It did not recur in
-  eight runs with the review instructions, so its cause is not yet known.
+- **The Vibe reviewer no longer fails with "Turn limit of 1 reached".** The ensemble records this
+  failure at stage `vibe-child`. Vibe trusts its working directory and loads that directory's
+  `.vibe` hooks, tools, skills and plugins, and the reviewer ran inside the Ferry checkout. The
+  checkout's plain-English stop hook read the review's JSON answer as a chat reply and injected a
+  rewrite request. That spent the single allowed turn, so Vibe exited with an error and the
+  review was lost. Every Vibe child now starts in an empty temporary directory. From inside the
+  checkout, two of three runs failed this way before the change and none of three after it.
 
 ## [2.41.12] - 2026-10-08
 

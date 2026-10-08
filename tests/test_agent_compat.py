@@ -3203,6 +3203,21 @@ def test_vibe_review_still_validates_findings_after_a_prose_preamble() -> None:
     assert "invalid findings" in result.stderr
 
 
+def test_vibe_review_runs_every_child_in_an_empty_directory_outside_the_checkout() -> None:
+    """A trusted checkout loads its own .vibe hooks; the plain-English one ended reviews (#1088)."""
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-review",
+        "isolated-workdir",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    workdirs = json.loads(result.stdout)["workdirs"]
+    assert len(workdirs) == 2  # the --help probe and the review
+    assert all(w == {"outside_checkout": True, "empty": True} for w in workdirs)
+
+
 def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
     result = _run(
         "node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", "prose-without-json"

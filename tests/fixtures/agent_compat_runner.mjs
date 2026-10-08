@@ -1124,7 +1124,16 @@ switch (mode) {
     }
     let argvContainsCanary = false;
     let stdinReceivedCanary = false;
+    const workdirs = [];
     const run = async (command, args, options) => {
+      // Vibe loads .vibe hooks, tools and skills from a trusted working
+      // directory, and walks up from it for AGENTS.md, so every child must
+      // start in an empty directory outside the checkout.
+      const cwd = options.cwd ?? process.cwd();
+      workdirs.push({
+        outside_checkout: !resolve(cwd).startsWith(resolve(process.cwd())),
+        empty: existsSync(cwd) && readdirSync(cwd).length === 0,
+      });
       if (args.includes('--help')) return { stdout: help };
       argvContainsCanary = args.some((value) => value.includes('FERRY_SECRET_CANARY'));
       stdinReceivedCanary = options.input?.includes('FERRY_SECRET_CANARY') ?? false;
@@ -1145,6 +1154,7 @@ switch (mode) {
         run,
       });
       if (argument in replies) writeJson({ status: record.status, summary: record.summary });
+      if (argument === 'isolated-workdir') writeJson({ workdirs });
       if (argument === 'stdin-prompt') {
         writeJson({
           argv_contains_canary: argvContainsCanary,
