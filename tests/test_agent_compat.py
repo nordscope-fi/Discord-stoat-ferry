@@ -3178,6 +3178,9 @@ def test_vibe_review_redacts_an_injected_child_failure() -> None:
     ("reply", "summary"),
     [
         ("prose-before-fence", "prose first"),
+        ("code-block-before-fence", "after a code block"),
+        ("prose-then-quoted-fence", "quotes ``` inside"),
+        ("prose-crlf", "clean"),
         ("bare-json-quoting-a-fence", "see ```json``` above"),
     ],
 )
@@ -3186,6 +3189,17 @@ def test_vibe_review_reads_the_json_from_each_reply_shape(reply: str, summary: s
     result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", reply, "--json")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"status": "valid", "summary": summary}
+
+
+def test_vibe_review_still_validates_findings_after_a_prose_preamble() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-review",
+        "prose-before-invalid-findings",
+    )
+    assert result.returncode == 1
+    assert "invalid findings" in result.stderr
 
 
 def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
