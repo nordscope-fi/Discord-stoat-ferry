@@ -3180,6 +3180,7 @@ def test_vibe_review_redacts_an_injected_child_failure() -> None:
         ("prose-before-fence", "prose first"),
         ("code-block-before-fence", "after a code block"),
         ("prose-then-quoted-fence", "quotes ``` inside"),
+        ("fence-after-the-answer", "before an example"),
         ("prose-crlf", "clean"),
         ("bare-json-quoting-a-fence", "see ```json``` above"),
     ],
