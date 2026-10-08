@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.11] - 2026-10-08
+
+### Fixed
+
+- **The brainstorm evidence guard reads Claude Code shell exit codes.** The guard read
+  `tool_response.exit_code` on Claude, and Claude Code's Bash result has no such field. Its
+  result carries `stdout`, `stderr`, `interrupted`, `isImage` and `backgroundTaskId`, and the
+  hook event that follows a successful call (PostToolUse) fires only for a command that exited
+  0. A non-zero exit fires the failure event (PostToolUseFailure) instead, with no
+  `tool_response` and a top-level `error` string whose first line is `Exit code N`. A challenge
+  command run on Claude therefore never completed its receipt, so a design recommendation could
+  never pass the guard there. Found on 2026-10-08, when a passing comparison run left no
+  receipt. The guard now records exit 0 for a finished successful call, and the code from the
+  first line of a failure. It records no outcome for an interrupted or backgrounded command, a
+  timeout, a user interrupt, or a shell that never started, because a default code would let a
+  challenge expecting that code pass without the command finishing. The Claude tests now send
+  the payload shapes from Claude Code's hook and SDK documentation. They previously sent an
+  `exit_code` field Claude never sends, which is why the defect passed. Codex and Qwen
+  behaviour is unchanged.
+
 ## [2.41.10] - 2026-10-07
 
 ### Fixed
