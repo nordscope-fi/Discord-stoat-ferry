@@ -904,9 +904,11 @@ the equivalent Stoat bitfield.
 
 **Special cases**:
 
-- **ADMINISTRATOR** (Discord bit 3): Expands to `ALL_STOAT_PERMISSIONS`, derived from
-  `STOAT_PERMISSION_BITS`, every one of the 34 bits Stoat defines, and nothing from its
-  reserved 41–52 free area
+- **ADMINISTRATOR** (Discord bit 3): On a server role or the `@everyone` server default, expands
+  to `ALL_STOAT_PERMISSIONS`, derived from `STOAT_PERMISSION_BITS`, every one of the 34 bits Stoat
+  defines, and nothing from its reserved 41–52 free area. Inside a channel overwrite it grants
+  nothing, because Discord checks it only on server-level role permissions. Ferry drops it there
+  and translates the overwrite's other bits
 - **CONNECT** maps to **two** bits: Stoat gates joining a voice channel on `Connect` but gates
   hearing anyone on `Listen`, and Discord's single permission covers both
 - **PIN_MESSAGES** (51) is deliberately unmapped, Stoat has no pin-only bit, and its nearest
@@ -1300,7 +1302,8 @@ sends a single `PATCH /servers/{id}` with the full categories array.
 
 Stoat does not have one. There is no equivalent to Discord's bit 3 that grants all permissions.
 Ferry must grant each permission individually. When translating Discord roles, ADMINISTRATOR is
-expanded to all individual Stoat permission bits.
+expanded to all individual Stoat permission bits. Channel overwrites are the exception: Discord
+ignores the bit there, so Ferry does too.
 
 ### Why Not Use stoat.py SDK?
 
