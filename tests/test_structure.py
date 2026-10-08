@@ -350,7 +350,9 @@ def _mock_server_create_and_edit(m: aioresponses, *, icons: bool = False) -> Non
     m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
 
-def _icon_setup(tmp_path: Path, icon_url: str) -> tuple[object, MigrationState, list[object]]:
+def _icon_setup(
+    tmp_path: Path, icon_url: str
+) -> tuple[FerryConfig, MigrationState, list[DCEExport]]:
     config = _make_config(tmp_path)
     state = MigrationState(autumn_url=AUTUMN_URL)
     exports = [_make_export(guild_icon_url=icon_url)]
