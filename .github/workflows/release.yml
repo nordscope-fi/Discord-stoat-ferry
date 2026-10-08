@@ -52,7 +52,7 @@ jobs:
         run: uv run --extra dev pyinstaller ferry.spec
 
       # Launch what we just built. Nothing else in CI ever executes the frozen
-      # binary -- ci.yml is ubuntu-only and runs the source tree, so a defect that
+      # binary. ci.yml runs the source tree, so a defect that
       # exists only in the packaged Windows app ships unseen. That is exactly what
       # happened with issue #123: a fault that killed the export on every platform
       # survived eleven releases because no test ran the real thing.

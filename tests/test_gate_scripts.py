@@ -401,7 +401,9 @@ def test_python_matrix_keeps_required_contract_and_runs_four_workers() -> None:
     job = _python_matrix_job()
     for required in (
         'python-version: ["3.11", "3.12", "3.13"]',
-        "runs-on: ubuntu-latest",
+        "runs-on: ${{ matrix.os }}",
+        "os: [ubuntu-latest]",
+        'include:\n          - os: windows-latest\n            python-version: "3.12"',
         "fail-fast: false",
         "uv run ruff check .",
         "uv run ruff format --check .",

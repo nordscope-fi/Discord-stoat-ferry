@@ -229,9 +229,8 @@ def _isolate_ferry_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
 # directory. test_repeated_checkpoints_overwrite_on_windows is the one that shows
 # this: it starts from an empty tmp_path.
 #
-# Every other job in ci.yml is ubuntu-only, so this fixture is the only way a pull
-# request can see that difference. The windows-atomic-write job runs the same two
-# files on a real Windows runner, where no simulation is needed.
+# This fixture also exposes that difference on Linux and macOS. The main CI
+# matrix runs the suite on a real Windows runner with Python 3.12.
 _REAL_RENAME = Path.rename
 
 
