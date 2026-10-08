@@ -5,9 +5,14 @@ import json
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="Developer tooling is covered by the Linux CI jobs (#174)"
+)
 
 REPO = Path(__file__).resolve().parent.parent
 MODULE = REPO / "scripts/agent-compat/brainstorm-evidence.mjs"

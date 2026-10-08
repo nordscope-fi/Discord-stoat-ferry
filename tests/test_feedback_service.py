@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from ipaddress import ip_network
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -84,7 +85,7 @@ def test_service_config_parses_the_closed_runtime_values() -> None:
     assert config.repository == "nordscope-fi/Discord-stoat-ferry"
     assert config.github_app_id == 4_773_301
     assert config.github_installation_id == 157_795_120
-    assert str(config.database_path) == "/data/feedback.sqlite3"
+    assert config.database_path == Path("/data/feedback.sqlite3").resolve()
     assert [str(network) for network in config.trusted_proxy_networks] == [
         "10.0.0.0/8",
         "fd00::/8",
@@ -1254,11 +1255,11 @@ async def test_feedback_route_cleans_diagnostics_again_before_github(
     assert credential not in str(sent.diagnostics.to_mapping())
 
 
-def test_startup_serve_loads_config_and_runs_only_public_routes(tmp_path: object) -> None:
+def test_startup_serve_loads_config_and_runs_only_public_routes(tmp_path: Path) -> None:
     from discord_ferry.feedback_service.__main__ import serve
 
     env = _valid_config_env()
-    env["FERRY_FEEDBACK_DATABASE_PATH"] = f"/data/{tmp_path!s}/feedback.sqlite3"
+    env["FERRY_FEEDBACK_DATABASE_PATH"] = str(Path("/data") / tmp_path.name / "feedback.sqlite3")
     captured: dict[str, object] = {}
 
     def runner(app: object, **kwargs: object) -> None:

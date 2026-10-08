@@ -115,6 +115,7 @@ def _private_key() -> str:
     ).decode()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="The feedback image requires Linux containers")
 def test_feedback_container_runs_read_only_with_only_data_writable() -> None:
     _require_docker()
     tag = f"discord-ferry-feedback-test:{time.time_ns()}"

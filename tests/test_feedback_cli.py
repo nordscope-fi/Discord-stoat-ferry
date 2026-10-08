@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -243,7 +244,8 @@ def test_feedback_failure_saves_only_after_a_path_is_chosen(
 
     assert result.exit_code == 0, result.output
     assert path.read_text() == client.submissions[0]["public_body"]
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert "private@example.com" not in path.read_text()
 
 
