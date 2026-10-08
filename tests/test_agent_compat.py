@@ -3215,7 +3215,8 @@ def test_vibe_review_runs_every_child_in_an_empty_directory_outside_the_checkout
     assert result.returncode == 0, result.stderr
     workdirs = json.loads(result.stdout)["workdirs"]
     assert len(workdirs) == 2  # the --help probe and the review
-    assert all(w == {"outside_checkout": True, "empty": True} for w in workdirs)
+    expected = {"outside_checkout": True, "empty": True, "private_home": True}
+    assert all(w == expected for w in workdirs)
 
 
 def test_vibe_child_starts_in_the_directory_it_is_given() -> None:
