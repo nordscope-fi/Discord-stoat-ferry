@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Require avatar download tests to assert the `avatar_download_failed` type and the relevant
   failure reason (#1079). An unrelated warning no longer satisfies the non-image and timeout
   coverage.
+- Require channel and emoji limit tests to assert their named warning types and truncation details
+  (#1079). Warnings from the same migration phase no longer satisfy this coverage.
 
 ## [2.41.18] - 2026-10-08
 

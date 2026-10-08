@@ -224,8 +224,9 @@ async def test_max_channels_limit_emits_warning(tmp_path: Path) -> None:
         for e in channel_warnings
     )
 
-    state_channel_warnings = [w for w in state.warnings if w.get("phase") == "channels"]
-    assert len(state_channel_warnings) > 0
+    state_channel_warnings = [w for w in state.warnings if w.get("type") == "channel_limit"]
+    assert len(state_channel_warnings) == 1
+    assert "exceeding 1 limit" in state_channel_warnings[0]["message"]
 
 
 async def test_max_channels_respects_limit(tmp_path: Path) -> None:
@@ -307,8 +308,7 @@ async def test_max_emoji_limit_emits_warning(tmp_path: Path) -> None:
     events: list[MigrationEvent] = []
     state = await run_migration(config, events.append, phase_overrides=overrides)
 
-    emoji_warnings = [w for w in state.warnings if w.get("phase") == "emoji"]
-    assert any("truncat" in w["message"].lower() for w in emoji_warnings), (
-        f"Expected truncation warning in state.warnings, got: {emoji_warnings}"
-    )
+    emoji_warnings = [w for w in state.warnings if w.get("type") == "emoji_limit"]
+    assert len(emoji_warnings) == 1
+    assert "Found 5 unique emoji; truncating to 2" in emoji_warnings[0]["message"]
     assert len(state.emoji_map) <= 2
