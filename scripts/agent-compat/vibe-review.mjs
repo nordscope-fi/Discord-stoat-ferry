@@ -181,8 +181,11 @@ async function withVibeInvocation({ home, credential, run, action }) {
   try {
     writeFileSync(join(vibeHome, 'config.toml'), VIBE_CONFIG, { mode: 0o600 });
     mkdirSync(cwd, { mode: 0o700 });
+    // HOME too: Vibe reads user-level skills from Path.home()/.agents, which
+    // ignores VIBE_HOME, so without it the reviewer saw the owner's own skills.
     const baseEnvironment = {
       PATH: process.env.PATH ?? '',
+      HOME: vibeHome,
       VIBE_HOME: vibeHome,
       VIBE_ACTIVE_MODEL: VIBE_MODEL,
       MISTRAL_API_KEY: '',
