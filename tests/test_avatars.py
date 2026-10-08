@@ -176,11 +176,11 @@ async def test_remote_non_image_content_type_rejected(tmp_path: Path) -> None:
 
     assert "user1" not in state.avatar_cache
     mock_upload.assert_not_called()
-    # Should have a warning
-    assert len(state.warnings) >= 1
-    assert any(
-        "content" in w["message"].lower() or "image" in w["message"].lower() for w in state.warnings
-    )
+    download_warnings = [
+        warning for warning in state.warnings if warning.get("type") == "avatar_download_failed"
+    ]
+    assert len(download_warnings) == 1
+    assert "non-image Content-Type 'text/html'" in download_warnings[0]["message"]
 
 
 async def test_remote_download_timeout_nonfatal(tmp_path: Path) -> None:
@@ -214,8 +214,11 @@ async def test_remote_download_timeout_nonfatal(tmp_path: Path) -> None:
     assert state.avatar_cache.get("user2") == "autumn_av2"
     # Phase completed (did not crash)
     assert any(e.status == "completed" for e in events)
-    # Warning logged for user1
-    assert len(state.warnings) >= 1
+    download_warnings = [
+        warning for warning in state.warnings if warning.get("type") == "avatar_download_failed"
+    ]
+    assert len(download_warnings) == 1
+    assert "Connection timed out" in download_warnings[0]["message"]
 
 
 async def test_already_cached_avatars_skipped(tmp_path: Path) -> None:
