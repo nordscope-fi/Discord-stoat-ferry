@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from dataclasses import replace
@@ -841,11 +842,13 @@ def test_feedback_draft_save_is_explicit_owner_only_and_excludes_contact(
     draft.save(path)
     assert path.read_text() == draft.render_public_body()
     assert "private@example.com" not in path.read_text()
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
 
     draft.edit_description("Saved again")
     draft.save(path, include_contact=True)
     saved = path.read_text()
     assert "Saved again" in saved
     assert "private@example.com" in saved
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600

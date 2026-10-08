@@ -6,11 +6,16 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import tomllib
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="Developer tooling is covered by the Linux CI jobs (#174)"
+)
 
 REPO = Path(__file__).resolve().parent.parent
 NODE = shutil.which("node")

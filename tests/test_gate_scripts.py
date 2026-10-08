@@ -12,11 +12,14 @@ passing case cannot distinguish a working guard from one that always exits 0.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="Developer tooling is covered by the Linux CI jobs (#174)"
+)
 
 REPO = Path(__file__).resolve().parent.parent
 DOC_REFS = REPO / "scripts" / "assert-doc-refs.sh"

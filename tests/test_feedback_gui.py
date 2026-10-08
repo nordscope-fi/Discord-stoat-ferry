@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
@@ -350,7 +351,8 @@ async def test_feedback_recovery_copies_saves_and_retries_only_when_chosen(
         assert copied == [client.submissions[0]["public_body"]]
         assert save_path.read_text() == client.submissions[0]["public_body"]
         assert "private@example.com" not in save_path.read_text()
-        assert save_path.stat().st_mode & 0o777 == 0o600
+        if os.name == "posix":
+            assert save_path.stat().st_mode & 0o777 == 0o600
 
         user.find("Retry").click()
         await user.should_see("Feedback shared")

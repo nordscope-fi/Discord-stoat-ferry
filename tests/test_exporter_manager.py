@@ -138,14 +138,21 @@ class TestDetectDotnet:
 
 
 class TestGetDcePath:
-    def test_returns_path_when_binary_exists(self, tmp_path):
+    @pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows"])
+    def test_returns_path_when_binary_exists(self, tmp_path, system):
         dce_dir = tmp_path / "dce"
         dce_dir.mkdir()
-        exe = dce_dir / "DiscordChatExporter.Cli"
+        executable = (
+            "DiscordChatExporter.Cli.exe" if system == "Windows" else "DiscordChatExporter.Cli"
+        )
+        exe = dce_dir / executable
         exe.touch()
         exe.chmod(0o755)
 
-        with patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir):
+        with (
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
+            patch("platform.system", return_value=system),
+        ):
             result = get_dce_path()
             assert result is not None
             assert result.exists()
@@ -252,6 +259,7 @@ class TestArchiveExtraction:
 
         with (
             aioresponses() as responses,
+            patch("platform.system", return_value="Darwin"),
             patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
             patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
