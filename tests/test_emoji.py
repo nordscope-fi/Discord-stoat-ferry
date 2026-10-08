@@ -194,19 +194,38 @@ async def test_run_emoji_limit_warning(tmp_path: Path) -> None:
         patch(
             "discord_ferry.migrator.emoji.upload_with_cache",
             new=AsyncMock(return_value="autumn_id"),
-        ),
+        ) as mock_upload,
         patch(
             "discord_ferry.migrator.emoji.api_create_emoji",
             new=AsyncMock(return_value={"_id": "stoat_id"}),
-        ),
+        ) as mock_create,
         patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
     ):
         await run_emoji(config, state, exports, events.append)
 
+    assert state.emoji_map == {str(i): "autumn_id" for i in range(MAX_EMOJI_DEFAULT)}
+    assert mock_upload.await_count == MAX_EMOJI_DEFAULT
+    assert mock_create.await_count == MAX_EMOJI_DEFAULT
+
+    dropped_names = ", ".join(f"emoji{i}" for i in range(MAX_EMOJI_DEFAULT, MAX_EMOJI_DEFAULT + 5))
+    assert state.warnings == [
+        {
+            "phase": "emoji",
+            "type": "emoji_limit",
+            "message": (
+                f"Found {MAX_EMOJI_DEFAULT + 5} unique emoji; truncating to {MAX_EMOJI_DEFAULT} "
+                f"by usage (Stoat server limit). Dropped: {dropped_names}"
+            ),
+        }
+    ]
     warning_events = [e for e in events if e.status == "warning"]
-    assert warning_events, "Expected at least one warning event for truncation"
-    assert any("truncat" in e.message.lower() for e in warning_events)
-    assert len(state.warnings) >= 1
+    assert [(e.phase, e.message) for e in warning_events] == [
+        (
+            "emoji",
+            f"Found {MAX_EMOJI_DEFAULT + 5} emoji but Stoat limit is {MAX_EMOJI_DEFAULT}; "
+            f"truncating to the {MAX_EMOJI_DEFAULT} most-used. Dropped: {dropped_names}",
+        )
+    ]
 
 
 async def test_run_emoji_resume_skip(tmp_path: Path) -> None:

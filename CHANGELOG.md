@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require the emoji-limit test to check the exact surviving emoji, upload and creation counts,
+  and the recorded and emitted limit warnings (#1079).
 - Run the application test suite on Windows with Python 3.12, replacing the four-file Windows
   atomic-write job (#174). The three Linux Python versions and the separate exporter contract
   job remain in place.
