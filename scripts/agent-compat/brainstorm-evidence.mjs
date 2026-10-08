@@ -1075,13 +1075,6 @@ function receiptIntegrityFinding(record, ledger) {
       `Brainstorm evidence record has an invalid schema: ${id}.`,
     );
   }
-  if (receipt.generation !== ledger.generation) {
-    return validationFinding(
-      'receipt_generation',
-      [id],
-      `Brainstorm evidence belongs to another generation: ${id}.`,
-    );
-  }
   if (receipt.requirements_sha256 !== ledger.requirements_sha256) {
     return validationFinding(
       'receipt_requirements',
@@ -1178,7 +1171,11 @@ export function validateRecommendation(ledger, receipts, { root }) {
     );
   }
   const receiptById = new Map();
+  // Receipts left by an earlier generation stay on disk and cannot qualify,
+  // so they are skipped rather than rejected. Rejecting them blocked every
+  // later brainstorm in the same checkout.
   for (const record of receipts) {
+    if (record.receipt?.generation !== ledger.generation) continue;
     const finding = receiptIntegrityFinding(record, ledger);
     if (finding !== null) return finding;
     if (receiptById.has(record.receipt.receipt_id)) {
@@ -1347,11 +1344,16 @@ export function handleStop(input, { host, root }) {
     return null;
   }
 
+  // A stop with no matching marker means no prompt event arrived for this
+  // turn. Seen after a hook ended a turn and after a Claude "!" command. The
+  // turn passes unchecked and drops its pending receipts, but the brainstorm
+  // stays active on the same generation. A missing tool event can only
+  // withhold a receipt, never forge one, so the completed evidence still
+  // counts and the next typed turn is checked again. Suspending here instead
+  // switched the check off until a restart that threw that evidence away
+  // (ADR-031).
   if (marker === null) {
     clearPendingReceipts(paths);
-    const suspended = { ...current, state: 'suspended' };
-    delete suspended.activation;
-    writeJsonAtomic(paths.ledger, suspended);
     return null;
   }
 

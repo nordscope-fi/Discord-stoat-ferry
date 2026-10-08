@@ -336,6 +336,29 @@ def test_cancelled_generation_requires_explicit_restart(
     assert restarted["activation"]["kind"] == "invoke"
 
 
+def test_suspended_record_from_an_earlier_version_restarts_on_invocation(
+    tmp_path: Path,
+) -> None:
+    # v2.41.11 and earlier could leave a record suspended. Nothing writes that state now,
+    # but an explicit invocation must still restart it, or it would have no way out.
+    root = tmp_path / "checkout"
+    root.mkdir()
+    post_edit(root, "docs/plans/specs/feature.md", "# Requirements\n")
+    submit_prompt(root, "continue")
+    ledger = read_ledger(root)
+    ledger["state"] = "suspended"
+    ledger.pop("activation")
+    write_ledger(root, ledger)
+
+    submit_prompt(root, "continue", "prompt-short")
+    assert read_ledger(root)["state"] == "suspended"
+
+    submit_prompt(root, "/df-brainstorm", "prompt-restart")
+    restarted = read_ledger(root)
+    assert restarted["state"] == "active"
+    assert restarted["generation"] != ledger["generation"]
+
+
 def test_changed_requirements_start_new_prepared_generation(tmp_path: Path) -> None:
     root = tmp_path / "checkout"
     root.mkdir()
@@ -441,13 +464,17 @@ def test_unrelated_active_turn_does_not_trigger_recommendation_gate(
 
 
 @pytest.mark.parametrize("marker_state", ["missing", "malformed"])
-def test_missing_prompt_marker_suspends_and_clears_pending_receipts(
+def test_missing_prompt_marker_keeps_generation_and_clears_pending_receipts(
     tmp_path: Path, marker_state: str
 ) -> None:
+    # A stop with no matching marker (seen after a hook ended a turn and after a Claude "!"
+    # command) passes unchecked, but the brainstorm stays active on the same generation,
+    # so its completed evidence still counts and the next typed turn is checked again.
     root = tmp_path / "checkout"
     root.mkdir()
     post_edit(root, "docs/plans/specs/feature.md", "# Requirements\n")
     submit_prompt(root, "continue")
+    generation = read_ledger(root)["generation"]
     marker = next((root / PROMPT_MARKERS).iterdir())
     if marker_state == "missing":
         marker.unlink()
@@ -460,8 +487,24 @@ def test_missing_prompt_marker_suspends_and_clears_pending_receipts(
     result = stop_turn(root, "## Recommendation\n\nUse the selected approach.")
 
     assert result.stdout == ""
-    assert read_ledger(root)["state"] == "suspended"
+    ledger = read_ledger(root)
+    assert ledger["state"] == "active"
+    assert ledger["generation"] == generation
     assert list((root / PENDING_RECEIPTS).iterdir()) == []
+
+
+def test_typed_turn_after_unmarked_turn_still_checks_recommendation(tmp_path: Path) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    post_edit(root, "docs/plans/specs/feature.md", "# Requirements\n")
+    submit_prompt(root, "continue")
+    stop_turn(root, "Research so far.")
+    assert stop_turn(root, "Merged.").stdout == ""
+
+    submit_prompt(root, "continue", prompt_id="prompt-2")
+    result = stop_turn(root, "## Recommendation\n\nUse the selected approach.")
+
+    assert json.loads(result.stdout)["decision"] == "block"
 
 
 def test_inactive_workflow_and_stop_loop_allow_recommendation(tmp_path: Path) -> None:
@@ -1215,6 +1258,8 @@ def test_recommendation_coverage_mutation_blocks(
 
 @pytest.mark.parametrize("mutation", ["copied_generation", "damaged_receipt"])
 def test_recommendation_receipt_mutation_blocks(tmp_path: Path, mutation: str) -> None:
+    # A receipt from another generation is ignored rather than rejected, so the block names
+    # the drawback it no longer covers. A damaged current receipt is named itself.
     root, source_receipt_id, _ = complete_recommendation_coverage(tmp_path)
     path = root / COMPLETED_RECEIPTS / f"{source_receipt_id}.json"
     receipt = json.loads(path.read_text())
@@ -1230,7 +1275,24 @@ def test_recommendation_receipt_mutation_blocks(tmp_path: Path, mutation: str) -
 
     decision = json.loads(result.stdout)
     assert decision["decision"] == "block"
-    assert source_receipt_id in decision["reason"]
+    expected = "drawback-a1" if mutation == "copied_generation" else source_receipt_id
+    assert expected in decision["reason"]
+
+
+def test_receipts_left_by_an_earlier_generation_do_not_block(tmp_path: Path) -> None:
+    root, source_receipt_id, _ = complete_recommendation_coverage(tmp_path)
+    leftover = json.loads((root / COMPLETED_RECEIPTS / f"{source_receipt_id}.json").read_text())
+    leftover["generation"] = "earlier-generation"
+    leftover["requirements_sha256"] = "0" * 64
+    leftover["receipt_id"] = "e" * 64
+    leftover.pop("integrity_sha256")
+    leftover["integrity_sha256"] = receipt_digest(leftover)
+    (root / COMPLETED_RECEIPTS / f"{'e' * 64}.json").write_text(json.dumps(leftover))
+    (root / COMPLETED_RECEIPTS / f"{'f' * 64}.json").write_text('{"generation": "older"')
+
+    result = stop_turn(root, "## Recommendation\n\nUse the file approach.")
+
+    assert result.stdout == ""
 
 
 def test_recommendation_falsified_rejection_mutation_blocks(tmp_path: Path) -> None:

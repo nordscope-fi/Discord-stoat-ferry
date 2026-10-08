@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.12] - 2026-10-08
+
+### Fixed
+
+- **The brainstorm evidence guard no longer switches itself off.** Two rules blocked real
+  brainstorms in the same checkout.
+  - A turn that ended with no matching prompt record used to suspend an active brainstorm. That
+    happened after a hook ended a turn and after the owner ran a `!` command. A suspended record
+    blocks nothing, so the check stayed off until `/df-brainstorm` restarted it. The restart then
+    discarded every receipt already collected. Such a turn now passes unchecked, and the
+    brainstorm stays active with its evidence. A missing tool event can only withhold a receipt,
+    never create one, so this cannot let incomplete evidence through.
+  - Receipts left by an earlier brainstorm made the validator reject the whole current record
+    with "Brainstorm evidence belongs to another generation". That blocked every later
+    recommendation until the files were moved by hand. They are now skipped. They still cannot
+    count as evidence.
+  - A record suspended by an earlier version still restarts through `/df-brainstorm`, and a test
+    now covers that path. ADR-031 records both changes.
+
 ## [2.41.11] - 2026-10-08
 
 ### Fixed
