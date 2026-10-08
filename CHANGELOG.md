@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.15] - 2026-10-08
+
+### Fixed
+
+- **A Discord channel overwrite holding the administrator permission no longer grants everything
+  on that channel in Stoat** (#986). Discord checks that permission only on server roles, so
+  inside a channel overwrite it grants nothing. Ferry turned it into every Stoat permission,
+  including managing the channel and its permissions, and for an `@everyone` overwrite that meant
+  every member. Fresh fetches now drop the bit inside overwrites and translate the rest.
+- **A saved Discord metadata file from an earlier version can no longer reapply that grant.** When
+  a resumed run or `ferry repair` sends a saved overwrite that holds a permission only the
+  administrator expansion produces, Ferry sends it with no allowed permissions, keeps its denied
+  ones, and records a `channel_override_admin_inflated` warning naming the channel. Servers already
+  migrated keep whatever they were given: neither `ferry check` nor `ferry repair` looks for this
+  on a live server.
+
 ## [2.41.14] - 2026-10-08
 
 ### Fixed
