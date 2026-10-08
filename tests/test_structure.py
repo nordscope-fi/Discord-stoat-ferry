@@ -1642,8 +1642,14 @@ async def test_run_channels_voice_fallback_to_text(tmp_path: Path) -> None:
         await run_channels(config, state, exports, events.append)
 
     assert state.channel_map["vc1"] == "stoat-vc1"
-    statuses = [e.status for e in events]
-    assert "warning" in statuses
+    fallback_warnings = [
+        event
+        for event in events
+        if event.phase == "channels"
+        and event.status == "warning"
+        and event.message == "Voice channel 'voice-chat' failed, retrying as text"
+    ]
+    assert len(fallback_warnings) == 1
 
 
 async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
