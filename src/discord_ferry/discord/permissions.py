@@ -135,6 +135,20 @@ def _bitfield(bits: frozenset[int]) -> int:
 # owners without ever persisting it to a role.
 ALL_STOAT_PERMISSIONS = _bitfield(STOAT_PERMISSION_BITS)
 
+# Stoat bits no DISCORD_TO_STOAT entry targets, so only the ADMINISTRATOR
+# expansion above can set them: today 12, 13 and 28. A channel overwrite
+# translated from Discord never holds one (#986), so a saved overwrite that does
+# was written by a version that expanded ADMINISTRATOR inside overwrites. Every
+# value those versions saved sets bit 28. Derived from the two tables, never
+# typed by hand, so a new mapping shrinks it and the tests built from the saved
+# values fail loudly.
+_DISCORD_TARGETS: frozenset[int] = frozenset(
+    bit
+    for target in DISCORD_TO_STOAT.values()
+    for bit in (target if isinstance(target, list) else [target])
+)
+ADMINISTRATOR_ONLY_BITS = _bitfield(STOAT_PERMISSION_BITS - _DISCORD_TARGETS)
+
 
 def translate_permissions(discord_bits: int, *, in_overwrite: bool = False) -> int:
     """Convert a Discord permission bitfield to a Stoat permission bitfield.

@@ -1,6 +1,9 @@
 """Tests for Discord → Stoat permission bit translation."""
 
+import pytest
+
 from discord_ferry.discord.permissions import (
+    ADMINISTRATOR_ONLY_BITS,
     ALL_STOAT_PERMISSIONS,
     DISCORD_TO_STOAT,
     STOAT_PERMISSION_BITS,
@@ -301,3 +304,40 @@ def test_admin_grants_voice_and_mention_bits() -> None:
     result = translate_permissions(1 << 3)
     for bit in (8, 9, 12, 13, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40):
         assert result & (1 << bit), f"admin expansion missing bit {bit}"
+
+
+# ---------------------------------------------------------------------------
+# #986: bits only the ADMINISTRATOR expansion can set
+# ---------------------------------------------------------------------------
+
+
+def test_administrator_only_bits_are_the_stoat_bits_no_discord_permission_maps_to() -> None:
+    """SC-2.1: derived from the two tables, and equal to bits 12, 13 and 28 today."""
+    targets: set[int] = set()
+    for target in DISCORD_TO_STOAT.values():
+        targets.update(target if isinstance(target, list) else [target])
+    recomputed = 0
+    for bit in STOAT_PERMISSION_BITS - targets:
+        recomputed |= 1 << bit
+    assert recomputed == ADMINISTRATOR_ONLY_BITS
+    assert ADMINISTRATOR_ONLY_BITS == (1 << 12) | (1 << 13) | (1 << 28)
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        pytest.param(0x3CF0001F, id="v2.6.14-and-earlier"),
+        pytest.param(0x3FF00CDF, id="v2.6.15-to-v2.9"),
+        pytest.param(0x1FFFFF03FDF, id="v2.10.0-on"),
+    ],
+)
+def test_every_inflated_value_ever_saved_holds_an_administrator_only_bit(saved: int) -> None:
+    """Each "every permission" value Ferry has saved, measured 2026-10-08, is detectable."""
+    assert saved & ADMINISTRATOR_ONLY_BITS
+
+
+def test_every_mapped_permission_together_holds_no_administrator_only_bit() -> None:
+    """The largest value a real overwrite can translate to is never mistaken for inflation."""
+    every_mapped = translate_permissions(sum(1 << bit for bit in DISCORD_TO_STOAT))
+    assert every_mapped == 0x1FFEFF00FDF
+    assert every_mapped & ADMINISTRATOR_ONLY_BITS == 0
