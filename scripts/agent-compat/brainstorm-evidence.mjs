@@ -875,10 +875,47 @@ function qwenExitCode(input, eventName) {
   return Number.parseInt(matches[matches.length - 1][1], 10);
 }
 
+// Claude Code's Bash result carries no exit code either. PostToolUse fires
+// only for a command that exited 0, with {stdout, stderr, interrupted,
+// isImage, backgroundTaskId}. A non-zero exit fires PostToolUseFailure, whose
+// top-level error string starts with an "Exit code N" line followed by the
+// command's own output, so only that first line is read. An interrupted or
+// backgrounded command never finished, a timeout is Claude Code's kill rather
+// than the command's exit, and a shell that failed to start reports no code.
+function claudeExitCode(input, eventName) {
+  if (eventName === 'PostToolUseFailure') {
+    if (input?.is_interrupt === true || typeof input?.error !== 'string') return null;
+    const lines = input.error.split(/\r?\n/u);
+    if (lines.some((line) => line.trim().startsWith('Command timed out'))) return null;
+    const match = /^Exit code (-?\d+)$/u.exec(lines[0].trim());
+    return match === null ? null : Number.parseInt(match[1], 10);
+  }
+  const response = input?.tool_response;
+  if (
+    response === null
+    || typeof response !== 'object'
+    || typeof response.stdout !== 'string'
+    || response.interrupted !== false
+    || (typeof response.backgroundTaskId === 'string' && response.backgroundTaskId !== '')
+  ) {
+    return null;
+  }
+  return 0;
+}
+
 export function normalizeToolOutcome(input, eventName, host) {
   const response = input?.tool_response;
-  if (host !== 'qwen' && (response === null || typeof response !== 'object')) return null;
-  const exitCode = host === 'qwen' ? qwenExitCode(input, eventName) : response.exit_code;
+  if (
+    !['qwen', 'claude'].includes(host)
+    && (response === null || typeof response !== 'object')
+  ) {
+    return null;
+  }
+  const exitCode = host === 'qwen'
+    ? qwenExitCode(input, eventName)
+    : host === 'claude'
+      ? claudeExitCode(input, eventName)
+      : response.exit_code;
   if (!Number.isInteger(exitCode)) return null;
   if (eventName === 'PostToolUseFailure' && exitCode === 0) return null;
   return {

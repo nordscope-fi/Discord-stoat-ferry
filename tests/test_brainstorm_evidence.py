@@ -163,6 +163,46 @@ def after_tool(
     return result
 
 
+def claude_bash_response(
+    stdout: str = "", *, interrupted: bool = False, background_task_id: str | None = None
+) -> dict[str, object]:
+    # The Bash tool_response Claude Code sends on PostToolUse. It has no exit code: the
+    # event fires only for a command that exited 0 (code.claude.com/docs/en/agent-sdk/python).
+    response: dict[str, object] = {
+        "stdout": stdout,
+        "stderr": "",
+        "interrupted": interrupted,
+        "isImage": False,
+    }
+    if background_task_id is not None:
+        response["backgroundTaskId"] = background_task_id
+    return response
+
+
+def claude_bash_failure(
+    root: Path,
+    tool_input: dict[str, object],
+    error: str,
+    *,
+    tool_use_id: str,
+    is_interrupt: bool = False,
+) -> None:
+    # A non-zero exit fires PostToolUseFailure with a top-level error whose first line is
+    # "Exit code N", and no tool_response (code.claude.com/docs/en/hooks).
+    payload: dict[str, object] = {
+        "hook_event_name": "PostToolUseFailure",
+        "session_id": "session-1",
+        "turn_id": "turn-1",
+        "tool_use_id": tool_use_id,
+        "tool_name": "Bash",
+        "tool_input": tool_input,
+        "error": error,
+        "is_interrupt": is_interrupt,
+    }
+    result = run_hook(root, "claude", payload)
+    assert result.returncode == 0, result.stderr
+
+
 def active_checkout(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "checkout"
     root.mkdir()
@@ -739,7 +779,7 @@ def test_challenge_supported_method_completes_predeclared_receipt(
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0, "stdout": "printed values do not count as evidence"},
+        claude_bash_response("printed values do not count as evidence"),
         tool_use_id=f"call-{method}",
     )
 
@@ -785,7 +825,7 @@ def test_challenge_changed_declaration_before_result_discards_receipt(tmp_path: 
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0, "stdout": "1 passed"},
+        claude_bash_response("1 passed"),
         tool_use_id="changed-declaration",
     )
 
@@ -805,7 +845,7 @@ def test_challenge_changed_artifact_before_result_discards_receipt(tmp_path: Pat
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0},
+        claude_bash_response(),
         tool_use_id="changed-artifact",
     )
 
@@ -825,7 +865,7 @@ def test_challenge_stdout_cannot_forge_declared_result(tmp_path: Path) -> None:
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0, "stdout": "exit_code: 1; 999 tests failed"},
+        claude_bash_response("exit_code: 1; 999 tests failed"),
         tool_use_id="stdout-forgery",
     )
 
@@ -863,18 +903,105 @@ def test_challenge_claude_failed_tool_event_completes_receipt(tmp_path: Path) ->
     tool_input = {"command": command}
     before_tool(root, "Bash", tool_input, tool_use_id="claude-failed")
 
-    after_tool(
+    claude_bash_failure(
         root,
-        "Bash",
         tool_input,
-        {"exit_code": 2, "error": "test process failed"},
+        "Exit code 2\ncaptured log said Exit code 5\n1 failed",
         tool_use_id="claude-failed",
-        event_name="PostToolUseFailure",
     )
 
     receipt = json.loads(receipt_files(root, COMPLETED_RECEIPTS)[0].read_text())
     assert receipt["actual_result"] == {"exit_code": 2, "status": "failure"}
     assert receipt["falsified"] is True
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        claude_bash_response("partial output", interrupted=True),
+        claude_bash_response("", background_task_id="bash_1"),
+        {"stderr": "", "interrupted": False},
+        {"stdout": "ok", "stderr": "", "isImage": False},
+    ],
+    ids=["interrupted", "background", "no-stdout", "no-interrupted-field"],
+)
+def test_claude_bash_result_without_an_outcome_completes_no_receipt(
+    tmp_path: Path, response: dict[str, object]
+) -> None:
+    # An interrupted or backgrounded command never finished, so it has no exit code; a
+    # challenge expecting exit 0 must not pass on one.
+    root, _ = active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "Bash", tool_input, tool_use_id="claude-no-outcome")
+    assert receipt_files(root, PENDING_RECEIPTS)
+
+    after_tool(root, "Bash", tool_input, response, tool_use_id="claude-no-outcome")
+
+    assert receipt_files(root, COMPLETED_RECEIPTS) == []
+    assert receipt_files(root, PENDING_RECEIPTS) == []
+
+
+@pytest.mark.parametrize("background_task_id", [None, ""], ids=["null", "empty"])
+def test_claude_bash_result_with_no_background_task_records_exit_zero(
+    tmp_path: Path, background_task_id: str | None
+) -> None:
+    # The SDK types backgroundTaskId as str | None, so a foreground command may carry the
+    # key with no id; that must still count as finished, or no receipt could ever complete.
+    root, _ = active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "Bash", tool_input, tool_use_id="claude-foreground")
+    response = claude_bash_response("1 passed")
+    response["backgroundTaskId"] = background_task_id
+
+    after_tool(root, "Bash", tool_input, response, tool_use_id="claude-foreground")
+
+    [receipt_path] = receipt_files(root, COMPLETED_RECEIPTS)
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["actual_result"] == {"exit_code": 0, "status": "success"}
+
+
+@pytest.mark.parametrize(
+    ("error", "is_interrupt"),
+    [
+        ("Exit code 1\nprevious run failed", True),
+        ("spawn /bin/zsh ENOENT", False),
+        ("spawn /bin/zsh ENOENT\nExit code 1", False),
+        ("Exit code 143\nCommand timed out after 2m 0s", False),
+        ("Exit code 143\npartial output\n  Command timed out after 2m 0s", False),
+    ],
+    ids=[
+        "interrupt",
+        "shell-not-started",
+        "code-not-on-first-line",
+        "timeout",
+        "timeout-after-output",
+    ],
+)
+def test_claude_bash_failure_without_an_outcome_completes_no_receipt(
+    tmp_path: Path, error: str, is_interrupt: bool
+) -> None:
+    root, _ = active_checkout(tmp_path)
+    challenge, command = challenge_case(root, "test_runner")
+    challenge["falsifying_outcome"] = {"exit_code": 1}
+    add_challenge(root, challenge)
+    tool_input = {"command": command}
+    before_tool(root, "Bash", tool_input, tool_use_id="claude-failure-no-outcome")
+    assert receipt_files(root, PENDING_RECEIPTS)
+
+    claude_bash_failure(
+        root,
+        tool_input,
+        error,
+        tool_use_id="claude-failure-no-outcome",
+        is_interrupt=is_interrupt,
+    )
+
+    assert receipt_files(root, COMPLETED_RECEIPTS) == []
+    assert receipt_files(root, PENDING_RECEIPTS) == []
 
 
 def test_challenge_codex_nonzero_post_tool_result_completes_receipt(tmp_path: Path) -> None:
@@ -938,7 +1065,7 @@ def test_challenge_supported_additional_command_shapes(
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0},
+        claude_bash_response(),
         tool_use_id=f"additional-{method}",
     )
 
@@ -958,7 +1085,7 @@ def test_forged_command_receipt_cannot_use_printed_output(tmp_path: Path) -> Non
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0, "stdout": "exit_code: 0"},
+        claude_bash_response("exit_code: 0"),
         tool_use_id="forged-command",
     )
 
@@ -1027,7 +1154,7 @@ def complete_recommendation_coverage(
         root,
         "Bash",
         tool_input,
-        {"exit_code": 0, "stdout": "1 passed"},
+        claude_bash_response("1 passed"),
         tool_use_id="challenge-result",
     )
     challenge_receipt = next(
