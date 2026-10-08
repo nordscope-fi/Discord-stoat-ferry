@@ -59,7 +59,9 @@ DISCORD_TO_STOAT: dict[int, int | list[int]] = {
 #   stickers, application commands, insights, TTS, priority speaker, VAD.
 #
 # Stoat bits with no Discord analogue, reachable only through the ADMINISTRATOR
-# expansion: 12 ChangeAvatar, 13 RemoveAvatars, 28 Masquerade.
+# expansion: 12 ChangeAvatar, 13 RemoveAvatars, 28 Masquerade. That expansion
+# applies to server roles and the server default only, never to a channel
+# overwrite (#986), so a translated overwrite never holds one of these bits.
 #
 # AssignRoles (9) is granted at CHANNEL-override scope too, as a side effect of
 # MANAGE_ROLES appearing in a Discord channel overwrite. That is inert rather
@@ -134,18 +136,20 @@ def _bitfield(bits: frozenset[int]) -> int:
 ALL_STOAT_PERMISSIONS = _bitfield(STOAT_PERMISSION_BITS)
 
 
-def translate_permissions(discord_bits: int, *, is_deny: bool = False) -> int:
+def translate_permissions(discord_bits: int, *, in_overwrite: bool = False) -> int:
     """Convert a Discord permission bitfield to a Stoat permission bitfield.
 
-    If ADMINISTRATOR (bit 3) is set in allow context, returns ALL_STOAT_PERMISSIONS.
-    In deny context, ADMINISTRATOR is skipped (denying ADMIN in Discord doesn't
-    mean "deny all" in Stoat). Unmapped Discord bits are silently dropped.
+    On a server role or the server default, ADMINISTRATOR (bit 3) returns
+    ALL_STOAT_PERMISSIONS. Pass ``in_overwrite=True`` for either side of a
+    channel overwrite: Discord checks ADMINISTRATOR only on server-level role
+    permissions, so inside an overwrite the bit grants and denies nothing.
+    It is dropped there and the remaining bits translate normally (#986).
+    Unmapped Discord bits are dropped.
     """
     if discord_bits & (1 << 3):  # ADMINISTRATOR
-        if is_deny:
-            # Strip ADMIN bit, translate remaining deny bits normally.
-            # Denying ADMIN in Discord doesn't mean "deny all" in Stoat,
-            # but other deny bits alongside ADMIN still carry real meaning.
+        if in_overwrite:
+            # Discord ignores ADMINISTRATOR inside an overwrite, on the allow
+            # side and the deny side alike. The other bits still mean something.
             discord_bits &= ~(1 << 3)
             if discord_bits == 0:
                 return 0

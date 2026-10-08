@@ -89,15 +89,15 @@ async def fetch_and_translate_guild_metadata(
                 continue
             if ow.id == guild_id:  # @everyone channel override → default_override
                 default_override = PermissionPair(
-                    allow=translate_permissions(ow.allow),
-                    deny=translate_permissions(ow.deny, is_deny=True),
+                    allow=translate_permissions(ow.allow, in_overwrite=True),
+                    deny=translate_permissions(ow.deny, in_overwrite=True),
                 )
             else:
                 role_overrides.append(
                     RoleOverride(
                         discord_role_id=ow.id,
-                        allow=translate_permissions(ow.allow),
-                        deny=translate_permissions(ow.deny, is_deny=True),
+                        allow=translate_permissions(ow.allow, in_overwrite=True),
+                        deny=translate_permissions(ow.deny, in_overwrite=True),
                     )
                 )
         if user_override_count > 0:

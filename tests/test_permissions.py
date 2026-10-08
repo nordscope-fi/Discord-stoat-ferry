@@ -122,40 +122,49 @@ def test_all_stoat_permissions_value() -> None:
 
 
 def test_administrator_deny_returns_zero() -> None:
-    """ADMINISTRATOR in deny context must NOT expand to all bits."""
-    assert translate_permissions(1 << 3, is_deny=True) == 0
+    """ADMINISTRATOR in an overwrite deny must NOT expand to all bits."""
+    assert translate_permissions(1 << 3, in_overwrite=True) == 0
 
 
 def test_administrator_allow_still_expands() -> None:
-    """ADMINISTRATOR in allow context preserves existing behavior."""
-    assert translate_permissions(1 << 3, is_deny=False) == ALL_STOAT_PERMISSIONS
+    """SC-1.6: without the overwrite keyword, ADMINISTRATOR still expands."""
     assert translate_permissions(1 << 3) == ALL_STOAT_PERMISSIONS
+
+
+def test_overwrite_administrator_alone_translates_to_zero() -> None:
+    """SC-1.3 (#986): ADMINISTRATOR in an overwrite allow grants nothing, as in Discord."""
+    assert translate_permissions(1 << 3, in_overwrite=True) == 0
+
+
+def test_overwrite_administrator_with_send_messages_keeps_only_send() -> None:
+    """SC-1.3 (#986): the other bits of an overwrite holding ADMINISTRATOR still translate."""
+    assert translate_permissions((1 << 3) | (1 << 11), in_overwrite=True) == 1 << 22
 
 
 def test_deny_view_channel_translates() -> None:
     """Normal deny bits translate correctly through the mapping."""
-    result = translate_permissions(1 << 10, is_deny=True)
+    result = translate_permissions(1 << 10, in_overwrite=True)
     assert result == 1 << 20
 
 
 def test_deny_multiple_bits() -> None:
     """Deny with multiple mapped bits translates each one."""
     discord_bits = (1 << 10) | (1 << 11)
-    result = translate_permissions(discord_bits, is_deny=True)
+    result = translate_permissions(discord_bits, in_overwrite=True)
     expected = (1 << 20) | (1 << 22)
     assert result == expected
 
 
 def test_deny_unmapped_bits_dropped() -> None:
-    """Unmapped Discord bits in deny context are silently dropped."""
+    """Unmapped Discord bits in an overwrite deny are dropped."""
     # bit 12 (USE_EXTERNAL_EMOJIS) has no Stoat equivalent (bit 1 is now mapped).
-    assert translate_permissions(1 << 12, is_deny=True) == 0
+    assert translate_permissions(1 << 12, in_overwrite=True) == 0
 
 
 def test_deny_administrator_with_other_bits_preserves_others() -> None:
     """C1 fix: ADMINISTRATOR + VIEW_CHANNEL in deny strips ADMIN, keeps VIEW_CHANNEL."""
     discord_bits = (1 << 3) | (1 << 10)  # ADMINISTRATOR + VIEW_CHANNEL
-    result = translate_permissions(discord_bits, is_deny=True)
+    result = translate_permissions(discord_bits, in_overwrite=True)
     assert result == 1 << 20  # Only ViewChannel deny, ADMIN stripped
 
 

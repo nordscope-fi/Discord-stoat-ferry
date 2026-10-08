@@ -17,6 +17,7 @@ from discord_ferry.discord.metadata import (
     load_discord_metadata,
     save_discord_metadata,
 )
+from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS, translate_permissions
 
 
 def test_metadata_roundtrip_preserves_new_fields(tmp_path: Path) -> None:
@@ -191,6 +192,107 @@ async def test_everyone_deny_view_channel_produces_stoat_deny_bit() -> None:
     assert ch_meta.default_override.deny & stoat_view_channel, (
         f"Expected Stoat ViewChannel deny bit (1<<20), got {ch_meta.default_override.deny}"
     )
+
+
+_STAFF_CHANNEL = "555000000000000002"
+_ADMIN_ROLE = "777000000000000001"
+_ADMINISTRATOR = 1 << 3  # Discord ADMINISTRATOR
+
+
+def _role(role_id: str, name: str, permissions: int = 0, position: int = 0) -> dict[str, object]:
+    """One Discord role payload, in the shape the roles endpoint returns."""
+    return {
+        "id": role_id,
+        "name": name,
+        "permissions": str(permissions),
+        "position": position,
+        "color": 0,
+        "hoist": False,
+        "managed": False,
+    }
+
+
+async def _fetch_one_channel(
+    overwrites: list[dict[str, object]],
+    *,
+    roles: list[dict[str, object]] | None = None,
+) -> DiscordMetadata:
+    """Fetch metadata for a guild with one text channel carrying ``overwrites``."""
+    from aioresponses import aioresponses
+
+    channels = [
+        {
+            "id": _STAFF_CHANNEL,
+            "name": "staff",
+            "type": 0,
+            "nsfw": False,
+            "permission_overwrites": overwrites,
+        }
+    ]
+    with aioresponses() as m:
+        m.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}",
+            payload={"id": _GUILD_ID, "name": "Test", "banner": None},
+        )
+        m.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles",
+            payload=roles if roles is not None else [_role(_GUILD_ID, "@everyone")],
+        )
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels", payload=channels)
+        async with aiohttp.ClientSession() as session:
+            return await fetch_and_translate_guild_metadata(session, "test-token", _GUILD_ID)
+
+
+async def test_everyone_overwrite_allowing_administrator_translates_to_zero() -> None:
+    """SC-1.1 (#986): Discord grants nothing by ADMINISTRATOR inside an overwrite."""
+    meta = await _fetch_one_channel(
+        [{"id": _GUILD_ID, "type": 0, "allow": str(_ADMINISTRATOR), "deny": "0"}]
+    )
+    override = meta.channel_metadata[_STAFF_CHANNEL].default_override
+    assert override is not None
+    assert override.allow == 0
+
+
+async def test_role_overwrite_allowing_administrator_keeps_only_send_messages() -> None:
+    """SC-1.2 (#986): the overwrite's other bits survive, the shortcut does not."""
+    meta = await _fetch_one_channel(
+        [
+            {
+                "id": _ADMIN_ROLE,
+                "type": 0,
+                "allow": str(_ADMINISTRATOR | (1 << 11)),  # plus SEND_MESSAGES
+                "deny": "0",
+            }
+        ]
+    )
+    (override,) = meta.channel_metadata[_STAFF_CHANNEL].role_overrides
+    assert override.allow == translate_permissions(1 << 11)
+    assert override.allow == 1 << 22  # Stoat SendMessage and nothing else
+
+
+async def test_everyone_overwrite_denying_administrator_keeps_the_other_deny_bits() -> None:
+    """SC-1.4: the deny side behaves exactly as before the fix."""
+    meta = await _fetch_one_channel(
+        [{"id": _GUILD_ID, "type": 0, "allow": "0", "deny": str(_ADMINISTRATOR | (1 << 10))}]
+    )
+    override = meta.channel_metadata[_STAFF_CHANNEL].default_override
+    assert override is not None
+    assert override.deny == 1 << 20  # Stoat ViewChannel only
+
+
+async def test_role_level_administrator_still_expands_while_an_overwrite_does_not() -> None:
+    """SC-1.5: the keyword reaches overwrites only, never role or server-default permissions."""
+    meta = await _fetch_one_channel(
+        [{"id": _ADMIN_ROLE, "type": 0, "allow": str(_ADMINISTRATOR), "deny": "0"}],
+        roles=[
+            _role(_GUILD_ID, "@everyone", _ADMINISTRATOR),
+            _role(_ADMIN_ROLE, "Admin", _ADMINISTRATOR, position=1),
+        ],
+    )
+    assert meta.server_default_permissions == ALL_STOAT_PERMISSIONS
+    assert meta.role_permissions[_ADMIN_ROLE].allow == ALL_STOAT_PERMISSIONS
+    (override,) = meta.channel_metadata[_STAFF_CHANNEL].role_overrides
+    assert override.allow == 0
 
 
 def test_user_override_channels_roundtrip(tmp_path: Path) -> None:
