@@ -5,7 +5,7 @@
 # OS-enforced sandbox with no network and scratch-only writes rendered from the
 # canonicalized scratch path.
 #
-# Usage: bash run-1041.sh [scratch-dir] [repo-root]
+# Usage: bash run-1041.sh <scratch-dir> [repo-root]
 # Argument order matches run-955.sh and run-956.sh: scratch first.
 # Restored to .qwen/tmp/probe-1041/ on 2026-10-07 after /tmp was cleaned.
 HERE="$(cd "$(dirname "$0")" && pwd)"
