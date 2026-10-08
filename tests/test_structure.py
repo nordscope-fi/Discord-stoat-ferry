@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import ssl
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.discord import fetch_and_translate_guild_metadata
 from discord_ferry.discord.metadata import (
     ChannelMeta,
     DiscordMetadata,
@@ -20,6 +22,7 @@ from discord_ferry.discord.metadata import (
     RoleOverride,
     save_discord_metadata,
 )
+from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
 from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
@@ -45,6 +48,7 @@ from discord_ferry.state import MigrationState, load_state
 from discord_ferry.state import save_state as save_state_real
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from discord_ferry.core.events import MigrationEvent
@@ -1758,6 +1762,367 @@ async def test_run_channels_override_failure_non_fatal(tmp_path: Path) -> None:
     role_warnings = [w for w in state.warnings if w.get("type") == "channel_role_perm_failed"]
     assert len(default_warnings) == 1
     assert len(role_warnings) == 1
+
+
+# ---------------------------------------------------------------------------
+# #986: a saved overwrite inflated by the ADMINISTRATOR expansion
+# ---------------------------------------------------------------------------
+
+# Every "every permission" value Ferry has saved into an overwrite, measured
+# 2026-10-08 from each commit that changed discord/permissions.py.
+_INFLATED_ALLOWS = [
+    pytest.param(0x3CF0001F, id="v2.6.14-and-earlier"),
+    pytest.param(0x3FF00CDF, id="v2.6.15-to-v2.9"),
+    pytest.param(0x1FFFFF03FDF, id="v2.10.0-on"),
+]
+
+
+def _save_overrides(tmp_path: Path, channel_metadata: dict[str, ChannelMeta]) -> None:
+    """Save a discord_metadata.json holding only these channel overwrites."""
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata=channel_metadata,
+        ),
+        tmp_path,
+    )
+
+
+def _recorder(bodies: list[object]) -> Callable[..., None]:
+    """An aioresponses callback that records each request's JSON body."""
+
+    def record(url: object, **kwargs: object) -> None:
+        bodies.append(kwargs.get("json"))
+
+    return record
+
+
+def _inflated_warnings(state: MigrationState) -> list[dict[str, str]]:
+    return [w for w in state.warnings if w.get("type") == "channel_override_admin_inflated"]
+
+
+def _permission_urls(mock: aioresponses) -> list[str]:
+    return [str(url) for (_method, url) in mock.requests if "/permissions/" in str(url)]
+
+
+@pytest.mark.parametrize("inflated", _INFLATED_ALLOWS)
+async def test_run_channels_sends_no_allow_for_an_inflated_everyone_overwrite(
+    tmp_path: Path, inflated: int
+) -> None:
+    """SC-2.2 (#986): the saved allow is replaced by 0 and the deny is kept."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    _save_overrides(
+        tmp_path,
+        {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(inflated, 1 << 20))},
+    )
+    bodies: list[object] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
+        )
+        m.put(
+            f"{STOAT_URL}/channels/stoat-ch1/permissions/default",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0.0),
+            state,
+            [_make_export(channel_id="ch1", category_id="")],
+            events.append,
+        )
+    assert bodies == [{"permissions": {"allow": 0, "deny": 1 << 20}}]
+
+
+@pytest.mark.parametrize("inflated", _INFLATED_ALLOWS)
+async def test_run_channels_sends_no_allow_for_an_inflated_role_overwrite(
+    tmp_path: Path, inflated: int
+) -> None:
+    """SC-2.3 (#986)."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1", role_map={"discord-role1": "stoat-role1"})
+    _save_overrides(
+        tmp_path,
+        {
+            "ch1": ChannelMeta(
+                nsfw=False,
+                role_overrides=[RoleOverride("discord-role1", inflated, 1 << 22)],
+            )
+        },
+    )
+    bodies: list[object] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
+        )
+        m.put(
+            f"{STOAT_URL}/channels/stoat-ch1/permissions/stoat-role1",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0.0),
+            state,
+            [_make_export(channel_id="ch1", category_id="")],
+            events.append,
+        )
+    assert bodies == [{"permissions": {"allow": 0, "deny": 1 << 22}}]
+
+
+async def test_run_channels_warns_once_per_channel_with_an_inflated_overwrite(
+    tmp_path: Path,
+) -> None:
+    """SC-2.4: one warning per affected channel, carrying only the existing keys."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1", role_map={"discord-role1": "stoat-role1"})
+    _save_overrides(
+        tmp_path,
+        {
+            "ch1": ChannelMeta(
+                nsfw=False,
+                default_override=PermissionPair(0x1FFFFF03FDF, 0),
+                role_overrides=[RoleOverride("discord-role1", 0x1FFFFF03FDF, 0)],
+            ),
+            "ch2": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0)),
+        },
+    )
+    exports = [
+        _make_export(channel_id="ch1", channel_name="general", category_id=""),
+        _make_export(channel_id="ch2", channel_name="staff", category_id=""),
+    ]
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
+        )
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch2", "name": "staff"})
+        m.put(re.compile(rf"{STOAT_URL}/channels/.*/permissions/.*"), payload={}, repeat=True)
+        await run_channels(_make_config(tmp_path, upload_delay=0.0), state, exports, events.append)
+    inflated = _inflated_warnings(state)
+    assert len(inflated) == 2
+    assert all(set(w) == {"phase", "type", "message"} for w in inflated)
+    assert all(w["phase"] == "channels" for w in inflated)
+    assert sorted("'general'" in w["message"] for w in inflated) == [False, True]
+    assert sorted("'staff'" in w["message"] for w in inflated) == [False, True]
+
+
+async def test_run_roles_leaves_a_role_holding_every_permission_unchanged(
+    tmp_path: Path,
+) -> None:
+    """SC-2.5: the check runs on channel overwrites only, never on role permissions."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={"r1": PermissionPair(allow=ALL_STOAT_PERMISSIONS, deny=0)},
+            channel_metadata={},
+        ),
+        tmp_path,
+    )
+    exports = [
+        _make_export(guild_id="111", messages=[_make_message("m1", roles=[DCERole("r1", "Mod")])])
+    ]
+    bodies: list[object] = []
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/default", payload={}, repeat=True)
+        m.put(
+            f"{STOAT_URL}/servers/srv1/permissions/stoat-r1",
+            payload={},
+            callback=_recorder(bodies),
+            repeat=True,
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={}, repeat=True)
+        await run_roles(_make_config(tmp_path, upload_delay=0.0), state, exports, events.append)
+    assert bodies == [{"permissions": {"allow": ALL_STOAT_PERMISSIONS, "deny": 0}}]
+    assert _inflated_warnings(state) == []
+
+
+async def test_run_channels_sends_an_ordinary_saved_overwrite_unchanged(tmp_path: Path) -> None:
+    """SC-2.6: every mapped bit together is the largest real allow, and is sent as is."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    _save_overrides(
+        tmp_path,
+        {
+            "ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x1FFEFF00FDF, 0)),
+            "ch2": ChannelMeta(nsfw=False, default_override=PermissionPair(1 << 22, 0)),
+        },
+    )
+    exports = [
+        _make_export(channel_id="ch1", channel_name="general", category_id=""),
+        _make_export(channel_id="ch2", channel_name="staff", category_id=""),
+    ]
+    bodies: list[object] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
+        )
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch2", "name": "staff"})
+        m.put(
+            re.compile(rf"{STOAT_URL}/channels/.*/permissions/default"),
+            payload={},
+            callback=_recorder(bodies),
+            repeat=True,
+        )
+        await run_channels(_make_config(tmp_path, upload_delay=0.0), state, exports, events.append)
+    sent = sorted(b["permissions"]["allow"] for b in bodies)
+    assert sent == sorted([0x1FFEFF00FDF, 1 << 22])
+    assert _inflated_warnings(state) == []
+
+
+async def test_run_channels_records_both_warnings_when_a_replaced_send_fails(
+    tmp_path: Path,
+) -> None:
+    """SC-2.7: the replacement and the failure are both true, so both are recorded."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    _save_overrides(
+        tmp_path,
+        {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0))},
+    )
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
+        )
+        m.put(f"{STOAT_URL}/channels/stoat-ch1/permissions/default", status=500)
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0.0),
+            state,
+            [_make_export(channel_id="ch1", category_id="")],
+            events.append,
+        )
+    failed = [w for w in state.warnings if w.get("type") == "channel_default_perm_failed"]
+    assert len(_inflated_warnings(state)) == 1
+    assert len(failed) == 1
+
+
+async def test_run_channels_skips_an_inflated_override_for_an_unmigrated_role(
+    tmp_path: Path,
+) -> None:
+    """SC-2.8: nothing is sent for the role, so there is nothing to warn about."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    _save_overrides(
+        tmp_path,
+        {
+            "ch1": ChannelMeta(
+                nsfw=False, role_overrides=[RoleOverride("discord-gone", 0x3FF00CDF, 0)]
+            )
+        },
+    )
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
+        )
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0.0),
+            state,
+            [_make_export(channel_id="ch1", category_id="")],
+            events.append,
+        )
+        assert _permission_urls(m) == []
+    assert state.warnings == []
+
+
+async def test_run_channels_dry_run_sends_and_warns_nothing(tmp_path: Path) -> None:
+    """SC-2.9."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1")
+    _save_overrides(
+        tmp_path,
+        {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0))},
+    )
+    with aioresponses() as m:
+        await run_channels(
+            _make_config(tmp_path, dry_run=True),
+            state,
+            [_make_export(channel_id="ch1", category_id="")],
+            events.append,
+        )
+        assert _permission_urls(m) == []
+    assert _inflated_warnings(state) == []
+
+
+async def test_a_fetched_administrator_overwrite_reaches_stoat_as_zero_without_a_warning(
+    tmp_path: Path,
+) -> None:
+    """SC-I1: fetch, save, then send. Fresh data is never inflated, so nothing warns."""
+    events: list[MigrationEvent] = []
+    discord_api = "https://discord.com/api/v10"
+    guild = "999000000000000001"
+    channel = "555000000000000002"
+    everyone = {
+        "id": guild,
+        "name": "@everyone",
+        "permissions": "0",
+        "position": 0,
+        "color": 0,
+        "hoist": False,
+        "managed": False,
+    }
+    discord_channel = {
+        "id": channel,
+        "name": "staff",
+        "type": 0,
+        "nsfw": False,
+        "permission_overwrites": [
+            {"id": guild, "type": 0, "allow": str(1 << 3), "deny": str(1 << 10)}
+        ],
+    }
+    state = MigrationState(stoat_server_id="srv1")
+    bodies: list[object] = []
+    with aioresponses() as m:
+        m.get(f"{discord_api}/guilds/{guild}", payload={"id": guild, "name": "T", "banner": None})
+        m.get(f"{discord_api}/guilds/{guild}/roles", payload=[everyone])
+        m.get(f"{discord_api}/guilds/{guild}/channels", payload=[discord_channel])
+        async with aiohttp.ClientSession() as session:
+            meta = await fetch_and_translate_guild_metadata(session, "test-token", guild)
+        save_discord_metadata(meta, tmp_path)
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "staff"})
+        m.put(
+            f"{STOAT_URL}/channels/stoat-ch1/permissions/default",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0.0),
+            state,
+            [
+                _make_export(
+                    guild_id=guild, channel_id=channel, channel_name="staff", category_id=""
+                )
+            ],
+            events.append,
+        )
+    assert bodies == [{"permissions": {"allow": 0, "deny": 1 << 20}}]
+    assert _inflated_warnings(state) == []
+
+
+async def test_a_carried_channel_is_not_sent_its_saved_overwrite_again(tmp_path: Path) -> None:
+    """SC-I2: pins the non-goal. A server already migrated keeps what it has."""
+    events: list[MigrationEvent] = []
+    state = MigrationState(stoat_server_id="srv1", channel_map={"ch1": "stoat-ch1"})
+    _save_overrides(
+        tmp_path,
+        {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0))},
+    )
+    with aioresponses() as m:
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0.0),
+            state,
+            [_make_export(channel_id="ch1", category_id="")],
+            events.append,
+        )
+        assert list(m.requests) == []
+    assert _inflated_warnings(state) == []
 
 
 # ---------------------------------------------------------------------------

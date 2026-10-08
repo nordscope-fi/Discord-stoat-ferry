@@ -20,6 +20,7 @@ from discord_ferry.discord.metadata import (
     RoleMeta,
     load_discord_metadata,
 )
+from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
 from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
@@ -1110,14 +1111,24 @@ async def apply_channel_permissions(
     """
     if not ch_meta or config.dry_run:
         return
+    # A saved allow holding a bit only the ADMINISTRATOR expansion sets was written
+    # by a version that expanded ADMINISTRATOR inside overwrites (#986). Discord
+    # grants nothing by that bit there, so send an allow of 0 and keep the deny.
+    # The expansion returned before reading any other bit, so the saved value
+    # holds no real grant to keep.
+    replaced = False
     if ch_meta.default_override:
+        default_allow = ch_meta.default_override.allow
+        if default_allow & ADMINISTRATOR_ONLY_BITS:
+            default_allow = 0
+            replaced = True
         try:
             await api_set_channel_default_permissions(
                 session,
                 config.stoat_url,
                 config.token,
                 stoat_channel_id,
-                allow=ch_meta.default_override.allow,
+                allow=default_allow,
                 deny=ch_meta.default_override.deny,
             )
             await asyncio.sleep(config.upload_delay)
@@ -1132,6 +1143,10 @@ async def apply_channel_permissions(
     for ow in ch_meta.role_overrides:
         stoat_role_id = state.role_map.get(ow.discord_role_id)
         if stoat_role_id:
+            role_allow = ow.allow
+            if role_allow & ADMINISTRATOR_ONLY_BITS:
+                role_allow = 0
+                replaced = True
             try:
                 await api_set_channel_role_permissions(
                     session,
@@ -1139,7 +1154,7 @@ async def apply_channel_permissions(
                     config.token,
                     stoat_channel_id,
                     stoat_role_id,
-                    allow=ow.allow,
+                    allow=role_allow,
                     deny=ow.deny,
                 )
                 await asyncio.sleep(config.upload_delay)
@@ -1151,6 +1166,18 @@ async def apply_channel_permissions(
                         "message": f"Role override for '{label}': {exc}",
                     }
                 )
+    if replaced:
+        state.warnings.append(
+            {
+                "phase": phase,
+                "type": "channel_override_admin_inflated",
+                "message": (
+                    f"Saved permission overwrite for '{label}' granted every permission, "
+                    "which Discord never grants inside an overwrite. Ferry sent it with "
+                    "no allowed permissions."
+                ),
+            }
+        )
 
 
 async def run_channels(
