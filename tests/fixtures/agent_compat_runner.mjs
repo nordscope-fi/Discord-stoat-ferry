@@ -1154,7 +1154,8 @@ switch (mode) {
         outside_checkout: !resolve(cwd).startsWith(resolve(process.cwd())),
         empty: existsSync(cwd) && readdirSync(cwd).length === 0,
         private_home: typeof childHome === 'string'
-          && !resolve(childHome).startsWith(resolve(homedir()))
+          && childHome === options.env?.VIBE_HOME
+          && resolve(childHome) !== resolve(homedir())
           && !existsSync(join(childHome, '.agents')),
       });
       if (args.includes('--help')) return { stdout: help };
