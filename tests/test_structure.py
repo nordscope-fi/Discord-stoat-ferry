@@ -2000,8 +2000,14 @@ async def test_run_channels_records_both_warnings_when_a_replaced_send_fails(
             events.append,
         )
     failed = [w for w in state.warnings if w.get("type") == "channel_default_perm_failed"]
-    assert len(_inflated_warnings(state)) == 1
+    (inflated,) = _inflated_warnings(state)
     assert len(failed) == 1
+    # The send failed, so the warning must describe the change to the value, not a send.
+    assert inflated["message"] == (
+        "Saved permission overwrite for 'general' granted every permission, which Discord "
+        "never grants inside an overwrite. Ferry removed its allowed permissions and kept "
+        "its denied ones."
+    )
 
 
 async def test_run_channels_skips_an_inflated_override_for_an_unmigrated_role(
