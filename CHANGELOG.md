@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   coverage.
 - Require channel and emoji limit tests to assert their named warning types and truncation details
   (#1079). Warnings from the same migration phase no longer satisfy this coverage.
+- Require the voice-channel fallback test to assert the exact channels warning event (#1079). An
+  unrelated warning no longer satisfies the fallback coverage.
 
 ## [2.41.18] - 2026-10-08
 
