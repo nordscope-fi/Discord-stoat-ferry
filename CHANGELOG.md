@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.14] - 2026-10-08
+
+### Fixed
+
+- **The Vibe reviewer no longer discards reviews that start with prose.** The `zai-glm-5-2` model
+  often writes a paragraph before its fenced JSON answer. The Vibe adapter stripped a fence only
+  at the very start of the reply, so it rejected those complete reviews with "Vibe review
+  returned invalid JSON". In repeated runs on one chunk payload, one reply in four had this shape.
+  Both the Vibe and the Claude adapters now read the last fenced JSON block when a reply does not
+  start with JSON. A fence quoted inside a JSON string never matches, because a fence boundary
+  needs a real line break. The findings check still runs on whatever is read, and a reply with no
+  JSON at all is still rejected.
+- A second Vibe failure is not fixed here: the Vibe program sometimes exits with "Turn limit of 1
+  reached" and no output, which the ensemble records at stage `vibe-child`. It did not recur in
+  eight runs with the review instructions, so its cause is not yet known.
+
 ## [2.41.12] - 2026-10-08
 
 ### Fixed

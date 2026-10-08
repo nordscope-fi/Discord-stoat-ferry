@@ -85,7 +85,11 @@ import {
   runQwenReview,
 } from '../../scripts/agent-compat/qwen-review.mjs';
 import * as qwenReview from '../../scripts/agent-compat/qwen-review.mjs';
-import { runClaudeReview } from '../../scripts/agent-compat/claude-review.mjs';
+import {
+  CLAUDE_CANONICAL_MODEL,
+  parseClaudeEnvelope,
+  runClaudeReview,
+} from '../../scripts/agent-compat/claude-review.mjs';
 import {
   advertisesSelfTest,
   runVerificationLayers,
@@ -1061,11 +1065,24 @@ switch (mode) {
       summary: 'clean',
       confidence: 'high',
     };
+    // Reply shapes seen from zai-glm-5-2: prose ahead of the fenced JSON, and
+    // bare JSON whose own text quotes a fence.
+    const replies = {
+      'prose-before-fence': [
+        'Looking at this chunk, I need to verify the rename.',
+        '',
+        '```json',
+        JSON.stringify({ ...clean, summary: 'prose first' }, null, 2),
+        '```',
+      ].join('\n'),
+      'prose-without-json': 'Looking at this chunk, I found nothing to report.',
+      'bare-json-quoting-a-fence': JSON.stringify({ ...clean, summary: 'see ```json``` above' }),
+    };
     const history = [{
       session_id: 'fixture-session',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: JSON.stringify(clean) }],
+        content: [{ type: 'text', text: replies[argument] ?? JSON.stringify(clean) }],
       },
     }];
     if (argument === 'tool-call') {
@@ -1089,12 +1106,13 @@ switch (mode) {
       return { stdout: JSON.stringify(history) };
     };
     try {
-      await runVibeReview({
+      const record = await runVibeReview({
         prompt: argument === 'stdin-prompt' ? 'FERRY_SECRET_CANARY' : 'fixture prompt',
         home: process.cwd(),
         credential: async () => 'fixture-api-key',
         run,
       });
+      if (argument in replies) writeJson({ status: record.status, summary: record.summary });
       if (argument === 'stdin-prompt') {
         writeJson({
           argv_contains_canary: argvContainsCanary,
@@ -1552,6 +1570,17 @@ switch (mode) {
       qwen_valid: failedVibe.slots.qwen,
       vibe_valid: validProviders.slots['mistral-vibe'],
     });
+    break;
+  }
+  case 'claude-envelope': {
+    if (argument !== 'prose-before-fence') throw new Error('invalid Claude envelope fixture');
+    const clean = { findings: [], summary: 'prose first', confidence: 'high' };
+    const { result } = parseClaudeEnvelope(JSON.stringify({
+      session_id: 'fixture-session',
+      modelUsage: { [CLAUDE_CANONICAL_MODEL]: { canonicalModel: CLAUDE_CANONICAL_MODEL } },
+      result: `Reviewing the change.\n\n\`\`\`json\n${JSON.stringify(clean)}\n\`\`\``,
+    }));
+    writeJson({ summary: result.summary });
     break;
   }
   case 'claude-review': {

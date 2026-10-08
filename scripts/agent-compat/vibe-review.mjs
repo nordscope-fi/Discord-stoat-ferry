@@ -17,6 +17,7 @@ import {
   buildReviewPrompt,
   makeReviewRecord,
   parseJsonText,
+  reviewReplyJson,
   safeChildFailure,
   validateFindings,
 } from './review-contract.mjs';
@@ -224,10 +225,7 @@ export async function runVibeReview({
         throw childFailure(error);
       }
       const parsed = parseVibeHistory(result.stdout);
-      const review = parseJsonText(
-        parsed.text.trim().replace(/^```(?:json)?\s*/u, '').replace(/\s*```$/u, ''),
-        'Vibe review',
-      );
+      const review = parseJsonText(reviewReplyJson(parsed.text), 'Vibe review');
       if (!validateFindings(review)) throw new Error('Vibe returned invalid findings');
       return makeReviewRecord({
         adapter: 'vibe',

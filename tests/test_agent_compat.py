@@ -3174,6 +3174,28 @@ def test_vibe_review_redacts_an_injected_child_failure() -> None:
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(
+    ("reply", "summary"),
+    [
+        ("prose-before-fence", "prose first"),
+        ("bare-json-quoting-a-fence", "see ```json``` above"),
+    ],
+)
+def test_vibe_review_reads_the_json_from_each_reply_shape(reply: str, summary: str) -> None:
+    """zai-glm-5-2 often writes prose before its fenced JSON, which used to discard the review."""
+    result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", reply, "--json")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"status": "valid", "summary": summary}
+
+
+def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
+    result = _run(
+        "node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", "prose-without-json"
+    )
+    assert result.returncode == 1
+    assert "invalid JSON" in result.stderr
+
+
 def test_vibe_review_sends_the_prompt_only_through_stdin() -> None:
     result = _run(
         "node",
@@ -3558,6 +3580,14 @@ def test_claude_review_requires_sonnet_5_without_mislabeling_sandbox_failure() -
     assert "--safe-mode --tools" in result.stderr
     assert "sandbox visibility" in result.stderr
     assert "account is unauthenticated" not in result.stderr
+
+
+def test_claude_review_reads_the_json_after_a_prose_preamble() -> None:
+    result = _run(
+        "node", "tests/fixtures/agent_compat_runner.mjs", "claude-envelope", "prose-before-fence"
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"summary": "prose first"}
 
 
 def test_claude_review_redacts_an_injected_host_child_failure() -> None:

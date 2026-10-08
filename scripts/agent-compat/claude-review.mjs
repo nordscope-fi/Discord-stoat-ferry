@@ -8,6 +8,7 @@ import {
   buildReviewPrompt,
   makeReviewRecord,
   parseJsonText,
+  reviewReplyJson,
   validateFindings,
 } from './review-contract.mjs';
 
@@ -150,10 +151,7 @@ export function parseClaudeEnvelope(raw) {
     throw error;
   }
   if (typeof envelope.result !== 'string') throw new Error('Claude envelope has no result text');
-  const text = envelope.result.trim()
-    .replace(/^```(?:json)?\s*/u, '')
-    .replace(/\s*```$/u, '');
-  const result = parseJsonText(text, 'Claude review');
+  const result = parseJsonText(reviewReplyJson(envelope.result), 'Claude review');
   if (!validateFindings(result)) throw new Error('Claude findings schema mismatch');
   return {
     result,
