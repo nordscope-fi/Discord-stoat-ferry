@@ -19,7 +19,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { dispatchCodexPreTool } from '../../scripts/agent-compat/codex-hook-adapter.mjs';
@@ -1147,9 +1147,16 @@ switch (mode) {
       // directory, and walks up from it for AGENTS.md, so every child must
       // start in an empty directory outside the checkout.
       const cwd = options.cwd ?? process.cwd();
+      // Vibe also reads user-level skills from Path.home()/.agents, which ignores
+      // VIBE_HOME, so HOME must point away from the real home directory.
+      const childHome = options.env?.HOME;
       workdirs.push({
         outside_checkout: !resolve(cwd).startsWith(resolve(process.cwd())),
         empty: existsSync(cwd) && readdirSync(cwd).length === 0,
+        private_home: typeof childHome === 'string'
+          && childHome === options.env?.VIBE_HOME
+          && resolve(childHome) !== resolve(homedir())
+          && !existsSync(join(childHome, '.agents')),
       });
       if (args.includes('--help')) return { stdout: help };
       argvContainsCanary = args.some((value) => value.includes('FERRY_SECRET_CANARY'));

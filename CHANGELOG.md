@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2.41.16] - 2026-10-08
+## [2.41.18] - 2026-10-08
 
 ### Fixed
 
@@ -38,6 +38,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   boundary. Its runner follows the same argument and exit-code contract as `run-955.sh`, so exit 1
   means regression and the scratch directory is a required argument. It reuses `sandbox-955.sb`
   rather than adding a third copy of the profile.
+
+## [2.41.17] - 2026-10-08
+
+### Fixed
+
+- **The inflated-overwrite warning no longer claims a send that failed.** The
+  `channel_override_admin_inflated` warning said Ferry "sent it with no allowed permissions", which
+  was false when that send failed. It now says Ferry removed the allowed permissions and kept the
+  denied ones, which is true either way. A failed send still records its own
+  `channel_default_perm_failed` or `channel_role_perm_failed` warning.
+- **The Vibe reviewer no longer sees the owner's personal skills.** Vibe reads user-level skills
+  from the `.agents` folder in the home directory, and that lookup ignores `VIBE_HOME`. The
+  reviewer now also points `HOME` at its temporary directory, so it starts with no skills from the
+  machine it runs on.
 
 ## [2.41.15] - 2026-10-08
 
