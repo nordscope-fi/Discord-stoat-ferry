@@ -2,6 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -17,6 +18,7 @@ import {
   buildReviewPrompt,
   makeReviewRecord,
   parseJsonText,
+  reviewReplyJson,
   safeChildFailure,
   validateFindings,
 } from './review-contract.mjs';
@@ -68,9 +70,10 @@ function stopProcessGroup(child, signal) {
   }
 }
 
-export function runVibeChild(command, args, { env, input = null, timeoutMs }) {
+export function runVibeChild(command, args, { cwd, env, input = null, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
+      cwd,
       detached: true,
       env,
       stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
@@ -168,8 +171,16 @@ function childFailure(error) {
 
 async function withVibeInvocation({ home, credential, run, action }) {
   const vibeHome = mkdtempSync(join(tmpdir(), 'ferry-vibe-review-'));
+  // Vibe trusts its working directory under --trust and then loads that
+  // directory's .vibe hooks, tools, skills and plugins, and walks up from it
+  // for AGENTS.md. Run every child in an empty directory so none of the
+  // checkout's agent setup reaches the reviewer. The checkout's plain-English
+  // post-agent hook used to inject a rewrite request into the review, which spent
+  // the single allowed turn and made Vibe exit with "Turn limit of 1 reached".
+  const cwd = join(vibeHome, 'workdir');
   try {
     writeFileSync(join(vibeHome, 'config.toml'), VIBE_CONFIG, { mode: 0o600 });
+    mkdirSync(cwd, { mode: 0o700 });
     const baseEnvironment = {
       PATH: process.env.PATH ?? '',
       VIBE_HOME: vibeHome,
@@ -179,6 +190,7 @@ async function withVibeInvocation({ home, credential, run, action }) {
     let help;
     try {
       help = await run('vibe', ['--help'], {
+        cwd,
         env: baseEnvironment,
         timeoutMs: 30000,
       });
@@ -192,6 +204,7 @@ async function withVibeInvocation({ home, credential, run, action }) {
       home,
     });
     return await action({
+      cwd,
       env: { ...baseEnvironment, MISTRAL_API_KEY: apiKey },
       run,
     });
@@ -211,11 +224,12 @@ export async function runVibeReview({
     home,
     credential,
     run,
-    action: async ({ env, run: invoke }) => {
+    action: async ({ cwd, env, run: invoke }) => {
       const started = Date.now();
       let result;
       try {
         result = await invoke('vibe', VIBE_REVIEW_ARGS, {
+          cwd,
           env,
           input: prompt,
           timeoutMs: 180000,
@@ -224,10 +238,7 @@ export async function runVibeReview({
         throw childFailure(error);
       }
       const parsed = parseVibeHistory(result.stdout);
-      const review = parseJsonText(
-        parsed.text.trim().replace(/^```(?:json)?\s*/u, '').replace(/\s*```$/u, ''),
-        'Vibe review',
-      );
+      const review = parseJsonText(reviewReplyJson(parsed.text), 'Vibe review');
       if (!validateFindings(review)) throw new Error('Vibe returned invalid findings');
       return makeReviewRecord({
         adapter: 'vibe',
@@ -260,10 +271,11 @@ async function liveToolProbe(home) {
       home,
       credential: readReviewerField,
       run: runVibeChild,
-      action: async ({ env, run }) => {
+      action: async ({ cwd, env, run }) => {
         let result;
         try {
           result = await run('vibe', VIBE_REVIEW_ARGS, {
+            cwd,
             env,
             input: `Do not use tools. Reply exactly FERRY_VIBE_NO_TOOLS. The inaccessible canary is ${canaryPath}.`,
             timeoutMs: 180000,

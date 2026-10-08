@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.41.14] - 2026-10-08
+
+### Fixed
+
+- **The Vibe reviewer no longer discards reviews that start with prose.** The `zai-glm-5-2` model
+  often writes a paragraph before its fenced JSON answer. The Vibe adapter stripped a fence only
+  at the very start of the reply, so it rejected those complete reviews with "Vibe review
+  returned invalid JSON". In repeated runs on one chunk payload, one reply in four had this shape.
+  When a reply starts with prose, the Vibe and Claude adapters now read the last fenced block
+  that parses as JSON. Each fence pairs with its own closer, so a quoted code block ahead of the
+  answer no longer swallows it, and Windows line endings are accepted. A fence quoted inside a
+  JSON string never matches, because a fence boundary needs a real line break. Replies that start
+  with JSON or with a fence are read exactly as before. The findings check still runs on whatever
+  is read, and a reply with no JSON at all is still rejected.
+- **The Vibe reviewer no longer fails with "Turn limit of 1 reached".** The ensemble records this
+  failure at stage `vibe-child`. Vibe trusts its working directory and loads that directory's
+  `.vibe` hooks, tools, skills and plugins, and the reviewer ran inside the Ferry checkout. The
+  checkout's plain-English post-agent hook read the review's JSON answer as a chat reply and injected a
+  rewrite request. That spent the single allowed turn, so Vibe exited with an error and the
+  review was lost. Every Vibe child now starts in an empty temporary directory. From inside the
+  checkout, two of three runs failed this way before the change and none of three after it.
+
 ## [2.41.12] - 2026-10-08
 
 ### Fixed

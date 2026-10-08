@@ -8,6 +8,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -18,6 +19,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { dispatchCodexPreTool } from '../../scripts/agent-compat/codex-hook-adapter.mjs';
@@ -78,14 +80,18 @@ import {
   verifyFindings,
 } from '../../scripts/agent-compat/review-verification.mjs';
 import { readReviewerField } from '../../scripts/agent-compat/proton-credential.mjs';
-import { runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
+import { runVibeChild, runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
 import {
   parseQwenResponse,
   requestQwen,
   runQwenReview,
 } from '../../scripts/agent-compat/qwen-review.mjs';
 import * as qwenReview from '../../scripts/agent-compat/qwen-review.mjs';
-import { runClaudeReview } from '../../scripts/agent-compat/claude-review.mjs';
+import {
+  CLAUDE_CANONICAL_MODEL,
+  parseClaudeEnvelope,
+  runClaudeReview,
+} from '../../scripts/agent-compat/claude-review.mjs';
 import {
   advertisesSelfTest,
   runVerificationLayers,
@@ -1051,6 +1057,21 @@ switch (mode) {
     writeJson({ providers: calls.map((call) => call.provider) });
     break;
   }
+  case 'vibe-child-cwd': {
+    // The real spawner, not a stand-in: a child must start in the cwd it is given.
+    const target = realpathSync(mkdtempSync(join(tmpdir(), 'ferry-vibe-cwd-')));
+    try {
+      const { stdout } = await runVibeChild(
+        process.execPath,
+        ['-e', 'process.stdout.write(process.cwd())'],
+        { cwd: target, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10000 },
+      );
+      writeJson({ started_in_target: realpathSync(stdout) === target });
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+    break;
+  }
   case 'vibe-review': {
     const help = [
       '--prompt', '--max-turns', '--max-tokens', '--enabled-tools',
@@ -1061,11 +1082,56 @@ switch (mode) {
       summary: 'clean',
       confidence: 'high',
     };
+    // Reply shapes seen from zai-glm-5-2: prose ahead of the fenced JSON, and
+    // bare JSON whose own text quotes a fence.
+    const replies = {
+      'prose-before-fence': [
+        'Looking at this chunk, I need to verify the rename.',
+        '',
+        '```json',
+        JSON.stringify({ ...clean, summary: 'prose first' }, null, 2),
+        '```',
+      ].join('\n'),
+      'code-block-before-fence': [
+        'The old line was:',
+        '',
+        '```python',
+        'x = 1',
+        '```',
+        '',
+        '```json',
+        JSON.stringify({ ...clean, summary: 'after a code block' }),
+        '```',
+      ].join('\n'),
+      'prose-then-quoted-fence': [
+        'Review follows.',
+        '',
+        '```json',
+        JSON.stringify({ ...clean, summary: 'quotes ``` inside' }, null, 2),
+        '```',
+      ].join('\n'),
+      'fence-after-the-answer': [
+        'Review follows.',
+        '',
+        '```json',
+        JSON.stringify({ ...clean, summary: 'before an example' }),
+        '```',
+        '',
+        'To check it, run:',
+        '```bash',
+        'rg -n pattern file',
+        '```',
+      ].join('\n'),
+      'prose-crlf': `Review follows.\r\n\r\n\`\`\`json\r\n${JSON.stringify(clean)}\r\n\`\`\``,
+      'prose-before-invalid-findings': 'Review follows.\n\n```json\n{"findings":[]}\n```',
+      'prose-without-json': 'Looking at this chunk, I found nothing to report.',
+      'bare-json-quoting-a-fence': JSON.stringify({ ...clean, summary: 'see ```json``` above' }),
+    };
     const history = [{
       session_id: 'fixture-session',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: JSON.stringify(clean) }],
+        content: [{ type: 'text', text: replies[argument] ?? JSON.stringify(clean) }],
       },
     }];
     if (argument === 'tool-call') {
@@ -1075,7 +1141,16 @@ switch (mode) {
     }
     let argvContainsCanary = false;
     let stdinReceivedCanary = false;
+    const workdirs = [];
     const run = async (command, args, options) => {
+      // Vibe loads .vibe hooks, tools and skills from a trusted working
+      // directory, and walks up from it for AGENTS.md, so every child must
+      // start in an empty directory outside the checkout.
+      const cwd = options.cwd ?? process.cwd();
+      workdirs.push({
+        outside_checkout: !resolve(cwd).startsWith(resolve(process.cwd())),
+        empty: existsSync(cwd) && readdirSync(cwd).length === 0,
+      });
       if (args.includes('--help')) return { stdout: help };
       argvContainsCanary = args.some((value) => value.includes('FERRY_SECRET_CANARY'));
       stdinReceivedCanary = options.input?.includes('FERRY_SECRET_CANARY') ?? false;
@@ -1089,12 +1164,14 @@ switch (mode) {
       return { stdout: JSON.stringify(history) };
     };
     try {
-      await runVibeReview({
+      const record = await runVibeReview({
         prompt: argument === 'stdin-prompt' ? 'FERRY_SECRET_CANARY' : 'fixture prompt',
         home: process.cwd(),
         credential: async () => 'fixture-api-key',
         run,
       });
+      if (argument in replies) writeJson({ status: record.status, summary: record.summary });
+      if (argument === 'isolated-workdir') writeJson({ workdirs });
       if (argument === 'stdin-prompt') {
         writeJson({
           argv_contains_canary: argvContainsCanary,
@@ -1552,6 +1629,17 @@ switch (mode) {
       qwen_valid: failedVibe.slots.qwen,
       vibe_valid: validProviders.slots['mistral-vibe'],
     });
+    break;
+  }
+  case 'claude-envelope': {
+    if (argument !== 'prose-before-fence') throw new Error('invalid Claude envelope fixture');
+    const clean = { findings: [], summary: 'prose first', confidence: 'high' };
+    const { result } = parseClaudeEnvelope(JSON.stringify({
+      session_id: 'fixture-session',
+      modelUsage: { [CLAUDE_CANONICAL_MODEL]: { canonicalModel: CLAUDE_CANONICAL_MODEL } },
+      result: `Reviewing the change.\n\n\`\`\`json\n${JSON.stringify(clean)}\n\`\`\``,
+    }));
+    writeJson({ summary: result.summary });
     break;
   }
   case 'claude-review': {

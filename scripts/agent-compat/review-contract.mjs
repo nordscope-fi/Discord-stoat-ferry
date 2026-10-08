@@ -239,6 +239,31 @@ export function parseJsonText(raw, adapter = 'reviewer') {
   }
 }
 
+// A model asked for JSON may answer with bare JSON, with JSON in a fence, or with
+// prose ahead of a fenced block, which zai-glm-5-2 does often. Return the text to
+// parse. Any fence pairs with its own closer, so a quoted code block ahead of the
+// answer cannot swallow it, and a fence boundary needs a real line break, so a
+// fence quoted inside a JSON string never matches. The last block that parses
+// wins. The caller still validates whatever this returns.
+export function reviewReplyJson(reply) {
+  const text = reply.trim();
+  if (text.startsWith('{') || text.startsWith('```')) {
+    return text.replace(/^```(?:json)?\s*/u, '').replace(/\s*```$/u, '');
+  }
+  const blocks = [...text.matchAll(/^```[^\n`]*\n([\s\S]*?)\r?\n[ \t]*```[ \t]*\r?$/gmu)]
+    .map((match) => match[1].trim())
+    .reverse();
+  for (const block of blocks) {
+    try {
+      JSON.parse(block);
+      return block;
+    } catch {
+      // Not the answer; an earlier block may be.
+    }
+  }
+  return text;
+}
+
 export function buildReviewPrompt({
   mode = 'whole-branch',
   title = '',
