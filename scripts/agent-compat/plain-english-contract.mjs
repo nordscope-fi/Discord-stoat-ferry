@@ -20,6 +20,31 @@ export function codexChatCommand(ownerRoot) {
   return `node ${shellSingleQuoted(launcher)} hook chat --agent codex`;
 }
 
+export function qwenChatCommand(ownerRoot) {
+  const launcher = join(ownerRoot, '.qwen', 'hooks', 'plain-english.mjs');
+  return `node ${shellSingleQuoted(launcher)} hook chat --agent qwen`;
+}
+
+export function normalizeQwenChatHooks(document, ownerRoot, preToolUse) {
+  // Native init removes legacy document registrations. Restore Ferry's
+  // complete generated pre-tool hooks and keep only the new chat checks.
+  document.hooks.PreToolUse = preToolUse;
+  for (const event of ['Stop', 'SubagentStop']) {
+    const matches = (document.hooks?.[event] ?? [])
+      .flatMap((group) => group.hooks ?? [])
+      .filter((hook) => hook.name === 'plain-english-chat');
+    if (matches.length !== 1) {
+      throw new Error(`expected one native Qwen chat hook for ${event}; found ${matches.length}`);
+    }
+    if (matches[0].command !== 'node .qwen/hooks/plain-english.mjs hook chat --agent qwen' ||
+        matches[0].timeout !== 10000) {
+      throw new Error(`unexpected plain-English Qwen chat hook for ${event}`);
+    }
+    matches[0].command = qwenChatCommand(ownerRoot);
+  }
+  return document;
+}
+
 const VERSION_SHAPE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 
 export function probePlainEnglish({ run = spawnSync } = {}) {

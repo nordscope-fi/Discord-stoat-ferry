@@ -473,6 +473,151 @@ def test_installer_keeps_native_plain_english_artifacts(tmp_path: Path) -> None:
     assert all("git rev-parse" not in hook["command"] for hook in native)
 
 
+def test_installer_adds_native_qwen_chat_hooks_without_duplicate_document_checks(
+    tmp_path: Path,
+) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    settings = json.loads((root / ".qwen/settings.json").read_text())
+    expected = f"node '{root}/.qwen/hooks/plain-english.mjs' hook chat --agent qwen"
+    for event in ("Stop", "SubagentStop"):
+        native = [
+            hook
+            for group in settings["hooks"].get(event, [])
+            for hook in group["hooks"]
+            if hook.get("name") == "plain-english-chat"
+        ]
+        assert len(native) == 1
+        assert native[0]["command"] == expected
+        assert native[0]["timeout"] == 10_000
+    assert (root / ".qwen/hooks/plain-english.mjs").is_file()
+    stop_commands = [
+        hook.get("command", "") for group in settings["hooks"]["Stop"] for hook in group["hooks"]
+    ]
+    assert any("qwen-stop-guard.mjs" in command for command in stop_commands)
+    assert any("brainstorm-evidence.mjs" in command for command in stop_commands)
+    before_commands = [
+        hook.get("command", "")
+        for group in settings["hooks"]["PreToolUse"]
+        for hook in group["hooks"]
+    ]
+    assert sum("plain-english-docs.sh" in command for command in before_commands) == 1
+    assert sum("plain-english-github.sh" in command for command in before_commands) == 1
+    assert not any(".qwen/hooks/plain-english.mjs" in command for command in before_commands)
+
+
+@pytest.mark.parametrize("event", ["Stop", "SubagentStop"])
+def test_installed_qwen_chat_hooks_run_outside_repository(tmp_path: Path, event: str) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    fake_cli = Path(env["PATH"].split(":", 1)[0]) / "plain-english"
+    marker = tmp_path / "chat-args.json"
+    fake_cli.write_text(
+        f'#!/usr/bin/env node\nrequire("node:fs").writeFileSync({json.dumps(str(marker))}, '
+        "JSON.stringify(process.argv.slice(2)));\n"
+    )
+    settings = json.loads((root / ".qwen/settings.json").read_text())
+    native = [
+        hook
+        for group in settings["hooks"].get(event, [])
+        for hook in group["hooks"]
+        if hook.get("name") == "plain-english-chat"
+    ]
+    assert len(native) == 1
+    event_cwd = tmp_path / "event-cwd"
+    event_cwd.mkdir()
+    result = subprocess.run(
+        ["/bin/sh", "-c", native[0]["command"]],
+        cwd=event_cwd,
+        env=env,
+        input=json.dumps({"hook_event_name": event}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(marker.read_text()) == ["hook", "chat", "--agent", "qwen"]
+
+
+@pytest.mark.parametrize("drift", [None, "missing-hook", "timeout", "launcher"])
+def test_generated_state_check_covers_native_qwen_chat_hooks(
+    tmp_path: Path,
+    drift: str | None,
+) -> None:
+    root, _, env = _installer_checkout(tmp_path)
+    installed = subprocess.run(
+        [NODE, "scripts/agent-compat/install-local.mjs"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+    settings_path = root / ".qwen/settings.json"
+    settings = json.loads(settings_path.read_text())
+    # Qwen owns this marker and changes it on startup.
+    settings["$version"] = 2
+    if drift == "missing-hook":
+        settings["hooks"]["Stop"] = [
+            group
+            for group in settings["hooks"]["Stop"]
+            if not any(hook.get("name") == "plain-english-chat" for hook in group["hooks"])
+        ]
+    elif drift == "timeout":
+        for group in settings["hooks"]["Stop"]:
+            for hook in group["hooks"]:
+                if hook.get("name") == "plain-english-chat":
+                    hook["timeout"] = 1
+    elif drift == "launcher":
+        (root / ".qwen/hooks/plain-english.mjs").unlink()
+    settings_path.write_text(json.dumps(settings))
+    checked = subprocess.run(
+        [NODE, "scripts/agent-compat/check.mjs", "--generated-only"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert checked.returncode == (0 if drift is None else 1), checked.stdout + checked.stderr
+    if drift == "launcher":
+        assert "missing native Qwen plain-English launcher" in checked.stdout
+
+
+def test_qwen_chat_parity_uses_native_hooks() -> None:
+    result = _run(
+        NODE,
+        "--input-type=module",
+        "-e",
+        "import {HOOK_PARITY,validateHookParity} from './scripts/agent-compat/hook-parity.mjs';"
+        "console.log(JSON.stringify({issues:validateHookParity(),entries:HOOK_PARITY.filter("
+        "e=>e.id.startsWith('project.plain-english-chat-'))}));",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["issues"] == []
+    assert len(report["entries"]) == 2
+    assert all(entry["qwenDisposition"] == "compensated" for entry in report["entries"])
+    assert all("qwen" in entry["nativeHosts"] for entry in report["entries"])
+
+
 def test_installed_codex_chat_hooks_run_outside_repository(tmp_path: Path) -> None:
     root, _, env = _installer_checkout(tmp_path)
     installed = subprocess.run(
