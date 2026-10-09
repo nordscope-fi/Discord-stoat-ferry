@@ -12,6 +12,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.core.events import MigrationEvent
 from discord_ferry.exporter.runner import (
     _build_dce_command,
     _check_disk_space,
@@ -23,9 +24,6 @@ from discord_ferry.exporter.runner import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-    from discord_ferry.core.events import MigrationEvent
-
 
 # ---------- Helpers ----------
 
@@ -109,8 +107,15 @@ class TestDiskSpaceCheck:
         with patch("discord_ferry.exporter.runner.shutil.disk_usage") as mock_du:
             mock_du.return_value = MagicMock(free=1_000_000_000)
             _check_disk_space(tmp_path, events.append)
-        assert len(events) == 1
-        assert "Low disk space" in events[0].message
+        assert events == [
+            MigrationEvent(
+                phase="export",
+                status="warning",
+                message=(
+                    "Low disk space (1.0 GB free). Large servers may need 5-10 GB for exports."
+                ),
+            )
+        ]
 
     def test_no_warning_when_plenty(self, tmp_path: Path) -> None:
         events: list[MigrationEvent] = []
@@ -276,10 +281,16 @@ class TestSuccessCountWarning:
             await run_dce_export(cfg, tmp_path / "dce", events.append)
 
         warnings = [e for e in events if e.status == "warning"]
-        assert any(
-            "7 of 10" in w.message and "3 channel(s) appear to have failed silently" in w.message
-            for w in warnings
-        )
+        assert warnings == [
+            MigrationEvent(
+                phase="export",
+                status="warning",
+                message=(
+                    "DCE reports 7 of 10 channels exported successfully. "
+                    "3 channel(s) appear to have failed silently."
+                ),
+            )
+        ]
 
 
 class TestStderrTaskDrainedOnCancel:
@@ -1069,5 +1080,13 @@ async def test_a_resolution_failure_reaches_the_event_stream(tmp_path: Path) -> 
     ):
         await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
 
-    warnings = [e for e in events if e.status == "warning" and "proxy" in e.message.lower()]
-    assert len(warnings) == 1
+    proxy_warnings = [e for e in events if "proxy" in e.message.lower()]
+    assert proxy_warnings == [
+        MigrationEvent(
+            phase="export",
+            status="warning",
+            message=(
+                "Could not read the system proxy configuration. The export will run without it."
+            ),
+        )
+    ]
