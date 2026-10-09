@@ -38,6 +38,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Require the voice-channel fallback test to assert the exact channels warning event (#1079). An
   unrelated warning no longer satisfies the fallback coverage.
 
+### Added
+
+- Add a repeatable reconstruction of the source-derived export fixture from reviewed dummy values
+  (#1002). The offline tool checks the pinned writer digest and disposition ledger,
+  rebuilds identical fixture bytes, and documents the source review required when updating it.
+
 ## [2.41.20] - 2026-10-09
 
 ### Fixed
