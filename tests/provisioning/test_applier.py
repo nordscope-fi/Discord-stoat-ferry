@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import pytest
 from aioresponses import aioresponses
+from yarl import URL
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -715,7 +716,11 @@ async def test_reconcile_provision_on_empty_guild(
         api = BotApi(session, TOKEN)
         d = diff(manifest, actual_empty)
         result = await reconcile_provision(
-            d, api, guild_id=guild, audit_reason="provision (issue #35)"
+            d,
+            api,
+            guild_id=guild,
+            marker=manifest.marker,
+            audit_reason="provision (issue #35)",
         )
 
     assert result.created_count >= 14  # 1 text + 10 msgs + 1 thread + 1 forum + 1 post
@@ -727,6 +732,86 @@ from tests.provisioning._applier import (  # noqa: E402
     reconcile_teardown,
     reconcile_verify,
 )
+
+
+async def test_custom_marker_created_topics_match_verify_and_teardown_selection(
+    mock_discord_for_state: aioresponses,
+) -> None:
+    marker = "[custom-fixture]"
+    text_channel = ManifestTextChannel("ch-general", "general", "primary", ())
+    forum_channel = ManifestForumChannel("fch-feedback", "Feedback Forum", "forum", ())
+    manifest = Manifest(
+        version=1,
+        marker=marker,
+        guild_name_for_bootstrap="Fixture Guild",
+        text_channels=(text_channel,),
+        threads=(),
+        forum_channels=(forum_channel,),
+    )
+    provision_diff = Diff(
+        ops=(
+            CreateTextChannelOp(text_channel, reason="missing from guild"),
+            CreateForumChannelOp(forum_channel, reason="missing from guild"),
+        ),
+        missing_entities=(text_channel.id, forum_channel.id),
+        extra_marker_entities=(),
+        extra_foreign_entities=(),
+        mismatched_embeds=(),
+    )
+    guild_id = "111"
+    channels_url = f"{DISCORD_API}/guilds/{guild_id}/channels"
+    mock_discord_for_state.post(
+        channels_url,
+        payload={"id": "100", "name": text_channel.name, "type": 0},
+    )
+    mock_discord_for_state.post(
+        channels_url,
+        payload={"id": "101", "name": forum_channel.name, "type": 15},
+    )
+    mock_discord_for_state.delete(f"{DISCORD_API}/channels/100", status=204)
+    mock_discord_for_state.delete(f"{DISCORD_API}/channels/101", status=204)
+
+    async with aiohttp.ClientSession() as session:
+        api = BotApi(session, TOKEN)
+        await reconcile_provision(
+            provision_diff,
+            api,
+            guild_id=guild_id,
+            marker=manifest.marker,
+            audit_reason="provision (issue #985)",
+        )
+
+        create_calls = mock_discord_for_state.requests[("POST", URL(channels_url))]
+        created_channels = tuple(
+            ActualChannel(
+                discord_id=str(100 + index),
+                name=call.kwargs["json"]["name"],
+                type=call.kwargs["json"]["type"],
+                topic=call.kwargs["json"]["topic"],
+                parent_id=None,
+            )
+            for index, call in enumerate(create_calls)
+        )
+        actual = ActualState(
+            guild_id=guild_id,
+            channels=created_channels,
+            messages_by_channel={},
+        )
+
+        verify_result = reconcile_verify(diff(manifest, actual))
+        teardown_result = await reconcile_teardown(
+            actual,
+            api,
+            marker=manifest.marker,
+            audit_reason="teardown (issue #985)",
+        )
+
+    assert {channel.topic for channel in created_channels} == {
+        f"{marker} primary",
+        f"{marker} forum",
+    }
+    assert verify_result.exit_code == 0
+    assert teardown_result.deleted_ids == ("100", "101")
 
 
 async def test_reconcile_teardown_deletes_marker_channels(

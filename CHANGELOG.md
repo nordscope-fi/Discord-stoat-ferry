@@ -38,6 +38,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Require the voice-channel fallback test to assert the exact channels warning event (#1079). An
   unrelated warning no longer satisfies the fallback coverage.
 
+## [2.41.20] - 2026-10-09
+
+### Fixed
+
+- Fixture provisioning now uses the selected manifest marker in text and forum channel topics
+  (#985). Custom-marker channels can be recognized by fixture verification and teardown.
+  An offline regression test checks the created topics and both consumers.
+
 ## [2.41.19] - 2026-10-09
 
 ### Fixed

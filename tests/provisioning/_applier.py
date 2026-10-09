@@ -701,6 +701,7 @@ async def reconcile_provision(
     api: BotApi,
     *,
     guild_id: str,
+    marker: str,
     audit_reason: str,
 ) -> ProvisionResult:
     """Apply create-ops in dependency order. Skips delete ops entirely.
@@ -714,7 +715,7 @@ async def reconcile_provision(
 
     for idx, op in enumerate(sorted_ops):
         try:
-            await apply_op(op, api, state, audit_reason=audit_reason)
+            await apply_op(op, api, state, marker=marker, audit_reason=audit_reason)
             created_lines.append(_op_summary(op, state))
         except ProvisioningError:
             return ProvisionResult(
@@ -776,6 +777,7 @@ async def apply_op(
     api: BotApi,
     state: _ProvisionState,
     *,
+    marker: str,
     audit_reason: str,
 ) -> None:
     """Execute one diff operation against Discord. Updates state with new IDs."""
@@ -785,7 +787,7 @@ async def apply_op(
                 state.guild_id,
                 name=t.name,
                 channel_type=0,
-                topic=f"[ferry-fixture] {t.topic_suffix}",
+                topic=f"{marker} {t.topic_suffix}",
                 audit_reason=audit_reason,
             )
             state.text_channel_discord_id[t.id] = str(result["id"])
@@ -794,7 +796,7 @@ async def apply_op(
                 state.guild_id,
                 name=t.name,
                 channel_type=15,
-                topic=f"[ferry-fixture] {t.topic_suffix}",
+                topic=f"{marker} {t.topic_suffix}",
                 audit_reason=audit_reason,
             )
             state.forum_channel_discord_id[t.id] = str(result["id"])
