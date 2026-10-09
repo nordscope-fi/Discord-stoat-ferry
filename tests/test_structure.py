@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 import ssl
@@ -27,6 +28,7 @@ from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     _apply_role_ordering,
+    _download_banner,
     _resolve_role_icon,
     get_session,
     make_unique_channel_name,
@@ -46,6 +48,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import MigrationState, load_state
 from discord_ferry.state import save_state as save_state_real
+from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -5739,3 +5742,164 @@ async def test_run_role_backfill_dry_run_sends_no_ranks_write(tmp_path: Path) ->
 
     assert patches == 0, "a dry run must not write the role hierarchy"
     assert [w for w in state.warnings if w["type"].startswith("role_ordering")] == []
+
+
+# ---------------------------------------------------------------------------
+# Banner download is bounded and never damages a good file (#981)
+# ---------------------------------------------------------------------------
+
+BANNER_CAP = 6_000_000
+GOOD_BANNER = b"\x89PNG-previous-good-banner"
+
+
+async def _fetch_banner(
+    tmp_path: Path, cdn_path: str, *, headers: dict[str, str] | None = None
+) -> tuple[str | None, Path, object]:
+    """Run _download_banner against the local server; seed a good previous file."""
+    banner_dir = tmp_path / "banners"
+    banner_dir.mkdir()
+    dest = banner_dir / "111.png"
+    dest.write_bytes(GOOD_BANNER)
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = RewritingSession(real, cdn.url(cdn_path))
+        failure = await asyncio.wait_for(
+            _download_banner(session, "https://cdn.discordapp.com/b.png", headers or {}, dest),  # type: ignore[arg-type]
+            timeout=10,
+        )
+        await asyncio.sleep(0.2)  # let the server notice a closed connection
+        return failure, dest, (cdn, session)
+
+
+def _only_the_banner_remains(dest: Path) -> bool:
+    return sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
+
+
+async def test_banner_exactly_at_the_cap_replaces_the_file(tmp_path: Path) -> None:
+    failure, dest, _ = await _fetch_banner(tmp_path, f"/chunked/{BANNER_CAP}")
+    assert failure is None
+    assert dest.stat().st_size == BANNER_CAP
+    assert _only_the_banner_remains(dest)
+
+
+@pytest.mark.parametrize("route", ["/body/{n}", "/chunked/{n}"])
+async def test_banner_one_byte_over_the_cap_keeps_the_previous_file(
+    tmp_path: Path, route: str
+) -> None:
+    failure, dest, _ = await _fetch_banner(tmp_path, route.format(n=BANNER_CAP + 1))
+    assert failure is not None
+    assert "limit" in failure
+    assert dest.read_bytes() == GOOD_BANNER
+    assert _only_the_banner_remains(dest)
+
+
+async def test_banner_undeclared_oversize_stops_reading_and_keeps_the_previous_file(
+    tmp_path: Path,
+) -> None:
+    failure, dest, (cdn, _) = await _fetch_banner(tmp_path, "/endless")  # type: ignore[misc]
+    assert failure is not None
+    assert cdn.sent < ENDLESS_LIMIT // 2, f"server sent {cdn.sent} bytes, the client kept reading"
+    assert dest.read_bytes() == GOOD_BANNER
+    assert _only_the_banner_remains(dest)
+
+
+async def test_banner_declared_oversize_is_rejected_without_reading_the_body(
+    tmp_path: Path,
+) -> None:
+    failure, dest, (cdn, _) = await _fetch_banner(tmp_path, "/lying/30000000")  # type: ignore[misc]
+    assert failure is not None
+    assert cdn.sent <= 2 * 65536
+    assert dest.read_bytes() == GOOD_BANNER
+    assert _only_the_banner_remains(dest)
+
+
+async def test_banner_redirect_is_not_followed(tmp_path: Path) -> None:
+    failure, dest, (cdn, _) = await _fetch_banner(tmp_path, "/redirect")  # type: ignore[misc]
+    assert failure is not None
+    assert "302" in failure
+    assert cdn.target_hits == 0
+    assert dest.read_bytes() == GOOD_BANNER
+
+
+async def test_banner_mid_body_disconnect_keeps_the_previous_file(tmp_path: Path) -> None:
+    with pytest.raises(aiohttp.ClientPayloadError):
+        await _fetch_banner(tmp_path, "/cutoff/1000000")
+    dest = tmp_path / "banners" / "111.png"
+    assert dest.read_bytes() == GOOD_BANNER
+    assert _only_the_banner_remains(dest)
+
+
+async def test_banner_write_failure_keeps_the_previous_file_and_leaves_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disk error half way through writing must not damage the good banner."""
+    from pathlib import Path as RealPath
+
+    real_write_bytes = RealPath.write_bytes
+
+    def _half_write_then_fail(self: Path, data: bytes) -> int:
+        if data == GOOD_BANNER:  # seeding the previous file must succeed
+            return real_write_bytes(self, data)
+        with self.open("wb") as fh:
+            fh.write(data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(RealPath, "write_bytes", _half_write_then_fail)
+    with pytest.raises(OSError, match="No space left"):
+        await _fetch_banner(tmp_path, "/body/1000")
+    dest = tmp_path / "banners" / "111.png"
+    monkeypatch.undo()
+    assert dest.read_bytes() == GOOD_BANNER
+    assert _only_the_banner_remains(dest)
+
+
+async def test_banner_download_requests_without_following_redirects(tmp_path: Path) -> None:
+    _, _, (_, session) = await _fetch_banner(tmp_path, "/body/10")  # type: ignore[misc]
+    assert session.calls[0]["allow_redirects"] is False
+
+
+async def test_banner_download_passes_the_headers_through(tmp_path: Path) -> None:
+    _, _, (cdn, _) = await _fetch_banner(  # type: ignore[misc]
+        tmp_path, "/body/10", headers={"Authorization": "Bot dummy-token"}
+    )
+    assert cdn.last_headers.get("Authorization") == "Bot dummy-token"
+
+
+async def test_run_server_warns_and_skips_upload_for_an_oversize_banner(tmp_path: Path) -> None:
+    """Declared Content-Length over the cap, through the real run_server path."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(autumn_url=AUTUMN_URL)
+    exports = [_make_export(guild_id="111")]
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={},
+            banner_hash="abc123banner",
+        ),
+        tmp_path,
+    )
+    banner = tmp_path / "banners" / "111.png"
+    banner.parent.mkdir()
+    banner.write_bytes(GOOD_BANNER)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        m.get(
+            f"{BANNER_CDN}/111/abc123banner.png?size=1024",
+            body=b"tiny",
+            headers={"Content-Length": str(BANNER_CAP + 1)},
+        )
+        await run_server(config, state, exports, events.append)
+        uploads = [k for k in m.requests if k[1].path == "/banners"]
+
+    warnings = [w for w in state.warnings if w.get("type") == "banner_download_failed"]
+    assert len(warnings) == 1
+    assert uploads == []
+    assert banner.read_bytes() == GOOD_BANNER

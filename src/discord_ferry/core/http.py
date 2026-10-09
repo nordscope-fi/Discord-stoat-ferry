@@ -178,6 +178,30 @@ def new_session(**kwargs: Any) -> aiohttp.ClientSession:
     return aiohttp.ClientSession(connector=connector, **kwargs)
 
 
+async def read_bounded(resp: aiohttp.ClientResponse, max_bytes: int) -> bytes | None:
+    """Read a response body, giving up the moment it exceeds ``max_bytes``.
+
+    Returns the body, or ``None`` when it is over the cap. A declared
+    Content-Length above the cap is refused before any body byte is read, and
+    an undeclared or understated body is cut off as soon as the running total
+    passes the cap, so peak memory stays near ``max_bytes`` rather than the
+    server's idea of the size. A body of exactly ``max_bytes`` is accepted.
+
+    Transport errors (a mid-body disconnect, a timeout) propagate untouched, so
+    a caller that writes the bytes somewhere never sees a partial body.
+    """
+    if resp.content_length is not None and resp.content_length > max_bytes:
+        return None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def tls_hint(exc: BaseException) -> str | None:
     """Return actionable guidance if `exc`'s chain holds a certificate failure.
 

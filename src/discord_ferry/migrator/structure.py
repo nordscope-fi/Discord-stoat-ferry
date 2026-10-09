@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import proxy_hint, tls_hint
+from discord_ferry.core.http import proxy_hint, read_bounded, tls_hint
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import (
     ChannelMeta,
@@ -45,7 +45,7 @@ from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCERole
 from discord_ferry.state import save_state
-from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
+from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -115,6 +115,38 @@ def _stoat_channel_type(channel_type: int) -> str:
             return "Voice"
         case _:
             return "Text"
+
+
+async def _download_banner(
+    session: aiohttp.ClientSession,
+    url: str,
+    headers: dict[str, str],
+    dest: Path,
+) -> str | None:
+    """Download a banner to ``dest``. Return ``None`` on success, else the failure message.
+
+    The body is read in full, within the Autumn banner limit, before ``dest`` is
+    touched, then swapped in with ``Path.replace``. An oversize body, a failed
+    status or a dropped connection therefore leaves any earlier banner intact
+    and no temp file behind. ``replace``, not ``rename``: rename refuses an
+    existing destination on Windows.
+    """
+    limit = TAG_SIZE_LIMITS["banners"]
+    # No redirects: the CDN answers directly, and a 3xx would send this request,
+    # with its Authorization header, to a host Ferry never chose.
+    async with session.get(url, headers=headers, allow_redirects=False) as resp:
+        if resp.status != 200:
+            return f"Banner download returned status {resp.status}"
+        data = await read_bounded(resp, limit)
+    if data is None:
+        return f"Banner is larger than the {limit} byte limit"
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return None
 
 
 async def run_server(
@@ -308,40 +340,39 @@ async def run_server(
                 headers: dict[str, str] = {}
                 if config.discord_token:
                     headers["Authorization"] = config.discord_token
-                async with session.get(banner_url, headers=headers) as resp:
-                    if resp.status == 200:
-                        banner_path.write_bytes(await resp.read())
-                        banner_id = await upload_with_cache(
-                            session,
-                            state.autumn_url,
-                            "banners",
-                            banner_path,
-                            config.token,
-                            state.upload_cache,
-                            config.upload_delay,
+                failure = await _download_banner(session, banner_url, headers, banner_path)
+                if failure is None:
+                    banner_id = await upload_with_cache(
+                        session,
+                        state.autumn_url,
+                        "banners",
+                        banner_path,
+                        config.token,
+                        state.upload_cache,
+                        config.upload_delay,
+                    )
+                    await api_edit_server(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        state.stoat_server_id,
+                        banner=banner_id,
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="server",
+                            status="progress",
+                            message="Applied server banner",
                         )
-                        await api_edit_server(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            state.stoat_server_id,
-                            banner=banner_id,
-                        )
-                        on_event(
-                            MigrationEvent(
-                                phase="server",
-                                status="progress",
-                                message="Applied server banner",
-                            )
-                        )
-                    else:
-                        state.warnings.append(
-                            {
-                                "phase": "server",
-                                "type": "banner_download_failed",
-                                "message": f"Banner download returned status {resp.status}",
-                            }
-                        )
+                    )
+                else:
+                    state.warnings.append(
+                        {
+                            "phase": "server",
+                            "type": "banner_download_failed",
+                            "message": failure,
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 state.warnings.append(
                     {

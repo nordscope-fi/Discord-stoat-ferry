@@ -23,6 +23,7 @@ from yarl import URL
 
 from discord_ferry.core import http
 from discord_ferry.core.security import reset_secret_registry, sanitize_secrets
+from tests.local_cdn import ENDLESS_LIMIT, LocalCDN, local_cdn
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "discord_ferry"
 
@@ -1898,3 +1899,64 @@ def test_the_kill_switch_short_circuits_before_the_platform(proxy_env) -> None:
 
     assert out["proxy-disabled"] == "true"
     assert out["proxy-source"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# read_bounded (#980, #981): real local server, realistic cap, no monkeypatch
+# ---------------------------------------------------------------------------
+
+_CAP = 2_500_000
+
+
+async def _read_bounded(cdn: LocalCDN, path: str, cap: int = _CAP) -> bytes | None:
+    async with aiohttp.ClientSession() as session, session.get(cdn.url(path)) as resp:
+        return await http.read_bounded(resp, cap)
+
+
+async def test_read_bounded_returns_a_small_body() -> None:
+    async with local_cdn() as cdn:
+        assert await _read_bounded(cdn, "/body/1000") == b"x" * 1000
+
+
+@pytest.mark.parametrize("path", ["/body/{n}", "/chunked/{n}"])
+async def test_read_bounded_accepts_a_body_of_exactly_the_cap(path: str) -> None:
+    async with local_cdn() as cdn:
+        data = await _read_bounded(cdn, path.format(n=_CAP))
+    assert data is not None
+    assert len(data) == _CAP
+
+
+@pytest.mark.parametrize("path", ["/body/{n}", "/chunked/{n}"])
+async def test_read_bounded_rejects_a_body_one_byte_over_the_cap(path: str) -> None:
+    async with local_cdn() as cdn:
+        assert await _read_bounded(cdn, path.format(n=_CAP + 1)) is None
+
+
+async def test_read_bounded_rejects_a_declared_oversize_without_reading_the_body() -> None:
+    """The server declares 30 MB and sends one 64 KB chunk, then stalls.
+
+    A reader that waits for the whole body would hang here, so the timeout
+    turns that failure into an assertion instead of a stuck suite.
+    """
+    async with local_cdn() as cdn:
+        data = await asyncio.wait_for(_read_bounded(cdn, "/lying/30000000"), timeout=5)
+        sent = cdn.sent
+    assert data is None
+    assert sent <= 2 * 65536, f"server sent {sent} bytes after a declared-oversize header"
+
+
+async def test_read_bounded_aborts_an_undeclared_oversize_near_the_cap() -> None:
+    async with local_cdn() as cdn:
+        data = await asyncio.wait_for(_read_bounded(cdn, "/endless"), timeout=10)
+        await asyncio.sleep(0.2)  # let the server notice the closed connection
+        sent = cdn.sent
+    assert data is None
+    # Anything near ENDLESS_LIMIT means the client kept reading to the end.
+    assert sent < ENDLESS_LIMIT // 2, f"server sent {sent} bytes, the client did not stop"
+
+
+async def test_read_bounded_lets_a_mid_body_disconnect_propagate() -> None:
+    """The caller must see the error and keep its previous file (banner contract)."""
+    async with local_cdn() as cdn:
+        with pytest.raises(aiohttp.ClientPayloadError):
+            await _read_bounded(cdn, "/cutoff/1000000")

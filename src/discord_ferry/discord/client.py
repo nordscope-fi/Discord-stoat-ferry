@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
-from discord_ferry.core.http import proxy_error_is_permanent, proxy_hint, tls_hint
+from discord_ferry.core.http import proxy_error_is_permanent, proxy_hint, read_bounded, tls_hint
 from discord_ferry.discord.models import DiscordChannel, DiscordRole, PermissionOverwrite
 from discord_ferry.errors import DiscordAuthError, MigrationError
 
@@ -209,14 +209,13 @@ async def download_role_icon(
     """
     url = f"https://cdn.discordapp.com/role-icons/{role_id}/{icon_hash}.png"
     try:
-        async with session.get(url) as resp:
+        # No redirects: the CDN answers directly, and a 3xx would send the
+        # download to a host Ferry never chose.
+        async with session.get(url, allow_redirects=False) as resp:
             if resp.status != 200:
                 return None
-            data = await resp.read()
-            if len(data) > _ROLE_ICON_MAX_BYTES:
-                return None
-            return data
-    except aiohttp.ClientError as exc:
+            return await read_bounded(resp, _ROLE_ICON_MAX_BYTES)
+    except (aiohttp.ClientError, TimeoutError) as exc:
         logger.warning("Role icon download failed for role %s: %s", role_id, exc)
         return None
 
