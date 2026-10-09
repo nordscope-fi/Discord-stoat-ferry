@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require the animated-emoji test to check the `animated_emoji` warning, the specific animation-loss
+  event, and successful emoji creation (#1079).
 - Require the role-ordering failure test to check the specific recorded and emitted warning,
   and the final role-phase progress event (#1079).
 - Require the emoji-limit test to check the exact surviving emoji, upload and creation counts,
