@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require five exporter tests to check the exact low-disk, partial-channel, proxy-resolution, and
+  stale-export warning outcomes (#1079). Changes to an event's status, phase, or message no longer
+  satisfy the affected coverage.
 - Require nine engine and message tests to check their exact warning outcomes (#1079). The
   assertions cover validation, missing tokens and pin references, skipped forwarded content,
   invalid reaction modes, oversized attachments, and forum indexes whose message IDs are unknown.

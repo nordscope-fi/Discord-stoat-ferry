@@ -428,10 +428,13 @@ class TestCheckExportFreshness:
 
     def test_export_freshness_warning(self, tmp_path: Path) -> None:
         """Files 10 days old produce a warning string."""
-        self._write_json_with_age(tmp_path, 10)
-        warnings = check_export_freshness(tmp_path)
-        assert len(warnings) == 1
-        assert "stale" in warnings[0]
+        json_file = self._write_json_with_age(tmp_path, 10)
+        with patch(
+            "discord_ferry.exporter.manager._time.time",
+            return_value=json_file.stat().st_mtime + 10 * 86400,
+        ):
+            warnings = check_export_freshness(tmp_path)
+        assert warnings == ["DCE export is 10 days old — data may be stale"]
 
     def test_export_freshness_error(self, tmp_path: Path) -> None:
         """Files 45 days old raise ValidationError (without force)."""
@@ -443,10 +446,13 @@ class TestCheckExportFreshness:
 
     def test_export_freshness_error_with_force(self, tmp_path: Path) -> None:
         """Files 45 days old with force=True produce a warning but no error."""
-        self._write_json_with_age(tmp_path, 45)
-        warnings = check_export_freshness(tmp_path, force=True)
-        assert len(warnings) == 1
-        assert "stale" in warnings[0]
+        json_file = self._write_json_with_age(tmp_path, 45)
+        with patch(
+            "discord_ferry.exporter.manager._time.time",
+            return_value=json_file.stat().st_mtime + 45 * 86400,
+        ):
+            warnings = check_export_freshness(tmp_path, force=True)
+        assert warnings == ["DCE export is 45 days old — data may be stale"]
 
     def test_export_freshness_no_json_files(self, tmp_path: Path) -> None:
         """Directory with no JSON files produces no warnings."""
