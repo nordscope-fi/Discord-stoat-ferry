@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   (#1002). The offline tool checks the pinned writer digest and disposition ledger,
   rebuilds identical fixture bytes, and documents the source review required when updating it.
 
+## [2.41.22] - 2026-10-09
+
+### Fixed
+
+- The exporter runner no longer keeps every DiscordChatExporter error line in memory during a run
+  (#987). Only the last line was ever reported, so a noisy run grew without need: 200,000 error
+  lines peaked near 28 MB. It now keeps just the last line, and the error message is unchanged.
+
 ## [2.41.21] - 2026-10-09
 
 ### Fixed
