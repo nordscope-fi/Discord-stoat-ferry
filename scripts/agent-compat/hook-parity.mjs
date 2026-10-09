@@ -96,8 +96,7 @@ function deriveVibeFields(entry) {
 // there: the installer merges them from .claude/settings.json at render time.
 // User prompt entries stay unsupported: they live in ~/.claude/settings.json,
 // which the Ferry installer does not write. Command entries with no Codex/Vibe
-// equivalent (the plain-english chat gates) stay unsupported until plain-english
-// ships a qwen agent profile.
+// equivalent stay unsupported unless a native Qwen registration compensates.
 function deriveQwenFields(entry) {
   if (entry.hostOverrides?.qwenDisposition) {
     return {
@@ -140,10 +139,12 @@ const RAW_ENTRIES = [
     'LLM judge for writing style on git/gh'),
   projectCommand('project.plain-english-chat-stop', 'Stop', null,
     'plain-english-chat.sh', 'unsupported', [], null,
-    'chat writing style; no Codex/Vibe equivalent'),
+    'chat writing style; native Qwen plain-English hook', ['qwen'],
+    { qwenDisposition: 'compensated' }),
   projectCommand('project.plain-english-chat-subagent', 'SubagentStop', null,
     'plain-english-chat.sh', 'unsupported', [], null,
-    'SubagentStop has no Codex/Vibe equivalent'),
+    'subagent chat writing style; native Qwen plain-English hook', ['qwen'],
+    { qwenDisposition: 'compensated' }),
   projectCommand('project.brainstorm-prompt', 'UserPromptSubmit', null,
     'brainstorm-evidence.mjs', 'ported', [], 'brainstorm-evidence',
     'activates or cancels the brainstorm evidence workflow', [],
@@ -341,7 +342,7 @@ export function validateHookParity(entries = HOOK_PARITY) {
     if (!['ported', 'compensated', 'unsupported'].includes(e.qwenDisposition)) {
       issues.push(`${e.id}: invalid qwenDisposition "${e.qwenDisposition}"`);
     }
-    if (e.nativeHosts && !e.nativeHosts.every(host => ['codex', 'vibe'].includes(host))) {
+    if (e.nativeHosts && !e.nativeHosts.every(host => ['codex', 'vibe', 'qwen'].includes(host))) {
       issues.push(`${e.id}: invalid native host`);
     }
     if (e.disposition === 'ported' && !e.route && e.codexTools.length > 0) {

@@ -11,6 +11,7 @@ import { codexPostToolMatcher, vibePostToolMatcher } from './hook-parity.mjs';
 import {
   canonicalCheckoutRoot,
   normalizeCodexChatHooks,
+  normalizeQwenChatHooks,
   removeUnusedIssueChannel,
   requirePlainEnglish,
   stripVibeIssueChannel,
@@ -167,8 +168,7 @@ async function main() {
   // 4a. Generate .qwen/
   // Qwen speaks the Claude hook envelope, so the template registers the guard
   // scripts directly instead of an adapter. The prompt hooks are merged below
-  // from the Claude settings; plain-english has no qwen agent profile to run
-  // its own init against (ADR-026).
+  // from the Claude settings. Native chat hooks are merged below (ADR-026).
   console.log('Generating .qwen/ ...');
   const qwenDir = join(projectRoot, '.qwen');
 
@@ -198,15 +198,24 @@ async function main() {
     console.log('  Qwen review credentials are retrieved from Proton by qwen-review.mjs');
   }
 
-  // 4b. Merge plain-english lint hooks into both hook files.
+  // 4b. Merge plain-english lint hooks into the host hook files.
   // The ferry templates carry only the adapter hooks. plain-english owns its own
   // blocks and merges them in, preserving the ferry hooks. This avoids duplicating
-  // plain-english config in the templates (ADR-024). Qwen is not in this step:
-  // plain-english has no qwen agent profile, so its shims are registered by the
-  // template and its judges arrive through the prompt merge above.
+  // plain-english config in the templates (ADR-024). Qwen keeps its existing
+  // document checks and adds native chat hooks (ADR-026 trigger 1).
   console.log('Merging plain-english lint hooks ...');
   if (!codexLinked) runPlainEnglishInit('codex');
   if (!vibeLinked) runPlainEnglishInit('vibe');
+  if (!qwenLinked) {
+    const qwenSettingsPath = join(qwenDir, 'settings.json');
+    const preToolUse = JSON.parse(readFileSync(qwenSettingsPath, 'utf8')).hooks.PreToolUse;
+    runPlainEnglishInit('qwen');
+    const qwenSettings = JSON.parse(readFileSync(qwenSettingsPath, 'utf8'));
+    normalizeQwenChatHooks(qwenSettings, projectRoot, preToolUse);
+    writeFileSync(qwenSettingsPath, `${JSON.stringify(qwenSettings, null, 2)}\n`, {
+      mode: 0o600,
+    });
+  }
   if (!vibeLinked) {
     const vibeHooksPath = join(projectRoot, '.vibe', 'hooks.toml');
     const content = readFileSync(vibeHooksPath, 'utf8');

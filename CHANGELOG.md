@@ -38,6 +38,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Require the voice-channel fallback test to assert the exact channels warning event (#1079). An
   unrelated warning no longer satisfies the fallback coverage.
 
+## [2.41.19] - 2026-10-09
+
+### Fixed
+
+- Qwen now runs the native plain-English chat writing-style check on main-session and subagent
+  completion (#942). The installer adds the hooks and launcher while preserving Ferry's existing
+  document checks and guards. Drift verification checks the merged settings and launcher.
+
 ## [2.41.18] - 2026-10-08
 
 ### Fixed

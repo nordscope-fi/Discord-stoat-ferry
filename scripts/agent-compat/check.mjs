@@ -32,6 +32,7 @@ import {
   canonicalCheckoutRoot,
   codexChatCommand,
   normalizeCodexChatHooks,
+  normalizeQwenChatHooks,
   removeUnusedIssueChannel,
   requirePlainEnglish,
   stripVibeIssueChannel,
@@ -494,10 +495,8 @@ function checkVibeState() {
 }
 
 // --- Check: Generated state (Qwen) ----------------------------------------------
-// .qwen/settings.json is fully generator-owned (plain-english has no qwen
-// profile that would merge into it), so the right strength here is exact
-// equality with a fresh build from the shared builder. A guard moved under
-// the wrong event, a changed matcher, or a stale prompt all fail.
+// Compare Ferry's generated settings plus native plain-English chat hooks
+// against a fresh staged build. A moved guard or stale chat launcher fails.
 
 function checkQwenState() {
   const settingsPath = join(projectRoot, '.qwen', 'settings.json');
@@ -521,6 +520,30 @@ function checkQwenState() {
   } catch (err) {
     fail(`qwen template failed to render: ${err.message}`);
     return;
+  }
+
+  const stage = mkdtempSync(join(tmpdir(), 'ferry-qwen-plain-english-'));
+  try {
+    execFileSync('git', ['init', '-q', stage], { stdio: 'pipe' });
+    writeFileSync(join(stage, 'AGENTS.md'), readFileSync(join(canonicalRoot, 'AGENTS.md')));
+    mkdirSync(join(stage, '.qwen'));
+    const stagedSettingsPath = join(stage, '.qwen', 'settings.json');
+    writeFileSync(stagedSettingsPath, `${JSON.stringify(expected, null, 2)}\n`, { mode: 0o600 });
+    const preToolUse = expected.hooks.PreToolUse;
+    if (!runPlainEnglishInit(stage, 'qwen')) return;
+    expected = JSON.parse(readFileSync(stagedSettingsPath, 'utf8'));
+    normalizeQwenChatHooks(expected, canonicalRoot, preToolUse);
+    const actualLauncher = join(canonicalRoot, '.qwen', 'hooks', 'plain-english.mjs');
+    if (!existsSync(actualLauncher)) {
+      fail('missing native Qwen plain-English launcher');
+    } else if (!sameFile(join(stage, '.qwen', 'hooks', 'plain-english.mjs'), actualLauncher)) {
+      fail('Qwen plain-English launcher differs from staged output');
+    }
+  } catch (err) {
+    fail(`plain-English Qwen staged build failed: ${err.message}`);
+    return;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
   }
 
   // Qwen maintains its own schema marker ($version) in the file and bumps it
@@ -550,7 +573,7 @@ function checkQwenState() {
       }
     }
     fail(
-      'drift: .qwen/settings.json does not match the template plus merged prompt hooks ' +
+      'drift: .qwen/settings.json does not match the template plus merged prompt and chat hooks ' +
       `(first difference ${firstDifference}; lengths ${actualCanonical.length}/` +
       `${expectedCanonical.length}). Re-run ./scripts/agent-install.sh`,
     );

@@ -69,6 +69,37 @@ if (agent === 'codex') {
   }
   fs.writeFileSync(hooksPath, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
   fs.writeFileSync(path.join(directory, 'plain-english.mjs'), runner, { mode: 0o755 });
+} else if (agent === 'qwen') {
+  const directory = path.join(root, '.qwen', 'hooks');
+  fs.mkdirSync(directory, { recursive: true });
+  const hooksPath = path.join(root, '.qwen', 'settings.json');
+  const document = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+  document.hooks.PreToolUse = document.hooks.PreToolUse.map(group => ({
+    ...group,
+    hooks: group.hooks.filter(hook => !/plain-english-(docs|github)/u.test(hook.command)),
+  }));
+  for (const [matcher, channel] of [
+    ['write_file|edit', 'docs'],
+    ['run_shell_command', 'github'],
+    ['mcp_.*_save_(issue|comment)', 'issue'],
+  ]) {
+    document.hooks.PreToolUse.push({ matcher, hooks: [{
+      type: 'command', name: `plain-english-${channel}`,
+      command: `node .qwen/hooks/plain-english.mjs hook ${channel} --agent qwen`,
+      timeout: 30000,
+    }] });
+  }
+  for (const event of ['Stop', 'SubagentStop']) {
+    const ferry = (document.hooks[event] ?? []).filter((group) =>
+      !(group.hooks ?? []).some((hook) => hook.name === 'plain-english-chat'));
+    document.hooks[event] = [...ferry, { matcher: '*', hooks: [{
+      type: 'command', name: 'plain-english-chat',
+      command: 'node .qwen/hooks/plain-english.mjs hook chat --agent qwen',
+      timeout: 10000,
+    }] }];
+  }
+  fs.writeFileSync(hooksPath, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(directory, 'plain-english.mjs'), runner, { mode: 0o755 });
 } else if (agent === 'vibe') {
   const directory = path.join(root, '.vibe', 'hooks');
   fs.mkdirSync(directory, { recursive: true });
