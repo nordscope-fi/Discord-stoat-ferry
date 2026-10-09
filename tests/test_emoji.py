@@ -274,16 +274,26 @@ async def test_run_emoji_http_image_url_skipped(tmp_path: Path) -> None:
 
     mock_create = AsyncMock(return_value={"_id": "id"})
     with (
-        patch("discord_ferry.migrator.emoji.upload_with_cache", new=AsyncMock()),
+        patch("discord_ferry.migrator.emoji.upload_with_cache", new=AsyncMock()) as mock_upload,
         patch("discord_ferry.migrator.emoji.api_create_emoji", new=mock_create),
         patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
     ):
         await run_emoji(config, state, exports, events.append)
 
+    mock_upload.assert_not_called()
     mock_create.assert_not_called()
     assert "222" not in state.emoji_map
-    warning_messages = [w["message"] for w in state.warnings]
-    assert any("222" in m or "cloud" in m for m in warning_messages)
+    assert state.warnings == [
+        {
+            "phase": "emoji",
+            "type": "missing_media",
+            "message": "Skipping emoji :cloud: \u2014 URL not downloaded",
+        }
+    ]
+    warning_events = [e for e in events if e.status == "warning"]
+    assert [(e.phase, e.message) for e in warning_events] == [
+        ("emoji", "Skipping :cloud: \u2014 URL not downloaded")
+    ]
 
 
 async def test_run_emoji_rejects_local_images_outside_export_dir(tmp_path: Path) -> None:
