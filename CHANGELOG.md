@@ -51,6 +51,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   (#1002). The offline tool checks the pinned writer digest and disposition ledger,
   rebuilds identical fixture bytes, and documents the source review required when updating it.
 
+## [2.41.24] - 2026-10-09
+
+### Fixed
+
+- The review verifier now runs commands that outside reviewers write with quotes (#1078). Before,
+  any quote character made it refuse the command, so every such finding became INCONCLUSIVE and
+  nothing the reviewer found was checked. A quoted search such as `rg -n 'a|b' README.md` now works,
+  and quoted paths still go through the containment check.
+- An `rg` or `git grep` search with no `--` now gets one inserted before its pattern when every
+  earlier word is an allowed flag. A pattern that starts with a dash, or an unknown flag in front
+  of the pattern, is still refused.
+- The reply format check and the design-evidence hook now split a command with the same shared
+  splitter as the verifier. It matches `/bin/sh` and refuses anything a shell would expand, chain
+  or redirect. An unquoted wildcard such as `rg -n -- foo.* README.md` is now refused, so quote the
+  pattern. A command the reply check cannot read now makes only its own finding INCONCLUSIVE and no
+  longer invalidates the whole reply.
+- The reviewer runtime gains one file, `shell-words.mjs`. Reinstall the runtime from `main` so the
+  installed checker picks up these changes.
+
 ## [2.41.23] - 2026-10-09
 
 ### Fixed
