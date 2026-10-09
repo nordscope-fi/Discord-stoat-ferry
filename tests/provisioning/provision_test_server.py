@@ -179,7 +179,11 @@ async def _run_provision(
                 return
 
             result = await reconcile_provision(
-                d, api, guild_id=target_guild_id, audit_reason="provision (issue #35)"
+                d,
+                api,
+                guild_id=target_guild_id,
+                marker=manifest.marker,
+                audit_reason="provision (issue #35)",
             )
             click.echo(f"created {result.created_count} entities:")
             for line in result.created_summary:
