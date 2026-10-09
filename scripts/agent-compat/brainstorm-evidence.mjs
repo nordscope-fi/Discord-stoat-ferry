@@ -17,6 +17,7 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
+import { shellWords } from './shell-words.mjs';
 
 export const LEDGER_SCHEMA_VERSION = 1;
 export const WORKFLOW_STATES = Object.freeze([
@@ -423,32 +424,9 @@ function publicHttpsUrl(value) {
   return url.toString();
 }
 
-function literalArguments(command) {
-  if (typeof command !== 'string' || command.length === 0) return null;
-  if (/[;&|<>`$\\\n\r]/u.test(command) || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(command)) {
-    return null;
-  }
-  const arguments_ = [];
-  let token = '';
-  let quote = null;
-  for (const character of command.trim()) {
-    if (quote !== null) {
-      if (character === quote) quote = null;
-      else token += character;
-    } else if (character === "'" || character === '"') {
-      quote = character;
-    } else if (/\s/u.test(character)) {
-      if (token.length > 0) {
-        arguments_.push(token);
-        token = '';
-      }
-    } else {
-      token += character;
-    }
-  }
-  if (quote !== null) return null;
-  if (token.length > 0) arguments_.push(token);
-  return arguments_.length > 0 ? arguments_ : null;
+function commandWords(command) {
+  if (typeof command !== 'string' || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(command)) return null;
+  return shellWords(command);
 }
 
 function repositoryCommandSource(root, ledger, arguments_) {
@@ -491,7 +469,7 @@ function gitSource(root, arguments_) {
 }
 
 function commandSource(root, ledger, command) {
-  const arguments_ = literalArguments(command);
+  const arguments_ = commandWords(command);
   if (arguments_ === null) return null;
   const repository = repositoryCommandSource(root, ledger, arguments_);
   if (repository !== null) return repository;
@@ -649,7 +627,7 @@ function normalizedChallengeDeclaration(challenge, input, { root, ledger }) {
   }
   const toolName = input?.tool_name;
   if (!['Bash', 'bash', 'exec_command', 'run_shell_command'].includes(toolName)) return null;
-  const arguments_ = literalArguments(input?.tool_input?.command ?? input?.tool_input?.cmd);
+  const arguments_ = commandWords(input?.tool_input?.command ?? input?.tool_input?.cmd);
   if (arguments_ === null) return null;
   const paths = brainstormPaths(root);
   let runner;

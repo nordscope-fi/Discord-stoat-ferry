@@ -689,6 +689,51 @@ def test_source_receipt_supported_calls_complete_independent_evidence(
         assert tool_input["query"] not in serialized
 
 
+def test_source_receipt_accepts_a_quoted_alternation(tmp_path: Path) -> None:
+    root, _ = active_checkout(tmp_path)
+    tool_input = {"command": "rg -n 'Atomic|rename' docs/reference.md"}
+
+    before_tool(root, "Bash", tool_input)
+    after_tool(root, "Bash", tool_input, "3:Atomic rename replaces a file.")
+
+    completed = receipt_files(root, COMPLETED_RECEIPTS)
+    assert len(completed) == 1
+    receipt = json.loads(completed[0].read_text())
+    assert receipt["source"]["type"] == "repository"
+    assert receipt["source"]["locator"] == "docs/reference.md"
+
+
+def test_source_receipt_keeps_a_mid_word_tilde_in_git_evidence(tmp_path: Path) -> None:
+    root, _ = active_checkout(tmp_path)
+    (root / "docs/second.md").write_text("Second commit.\n")
+    subprocess.run(["git", "-C", str(root), "add", "docs/second.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Ferry Test",
+            "-c",
+            "user.email=ferry@example.invalid",
+            "commit",
+            "-qm",
+            "second",
+        ],
+        check=True,
+    )
+    tool_input = {"command": "git show HEAD~1:docs/reference.md"}
+
+    before_tool(root, "Bash", tool_input)
+    after_tool(root, "Bash", tool_input, "# Reference\nAtomic rename replaces a file.")
+
+    completed = receipt_files(root, COMPLETED_RECEIPTS)
+    assert len(completed) == 1
+    receipt = json.loads(completed[0].read_text())
+    assert receipt["source"]["type"] == "git"
+    assert receipt["source"]["locator"] == "HEAD~1:docs/reference.md"
+
+
 def test_source_receipt_changed_source_discards_pending_record(tmp_path: Path) -> None:
     root, source = active_checkout(tmp_path)
     tool_input = {"file_path": str(source)}
