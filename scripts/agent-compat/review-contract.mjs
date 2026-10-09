@@ -5,6 +5,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { verificationExitAllowed } from './review-verification.mjs';
+import { shellWords } from './shell-words.mjs';
 
 export const VERIFICATION_OUTCOME_SCHEMA = {
   type: 'object',
@@ -217,12 +218,17 @@ export function validateFindings(result) {
     if (typeof verification.command !== 'string' || !verification.command.trim()) return false;
     if (!validVerificationOutcome(verification.confirms_if)) return false;
     if (!validVerificationOutcome(verification.refutes_if)) return false;
-    const verificationArgv = verification.command.trim().split(/\s+/u);
-    if (!verificationExitAllowed(verificationArgv, verification.confirms_if.exit_code)) {
-      return false;
-    }
-    if (!verificationExitAllowed(verificationArgv, verification.refutes_if.exit_code)) {
-      return false;
+    // A command that cannot be read safely is refused later by the review checker, which makes
+    // only this finding INCONCLUSIVE. Skip the exit-code rule here so one unreadable command does
+    // not invalidate the whole reply.
+    const verificationArgv = shellWords(verification.command);
+    if (verificationArgv !== null) {
+      if (!verificationExitAllowed(verificationArgv, verification.confirms_if.exit_code)) {
+        return false;
+      }
+      if (!verificationExitAllowed(verificationArgv, verification.refutes_if.exit_code)) {
+        return false;
+      }
     }
     if (!outcomesAreExclusive(verification.confirms_if, verification.refutes_if)) {
       return false;

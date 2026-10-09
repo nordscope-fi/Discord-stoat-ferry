@@ -3007,6 +3007,9 @@ def test_review_contract_requires_distinct_structured_verification_outcomes() ->
         "unreachable_non_search_exit": False,
         "empty_text": False,
         "invalid_exit": False,
+        "quoted_search_exit_1": True,
+        "quoted_program_name": True,
+        "unreadable_command_skipped": True,
     }
 
 

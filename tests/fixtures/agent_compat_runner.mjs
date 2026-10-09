@@ -679,6 +679,37 @@ switch (mode) {
         ...finding,
         verification: { ...finding.verification, confirms_if: outcome(2) },
       }),
+      quoted_search_exit_1: valid({
+        ...finding,
+        verification: {
+          command: "rg -n 'a b' README.md",
+          confirms_if: outcome(1),
+          refutes_if: outcome(0),
+        },
+      }),
+      quoted_program_name: valid({
+        ...finding,
+        verification: {
+          command: "'rg' -n 'a b' README.md",
+          confirms_if: outcome(1),
+          refutes_if: outcome(0),
+        },
+      }),
+      unreadable_command_skipped: validateFindings({
+        findings: [
+          {
+            ...finding,
+            verification: {
+              command: 'rg x src/ | sh',
+              confirms_if: outcome(1),
+              refutes_if: outcome(0),
+            },
+          },
+          finding,
+        ],
+        summary: 'fixture',
+        confidence: 'high',
+      }),
     });
     break;
   }
