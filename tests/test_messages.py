@@ -546,8 +546,20 @@ async def test_forwarded_message_skipped(tmp_path: Path) -> None:
     await run_messages(config, state, [export], _collect_events(events))
 
     assert "fwd1" not in state.message_map
-    warning_messages = [e.message for e in events if e.status == "warning"]
-    assert any("fwd1" in w for w in warning_messages)
+    assert state.warnings == [
+        {
+            "phase": "messages",
+            "type": "forwarded_message",
+            "message": (
+                "Forwarded message fwd1 skipped: this export predates DiscordChatExporter 2.47 "
+                "and does not carry the forwarded content. Re-exporting with a current DCE "
+                "recovers it."
+            ),
+        }
+    ]
+    assert [(e.phase, e.status, e.message) for e in events if e.status == "warning"] == [
+        ("messages", "warning", "Forwarded message fwd1 skipped.")
+    ]
 
 
 async def test_non_forwarded_empty_content_with_attachment_not_skipped(
@@ -1167,7 +1179,13 @@ async def test_channel_pinned_message_unknown_ref(
     await run_messages(config, state, [export], lambda e: None)
 
     assert "pinmsg2" not in state.message_map
-    assert any("nonexistent999" in w["message"] for w in state.warnings)
+    assert state.warnings == [
+        {
+            "phase": "messages",
+            "type": "pin_reference_missing",
+            "message": "ChannelPinnedMessage pinmsg2 references unknown message nonexistent999",
+        }
+    ]
 
 
 async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
@@ -1524,11 +1542,19 @@ async def test_oversized_attachment_skipped_before_upload(
         )
 
     assert result_ids == []
-    assert len(result_placeholders) >= 1
+    assert result_placeholders == ["[File too large: huge.bin (26.2 MB, limit: 20.0 MB)]"]
     assert state.attachments_skipped == 1
-    assert any(w["type"] == "attachment_skipped" for w in state.warnings)
-    warning_events = [e for e in events if e.status == "warning"]
-    assert any("too large" in e.message for e in warning_events)
+    assert state.warnings == [
+        {
+            "phase": "messages",
+            "type": "attachment_skipped",
+            "message": "File too large: huge.bin (26.2 MB, limit: 20.0 MB)",
+        }
+    ]
+    assert [(e.phase, e.status, e.message) for e in events if e.status == "warning"] == [
+        ("messages", "warning", "Attachment 'huge.bin' too large — skipped.")
+    ]
+    assert mock_aiohttp.requests == {}
 
 
 async def test_file_size_zero_falls_through_to_upload(
@@ -2022,8 +2048,13 @@ async def test_invalid_reaction_mode_defaults_to_text(
     # Should behave like text mode
     assert len(state.pending_reactions) == 0
     assert "[Reactions:" in sent_kwargs[0]["content"]
-    # Warning should be logged about invalid mode
-    assert any("reaction_mode" in w["message"] for w in state.warnings)
+    assert state.warnings == [
+        {
+            "phase": "messages",
+            "type": "invalid_reaction_mode",
+            "message": "Unknown reaction_mode 'bogus', falling back to 'text'",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -3759,7 +3790,20 @@ async def test_pre_247_export_still_skips_and_warns(tmp_path: Path) -> None:
     await run_messages(config, state, [export], _collect_events(events))
 
     assert "fwd_old" not in state.message_map
-    assert any("fwd_old" in e.message for e in events if e.status == "warning")
+    assert state.warnings == [
+        {
+            "phase": "messages",
+            "type": "forwarded_message",
+            "message": (
+                "Forwarded message fwd_old skipped: this export predates "
+                "DiscordChatExporter 2.47 and does not carry the forwarded content. "
+                "Re-exporting with a current DCE recovers it."
+            ),
+        }
+    ]
+    assert [(e.phase, e.status, e.message) for e in events if e.status == "warning"] == [
+        ("messages", "warning", "Forwarded message fwd_old skipped.")
+    ]
 
 
 # ---------------------------------------------------------------------------

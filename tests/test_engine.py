@@ -634,14 +634,18 @@ async def test_no_discord_token_emits_warning(tmp_path: Path) -> None:
     events: list[MigrationEvent] = []
     await run_migration(config, events.append, _NOOP_OVERRIDES)
 
-    warning_events = [
-        e
+    assert [
+        (e.phase, e.status, e.message)
         for e in events
-        if e.status == "warning"
-        and "permission" in e.message.lower()
-        and "private" in e.message.lower()
+        if e.phase == "export" and e.status == "warning"
+    ] == [
+        (
+            "export",
+            "warning",
+            "No Discord token — permission overrides will not be migrated. "
+            "Private channels may become publicly visible on Stoat.",
+        )
     ]
-    assert len(warning_events) >= 1, "Expected warning about permissions and private channels"
 
 
 async def test_discord_token_present_no_permission_warning(tmp_path: Path) -> None:
@@ -1301,7 +1305,9 @@ async def test_validation_reports_failures(tmp_path: Path) -> None:
         state = await run_migration(config, events.append, phase_overrides=overrides)
 
     val_events = [e for e in events if e.phase == "validate_migration"]
-    assert any(e.status == "warning" for e in val_events)
+    assert [(e.status, e.message) for e in val_events if e.status == "warning"] == [
+        ("warning", "Validation found issues: 1 failing, 0 warned, 0 ok.")
+    ]
     assert state.validation_results["has_failures"] is True
 
 
@@ -1342,10 +1348,17 @@ async def test_validation_skips_dry_run(tmp_path: Path) -> None:
     config = _make_config(tmp_path, validate_after=True)
     overrides = {**_NOOP_OVERRIDES, "connect": set_dry_run}
 
-    await run_migration(config, events.append, phase_overrides=overrides)
+    with patch(
+        "discord_ferry.migrator.verify.run_check",
+        new_callable=AsyncMock,
+    ) as run_check:
+        await run_migration(config, events.append, phase_overrides=overrides)
 
     val_events = [e for e in events if e.phase == "validate_migration"]
-    assert any(e.status == "warning" and "dry-run" in e.message.lower() for e in val_events)
+    run_check.assert_not_awaited()
+    assert [(e.status, e.message) for e in val_events if e.status == "warning"] == [
+        ("warning", "Validation skipped: dry-run state has no real server to verify.")
+    ]
 
 
 async def test_validation_handles_api_failure(tmp_path: Path) -> None:
@@ -1810,7 +1823,14 @@ async def test_rebuild_skips_marked_forum(tmp_path: Path) -> None:
         mock.post("https://api.test/channels/idx/search", payload=[])
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", events.append)
-    assert any(e.status == "warning" and "unknown" in (e.message or "").lower() for e in events)
+    assert [(e.phase, e.status, e.message) for e in events] == [
+        (
+            "report",
+            "warning",
+            "Forum index for 'F' exists but its message id is unknown; "
+            "its counts were not refreshed.",
+        )
+    ]
     assert state.forum_index_present_unknown_id == {"f"}
 
 
