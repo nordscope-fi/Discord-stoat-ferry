@@ -1371,7 +1371,9 @@ async def test_validation_handles_api_failure(tmp_path: Path) -> None:
         state = await run_migration(config, events.append, phase_overrides=overrides)
 
     val_events = [e for e in events if e.phase == "validate_migration"]
-    assert any(e.status == "warning" and "failed" in e.message.lower() for e in val_events)
+    assert [(e.status, e.message) for e in val_events if e.status == "warning"] == [
+        ("warning", "Validation failed: API timeout")
+    ]
     assert state.completed_at != ""
 
 
