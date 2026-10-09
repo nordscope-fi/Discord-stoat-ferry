@@ -811,8 +811,8 @@ class TestStderrOverlongLine:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
     @pytest.mark.asyncio
-    async def test_normal_stderr_accumulates(self, tmp_path: Path) -> None:
-        """SC-22: normal stderr lines accumulate (surfaced in the ExportError)."""
+    async def test_normal_stderr_line_surfaces_in_error(self, tmp_path: Path) -> None:
+        """SC-22: a normal stderr line is surfaced in the ExportError."""
         from discord_ferry.errors import ExportError
 
         process = _make_process([], returncode=1, stderr_lines=[b"a real error\n"])
@@ -826,6 +826,104 @@ class TestStderrOverlongLine:
             pytest.raises(ExportError, match="a real error"),
         ):
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+    @pytest.mark.asyncio
+    async def test_many_stderr_lines_surface_only_the_last(self, tmp_path: Path) -> None:
+        """#987: with thousands of stderr lines the error carries the last, not an earlier one."""
+        from discord_ferry.errors import ExportError
+
+        lines = [f"error line {i}\n".encode() for i in range(10_000)]
+        process = _make_process([], returncode=1, stderr_lines=lines)
+        cfg = _make_config(tmp_path)
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(ExportError) as excinfo,
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+        message = str(excinfo.value)
+        assert message.endswith("error line 9999")
+        assert "error line 9998" not in message
+        assert "error line 0" not in message
+
+    @pytest.mark.asyncio
+    async def test_overlong_marker_surfaces_when_it_is_the_last_stderr_line(
+        self, tmp_path: Path
+    ) -> None:
+        """#987: a normal line followed by an over-long one reports the truncation marker."""
+        from discord_ferry.errors import ExportError
+
+        process = _make_process([], returncode=1)
+        stderr = asyncio.StreamReader(limit=64)
+        stderr.feed_data(b"an earlier error\n")
+        stderr.feed_data(b"x" * 200)  # over-long line, no newline
+        stderr.feed_eof()
+        process.stderr = stderr
+        cfg = _make_config(tmp_path)
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(ExportError) as excinfo,
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+        message = str(excinfo.value)
+        assert "exceeded 64 KiB" in message
+        assert "an earlier error" not in message
+
+    @pytest.mark.asyncio
+    async def test_stderr_memory_does_not_grow_with_line_count(self, tmp_path: Path) -> None:
+        """#987: peak allocation stays flat while 100,000 distinct stderr lines stream through.
+
+        The lines are produced lazily, one per readuntil() call, so the test's own input
+        never holds them. Holding every line (the old list) costs roughly 10 MB here;
+        keeping only the last costs a few KB.
+        """
+        import tracemalloc
+
+        from discord_ferry.errors import ExportError
+
+        total = 100_000
+        produced = 0
+
+        async def _readuntil(_sep: bytes) -> bytes:
+            nonlocal produced
+            if produced >= total:
+                raise asyncio.IncompleteReadError(partial=b"", expected=None)
+            produced += 1
+            return f"error line {produced:06d}".ljust(99, "e").encode() + b"\n"
+
+        process = _make_process([], returncode=1)
+        process.stderr = MagicMock()
+        process.stderr.readuntil = _readuntil
+        cfg = _make_config(tmp_path)
+
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            baseline, _ = tracemalloc.get_traced_memory()
+            with (
+                patch(
+                    "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                    new=AsyncMock(return_value=process),
+                ),
+                pytest.raises(ExportError) as excinfo,
+            ):
+                await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert produced == total  # the reader really consumed every line
+        assert "error line 100000" in str(excinfo.value)
+        assert peak - baseline < 2_000_000
 
 
 class TestDrainCancel:

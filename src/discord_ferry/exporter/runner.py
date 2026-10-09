@@ -101,6 +101,9 @@ class _RunState:
     against DCE's per-channel retry behavior: a channel that hits 100%, fails
     transiently, retries from 25%, and hits 100% again would otherwise
     double-count and overshoot total_channels.
+
+    The runner does not buffer progress events: each one goes straight to the
+    callback. Only channels_completed grows, and it is bounded by the channel count.
     """
 
     total_channels: int | None = None
@@ -433,12 +436,14 @@ async def run_dce_export(
     )
 
     state = _RunState()
-    stderr_lines: list[str] = []
+    # Only the last non-empty stderr line is ever reported, so keep just that one.
+    last_err: str | None = None
 
     assert process.stdout is not None
     assert process.stderr is not None
 
     async def _read_stderr() -> None:
+        nonlocal last_err
         assert process.stderr is not None
         # Mirror the stdout loop: an explicit readuntil loop so a >64 KiB stderr
         # line is drained (not crashed via `async for`'s readline → ValueError).
@@ -451,11 +456,11 @@ async def run_dce_export(
                     break
             except asyncio.LimitOverrunError:
                 consumed = await _drain_overlong_line(process.stderr)
-                stderr_lines.append(f"<truncated {consumed} bytes; stderr line exceeded 64 KiB>")
+                last_err = f"<truncated {consumed} bytes; stderr line exceeded 64 KiB>"
                 continue
             line = raw_line.decode("utf-8", errors="replace").strip()
             if line:
-                stderr_lines.append(line)
+                last_err = line
 
     stderr_task = asyncio.create_task(_read_stderr())
     heartbeat_task = asyncio.create_task(
@@ -522,7 +527,8 @@ async def run_dce_export(
                 await stderr_task
 
     if process.returncode != 0:
-        last_err = stderr_lines[-1] if stderr_lines else "Unknown error"
-        raise ExportError(f"DCE export failed (exit code {process.returncode}): {last_err}")
+        raise ExportError(
+            f"DCE export failed (exit code {process.returncode}): {last_err or 'Unknown error'}"
+        )
 
     return config.export_dir
