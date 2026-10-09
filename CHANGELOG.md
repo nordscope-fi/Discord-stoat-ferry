@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require the thread-truncation test to check the five surviving threads and the exact recorded
+  and emitted channel-limit warnings (#1079).
 - Require the avatar HTTP 404 test to check the exact `avatar_download_failed` warning and failure
   reason while preserving the no-upload check (#1079).
 - Require the animated-emoji test to check the `animated_emoji` warning, the specific animation-loss

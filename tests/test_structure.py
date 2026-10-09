@@ -2817,13 +2817,26 @@ async def test_run_channels_truncates_at_200(tmp_path: Path) -> None:
     for i in range(195):
         assert f"ch{i}" in state.channel_map
 
-    # Only 5 of the 10 threads fit.
-    thread_count = sum(1 for k in state.channel_map if k.startswith("th"))
-    assert thread_count == 5
+    # Equal-traffic threads retain export order, so only the first five fit.
+    assert {k for k in state.channel_map if k.startswith("th")} == {f"th{i}" for i in range(5)}
 
-    # Warning emitted.
+    dropped_names = ", ".join(f"├─ thread-{i}" for i in range(5, 10))
+    limit_warnings = [w for w in state.warnings if w.get("type") == "channel_limit"]
+    assert limit_warnings == [
+        {
+            "phase": "channels",
+            "type": "channel_limit",
+            "message": f"Dropped 5 channel(s) exceeding 200 limit: {dropped_names}",
+        }
+    ]
     warning_events = [e for e in events if e.status == "warning"]
-    assert any("205" in e.message for e in warning_events)
+    assert [(e.phase, e.message) for e in warning_events].count(
+        (
+            "channels",
+            "Total channels (205) exceeds Stoat limit of 200. "
+            f"Dropped 5 channel(s): {dropped_names}",
+        )
+    ) == 1
 
 
 # ---------------------------------------------------------------------------
