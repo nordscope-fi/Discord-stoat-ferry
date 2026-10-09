@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require nine engine and message tests to check their exact warning outcomes (#1079). The
+  assertions cover validation, missing tokens and pin references, skipped forwarded content,
+  invalid reaction modes, oversized attachments, and forum indexes whose message IDs are unknown.
+  They also verify that dry runs skip validation and oversized attachments make no upload request.
 - Require the remote-image emoji test to check the exact recorded and emitted missing-media
   warnings and verify that no upload or emoji creation is attempted (#1079).
 - Require the post-migration validation failure test to check the exact API timeout warning
