@@ -4078,6 +4078,71 @@ def test_shell_words_refuse_what_a_shell_would_expand_chain_or_mis_split(command
     assert _shell_words(command) is None
 
 
+def _authorize(command: str) -> tuple[int, dict[str, object]]:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-authorize",
+        "--command",
+        command,
+        "--json",
+    )
+    return result.returncode, json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("command", "argv"),
+    [
+        ("rg -n -- 'a|b' README.md", ["rg", "-n", "--", "a|b", "README.md"]),
+        ('rg -n -- "guild_name" README.md', ["rg", "-n", "--", "guild_name", "README.md"]),
+        (
+            "rg -n -- 'versioned contract' README.md",
+            ["rg", "-n", "--", "versioned contract", "README.md"],
+        ),
+        ("rg -n -- 'foo.*' README.md", ["rg", "-n", "--", "foo.*", "README.md"]),
+        ("rg -n -- x ''", ["rg", "-n", "--", "x", ""]),
+    ],
+)
+def test_review_verification_authorizes_quoted_arguments(command: str, argv: list[str]) -> None:
+    status, report = _authorize(command)
+    assert status == 0, report
+    assert report["authorized"] is True
+    assert report["argv"] == argv
+
+
+def test_review_verification_still_checks_a_quoted_path() -> None:
+    status, report = _authorize("rg -n -- x '../outside'")
+    assert status == 1
+    assert report["authorized"] is False
+    assert report["reason"] == "path leaves the checkout"
+
+
+def test_review_verification_refuses_an_unquoted_wildcard_pattern() -> None:
+    status, report = _authorize("rg -n -- foo.* README.md")
+    assert status == 1
+    assert report["reason"] == "shell syntax is not allowed"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg -n -- 'unterminated README.md",
+        "'a'|sh",
+        "rg -n -- 'a' x; rm y",
+        "rg -n -- $(x) y",
+        'rg -n -- "$(x)" y',
+        'rg -n -- "a`b`" y',
+        "rg -n -- x\nREADME.md",
+    ],
+)
+def test_review_verification_refuses_risky_quoted_spellings(command: str) -> None:
+    status, report = _authorize(command)
+    assert status == 1
+    assert report["authorized"] is False
+    assert report["executed"] is False
+    assert report["reason"] == "shell syntax is not allowed"
+
+
 def test_review_verification_disables_repository_git_text_converters(
     tmp_path: Path,
 ) -> None:

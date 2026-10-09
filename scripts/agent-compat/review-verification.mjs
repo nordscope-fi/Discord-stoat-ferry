@@ -3,8 +3,8 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { shellWords } from './shell-words.mjs';
 
-const SHELL_SYNTAX = /[;&|<>`$\\\n\r'"(){}]/u;
 const EXECUTABLES = new Set(['rg', 'git', 'head', 'tail', 'wc', 'ls']);
 const RG_FLAGS = new Set([
   '-n', '--line-number', '-F', '--fixed-strings', '-i', '--ignore-case',
@@ -121,8 +121,8 @@ export function parseVerificationCommand(command) {
   if (typeof command !== 'string' || !command.trim() || command.length > 2000) {
     return denied('command is empty or too long');
   }
-  if (SHELL_SYNTAX.test(command)) return denied('shell syntax is not allowed');
-  const argv = command.trim().split(/\s+/u);
+  const argv = shellWords(command);
+  if (argv === null) return denied('shell syntax is not allowed');
   const executable = argv[0];
   if (!EXECUTABLES.has(executable)) return denied('executable is not allowed');
   if (argv.some((value, index) => index > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value))) {
