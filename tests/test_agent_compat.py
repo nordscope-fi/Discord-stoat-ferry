@@ -4143,6 +4143,177 @@ def test_review_verification_refuses_risky_quoted_spellings(command: str) -> Non
     assert report["reason"] == "shell syntax is not allowed"
 
 
+@pytest.mark.parametrize(
+    ("command", "argv"),
+    [
+        (
+            "rg -n 'test_run_server_remote_icon_url_is_skipped_without_a_missing_warning' "
+            "README.md",
+            [
+                "rg",
+                "-n",
+                "--",
+                "test_run_server_remote_icon_url_is_skipped_without_a_missing_warning",
+                "README.md",
+            ],
+        ),
+        (
+            "rg -n 'report.json|migration_report|versioned contract|warning.type' README.md",
+            [
+                "rg",
+                "-n",
+                "--",
+                "report.json|migration_report|versioned contract|warning.type",
+                "README.md",
+            ],
+        ),
+        (
+            "rg -n 'upload_with_cache' src/discord_ferry/migrator/structure.py "
+            "src/discord_ferry/uploader/autumn.py",
+            [
+                "rg",
+                "-n",
+                "--",
+                "upload_with_cache",
+                "src/discord_ferry/migrator/structure.py",
+                "src/discord_ferry/uploader/autumn.py",
+            ],
+        ),
+        (
+            "rg -n 'git stash push src/discord_ferry/migrator/structure.py' README.md",
+            [
+                "rg",
+                "-n",
+                "--",
+                "git stash push src/discord_ferry/migrator/structure.py",
+                "README.md",
+            ],
+        ),
+        ("rg -n 'guild_name' README.md", ["rg", "-n", "--", "guild_name", "README.md"]),
+        (
+            "git grep -n 'guild_name' README.md",
+            ["git", "grep", "-n", "--", "guild_name", "README.md"],
+        ),
+        (
+            "rg -n -- canonicalCheckoutRoot scripts/agent-compat",
+            ["rg", "-n", "--", "canonicalCheckoutRoot", "scripts/agent-compat"],
+        ),
+    ],
+)
+def test_review_verification_puts_the_missing_separator_before_the_pattern(
+    command: str, argv: list[str]
+) -> None:
+    status, report = _authorize(command)
+    assert status == 0, report
+    assert report["argv"] == argv
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("rg -n '--pre=x' README.md", "rg flag is not allowed"),
+        ("rg -n -x README.md", "rg flag is not allowed"),
+        ("git grep -n --open-files-in-pager=sh x README.md", "Git flag or operand is not allowed"),
+        ("rg -n foo -- README.md", "rg requires -- before its pattern and paths"),
+        ("rg -n foo", "rg requires -- before its pattern and paths"),
+        ("git grep -n foo", "git grep requires -- before its pattern and paths"),
+    ],
+)
+def test_review_verification_refuses_a_search_it_cannot_read_unambiguously(
+    command: str, reason: str
+) -> None:
+    status, report = _authorize(command)
+    assert status == 1
+    assert report["authorized"] is False
+    assert report["reason"] == reason
+
+
+def test_review_verification_decides_a_quoted_reviewer_finding(tmp_path: Path) -> None:
+    root = tmp_path / "checkout"
+    artifacts = root / "docs/plans/.review/verification"
+    artifacts.mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / "src/inside.txt").write_text("needle\n")
+    finding = {
+        "description": "quoted fixture",
+        "verification": {
+            "command": "rg -n 'needle|other' src/inside.txt",
+            "confirms_if": {"exit_code": 0, "stdout_contains": "needle", "stdout_excludes": None},
+            "refutes_if": {"exit_code": 1, "stdout_contains": None, "stdout_excludes": None},
+        },
+    }
+    result = {"status": "completed", "exit_code": 0, "stdout": "1:needle", "stderr": ""}
+    (artifacts / "finding.json").write_text(json.dumps(finding))
+    (artifacts / "result.json").write_text(json.dumps(result))
+    verifier = str(REPO / "scripts/agent-compat/review-verification.mjs")
+
+    authorized = _run(
+        "node",
+        verifier,
+        "--authorize-finding",
+        str(artifacts / "finding.json"),
+        "--root",
+        str(root),
+    )
+    classified = _run(
+        "node",
+        verifier,
+        "--classify-files",
+        "--finding-file",
+        str(artifacts / "finding.json"),
+        "--result-file",
+        str(artifacts / "result.json"),
+        "--root",
+        str(root),
+    )
+
+    assert authorized.returncode == 0, authorized.stdout
+    assert json.loads(authorized.stdout)["argv"] == [
+        "rg",
+        "-n",
+        "--",
+        "needle|other",
+        "src/inside.txt",
+    ]
+    assert classified.returncode == 0, classified.stderr
+    assert json.loads(classified.stdout) == {"verdict": "CONFIRMED"}
+
+
+def test_installed_reviewer_runtime_authorizes_a_quoted_command(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    install = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "reviewer-runtime",
+        "--home",
+        str(home),
+        "--root",
+        str(REPO),
+        "--json",
+    )
+    assert install.returncode == 0, install.stderr
+    current = home / ".local/share/discord-ferry/reviewer-runtime/current"
+    root = tmp_path / "checkout"
+    artifacts = root / "docs/plans/.review/verification"
+    artifacts.mkdir(parents=True)
+    (root / "README.md").write_text("a\n")
+    (artifacts / "finding.json").write_text(
+        json.dumps({"verification": {"command": "rg -n 'a|b' README.md"}})
+    )
+
+    result = _run(
+        "node",
+        str(current / "review-verification.mjs"),
+        "--authorize-finding",
+        str(artifacts / "finding.json"),
+        "--root",
+        str(root),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["argv"] == ["rg", "-n", "--", "a|b", "README.md"]
+
+
 def test_review_verification_disables_repository_git_text_converters(
     tmp_path: Path,
 ) -> None:
