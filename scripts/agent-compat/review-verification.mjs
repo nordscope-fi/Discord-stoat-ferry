@@ -199,25 +199,43 @@ export function parseVerificationCommand(command) {
   }
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+// An authorized word may hold shell characters inside quotes, such as `$(id)` or `a|b`. A host
+// that runs the command through a shell must not join argv itself, so it gets this line, with
+// every word single-quoted. Assignments set the environment because command lines starting
+// `env -i` are blocked by the machine credential guard.
+function commandLine(cwd, variables, argv) {
+  const assignments = Object.entries(variables).map(
+    ([name, value]) => `${name}=${shellQuote(value)}`,
+  );
+  return [`cd -- ${shellQuote(cwd)} &&`, ...assignments, ...argv.map(shellQuote)].join(' ');
+}
+
 export function authorizeVerificationCommand(command, { root = process.cwd() } = {}) {
   const parsed = parseVerificationCommand(command);
   if (!parsed.authorized) return parsed;
   if (!pathsStayInside(root, parsed.paths)) return denied('path leaves the checkout');
+  const cwd = resolve(root);
+  const variables = {
+    PATH: process.env.PATH ?? '',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_EXTERNAL_DIFF: '',
+    GIT_PAGER: 'cat',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.fsmonitor',
+    GIT_CONFIG_VALUE_0: 'false',
+  };
   return {
     authorized: true,
     argv: parsed.argv,
-    cwd: resolve(root),
-    env: {
-      PATH: process.env.PATH ?? '',
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_EXTERNAL_DIFF: '',
-      GIT_PAGER: 'cat',
-      GIT_OPTIONAL_LOCKS: '0',
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: 'core.fsmonitor',
-      GIT_CONFIG_VALUE_0: 'false',
-    },
+    cwd,
+    env: variables,
+    command_line: commandLine(cwd, variables, parsed.argv),
   };
 }
 

@@ -67,6 +67,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   or redirect. An unquoted wildcard such as `rg -n -- foo.* README.md` is now refused, so quote the
   pattern. A command the reply check cannot read now makes only its own finding INCONCLUSIVE and no
   longer invalidates the whole reply.
+- An authorized verification command now also carries `command_line`, the full command with every
+  word single-quoted. A quoted word can hold shell characters such as `$(id)` or `a|b`, so a host
+  that runs the command through a shell must use this line and never join the words itself. A test
+  runs a pattern of `$(touch MARK)` through `/bin/sh` and checks that no file is created.
 - The reviewer runtime gains one file, `shell-words.mjs`. Reinstall the runtime from `main` so the
   installed checker picks up these changes.
 

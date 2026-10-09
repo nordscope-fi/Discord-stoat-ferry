@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -4315,6 +4316,64 @@ def test_installed_reviewer_runtime_authorizes_a_quoted_command(tmp_path: Path) 
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["argv"] == ["rg", "-n", "--", "a|b", "README.md"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rg -n -- '$(id)|x;y' README.md",
+        'rg -n -- "it\'s" README.md',
+        "rg -n -- 'two words' README.md",
+        "rg -n -- '' README.md",
+    ],
+)
+def test_review_verification_command_line_reads_back_as_the_authorized_words(
+    command: str,
+) -> None:
+    status, report = _authorize(command)
+    assert status == 0, report
+    words = shlex.split(str(report["command_line"]))
+    argv = report["argv"]
+    assert isinstance(argv, list)
+    assert words[:4] == ["cd", "--", report["cwd"], "&&"]
+    assert words[-len(argv) :] == argv
+    variables = report["env"]
+    assert isinstance(variables, dict)
+    assert words[4 : -len(argv)] == [f"{name}={value}" for name, value in variables.items()]
+
+
+def test_review_verification_command_line_keeps_shell_text_literal(tmp_path: Path) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "$(touch MARK)").write_text("inside\n")
+    status, report = _authorize_in("head -n 1 -- '$(touch MARK)'", root)
+    assert status == 0, report
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", str(report["command_line"])],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "inside\n"
+    assert not (root / "MARK").exists()
+    assert not (Path.cwd() / "MARK").exists()
+
+
+def _authorize_in(command: str, root: Path) -> tuple[int, dict[str, object]]:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-authorize",
+        "--command",
+        command,
+        "--root",
+        str(root),
+        "--json",
+    )
+    return result.returncode, json.loads(result.stdout)
 
 
 def test_review_verification_disables_repository_git_text_converters(
