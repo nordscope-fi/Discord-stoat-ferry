@@ -503,9 +503,13 @@ async def test_download_failure_includes_specific_reason(tmp_path: Path) -> None
                 await run_avatars(config, state, [export], events.append)
 
     mock_upload.assert_not_called()
-    assert len(state.warnings) >= 1
-    warning_msg = state.warnings[0]["message"]
-    assert "HTTP 404" in warning_msg
+    assert state.warnings == [
+        {
+            "phase": "avatars",
+            "type": "avatar_download_failed",
+            "message": "Failed to download avatar for Alice (HTTP 404)",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

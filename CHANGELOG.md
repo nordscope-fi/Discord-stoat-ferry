@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require the avatar HTTP 404 test to check the exact `avatar_download_failed` warning and failure
+  reason while preserving the no-upload check (#1079).
 - Require the animated-emoji test to check the `animated_emoji` warning, the specific animation-loss
   event, and successful emoji creation (#1079).
 - Require the role-ordering failure test to check the specific recorded and emitted warning,
