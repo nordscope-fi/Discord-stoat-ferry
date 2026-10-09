@@ -117,17 +117,44 @@ function optionsBeforeSeparator(
   return true;
 }
 
+// Reviewers often write `rg -n 'pattern' path` with no `--`. When every word before the pattern
+// is an allowed flag, the meaning is unambiguous, so put the `--` in. A word that starts with `-`
+// and is not an allowed flag is refused, so a pattern can never be read as a flag.
+function insertSearchSeparator(words, start, allowed, reason) {
+  let index = start;
+  while (index < words.length && allowed.has(words[index])) index += 1;
+  if (index === words.length) return { argv: words };
+  if (words[index].startsWith('-')) return { reason };
+  return { argv: [...words.slice(0, index), '--', ...words.slice(index)] };
+}
+
+function withSearchSeparator(words) {
+  if (words.includes('--')) return { argv: words };
+  if (words[0] === 'rg') {
+    return insertSearchSeparator(words, 1, RG_FLAGS, 'rg flag is not allowed');
+  }
+  if (words[0] === 'git' && words[1] === 'grep') {
+    return insertSearchSeparator(
+      words, 2, GIT_SUBCOMMAND_FLAGS.get('grep'), 'Git flag or operand is not allowed',
+    );
+  }
+  return { argv: words };
+}
+
 export function parseVerificationCommand(command) {
   if (typeof command !== 'string' || !command.trim() || command.length > 2000) {
     return denied('command is empty or too long');
   }
-  const argv = shellWords(command);
+  let argv = shellWords(command);
   if (argv === null) return denied('shell syntax is not allowed');
   const executable = argv[0];
   if (!EXECUTABLES.has(executable)) return denied('executable is not allowed');
   if (argv.some((value, index) => index > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value))) {
     return denied('environment assignments are not allowed');
   }
+  const separated = withSearchSeparator(argv);
+  if (separated.reason) return denied(separated.reason);
+  argv = separated.argv;
 
   if (executable === 'rg') {
     const separator = argv.indexOf('--');
