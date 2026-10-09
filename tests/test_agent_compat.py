@@ -3989,6 +3989,95 @@ def test_review_verification_default_authorizer_accepts_direct_read_only_argv() 
     ]
 
 
+def _shell_words(command: str) -> list[str] | None:
+    # The command travels as JSON, so a NUL character reaches the runner as the six characters
+    # \u0000. An argument list cannot carry a raw NUL.
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "shell-words",
+        "--commands",
+        json.dumps([command]),
+    )
+    assert result.returncode == 0, result.stderr
+    words: list[str] | None = json.loads(result.stdout)["results"][0]["words"]
+    return words
+
+
+def _sh_words(command: str) -> list[str]:
+    result = subprocess.run(
+        ["/bin/sh", "-c", f"printf '%s\\0' {command}"],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [part.decode() for part in result.stdout.split(b"\0")[:-1]]
+
+
+SHELL_WORD_COMMANDS = [
+    "rg -n 'test_run_server_remote_icon_url_is_skipped_without_a_missing_warning' "
+    "docs/plans/specs/x.md",
+    "rg -n 'report.json|migration_report|versioned contract|warning.type' docs/plans/x.md",
+    "rg -n 'upload_with_cache' src/discord_ferry/migrator/structure.py "
+    "src/discord_ferry/uploader/autumn.py",
+    "rg -n 'git stash push src/discord_ferry/migrator/structure.py' docs/plans/x.md",
+    "rg -n 'guild_name' docs/plans/x.md",
+    "rg -n -- 'a|b' README.md",
+    'rg -n -- "guild_name" README.md',
+    "rg -n -- 'two words' README.md",
+    "rg -n -- a'b c' README.md",
+    "rg -n -- '' README.md",
+    'rg -n -- "" README.md',
+    'rg -n -- "it\'s" README.md',
+    "rg -n -F -- 'x$y' README.md",
+    "rg -n -- 'foo.*' README.md",
+    "git show HEAD~1:docs/x.md",
+    "rg -n -- a#b README.md",
+    "rg -n -- c!d README.md",
+    "rg\t-n -- tabbed README.md",
+    "  rg -n -- padded README.md  ",
+]
+
+
+@pytest.mark.parametrize("command", SHELL_WORD_COMMANDS)
+def test_shell_words_split_accepted_commands_exactly_as_bin_sh_does(command: str) -> None:
+    assert _shell_words(command) == _sh_words(command)
+
+
+def test_shell_words_make_an_empty_word_from_empty_quotes() -> None:
+    expected = ["rg", "-n", "--", "", "README.md"]
+    assert _shell_words("rg -n -- '' README.md") == expected
+    assert _shell_words('rg -n -- "" README.md') == expected
+    assert _sh_words("rg -n -- '' README.md") == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "'a'|sh",
+        "rg -n -- 'a' x; rm y",
+        "rg -n -- $(x) y",
+        'rg -n -- "$(x)" y',
+        'rg -n -- "a`b`" y',
+        "rg -n -- 'unterminated y",
+        "rg -n -- src/*.py y",
+        "rg -n -- foo.* README.md",
+        "rg -n -- x ~/y",
+        "rg -n -- #comment y",
+        "! rg -n -- x y",
+        "rg -n -- 'line\nbreak' README.md",
+        f"rg -n -- a{chr(0xA0)}b README.md",
+        "rg -n -- a\u000bb README.md",
+        "rg -n -- a\u000cb README.md",
+        "rg -n -- 'a\u0000b' README.md",
+        "",
+        "   ",
+    ],
+)
+def test_shell_words_refuse_what_a_shell_would_expand_chain_or_mis_split(command: str) -> None:
+    assert _shell_words(command) is None
+
+
 def test_review_verification_disables_repository_git_text_converters(
     tmp_path: Path,
 ) -> None:

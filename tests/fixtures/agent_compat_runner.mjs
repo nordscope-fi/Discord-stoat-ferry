@@ -79,6 +79,7 @@ import {
   reverifyAfterFix,
   verifyFindings,
 } from '../../scripts/agent-compat/review-verification.mjs';
+import { shellWords } from '../../scripts/agent-compat/shell-words.mjs';
 import { readReviewerField } from '../../scripts/agent-compat/proton-credential.mjs';
 import { runVibeChild, runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
 import {
@@ -592,6 +593,12 @@ switch (mode) {
   case 'setup-repeat-real':
     setupRepeatReal();
     break;
+  case 'shell-words': {
+    const commandsIndex = process.argv.indexOf('--commands');
+    const commands = JSON.parse(commandsIndex === -1 ? '[]' : process.argv[commandsIndex + 1]);
+    writeJson({ results: commands.map((command) => ({ words: shellWords(command) })) });
+    break;
+  }
   case 'review-contract': {
     if (argument !== 'canary-child-error') throw new Error('unknown review contract fixture');
     const error = {
