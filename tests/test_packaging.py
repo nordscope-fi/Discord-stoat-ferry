@@ -92,9 +92,11 @@ def test_ferry_spec_bundles_dce_checksums() -> None:
     """ferry.spec must bundle dce_checksums.json into the frozen binary.
 
     Regression: the spec only bundled templates/*.json, so the frozen binary shipped
-    without dce_checksums.json. exporter/manager._verify_dce_checksum then hits
-    FileNotFoundError and silently returns, skipping the supply-chain checksum gate
-    added in v2.2.12 — but only in the shipped app, so source-run tests never saw it.
+    without dce_checksums.json. exporter/manager._verify_dce_checksum then hit
+    FileNotFoundError and returned, skipping the supply-chain checksum gate added in
+    v2.2.12, but only in the shipped app, so source-run tests never saw it. Since #973
+    a missing checksum file refuses the download, so a binary built without it can no
+    longer download DiscordChatExporter at all.
     """
     checksums = _REPO_ROOT / "src" / "discord_ferry" / "dce_checksums.json"
     assert checksums.is_file(), f"missing source data file: {checksums}"

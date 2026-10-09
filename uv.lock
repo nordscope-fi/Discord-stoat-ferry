@@ -622,7 +622,7 @@ wheels = [
 
 [[package]]
 name = "discord-ferry"
-version = "2.41.20"
+version = "2.41.21"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
