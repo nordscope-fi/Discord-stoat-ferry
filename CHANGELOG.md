@@ -51,6 +51,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   (#1002). The offline tool checks the pinned writer digest and disposition ledger,
   rebuilds identical fixture bytes, and documents the source review required when updating it.
 
+## [2.41.21] - 2026-10-09
+
+### Fixed
+
+- Ferry no longer installs a DiscordChatExporter download it cannot verify (#973). If the bundled
+  checksum file (`dce_checksums.json`) is missing, the download now stops with an error that
+  suggests reinstalling Ferry or passing `--skip-dce-verify`, where before it skipped the check and
+  reported the exporter as ready. The `--skip-dce-verify` bypass works as before.
+
 ## [2.41.20] - 2026-10-09
 
 ### Fixed

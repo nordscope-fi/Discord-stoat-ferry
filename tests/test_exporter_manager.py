@@ -550,6 +550,70 @@ class TestVerifyDceChecksum:
             with pytest.raises(DCENotFoundError, match="win-arm64"):
                 _verify_dce_checksum(zip_data, "2.46.1", "win-arm64")
 
+    @pytest.mark.parametrize("missing", [FileNotFoundError, ModuleNotFoundError])
+    def test_dce_checksum_missing_resource_raises(self, missing: type[Exception]) -> None:
+        """A missing bundled checksums file refuses the binary (issue #973).
+
+        It used to return, so an archive whose hash would not match was installed.
+        """
+        with patch("importlib.resources.files") as mock_files:
+            mock_ref = mock_files.return_value.joinpath.return_value
+            mock_ref.read_text.side_effect = missing("dce_checksums.json")
+            with pytest.raises(DCENotFoundError, match="dce_checksums.json") as excinfo:
+                _verify_dce_checksum(b"fake-zip-content", "2.46.1", "linux-x64")
+
+        assert "--skip-dce-verify" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, missing)
+
+    @pytest.mark.parametrize("missing", [FileNotFoundError, ModuleNotFoundError])
+    def test_dce_checksum_missing_package_raises(self, missing: type[Exception]) -> None:
+        """The same refusal applies when the package lookup itself fails."""
+        with (
+            patch("importlib.resources.files", side_effect=missing("discord_ferry")),
+            pytest.raises(DCENotFoundError, match="dce_checksums.json"),
+        ):
+            _verify_dce_checksum(b"fake-zip-content", "2.46.1", "linux-x64")
+
+    async def test_download_refuses_unverifiable_archive_when_checksums_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """download_dce must not install an archive it cannot verify (issue #973)."""
+        dce_dir = tmp_path / "dce"
+
+        with (
+            aioresponses() as responses,
+            patch("platform.system", return_value="Darwin"),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
+            patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("importlib.resources.files", side_effect=FileNotFoundError("missing")),
+        ):
+            _register_dce_download(responses, _make_dce_zip())
+            with pytest.raises(DCENotFoundError, match="dce_checksums.json"):
+                await download_dce(lambda _event: None)
+
+        assert not dce_dir.exists()
+
+    async def test_download_with_skip_verify_proceeds_when_checksums_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """--skip-dce-verify still bypasses verification, so the missing file is not read."""
+        dce_dir = tmp_path / "dce"
+
+        with (
+            aioresponses() as responses,
+            patch("platform.system", return_value="Darwin"),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
+            patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("importlib.resources.files", side_effect=FileNotFoundError("missing")) as files,
+        ):
+            _register_dce_download(responses, _make_dce_zip())
+            result = await download_dce(lambda _event: None, skip_verify=True)
+
+        assert result == dce_dir / "DiscordChatExporter.Cli"
+        files.assert_not_called()
+
 
 class TestDceChecksumsJson:
     """Schema validation for src/discord_ferry/dce_checksums.json.

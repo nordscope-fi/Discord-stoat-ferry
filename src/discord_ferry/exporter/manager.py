@@ -74,9 +74,9 @@ def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> No
 
     Hard-fails (raises) if no hash is pinned for the given version/platform —
     refusing to use an unverified binary closes the silent-skip hole that left
-    ARM platforms unverified for years (issue #37). Still skips only when the
-    bundled checksums file itself is absent (a packaging edge, not a platform
-    coverage gap).
+    ARM platforms unverified for years (issue #37). Also refuses when the
+    bundled checksums file itself is absent, since a packaging
+    fault must not turn into an unverified install (issue #973).
 
     Args:
         zip_data: Raw bytes of the downloaded zip archive.
@@ -86,15 +86,20 @@ def _verify_dce_checksum(zip_data: bytes, version: str, platform_key: str) -> No
 
     Raises:
         DCENotFoundError: If the computed hash does not match the pinned hash,
-            or if no hash is pinned for this version/platform.
+            if no hash is pinned for this version/platform, or if the bundled
+            checksums file is missing.
     """
     try:
         import importlib.resources as pkg_resources
 
         checksums_ref = pkg_resources.files("discord_ferry").joinpath("dce_checksums.json")
         checksums_text = checksums_ref.read_text(encoding="utf-8")
-    except (FileNotFoundError, ModuleNotFoundError):
-        return  # No checksums file — skip verification
+    except (FileNotFoundError, ModuleNotFoundError) as e:
+        raise DCENotFoundError(
+            "Bundled DCE checksum file (dce_checksums.json) is missing, so the download "
+            "cannot be verified. Reinstall Ferry, or pass --skip-dce-verify (CLI) or "
+            "skip_verify=True (API) to bypass verification at your own risk."
+        ) from e
 
     checksums = _json.loads(checksums_text)
     expected = checksums.get(version, {}).get(platform_key, "")
