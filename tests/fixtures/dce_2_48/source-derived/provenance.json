@@ -3,6 +3,7 @@
   "dceVersion": "2.48",
   "sourceTag": "2.48",
   "sourceCommit": "905489b01b5523719082275c34c232fc47f827c6",
+  "sourceSha256": "2b7d17c45f95c68437c598eaa2dec6b17317cc32dbc1416d4e02ab7c9a675127",
   "sourceFile": "DiscordChatExporter.Core/Exporting/JsonMessageWriter.cs",
   "sourceUrl": "https://github.com/Tyrrrz/DiscordChatExporter/blob/2.48/DiscordChatExporter.Core/Exporting/JsonMessageWriter.cs",
   "reviewedDate": "2026-08-30",
