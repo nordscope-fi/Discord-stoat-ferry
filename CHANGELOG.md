@@ -51,6 +51,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   (#1002). The offline tool checks the pinned writer digest and disposition ledger,
   rebuilds identical fixture bytes, and documents the source review required when updating it.
 
+## [2.41.23] - 2026-10-09
+
+### Fixed
+
+- Role icon and server banner downloads from the Discord CDN now stop reading as soon as they pass
+  their size limit (2.5 MB and 6 MB), refuse an oversize Content-Length before reading the body,
+  and no longer follow redirects (#980, #981). A banner is written to a temporary file and moved
+  into place only after a complete, in-limit download, so a failed or oversize download leaves the
+  previous banner file untouched.
+
 ## [2.41.22] - 2026-10-09
 
 ### Fixed

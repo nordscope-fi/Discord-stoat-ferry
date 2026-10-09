@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import ssl
 
@@ -12,6 +13,7 @@ from aioresponses import aioresponses
 from discord_ferry.discord import fetch_and_translate_guild_metadata
 from discord_ferry.discord.client import download_role_icon, fetch_guild_channels, fetch_guild_roles
 from discord_ferry.errors import DiscordAuthError
+from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 
 DISCORD_API = "https://discord.com/api/v10"
 TOKEN = "test-discord-token"
@@ -758,3 +760,70 @@ async def test_a_proxy_502_still_retries(fake_proxy, proxy_env, os_proxy) -> Non
     message = str(caught.value)
     assert "Discord API network error" in message
     assert f"The request to discord.com went through the proxy at 127.0.0.1:{port}" in message
+
+
+# ---------------------------------------------------------------------------
+# download_role_icon against a real local server (#980)
+# ---------------------------------------------------------------------------
+
+_ICON_CAP = 2_500_000
+
+
+async def _download_icon(cdn_path: str):
+    """Run download_role_icon with its CDN URL redirected to the local server."""
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = RewritingSession(real, cdn.url(cdn_path))
+        icon = await asyncio.wait_for(
+            download_role_icon(session, "r1", "hash"),  # type: ignore[arg-type]
+            timeout=10,
+        )
+        await asyncio.sleep(0.2)  # let the server notice a closed connection
+        return icon, cdn, session
+
+
+async def test_download_role_icon_accepts_a_body_of_exactly_the_cap():
+    icon, _, _ = await _download_icon(f"/chunked/{_ICON_CAP}")
+    assert icon is not None
+    assert len(icon) == _ICON_CAP
+
+
+async def test_download_role_icon_rejects_a_body_one_byte_over_the_cap():
+    icon, _, _ = await _download_icon(f"/body/{_ICON_CAP + 1}")
+    assert icon is None
+
+
+async def test_download_role_icon_stops_reading_an_undeclared_oversize_body():
+    icon, cdn, _ = await _download_icon("/endless")
+    assert icon is None
+    assert cdn.sent < ENDLESS_LIMIT // 2, f"server sent {cdn.sent} bytes, the client kept reading"
+
+
+async def test_download_role_icon_rejects_a_declared_oversize_without_reading_it():
+    icon, cdn, _ = await _download_icon("/lying/30000000")
+    assert icon is None
+    assert cdn.sent <= 2 * 65536
+
+
+async def test_download_role_icon_does_not_follow_a_redirect():
+    icon, cdn, _ = await _download_icon("/redirect")
+    assert icon is None
+    assert cdn.target_hits == 0
+
+
+async def test_download_role_icon_requests_without_following_redirects():
+    _, _, session = await _download_icon("/body/10")
+    assert len(session.calls) == 1
+    assert session.calls[0]["allow_redirects"] is False
+
+
+async def test_download_role_icon_none_on_a_mid_body_disconnect():
+    icon, _, _ = await _download_icon("/cutoff/1000000")
+    assert icon is None
+
+
+async def test_download_role_icon_none_on_timeout():
+    class _TimingOut:
+        def get(self, url: str, **kwargs: object) -> None:
+            raise TimeoutError
+
+    assert await download_role_icon(_TimingOut(), "r1", "hash") is None  # type: ignore[arg-type]
