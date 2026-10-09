@@ -472,18 +472,26 @@ async def test_run_emoji_animated_warning(tmp_path: Path) -> None:
         patch(
             "discord_ferry.migrator.emoji.api_create_emoji",
             new=AsyncMock(return_value={"_id": "stoat_555"}),
-        ),
+        ) as mock_create,
         patch("discord_ferry.migrator.emoji.asyncio.sleep", new=AsyncMock()),
     ):
         await run_emoji(config, state, exports, events.append)
 
     # Emoji should still be created.
-    assert state.emoji_map["555"] == "autumn_id"
+    assert state.emoji_map == {"555": "autumn_id"}
+    mock_create.assert_awaited_once()
 
     # Warning about animation loss should be emitted.
+    warning_message = "Emoji :spin: is animated \u2014 animation will be lost"
+    assert state.warnings == [
+        {
+            "phase": "emoji",
+            "type": "animated_emoji",
+            "message": f"{warning_message} on Stoat",
+        }
+    ]
     warning_events = [e for e in events if e.status == "warning"]
-    assert any("animated" in e.message.lower() for e in warning_events)
-    assert any("animated" in w["message"].lower() for w in state.warnings)
+    assert [(e.phase, e.message) for e in warning_events] == [("emoji", warning_message)]
 
 
 # ---------------------------------------------------------------------------
