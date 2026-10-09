@@ -82,6 +82,7 @@ export const REVIEWER_RUNTIME_FILES = [
   'claude-review.mjs',
   'review-ensemble.mjs',
   'review-verification.mjs',
+  'shell-words.mjs',
 ];
 const REVIEWER_RULE_FILES = [
   'review-ensemble.mjs',

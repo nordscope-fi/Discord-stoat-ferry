@@ -3330,7 +3330,7 @@ switch (mode) {
       ? Object.fromEntries([
           'review-contract.mjs', 'proton-credential.mjs', 'context7-mcp.mjs',
           'vibe-review.mjs', 'qwen-review.mjs', 'claude-review.mjs',
-          'review-ensemble.mjs', 'review-verification.mjs',
+          'review-ensemble.mjs', 'review-verification.mjs', 'shell-words.mjs',
         ].map((name) => [name, `${name}:${version}\n`]))
       : undefined;
     try {

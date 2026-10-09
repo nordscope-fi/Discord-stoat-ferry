@@ -4276,6 +4276,26 @@ def test_reviewer_rules_target_only_the_user_runtime(tmp_path: Path) -> None:
     assert all((current / name).stat().st_mode & 0o222 == 0 for name in manifest["files"])
 
 
+def test_installed_reviewer_runtime_holds_the_shared_splitter(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    install = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "reviewer-runtime",
+        "--home",
+        str(home),
+        "--root",
+        str(REPO),
+        "--json",
+    )
+    assert install.returncode == 0, install.stderr
+    current = home / ".local/share/discord-ferry/reviewer-runtime/current"
+    assert (current / "shell-words.mjs").is_file()
+    checked = _run("node", str(current / "review-verification.mjs"), "--self-test")
+    assert checked.returncode == 0, checked.stderr
+    assert "review-verification self-test: all checks passed" in checked.stderr
+
+
 def test_reviewer_runtime_interruption_keeps_the_previous_release(
     tmp_path: Path,
 ) -> None:
