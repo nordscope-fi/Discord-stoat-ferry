@@ -4865,12 +4865,17 @@ async def test_run_roles_ordering_failure_is_non_fatal(tmp_path: Path) -> None:
 
         await run_roles(config, state, exports, events.append)
 
+    warning_message = "Failed to apply role ordering: API error 500: {}"
     failures = [w for w in state.warnings if w["type"] == "role_ordering_failed"]
-    assert len(failures) == 1
+    assert failures == [
+        {"phase": "roles", "type": "role_ordering_failed", "message": warning_message}
+    ]
     # The rest of the phase's work survives the degradation.
     assert state.role_map == {"a": "stoat-a", "b": "stoat-b"}
     assert "a" in state.roles_finalized and "b" in state.roles_finalized
-    assert any(e.status == "warning" for e in events)
+    event_records = [(e.phase, e.status, e.message) for e in events]
+    assert ("roles", "warning", warning_message) in event_records
+    assert event_records[-1] == ("roles", "progress", "Created 2 roles")
 
 
 @pytest.mark.parametrize("err_type", ["NotElevated", "MissingPermission"])

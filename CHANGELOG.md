@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Require the role-ordering failure test to check the specific recorded and emitted warning,
+  and the final role-phase progress event (#1079).
 - Require the emoji-limit test to check the exact surviving emoji, upload and creation counts,
   and the recorded and emitted limit warnings (#1079).
 - Run the application test suite on Windows with Python 3.12, replacing the four-file Windows
