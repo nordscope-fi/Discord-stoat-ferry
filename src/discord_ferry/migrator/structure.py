@@ -244,8 +244,8 @@ async def run_server(
                                 "type": "unsafe_media_path",
                                 "message": (
                                     f"Guild icon path for server {guild_name} failed the "
-                                    f"export-root containment check — {repr(icon_url)[:120]}"
-                                    " — skipped. Re-export with media attached, or set the "
+                                    f"export-root containment check: {repr(icon_url)[:120]}"
+                                    "; skipped. Re-export with media attached, or set the "
                                     "icon in Stoat server settings."
                                 ),
                             }
@@ -256,7 +256,7 @@ async def run_server(
                                 status="warning",
                                 message=(
                                     f"Guild icon path for server {guild_name} failed the "
-                                    "export-root containment check — skipped"
+                                    "export-root containment check; skipped"
                                 ),
                             )
                         )

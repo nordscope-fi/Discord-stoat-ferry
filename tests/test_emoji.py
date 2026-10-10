@@ -344,6 +344,11 @@ async def test_run_emoji_rejects_local_images_outside_export_dir(tmp_path: Path)
     mock_upload.assert_not_awaited()
     assert state.emoji_map == {}
     assert sum(warning["type"] == "unsafe_media_path" for warning in state.warnings) == 2
+    assert all(
+        "\u2014" not in warning["message"]
+        for warning in state.warnings
+        if warning["type"] == "unsafe_media_path"
+    )
 
 
 async def test_run_emoji_missing_file_skipped(tmp_path: Path) -> None:

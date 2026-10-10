@@ -421,14 +421,14 @@ async def run_emoji(
                     {
                         "phase": "emoji",
                         "type": "unsafe_media_path",
-                        "message": f"Skipping emoji :{name}: — {reason}",
+                        "message": f"Skipping emoji :{name}: ({reason})",
                     }
                 )
                 on_event(
                     MigrationEvent(
                         phase="emoji",
                         status="warning",
-                        message=f"Skipping :{name}: — {reason}",
+                        message=f"Skipping :{name}: ({reason})",
                         current=idx,
                         total=total,
                     )

@@ -590,6 +590,7 @@ async def test_avatar_phase_local_escape_warns_and_skips(tmp_path: Path) -> None
     unsafe = [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
     assert len(unsafe) == 1
     assert unsafe[0].get("phase") == "avatars"
+    assert "\u2014" not in unsafe[0]["message"]
     assert marker.read_bytes() == b"MARKER"
     completed = [e for e in events if e.status == "completed"]
     assert completed and "1 failed" in completed[0].message

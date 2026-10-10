@@ -235,7 +235,7 @@ async def run_avatars(
                                 "type": "unsafe_media_path",
                                 "message": (
                                     f"Avatar path for {author.name} failed the export-root "
-                                    "containment check — skipped."
+                                    "containment check; skipped."
                                 ),
                             }
                         )
