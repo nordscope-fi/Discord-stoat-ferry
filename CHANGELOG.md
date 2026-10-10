@@ -34,6 +34,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   repeats no longer fail with a server error when they try to do the same. A request that is
   already delivered still never reads from GitHub. The feedback service needs a redeploy for this
   to take effect.
+- The feedback service now remembers a failed GitHub readiness check for 5 seconds (#963). A
+  successful check was already kept for 30 seconds, but a failed one was forgotten at once. Every
+  caller of `/ready`, and every feedback submission that arrived during an outage, then ran the
+  full chain of GitHub requests again, one after another. Callers now share one failed check.
+  After 5 seconds the next caller checks again, so a recovered GitHub reads as ready within that
+  time. A delivery failure still forces a fresh check on the next request. The feedback service
+  needs a redeploy for this to take effect.
 
 ## [2.41.30] - 2026-10-10
 
