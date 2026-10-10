@@ -9,11 +9,13 @@ pair, so a truncated export outlived the run that produced it.
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 import pytest
 
-from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.core import atomicio
+from discord_ferry.core.atomicio import atomic_write_text, replace_with_retry
 
 
 def test_writes_a_new_file(tmp_path: Path) -> None:
@@ -102,6 +104,137 @@ def test_a_failed_swap_leaves_the_previous_file_intact(
 
     monkeypatch.undo()
     assert target.read_text(encoding="utf-8") == '{"good": true}'
+
+
+# --- Retry on a held-open destination (#176) --------------------------------
+# On Windows, MoveFileEx fails with PermissionError when another process holds the
+# destination open without FILE_SHARE_DELETE (OneDrive, antivirus). The swap is
+# retried a few times on PermissionError, on Windows only.
+
+
+class _FlakyReplace:
+    """Stand-in for Path.replace that raises *error* for the first *failures* calls."""
+
+    def __init__(self, failures: int, error: OSError) -> None:
+        self.failures = failures
+        self.error = error
+        self.calls = 0
+        self._real = Path.replace
+
+    def __call__(self, source: Path, destination: Path) -> Path:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return self._real(source, destination)
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the delays the retry asks for, without waiting."""
+    recorded: list[float] = []
+    monkeypatch.setattr(atomicio.time, "sleep", recorded.append)
+    return recorded
+
+
+def _flaky(
+    monkeypatch: pytest.MonkeyPatch, failures: int, error: OSError | None = None
+) -> _FlakyReplace:
+    flaky = _FlakyReplace(failures, error or PermissionError(13, "held open"))
+    # A plain function, so Path binds it as a method. A callable instance would not bind.
+    monkeypatch.setattr(Path, "replace", lambda source, destination: flaky(source, destination))
+    return flaky
+
+
+def test_retries_a_held_open_destination_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sleeps: list[float]
+) -> None:
+    target = tmp_path / "doc.json"
+    target.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "win32")
+    flaky = _flaky(monkeypatch, failures=3)
+
+    atomic_write_text(target, "new")
+
+    assert flaky.calls == 4
+    assert sleeps == [0.05, 0.1, 0.2]
+    assert target.read_text(encoding="utf-8") == "new"
+    assert not (tmp_path / "doc.json.tmp").exists()
+
+
+def test_succeeds_on_the_last_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sleeps: list[float]
+) -> None:
+    target = tmp_path / "doc.json"
+    target.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "win32")
+    flaky = _flaky(monkeypatch, failures=atomicio.REPLACE_ATTEMPTS - 1)
+
+    atomic_write_text(target, "new")
+
+    assert flaky.calls == atomicio.REPLACE_ATTEMPTS
+    assert sleeps == [0.05, 0.1, 0.2, 0.4]
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_gives_up_after_the_last_attempt_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sleeps: list[float]
+) -> None:
+    target = tmp_path / "doc.json"
+    target.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "win32")
+    error = PermissionError(13, "held open")
+    flaky = _flaky(monkeypatch, failures=atomicio.REPLACE_ATTEMPTS, error=error)
+
+    with pytest.raises(PermissionError) as raised:
+        atomic_write_text(target, "new")
+
+    assert raised.value is error
+    assert flaky.calls == atomicio.REPLACE_ATTEMPTS
+    assert sleeps == [0.05, 0.1, 0.2, 0.4]
+    monkeypatch.undo()
+    assert target.read_text(encoding="utf-8") == "old"
+    assert [p.name for p in tmp_path.iterdir()] == ["doc.json"]
+
+
+def test_does_not_retry_other_oserrors_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sleeps: list[float]
+) -> None:
+    target = tmp_path / "doc.json"
+    monkeypatch.setattr(sys, "platform", "win32")
+    flaky = _flaky(monkeypatch, failures=1, error=OSError(28, "No space left on device"))
+
+    with pytest.raises(OSError, match="No space"):
+        atomic_write_text(target, "new")
+
+    assert flaky.calls == 1
+    assert sleeps == []
+
+
+def test_does_not_retry_permission_errors_off_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sleeps: list[float]
+) -> None:
+    target = tmp_path / "doc.json"
+    monkeypatch.setattr(sys, "platform", "linux")
+    flaky = _flaky(monkeypatch, failures=1)
+
+    with pytest.raises(PermissionError):
+        atomic_write_text(target, "new")
+
+    assert flaky.calls == 1
+    assert sleeps == []
+
+
+def test_replace_with_retry_moves_a_file_without_sleeping(
+    tmp_path: Path, sleeps: list[float]
+) -> None:
+    source = tmp_path / "a.part"
+    destination = tmp_path / "a"
+    source.write_text("x", encoding="utf-8")
+
+    replace_with_retry(source, destination)
+
+    assert destination.read_text(encoding="utf-8") == "x"
+    assert sleeps == []
 
 
 # --- The guard --------------------------------------------------------------

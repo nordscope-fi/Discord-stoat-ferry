@@ -27,6 +27,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   on one line. The JSON reports and `state.json` are unchanged. The server name in the guild
   icon warnings is also shown in quotes with escapes and a 120 character cap, the same way the
   icon path already was. The `ferry check` output uses the same shared helper as before.
+### Fixed
+
+- On Windows, Ferry now retries a file swap that fails because another program has the target
+  open (#176). Saving `state.json`, the reports, the blueprint, a saved feedback draft or a
+  downloaded banner could stop with `PermissionError` (WinError 5 or 32) while OneDrive or an
+  antivirus scan held the old file. Ferry tries up to five times, waiting 0.05, 0.1, 0.2 and
+  0.4 seconds between tries, then raises the original error. Other platforms and other errors
+  are not retried. A failed document write now also removes its `.tmp` file.
 
 ## [2.41.28] - 2026-10-10
 

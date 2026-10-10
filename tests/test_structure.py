@@ -25,6 +25,7 @@ from discord_ferry.discord.metadata import (
 )
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
 from discord_ferry.errors import AutumnUploadError, MigrationError
+from discord_ferry.migrator import structure as structure_module
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     _apply_role_ordering,
@@ -5822,6 +5823,23 @@ async def test_banner_exactly_at_the_cap_replaces_the_file(tmp_path: Path) -> No
     assert failure is None
     assert dest.stat().st_size == BANNER_CAP
     assert _only_the_banner_remains(dest)
+
+
+async def test_banner_swap_goes_through_the_retrying_replace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#176: a held-open banner on Windows is retried, so the swap must use the helper."""
+    calls: list[tuple[Path, Path]] = []
+    real = structure_module.replace_with_retry
+
+    def spy(source: Path, destination: Path) -> None:
+        calls.append((source, destination))
+        real(source, destination)
+
+    monkeypatch.setattr(structure_module, "replace_with_retry", spy)
+    failure, dest, _ = await _fetch_banner(tmp_path, "/body/10")
+    assert failure is None
+    assert [d for _, d in calls] == [dest]
 
 
 @pytest.mark.parametrize("route", ["/body/{n}", "/chunked/{n}"])
