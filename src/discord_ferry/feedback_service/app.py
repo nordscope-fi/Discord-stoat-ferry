@@ -67,6 +67,9 @@ class ReadinessGitHub(Protocol):
 
 _HEALTH_PROBE_ID = UUID(int=0)
 _READINESS_CACHE = timedelta(seconds=30)
+# A failed check is remembered briefly (ADR-030). Short, so a recovered GitHub reads as ready
+# within seconds; long enough that callers during an outage share one failed check (#963).
+_READINESS_FAILURE_CACHE = timedelta(seconds=5)
 _EXPIRY_SWEEP_TASK_NAME = "feedback-expiry-sweep"
 logger = logging.getLogger(__name__)
 
@@ -126,6 +129,7 @@ def _utc_now() -> datetime:
 class _ReadinessState:
     now: Callable[[], datetime]
     expires_at: datetime | None = None
+    failed_until: datetime | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -161,11 +165,16 @@ async def _github_is_ready(app: web.Application) -> bool:
         now = state.now().astimezone(UTC)
         if state.expires_at is not None and now < state.expires_at:
             return True
+        if state.failed_until is not None and now < state.failed_until:
+            return False
         try:
             await app[GITHUB_KEY].check_readiness()
         except (GitHubAuthenticationError, GitHubReadinessError):
             state.expires_at = None
+            # Count from the end of the check: a slow failure must not use up its own period.
+            state.failed_until = state.now().astimezone(UTC) + _READINESS_FAILURE_CACHE
             return False
+        state.failed_until = None
         state.expires_at = now + _READINESS_CACHE
     return True
 
@@ -520,6 +529,7 @@ def invalidate_readiness(app: web.Application) -> None:
     """Require the next readiness request to check GitHub again."""
 
     app[READINESS_KEY].expires_at = None
+    app[READINESS_KEY].failed_until = None
     app[GITHUB_KEY].invalidate_readiness()
 
 

@@ -551,22 +551,6 @@ async def test_ready_maps_every_dependency_failure_to_private_503(
         await client.close()
 
 
-async def test_ready_does_not_cache_failure(tmp_path: object) -> None:
-    from discord_ferry.feedback_service.app import create_app
-
-    github = _ReadyGitHub(GitHubReadinessError("temporary"), None)
-    client = TestClient(TestServer(create_app(_service_config(tmp_path), github=github)))
-    await client.start_server()
-    try:
-        failed = await client.get("/ready")
-        recovered = await client.get("/ready")
-        assert failed.status == 503
-        assert recovered.status == 200
-        assert github.calls == 2
-    finally:
-        await client.close()
-
-
 async def test_ready_refreshes_expired_success(tmp_path: object) -> None:
     from discord_ferry.feedback_service.app import create_app
 
@@ -1888,5 +1872,113 @@ async def test_delivered_replays_read_no_github_control(tmp_path: object) -> Non
         assert store.claims_done == claims + _REPLAYS
         assert github.reconcile_calls == 1
         assert _report_quota_events(database) == 1
+    finally:
+        await client.close()
+
+
+_READINESS_CHAIN_CALLS = 6
+_READINESS_REQUESTS = 3
+
+
+class _ChainReadyGitHub(_ReadyGitHub):
+    """Each readiness check makes six logical GitHub requests, then fails late or succeeds."""
+
+    def __init__(self, *, fail: bool) -> None:
+        super().__init__()
+        self.fail = fail
+        self.logical_calls = 0
+
+    async def check_readiness(self) -> None:
+        self.calls += 1
+        for _ in range(_READINESS_CHAIN_CALLS):
+            self.logical_calls += 1
+            await asyncio.sleep(0)
+        if self.fail:
+            raise GitHubReadinessError("late failure")
+
+
+async def _ready_status_codes(client: TestClient) -> list[int]:
+    replies = await asyncio.gather(*(client.get("/ready") for _ in range(_READINESS_REQUESTS)))
+    return [reply.status for reply in replies]
+
+
+async def test_failed_readiness_is_shared_like_a_cached_success(tmp_path: object) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    results: dict[bool, _ChainReadyGitHub] = {}
+    for fail in (False, True):
+        github = _ChainReadyGitHub(fail=fail)
+        client = TestClient(
+            TestServer(create_app(_service_config(tmp_path), github=github, now=lambda: NOW))
+        )
+        await client.start_server()
+        try:
+            expected = 503 if fail else 200
+            assert await _ready_status_codes(client) == [expected] * _READINESS_REQUESTS
+        finally:
+            await client.close()
+        results[fail] = github
+    assert results[False].calls == 1
+    assert results[True].calls == 1
+    assert results[True].logical_calls == results[False].logical_calls == _READINESS_CHAIN_CALLS
+
+
+async def test_failed_readiness_is_rechecked_once_the_failure_cache_lapses(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback_service.app import _READINESS_FAILURE_CACHE, create_app
+
+    clock = _Clock(NOW)
+    github = _ReadyGitHub(GitHubReadinessError("late failure"), None)
+    client = TestClient(TestServer(create_app(_service_config(tmp_path), github=github, now=clock)))
+    await client.start_server()
+    try:
+        assert (await client.get("/ready")).status == 503
+        clock.current = NOW + _READINESS_FAILURE_CACHE - timedelta(seconds=1)
+        assert (await client.get("/ready")).status == 503
+        assert github.calls == 1
+        clock.current = NOW + _READINESS_FAILURE_CACHE
+        assert (await client.get("/ready")).status == 200
+        assert github.calls == 2
+    finally:
+        await client.close()
+
+
+async def test_invalidating_readiness_overrides_a_cached_failure(tmp_path: object) -> None:
+    from discord_ferry.feedback_service.app import create_app, invalidate_readiness
+
+    github = _ReadyGitHub(GitHubReadinessError("late failure"), None)
+    app = create_app(_service_config(tmp_path), github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        assert (await client.get("/ready")).status == 503
+        invalidate_readiness(app)
+        assert (await client.get("/ready")).status == 200
+        assert github.calls == 2
+    finally:
+        await client.close()
+
+
+async def test_a_slow_failed_readiness_check_still_covers_the_callers_queued_behind_it(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    clock = _Clock(NOW)
+
+    class _SlowFailure(_ReadyGitHub):
+        async def check_readiness(self) -> None:
+            self.calls += 1
+            await asyncio.sleep(0)
+            clock.current += timedelta(seconds=20)
+            raise GitHubReadinessError("timeout")
+
+    github = _SlowFailure()
+    client = TestClient(TestServer(create_app(_service_config(tmp_path), github=github, now=clock)))
+    await client.start_server()
+    try:
+        assert await _ready_status_codes(client) == [503] * _READINESS_REQUESTS
+        assert github.calls == 1
     finally:
         await client.close()
