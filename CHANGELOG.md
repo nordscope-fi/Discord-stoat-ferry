@@ -4,11 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.41.30] - 2026-10-10
 
 ### Fixed
 
-- Stage saved documents and the downloaded server banner under a random, exclusively created temporary name (#960). Ferry used a predictable name such as `state.json.tmp`. In a shared output folder, another account could plant a symlink at that name and send the write to a file it could not otherwise change. The temporary file is now created fresh in the same folder, so an existing entry is never reused or followed. The files Ferry writes (state, reports, blueprints, metadata, banners) are now readable only by the account that ran Ferry. Direct writes that stay in place (avatars, role-icon staging files and thread archives) now refuse to follow a symlink at their path. A planted link makes the avatar or role icon fail with the usual warning, and a thread archive that cannot be written is recorded as a warning while the rest of the phase carries on. The `avatars`, `role-icons` and `threads` folders are checked the same way: if any of them, or a folder inside `threads`, is a symlink, Ferry refuses to use it.
+- Stage saved documents and the downloaded server banner under a random, exclusively created temporary name (#960). Ferry used a predictable name such as `state.json.tmp`. In a shared output folder, another account could plant a symlink at that name and send the write to a file it could not otherwise change. The temporary file is now created fresh in the same folder, so an existing entry is never reused or followed. The files Ferry writes (state, reports, blueprints, metadata, banners) are now readable only by the account that ran Ferry. Direct writes that stay in place (avatars, role-icon staging files and thread archives) now refuse to follow a symlink at their path. A planted link makes the avatar or role icon fail with the usual warning, and a thread archive that cannot be written is recorded as a warning while the rest of the phase carries on. The `avatars`, `role-icons` and `threads` folders are checked the same way: if any of them, or a folder inside `threads`, is a symlink, Ferry refuses to use it. The banner folder gets the same folder check. On Windows these direct writes open the file in binary mode, so an image is written byte for byte.
 - Refuse web requests that do not address Ferry as a local machine (#964). A hostile website
   could point its own name at 127.0.0.1 (DNS rebinding) and then talk to Ferry's local
   interface from the visitor's browser, reaching pages that write files such as the blueprint
@@ -34,12 +34,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Stoat returns no id, so Ferry records the forum as "present, id unknown", the same way the
   rebuild step already did (#215). The rebuild then looks for the index among the pinned messages
   and edits it instead of adding a second one.
-- Check the cached Discord metadata before `--resume` reuses it (#971). Ferry now refuses to
-  resume when `discord_metadata.json` is for a different server than the export or the
-  configured server id. It also refuses an id that is not all digits. A permission value that
-  is a boolean, negative or not a whole number is refused too. The error names the file and
-  says to delete it or point at the right output directory. Permission bits Stoat does not
-  define are dropped, as they are for freshly fetched metadata. A valid cache is used as before.
 - Bind the cached Discord metadata to the export before anything uses it (#971). A leftover
   `discord_metadata.json` from another server no longer feeds its role and channel
   permissions into a migration, on a resume or a fresh run. `--resume` stops with an error
@@ -47,7 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   rejected when its server differs from the export or the configured server id, and when a
   permission value is a boolean, negative or not a whole number. A resume also rejects an id
   that is not all digits. A corrupt file no longer crashes the pre-creation review. Permission
-  bits Stoat does not define are dropped, with one warning. A valid cache is used as before.
+  bits Stoat does not define are dropped, with one warning. A valid cache is used as before. `ferry repair` and the migration report check the file against the export too, and a malformed user-override entry makes the file unusable instead of crashing the review or the report.
 
 ## [2.41.29] - 2026-10-10
 
