@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import ssl
 import zipfile
@@ -785,3 +786,101 @@ async def test_a_proxy_502_still_retries(tmp_path, fake_proxy, proxy_env, os_pro
     assert f"The request to api.github.com went through the proxy at 127.0.0.1:{port}" in str(
         caught.value
     )
+
+
+# ---------------------------------------------------------------------------
+# #1127 - the release asset download stops at _MAX_DCE_BYTES instead of buffering it
+# ---------------------------------------------------------------------------
+
+_TEST_DCE_CAP = 200_000
+
+
+class _ReleaseThenLocalSession:
+    """Stands in for ``new_session()``: the release lookup is canned, the asset GET is real.
+
+    The first GET (the GitHub release JSON) returns a fixed asset list. The second
+    GET goes over a real ClientSession to the local server, so the body is streamed
+    for real and ``LocalCDN.sent`` counts what the client let the server write.
+    """
+
+    def __init__(self, real: aiohttp.ClientSession, asset_url: str) -> None:
+        self._real = real
+        self._asset_url = asset_url
+
+    async def __aenter__(self) -> _ReleaseThenLocalSession:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]  # test double
+        if "api.github.com" in url:
+            return _FakeReleaseResponse()
+        return self._real.get(self._asset_url)
+
+
+class _FakeReleaseResponse:
+    status = 200
+
+    async def __aenter__(self) -> _FakeReleaseResponse:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def json(self) -> dict[str, object]:
+        return {
+            "assets": [{"name": "test.zip", "browser_download_url": "https://example.test/a.zip"}]
+        }
+
+
+async def _download_from_local(tmp_path: Path, cdn_path: str):  # type: ignore[no-untyped-def]
+    """Run the real download_dce against the local server with the cap lowered."""
+    from tests.local_cdn import local_cdn
+
+    real_sleep = asyncio.sleep  # the manager's retry sleep is patched on the shared module
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = _ReleaseThenLocalSession(real, cdn.url(cdn_path))
+        with (
+            patch("discord_ferry.exporter.manager._MAX_DCE_BYTES", _TEST_DCE_CAP),
+            patch("discord_ferry.exporter.manager.new_session", return_value=session),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("discord_ferry.exporter.manager.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(DCENotFoundError) as caught,
+        ):
+            await asyncio.wait_for(download_dce(lambda _e: None, skip_verify=True), timeout=10)
+        await real_sleep(0.2)  # let the server notice a closed connection
+        return str(caught.value), cdn
+
+
+async def test_dce_download_undeclared_oversize_stops_reading(tmp_path: Path) -> None:
+    """Kills `data = await resp.read()` followed by a length check.
+
+    The /endless route has no Content-Length and keeps writing until the client stops
+    reading. The old code reads all of it before comparing, so the server ends up
+    having sent the full 30 MB. The bounded read stops just past the cap.
+    """
+    from tests.local_cdn import ENDLESS_LIMIT
+
+    message, cdn = await _download_from_local(tmp_path, "/endless")
+    # Bytes first: the old code's first attempt drains /endless, and its retry then gets an
+    # empty body, so its message would differ and hide the real defect.
+    assert cdn.sent < ENDLESS_LIMIT // 2, f"server sent {cdn.sent} bytes, the client kept reading"
+    assert "exceeded the size limit" in message
+
+
+async def test_dce_download_declared_oversize_is_refused_without_reading(tmp_path: Path) -> None:
+    """Kills an implementation that trusts the body and ignores a declared Content-Length.
+
+    The server declares 30 MB. A client that starts reading drains it all (the old
+    code); one that checks Content-Length first leaves the server stalled on
+    backpressure after a socket buffer's worth.
+    """
+    from tests.local_cdn import ENDLESS_LIMIT
+
+    message, cdn = await _download_from_local(tmp_path, f"/body/{ENDLESS_LIMIT}")
+    # Bytes first: the old code's first attempt drains /endless, and its retry then gets an
+    # empty body, so its message would differ and hide the real defect.
+    assert cdn.sent < ENDLESS_LIMIT // 2, f"server sent {cdn.sent} bytes, the client kept reading"
+    assert "exceeded the size limit" in message

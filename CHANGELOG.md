@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Ignore common credential file names in `.gitignore`: `credentials.json`, `*.pem` and `*.key`
   (#979). None are tracked today, so this only stops an accidental `git add` from picking one up.
+### Fixed
+
+- The DiscordChatExporter download now stops reading at the 150 MB size limit. It used to buffer
+  the whole response and only then compare its size, so an oversized or endless response was held
+  in memory in full. A declared Content-Length over the limit is now refused before any of the body
+  is read (#1127).
 
 ### Security
 
