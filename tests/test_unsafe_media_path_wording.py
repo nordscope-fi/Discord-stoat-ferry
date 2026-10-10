@@ -114,9 +114,17 @@ def _docstring_nodes(tree: ast.AST) -> set[int]:
     return found
 
 
+# Text Ferry posts into the migrated server keeps its shipped wording, so servers migrated
+# across several runs stay consistent. Such a line, or the comment line above it, carries
+# this marker and is skipped.
+_SERVER_CONTENT_MARKER = "osted into the server, not an operator message"
+
+
 def _em_dash_literals(path: Path) -> list[tuple[int, str]]:
     """Every non-docstring string constant (f-string parts included) holding an em dash."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    tree = ast.parse(source)
     docstrings = _docstring_nodes(tree)
     return [
         (node.lineno, node.value)
@@ -125,6 +133,7 @@ def _em_dash_literals(path: Path) -> list[tuple[int, str]]:
         and isinstance(node.value, str)
         and id(node) not in docstrings
         and _EM_DASH in node.value
+        and _SERVER_CONTENT_MARKER not in "".join(lines[max(node.lineno - 2, 0) : node.lineno])
     ]
 
 
@@ -142,7 +151,8 @@ def test_em_dash_scan_catches_a_planted_literal(tmp_path: Path) -> None:
         '"""Module docstring — ignored."""\n'
         "def f(name):\n"
         '    """Docstring — ignored."""\n'
-        '    return f"Skipping {name} — gone"\n',
+        '    return f"Skipping {name} — gone"\n'
+        'POSTED = f"- {1} — x"  # posted into the server, not an operator message\n',
         encoding="utf-8",
     )
     assert [text for _, text in _em_dash_literals(planted)] == [" — gone"]
