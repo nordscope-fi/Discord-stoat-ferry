@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { accessSync, constants, readFileSync, realpathSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import {
   buildReviewPrompt,
@@ -11,6 +10,7 @@ import {
   reviewReplyJson,
   validateFindings,
 } from './review-contract.mjs';
+import { resolveExecutable } from './resolve-executable.mjs';
 
 export const CLAUDE_MODEL_ALIAS = 'sonnet';
 export const CLAUDE_CANONICAL_MODEL = 'claude-sonnet-5';
@@ -29,19 +29,13 @@ export const CLAUDE_REVIEW_ARGS = [
 const REQUIRED_HELP_FLAGS = ['--safe-mode', '--tools', '--prompt-suggestions'];
 
 export function resolveClaudeCommand(pathValue = process.env.PATH ?? '') {
-  for (const directory of pathValue.split(delimiter)) {
-    if (!directory) continue;
-    const candidate = join(directory, 'claude');
-    try {
-      accessSync(candidate, constants.X_OK);
-      return realpathSync(candidate);
-    } catch {
-      // Continue through the command lookup path.
-    }
+  try {
+    return resolveExecutable('claude', { pathValue });
+  } catch {
+    const error = new Error('Claude client prerequisite missing');
+    error.code = 'ENOENT';
+    throw error;
   }
-  const error = new Error('Claude client prerequisite missing');
-  error.code = 'ENOENT';
-  throw error;
 }
 
 export function classifyClaudeStderr(stderr) {

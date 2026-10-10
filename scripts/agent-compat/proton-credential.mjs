@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { classifyReviewFailure, safeChildFailure } from './review-contract.mjs';
+import { resolveExecutable } from './resolve-executable.mjs';
 
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const LOGIN_ATTEMPT_TIMEOUT_MS = 30000;
@@ -176,11 +177,11 @@ export function runBoundedChild(command, args, { env, timeoutMs }) {
   });
 }
 
-async function loginWithTransportRetry(run, environment) {
+async function loginWithTransportRetry(run, passCli, environment) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await run('pass-cli', ['login'], {
+      return await run(passCli, ['login'], {
         env: environment,
         timeoutMs: LOGIN_ATTEMPT_TIMEOUT_MS,
       });
@@ -192,8 +193,8 @@ async function loginWithTransportRetry(run, environment) {
   throw lastError;
 }
 
-function stageFailure(stage, error) {
-  const wrapped = new Error(safeChildFailure(`pass-cli ${stage}`, error));
+function stageFailure(stage, error, label = `pass-cli ${stage}`) {
+  const wrapped = new Error(safeChildFailure(label, error));
   wrapped.stage = stage;
   wrapped.classification = classifyReviewFailure(error);
   return wrapped;
@@ -209,6 +210,7 @@ export async function readProtonField({
   reason,
   home,
   run = runBoundedChild,
+  resolve = resolveExecutable,
 }) {
   if (![tokenFile, field, reason, home].every(Boolean)) {
     throw new Error('Proton field access requires token, field, reason, and home');
@@ -217,6 +219,14 @@ export async function readProtonField({
   const usesIds = Boolean(shareId) && Boolean(itemId) && !vaultName && !itemTitle;
   if (!usesNames && !usesIds) {
     throw new Error('Proton field access requires one complete item locator');
+  }
+  // Resolve the client before the token file is read or any session exists, so a missing or
+  // substituted program is refused while no credential is in play.
+  let passCli;
+  try {
+    passCli = resolve('pass-cli');
+  } catch (error) {
+    throw stageFailure('executable', error, 'pass-cli');
   }
   const tokenPath = join(home, '.config', 'discord-ferry', tokenFile);
   const tokenStat = lstatSync(tokenPath);
@@ -235,7 +245,7 @@ export async function readProtonField({
   };
   try {
     try {
-      await loginWithTransportRetry(run, environment);
+      await loginWithTransportRetry(run, passCli, environment);
     } catch (error) {
       throw stageFailure('login', error);
     }
@@ -244,7 +254,7 @@ export async function readProtonField({
       const locator = usesIds
         ? ['--share-id', shareId, '--item-id', itemId]
         : ['--vault-name', vaultName, '--item-title', itemTitle];
-      value = await run('pass-cli', ['item', 'view', ...locator, '--field', field], {
+      value = await run(passCli, ['item', 'view', ...locator, '--field', field], {
         env: { ...environment, PROTON_PASS_AGENT_REASON: reason },
         timeoutMs: 30000,
       });
@@ -277,6 +287,7 @@ export function readReviewerField(options) {
     reason: options.reason,
     home: options.home,
     run: options.run,
+    resolve: options.resolve,
   });
 }
 
@@ -317,7 +328,7 @@ exit 73
 `, { mode: 0o700 });
 
     const run = (command, args, options) => {
-      if (command !== 'pass-cli') throw new Error('unexpected command');
+      if (command !== fakePassCli) throw new Error('unexpected command');
       observedSessions.push(options.env.PROTON_PASS_SESSION_DIR);
       observedEnvironments.push(Object.keys(options.env).sort());
       return runBoundedChild(fakePassCli, args, options);
@@ -327,6 +338,10 @@ exit 73
       reason: 'Review Ferry code',
       home,
       run,
+      resolve: (name) => {
+        if (name !== 'pass-cli') throw new Error('unexpected client');
+        return fakePassCli;
+      },
     });
     if (value !== 'FIXTURE_FIELD_VALUE') throw new Error('field value changed in transit');
     if (observedSessions.length !== 2 || observedSessions[0] !== observedSessions[1]) {
@@ -350,6 +365,7 @@ exit 73
         reason: 'Review Ferry code',
         home,
         run,
+        resolve: () => fakePassCli,
       });
     } catch (error) {
       rejectedMode = error.message === 'reviewer-agent.pat must have mode 0600';

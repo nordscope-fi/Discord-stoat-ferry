@@ -35,6 +35,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   antivirus scan held the old file. Ferry tries up to five times, waiting 0.05, 0.1, 0.2 and
   0.4 seconds between tries, then raises the original error. Other platforms and other errors
   are not retried. A failed document write now also removes its `.tmp` file.
+- The credential launcher and the Codex and Claude review launchers now find their client
+  program once, as an absolute path, before they do anything else (#977). Before, they passed a
+  bare name such as `pass-cli` to the operating system, which searched `PATH`, including empty,
+  relative and `.` entries and any folder inside the working checkout. A look-alike file planted
+  in one of those places could have been run, in the credential case before the credential was
+  requested. The new helper `resolve-executable.mjs` skips those entries, takes the first
+  executable file on an absolute entry, and the launcher runs that path. A missing program now
+  stops with "executable not found" before a token file is read. Homebrew, `~/.local/bin` and
+  npm global installs are unchanged. The reviewer runtime gains one file, so reinstall it from
+  `main`.
 
 ## [2.41.28] - 2026-10-10
 

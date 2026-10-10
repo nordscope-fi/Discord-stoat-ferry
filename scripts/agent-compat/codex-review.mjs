@@ -19,6 +19,7 @@ import {
   safeChildFailure,
   validateFindings,
 } from './review-contract.mjs';
+import { resolveExecutable } from './resolve-executable.mjs';
 
 const DEFAULT_MODEL = 'gpt-5.6-sol';
 const DEFAULT_EFFORT = 'high';
@@ -71,6 +72,8 @@ function reviewPrompt(args) {
 }
 
 function runCodex(args, payload) {
+  // Resolve once, to an absolute path, before any temporary file exists or any process starts.
+  const codex = resolveExecutable('codex');
   const temporaryDirectory = mkdtempSync(join(tmpdir(), 'ferry-codex-review-'));
   const schemaFile = join(temporaryDirectory, 'schema.json');
   const lastMessageFile = join(temporaryDirectory, 'last-message.json');
@@ -88,7 +91,7 @@ function runCodex(args, payload) {
       reviewPrompt(args),
     ];
     // Read only the output file. Child diagnostics and reasoning never reach this process's output.
-    execFileSync('codex', cliArgs, {
+    execFileSync(codex, cliArgs, {
       input: payload,
       encoding: 'utf8',
       timeout: 600000,

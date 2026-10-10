@@ -5886,3 +5886,287 @@ def test_session_start_marks_commit_subjects_as_untrusted_metadata(
     assert all(len(line) <= 160 for line in body)
     assert "x" * 200 not in inside
     assert "\u2028" not in context and "\u2029" not in context
+
+
+# --- Client executable resolution (#977) ----------------------------------------------------
+#
+# The credential and review launchers used to hand a bare program name to the operating system,
+# which searched the caller's PATH, including empty, relative and working-directory entries.
+# These tests use recorder executables that only append their own path to a marker file.
+
+_MODULES = REPO / "scripts/agent-compat"
+
+
+def _recorder(path: Path, marker: Path, body: str = "") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\necho \"$0\" >> '{marker}'\n{body}")
+    path.chmod(0o755)
+    return path
+
+
+def _probe(
+    tmp_path: Path, source: str, *, cwd: Path, path_value: str
+) -> subprocess.CompletedProcess[str]:
+    assert NODE_EXECUTABLE is not None
+    probe = tmp_path / "probe.mjs"
+    probe.write_text(source)
+    return subprocess.run(
+        [NODE_EXECUTABLE, str(probe)],
+        cwd=cwd,
+        env={"PATH": path_value, "HOME": str(tmp_path / "home")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _poisoned_layouts(tmp_path: Path, name: str) -> dict[str, tuple[Path, str]]:
+    """Each layout plants a recorder named `name` where a PATH search would reach it."""
+    work = tmp_path / "work"
+    good_dir = tmp_path / "good"
+    marker = tmp_path / "poisoned.log"
+    good = good_dir
+    layouts = {
+        "relative": (work / "bin" / name, f"bin:{good}"),
+        "dot": (work / name, f".:{good}"),
+        "empty": (work / name, f":{good}"),
+        "absolute-in-cwd": (work / "bin" / name, f"{work / 'bin'}:{good}"),
+    }
+    for poisoned, _ in layouts.values():
+        _recorder(poisoned, marker)
+    good.mkdir(parents=True, exist_ok=True)
+    return layouts
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+@pytest.mark.parametrize("layout", ["relative", "dot", "empty", "absolute-in-cwd"])
+def test_resolve_executable_ignores_search_entries_that_reach_the_working_directory(
+    tmp_path: Path, layout: str
+) -> None:
+    layouts = _poisoned_layouts(tmp_path, "pass-cli")
+    good = _recorder(tmp_path / "good" / "pass-cli", tmp_path / "good.log")
+    _, path_value = layouts[layout]
+    result = _probe(
+        tmp_path,
+        f"""
+        import {{ resolveExecutable }} from '{_MODULES / "resolve-executable.mjs"}';
+        process.stdout.write(resolveExecutable('pass-cli'));
+        """,
+        cwd=tmp_path / "work",
+        path_value=path_value,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(good.resolve())
+    assert not (tmp_path / "poisoned.log").exists()
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_resolve_executable_skips_a_file_that_is_not_executable(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "pass-cli").write_text("#!/bin/sh\n")
+    (first / "pass-cli").chmod(0o644)
+    good = _recorder(tmp_path / "second" / "pass-cli", tmp_path / "good.log")
+    (tmp_path / "work").mkdir()
+    result = _probe(
+        tmp_path,
+        f"""
+        import {{ resolveExecutable }} from '{_MODULES / "resolve-executable.mjs"}';
+        process.stdout.write(resolveExecutable('pass-cli'));
+        """,
+        cwd=tmp_path / "work",
+        path_value=f"{first}:{good.parent}",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(good.resolve())
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_resolve_executable_reports_a_missing_client_by_name(tmp_path: Path) -> None:
+    _poisoned_layouts(tmp_path, "pass-cli")
+    result = _probe(
+        tmp_path,
+        f"""
+        import {{ resolveExecutable }} from '{_MODULES / "resolve-executable.mjs"}';
+        try {{
+          resolveExecutable('pass-cli');
+        }} catch (error) {{
+          process.stdout.write(JSON.stringify({{ code: error.code, message: error.message }}));
+        }}
+        """,
+        cwd=tmp_path / "work",
+        path_value="bin:.:",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["code"] == "ENOENT"
+    assert "pass-cli" in report["message"]
+    assert not (tmp_path / "poisoned.log").exists()
+
+
+def _proton_home(tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    directory = home / ".config" / "discord-ferry"
+    directory.mkdir(parents=True)
+    token = directory / "context7-agent.pat"
+    token.write_text("pst_" + "x" * 40)
+    token.chmod(0o600)
+    return home
+
+
+_PROTON_PROBE = """
+import {{ readProtonField }} from '{module}';
+const events = [];
+try {{
+  const value = await readProtonField({{
+    tokenFile: 'context7-agent.pat',
+    shareId: 'share',
+    itemId: 'item',
+    field: 'API Key',
+    reason: 'recorder test',
+    home: '{home}',
+    {extra}
+  }});
+  process.stdout.write(JSON.stringify({{ value }}));
+}} catch (error) {{
+  process.stdout.write(JSON.stringify({{ error: error.message }}));
+}}
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+@pytest.mark.parametrize("layout", ["relative", "dot", "empty", "absolute-in-cwd"])
+def test_credential_launcher_runs_the_absolute_pass_cli_not_a_planted_one(
+    tmp_path: Path, layout: str
+) -> None:
+    home = _proton_home(tmp_path)
+    layouts = _poisoned_layouts(tmp_path, "pass-cli")
+    good_log = tmp_path / "good.log"
+    _recorder(
+        tmp_path / "good" / "pass-cli",
+        good_log,
+        'if [ "$1" = "item" ]; then printf \'RECORDED_FIELD\\n\'; fi\n',
+    )
+    _, path_value = layouts[layout]
+    result = _probe(
+        tmp_path,
+        _PROTON_PROBE.format(module=_MODULES / "proton-credential.mjs", home=home, extra=""),
+        cwd=tmp_path / "work",
+        path_value=path_value,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"value": "RECORDED_FIELD"}
+    assert not (tmp_path / "poisoned.log").exists()
+    assert len(good_log.read_text().splitlines()) == 2  # login, then the field read
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_credential_launcher_resolves_the_client_before_any_credential_step(
+    tmp_path: Path,
+) -> None:
+    home = _proton_home(tmp_path)
+    (tmp_path / "work").mkdir()
+    extra = """
+    resolve: (name) => { events.push('resolve:' + name); return '/fixture/pass-cli'; },
+    run: async (command, args) => {
+      events.push('run:' + command + ':' + args[0]);
+      return { stdout: args[0] === 'item' ? 'V\\n' : '' };
+    },
+    """
+    source = _PROTON_PROBE.format(module=_MODULES / "proton-credential.mjs", home=home, extra=extra)
+    source += "process.stdout.write('\\n' + JSON.stringify(events));\n"
+    result = _probe(tmp_path, source, cwd=tmp_path / "work", path_value="/usr/bin")
+    assert result.returncode == 0, result.stderr
+    value_line, events_line = result.stdout.splitlines()
+    assert json.loads(value_line) == {"value": "V"}
+    assert json.loads(events_line) == [
+        "resolve:pass-cli",
+        "run:/fixture/pass-cli:login",
+        "run:/fixture/pass-cli:item",
+    ]
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_credential_launcher_without_a_client_fails_before_reading_the_token(
+    tmp_path: Path,
+) -> None:
+    # No token file exists under this home, so any attempt to read it would fail differently.
+    (tmp_path / "home").mkdir()
+    _poisoned_layouts(tmp_path, "pass-cli")
+    result = _probe(
+        tmp_path,
+        _PROTON_PROBE.format(
+            module=_MODULES / "proton-credential.mjs", home=tmp_path / "home", extra=""
+        ),
+        cwd=tmp_path / "work",
+        path_value="bin:.:",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"error": "pass-cli executable not found"}
+    assert not (tmp_path / "poisoned.log").exists()
+
+
+_CODEX_BODY = """out=
+while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out="$2"; fi; shift; done
+printf '%s' '{"summary":"recorded","confidence":"high","findings":[]}' > "$out"
+"""
+
+
+def _run_codex_review(tmp_path: Path, path_value: str) -> subprocess.CompletedProcess[str]:
+    assert NODE_EXECUTABLE is not None
+    return subprocess.run(
+        [NODE_EXECUTABLE, str(_MODULES / "codex-review.mjs")],
+        cwd=tmp_path / "work",
+        env={"PATH": path_value, "HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path)},
+        input="diff --git a/x b/x\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+@pytest.mark.parametrize("layout", ["relative", "dot", "empty", "absolute-in-cwd"])
+def test_codex_review_runs_the_absolute_codex_not_a_planted_one(
+    tmp_path: Path, layout: str
+) -> None:
+    layouts = _poisoned_layouts(tmp_path, "codex")
+    good_log = tmp_path / "good.log"
+    _recorder(tmp_path / "good" / "codex", good_log, _CODEX_BODY)
+    _, path_value = layouts[layout]
+    result = _run_codex_review(tmp_path, path_value)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["summary"] == "recorded"
+    assert not (tmp_path / "poisoned.log").exists()
+    assert len(good_log.read_text().splitlines()) == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_codex_review_without_a_client_reports_it_and_runs_nothing(tmp_path: Path) -> None:
+    _poisoned_layouts(tmp_path, "codex")
+    result = _run_codex_review(tmp_path, "bin:.:")
+    assert result.returncode == 1
+    assert "codex executable not found" in result.stderr
+    assert not (tmp_path / "poisoned.log").exists()
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+@pytest.mark.parametrize("layout", ["relative", "dot", "empty", "absolute-in-cwd"])
+def test_claude_review_resolves_the_absolute_claude_not_a_planted_one(
+    tmp_path: Path, layout: str
+) -> None:
+    layouts = _poisoned_layouts(tmp_path, "claude")
+    good = _recorder(tmp_path / "good" / "claude", tmp_path / "good.log")
+    _, path_value = layouts[layout]
+    result = _probe(
+        tmp_path,
+        f"""
+        import {{ resolveClaudeCommand }} from '{_MODULES / "claude-review.mjs"}';
+        process.stdout.write(resolveClaudeCommand());
+        """,
+        cwd=tmp_path / "work",
+        path_value=path_value,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(good.resolve())
+    assert not (tmp_path / "poisoned.log").exists()
