@@ -4392,6 +4392,123 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
     assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
 
 
+def _forum_index_exports() -> list[DCEExport]:
+    return [
+        _make_export(
+            channel_id="fp1",
+            channel_name="first-post",
+            channel_type=15,
+            is_thread=True,
+            parent_channel_name="my-forum",
+            category_id="cat1",
+            category="General",
+            message_count=42,
+        ),
+    ]
+
+
+def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> None:
+    """Register the two channel creates and the index send for one forum."""
+    m.post(
+        f"{STOAT_URL}/servers/srv1/channels",
+        payload={"_id": "stoat-fp1", "name": "my-forum-first-post"},
+    )
+    m.post(
+        f"{STOAT_URL}/servers/srv1/channels",
+        payload={"_id": "stoat-idx1", "name": "my-forum-index"},
+    )
+    if index_send_status == 409:
+        m.post(
+            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            status=409,
+            payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
+        )
+    else:
+        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages", payload={"_id": "idx-msg1"})
+        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin", payload={})
+    m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+
+
+async def test_forum_index_create_duplicate_marks_the_forum_present(tmp_path: Path) -> None:
+    """#560: a duplicate on the create send records the #215 present-id-unknown marker.
+
+    Stoat returns no id with the 409, so nothing may be written to
+    forum_index_message_ids (a truthy entry there would drive an edit against a missing id).
+    """
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+
+    with aioresponses() as m:
+        _register_forum_index_channels(m, 409)
+        await run_channels(config, state, _forum_index_exports(), [].append)
+
+    assert state.forum_index_present_unknown_id == {"forum-my-forum"}
+    assert "forum-my-forum" not in state.forum_index_message_ids
+
+
+async def test_forum_index_create_success_does_not_mark_the_forum(tmp_path: Path) -> None:
+    """#560: a normal create send leaves the marker set empty."""
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+
+    with aioresponses() as m:
+        _register_forum_index_channels(m, 200)
+        await run_channels(config, state, _forum_index_exports(), [].append)
+
+    assert state.forum_index_present_unknown_id == set()
+    assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
+
+
+async def test_forum_index_create_success_clears_a_stale_mark(tmp_path: Path) -> None:
+    """#560: a carried mark does not survive a create that returned a real id."""
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(
+        stoat_server_id="srv1", forum_index_present_unknown_id={"forum-my-forum"}
+    )
+
+    with aioresponses() as m:
+        _register_forum_index_channels(m, 200)
+        await run_channels(config, state, _forum_index_exports(), [].append)
+
+    assert state.forum_index_present_unknown_id == set()
+
+
+async def test_report_rebuild_after_a_create_duplicate_posts_no_second_index(
+    tmp_path: Path,
+) -> None:
+    """#560: the REPORT-phase rebuild treats a create-path duplicate as #215 defines.
+
+    Without the marker the rebuild finds no id and no mark, takes the send branch and
+    posts a second index message. With it, the rebuild searches the pinned messages and,
+    finding none here, warns and sends nothing.
+    """
+    from discord_ferry.core.engine import _rebuild_forum_indexes
+
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+
+    with aioresponses() as m:
+        _register_forum_index_channels(m, 409)
+        await run_channels(config, state, _forum_index_exports(), [].append)
+
+    sends: list[str] = []
+    events: list[MigrationEvent] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            payload={"_id": "second-index"},
+            callback=lambda url, **kwargs: sends.append(str(url)),  # type: ignore[misc]
+            repeat=True,
+        )
+        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages/second-index/pin", payload={})
+        m.post(f"{STOAT_URL}/channels/stoat-idx1/search", payload=[])
+        await _rebuild_forum_indexes(config, state, events.append)
+
+    assert sends == [], "the rebuild posted a second index next to the one already on the server"
+    assert state.forum_index_present_unknown_id == {"forum-my-forum"}
+    assert [e.status for e in events] == ["warning"]
+
+
 # ---------------------------------------------------------------------------
 # created_channel_names: the name Ferry SENT, from the create response (#289)
 # ---------------------------------------------------------------------------
