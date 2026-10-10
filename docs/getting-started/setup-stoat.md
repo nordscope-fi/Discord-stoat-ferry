@@ -69,26 +69,29 @@ You will be opening a hidden panel in your browser called "developer tools." Thi
     !!! tip "Can't see the Application tab?"
         If the panel is narrow, some tabs may be hidden. Look for a **>>** button at the end of the tab row — click it to reveal the hidden tabs.
 
-4. In the left sidebar of the Application panel, look for a section called **Local Storage**. Click the small arrow or triangle next to it to expand it. You will see one or more website addresses listed underneath. Click the one that matches your Stoat instance — for example, `https://stoat.chat` or `https://chat.yourdomain.com`.
+4. In the left sidebar of the Application panel, find the **Storage** section. Your browser keeps a small database for each website there, listed as **IndexedDB**. Click the small arrow next to it. Under it, open **localforage**, then click **keyvaluepairs**. In Firefox, the same database is listed under **Indexed DB** in the Storage tab.
 
-    <!-- screenshot: devtools-local-storage-expanded -->
+    !!! note "Not under Local Storage"
+        Earlier versions of this guide sent you to **Local Storage**. On the current Stoat web app, Local Storage is empty and the token is in IndexedDB.
 
-5. A table appears on the right side with two columns: **Key** and **Value**. Scroll through the list and find the row where the Key column says **`session_token`** (or something ending in `token`).
+    <!-- screenshot: devtools-indexeddb-keyvaluepairs -->
 
-6. Click that row. The full value will appear — either in the row itself or in a panel below the table. **Select the entire value and copy it** (right-click → Copy, or Ctrl+C / Cmd+C). This is your token.
+5. A table appears on the right with **Key** and **Value** columns. Click the row whose key is **`auth`**. A preview of its contents opens below the table.
+
+6. In the preview, expand **session**. It holds a field called **token**. Right-click the token's value and choose the copy option, or select the value and press Cmd+C (Ctrl+C on Windows). Do not include the quotation marks. This is your token.
 
     <!-- screenshot: devtools-session-token-selected -->
 
 !!! info "What does a token look like?"
-    It is a long string of random-looking letters and numbers, typically 40–64 characters. Example shape (not a real token): `A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0`. If what you copied is very short (under 20 characters), you probably copied the wrong field — go back and look for the longer value.
+    A long string of random-looking letters and numbers, 64 characters on stoat.chat. Example shape (not a real token): `A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0`. If what you copied is very short (under 20 characters), you probably copied **userId** or **_id** from the same preview. Those sit next to the token and are not secret, but Ferry cannot log in with them.
 
-!!! question "The table is empty — there is nothing to copy?"
+!!! question "There is no auth row, or no localforage database?"
     This means your browser has not saved a login session yet. Try these fixes:
 
-    - **Make sure you are actually logged in.** Go to your Stoat instance (e.g. `https://stoat.chat/app`) in the same browser tab and log in. Then go back to the developer tools panel — the table should now have entries.
+    - **Make sure you are actually logged in.** Go to your Stoat instance (for example `https://stoat.chat/app`) in the same browser tab and log in. Then go back to the developer tools panel and click the refresh arrow above the table.
     - **Refresh the page.** Press F5 or click the refresh button, then check the table again.
-    - **Disable browser extensions.** Privacy-focused extensions (uBlock Origin, Privacy Badger, etc.) can block Local Storage. Try disabling them temporarily, or open Stoat in a **private/incognito window** (Ctrl+Shift+N in Chrome, Ctrl+Shift+P in Firefox).
-    - **Try a different browser.** If you normally use Firefox, try Chrome (or vice versa). Log in to Stoat there and repeat the steps above.
+    - **Disable browser extensions.** Privacy-focused extensions (uBlock Origin, Privacy Badger and similar) can block site storage. Try disabling them temporarily, or open Stoat in a **private/incognito window** (Ctrl+Shift+N in Chrome, Ctrl+Shift+P in Firefox).
+    - **Try a different browser.** If you normally use Firefox, try Chrome (or the other way round). Log in to Stoat there and repeat the steps above.
 
 ---
 
