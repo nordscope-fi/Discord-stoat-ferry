@@ -13,6 +13,7 @@ from discord_ferry.cli import (
 )
 from discord_ferry.state import MigrationState, RollbackProgress
 from discord_ferry.stats import FidelityBlock, RollbackBlock, StateSummary, summarize_state
+from tests.stoat_ids import stoat_id
 
 
 def test_fidelity_block_optional_subscores_default_to_none() -> None:
@@ -93,11 +94,11 @@ def test_state_summary_default_construction_is_explicit() -> None:
 def _full_state() -> MigrationState:
     """Build a realistic MigrationState for happy-path tests."""
     state = MigrationState()
-    state.role_map = {f"r{i}": f"sr{i}" for i in range(4)}
-    state.channel_map = {f"c{i}": f"sc{i}" for i in range(7)}
-    state.category_map = {"cat1": "scat1", "cat2": "scat2"}
-    state.emoji_map = {f"e{i}": f"se{i}" for i in range(12)}
-    state.message_map = {f"m{i}": f"sm{i}" for i in range(1000)}
+    state.role_map = {f"{810 + i}": stoat_id(i) for i in range(4)}
+    state.channel_map = {f"{820 + i}": stoat_id(100 + i) for i in range(7)}
+    state.category_map = {"830": "scat1", "831": "scat2"}
+    state.emoji_map = {f"{850 + i}": f"se{i}" for i in range(12)}
+    state.message_map = {f"{1000 + i}": stoat_id(1000 + i) for i in range(1000)}
     state.attachments_uploaded = 85
     state.attachments_skipped = 5
     state.pins_applied = 12
@@ -114,7 +115,7 @@ def _full_state() -> MigrationState:
     state.warnings = [{"phase": "STRUCTURE", "message": "emoji slot near cap"}]
     state.channel_message_counts = {"c0": 600, "c1": 300, "c2": 100}
     state.is_dry_run = False
-    state.stoat_server_id = "01HXYZSERVER"
+    state.stoat_server_id = "01HXYZSERVER00000000000000"
     state.started_at = "2026-05-16T10:00:00"
     state.completed_at = "2026-05-16T10:30:00"
     state.current_phase = "REPORT"

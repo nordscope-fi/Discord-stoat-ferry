@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
 from discord_ferry.migrator.api import api_add_reaction, get_session
-from discord_ferry.state import save_state
+from discord_ferry.state import is_stoat_file_id, save_state
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -74,7 +74,28 @@ async def run_reactions(
 
     # Resume-safe: seed per-message cap counts from persisted state.
     per_message_counts: dict[str, int] = dict(state.reaction_message_counts)
-    queue = list(state.pending_reactions)  # snapshot — we reassign state.pending_reactions below
+    # #970: reactions are replayed from state.json on a resume. Each must target a channel
+    # this migration created, and a custom emoji must be one it uploaded (a value that can
+    # only be a custom emoji id, because a Unicode emoji is never plain ASCII, and that is
+    # not in emoji_map). Anything else is dropped with a warning rather than sent.
+    mapped_channels = set(state.channel_map.values())
+    owned_emoji = set(state.emoji_map.values())
+    queue: list[dict[str, object]] = []  # snapshot — we reassign state.pending_reactions below
+    for entry in state.pending_reactions:
+        emoji_text = str(entry["emoji"])
+        refusal = ""
+        if str(entry["channel_id"]) not in mapped_channels:
+            refusal = (
+                f"channel {entry['channel_id']} is not one of the channels this migration created"
+            )
+        elif is_stoat_file_id(emoji_text) and emoji_text not in owned_emoji:
+            refusal = f"emoji {emoji_text} is not one this migration uploaded"
+        if not refusal:
+            queue.append(entry)
+            continue
+        notice = f"Skipping reaction on message {entry['message_id']}: {refusal}."
+        state.warnings.append({"phase": "reactions", "type": "reaction_unbound", "message": notice})
+        on_event(MigrationEvent(phase="reactions", status="warning", message=notice))
     remaining: list[dict[str, object]] = []
     checkpoint_interval = max(config.checkpoint_interval, 1)
     last_save = time.monotonic()

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from discord_ferry.config import FerryConfig
 from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.state import MigrationState
+from tests.stoat_ids import SERVER_ID, stoat_id
 
 BASE_URL = "https://api.test"
 TOKEN = "test-token"
@@ -31,15 +32,27 @@ def _make_config(output_dir: Path) -> FerryConfig:
 
 def _make_state(pending: list[dict[str, object]] | None = None) -> MigrationState:
     state = MigrationState()
-    state.stoat_server_id = "srv1"
+    state.stoat_server_id = SERVER_ID
     if pending is not None:
         state.pending_reactions = pending
+        _register_owned(state)
     return state
 
 
+def _register_owned(state: MigrationState) -> None:
+    """Record the queue's channels, and its custom emoji ids, as this migration's own (#970).
+
+    A plain ASCII emoji value can only be a custom emoji id, so those are mapped.
+    """
+    channels = sorted({str(r["channel_id"]) for r in state.pending_reactions})
+    state.channel_map = {str(810 + i): channel for i, channel in enumerate(channels)}
+    custom = sorted({str(r["emoji"]) for r in state.pending_reactions if str(r["emoji"]).isascii()})
+    state.emoji_map = {str(850 + i): emoji for i, emoji in enumerate(custom)}
+
+
 def _reaction(
-    channel_id: str = "ch1",
-    message_id: str = "msg1",
+    channel_id: str = stoat_id(1),
+    message_id: str = stoat_id(11),
     emoji: str = "\U0001f44d",
 ) -> dict[str, object]:
     return {"channel_id": channel_id, "message_id": message_id, "emoji": emoji}
@@ -102,7 +115,7 @@ async def test_run_reactions_per_message_limit(tmp_path: Path) -> None:
     events: list[Any] = []
     config = _make_config(tmp_path)
     # 25 reactions all on the same message.
-    pending = [_reaction(message_id="msg1", emoji=f"e{i}") for i in range(25)]
+    pending = [_reaction(message_id=stoat_id(11), emoji=f"e{i}") for i in range(25)]
     state = _make_state(pending=pending)
 
     mock_add = AsyncMock(return_value={})
@@ -121,7 +134,10 @@ async def test_run_reactions_error_handling(tmp_path: Path) -> None:
     """Failed reaction stays in pending; successful one is consumed."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    pending = [_reaction(message_id="msg1"), _reaction(message_id="msg2")]  # 1 fails, 1 ok
+    pending = [
+        _reaction(message_id=stoat_id(11)),
+        _reaction(message_id=stoat_id(12)),
+    ]  # 1 fails, 1 ok
     state = _make_state(pending=pending)
 
     call_count = 0
@@ -142,14 +158,14 @@ async def test_run_reactions_error_handling(tmp_path: Path) -> None:
     assert len(state.errors) == 1
     assert state.reactions_applied == 1
     # The failed entry is retained for resume; the successful one consumed.
-    assert state.pending_reactions == [_reaction(message_id="msg1")]
+    assert state.pending_reactions == [_reaction(message_id=stoat_id(11))]
 
 
 async def test_run_reactions_counter_increment(tmp_path: Path) -> None:
     """reactions_applied increments correctly for each successful reaction."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    pending = [_reaction(message_id=f"msg{i}") for i in range(5)]
+    pending = [_reaction(message_id=stoat_id(20 + i)) for i in range(5)]
     state = _make_state(pending=pending)
 
     mock_add = AsyncMock(return_value={})
@@ -171,7 +187,7 @@ async def test_run_reactions_clears_pending_on_success(tmp_path: Path) -> None:
 
     events: list[Any] = []
     config = _make_config(tmp_path)
-    state = _make_state(pending=[_reaction(message_id=f"msg{i}") for i in range(3)])
+    state = _make_state(pending=[_reaction(message_id=stoat_id(20 + i)) for i in range(3)])
 
     with (
         patch("discord_ferry.migrator.reactions.api_add_reaction", new=AsyncMock(return_value={})),
@@ -189,7 +205,7 @@ async def test_run_reactions_resume_no_double_count(tmp_path: Path) -> None:
     from discord_ferry.state import load_state
 
     config = _make_config(tmp_path)
-    state = _make_state(pending=[_reaction(message_id=f"msg{i}") for i in range(5)])
+    state = _make_state(pending=[_reaction(message_id=stoat_id(20 + i)) for i in range(5)])
 
     crash_after = 0
 
@@ -232,8 +248,9 @@ async def test_run_reactions_cap_persists_across_resume(tmp_path: Path) -> None:
     """A message already at the 20 cap is not re-applied past 20 after a resume."""
     config = _make_config(tmp_path)
     state = _make_state(pending=[])
-    state.reaction_message_counts = {"msgX": 20}  # already capped in a prior run
-    state.pending_reactions = [_reaction(message_id="msgX", emoji=f"e{i}") for i in range(3)]
+    state.reaction_message_counts = {stoat_id(40): 20}  # already capped in a prior run
+    state.pending_reactions = [_reaction(message_id=stoat_id(40), emoji=f"e{i}") for i in range(3)]
+    _register_owned(state)
 
     mock_add = AsyncMock(return_value={})
     with (
@@ -252,7 +269,7 @@ async def test_run_reactions_dry_run_reports_full(tmp_path: Path) -> None:
 
     config = _make_config(tmp_path)
     config.dry_run = True
-    state = _make_state(pending=[_reaction(message_id=f"msg{i}") for i in range(4)])
+    state = _make_state(pending=[_reaction(message_id=stoat_id(20 + i)) for i in range(4)])
 
     mock_add = AsyncMock(return_value={})
     with patch("discord_ferry.migrator.reactions.api_add_reaction", new=mock_add):
@@ -268,7 +285,7 @@ async def test_run_reactions_cap_counter(tmp_path: Path) -> None:
     """SC-14: reactions skipped at the 20/message cap increment reactions_capped."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    pending = [_reaction(message_id="msg1", emoji=f"e{i}") for i in range(25)]
+    pending = [_reaction(message_id=stoat_id(11), emoji=f"e{i}") for i in range(25)]
     state = _make_state(pending=pending)
 
     mock_add = AsyncMock(return_value={})
@@ -285,7 +302,7 @@ async def test_run_reactions_cap_counter(tmp_path: Path) -> None:
 async def test_run_reactions_cap_counter_resume_no_double_count(tmp_path: Path) -> None:
     """SC-15: re-running after the cap consumed the overflow does not re-count."""
     config = _make_config(tmp_path)
-    pending = [_reaction(message_id="msg1", emoji=f"e{i}") for i in range(25)]
+    pending = [_reaction(message_id=stoat_id(11), emoji=f"e{i}") for i in range(25)]
     state = _make_state(pending=pending)
 
     with (

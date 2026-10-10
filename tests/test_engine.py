@@ -1373,7 +1373,7 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 STOAT_URL = "https://api.test"
-STOAT_SERVER_ID = "stoat_server_123"
+STOAT_SERVER_ID = "01J5T000000000000000009000"
 
 
 async def test_validation_calls_run_check(tmp_path: Path) -> None:
@@ -1387,8 +1387,8 @@ async def test_validation_calls_run_check(tmp_path: Path) -> None:
         emit: EventCallback,
     ) -> None:
         state.stoat_server_id = STOAT_SERVER_ID
-        state.channel_map = {"d1": "s1"}
-        state.role_map = {"r1": "sr1"}
+        state.channel_map = {"111": "01J5T000000000000000000001"}
+        state.role_map = {"222": "01J5T000000000000000000002"}
 
     config = _make_config(tmp_path, validate_after=True)
     overrides = {**_NOOP_OVERRIDES, "connect": set_server_id}
@@ -2726,7 +2726,7 @@ async def test_an_incremental_with_a_prior_records_the_thread_strategy(tmp_path:
     from discord_ferry.state import save_state
 
     prior = MigrationState(
-        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
+        channel_map={"100": "01J5T000000000000000000001"},
         thread_strategy="flatten",
     )
     save_state(prior, tmp_path)
@@ -2782,21 +2782,21 @@ async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
     from discord_ferry.state import save_state
 
     prior = MigrationState(
-        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
-        created_channel_names={"d-100": "general"},
-        role_map={"d-role-1": "01JSTOATRL0000000000AAA"},
-        created_role_names={"d-role-1": "mods"},
-        emoji_map={"d-e1": "01JAUTUMNEMOJI00000000A"},
-        created_emoji_names={"d-e1": "party"},
+        channel_map={"100": "01J5T000000000000000000001"},
+        created_channel_names={"100": "general"},
+        role_map={"110": "01J5T000000000000000000003"},
+        created_role_names={"110": "mods"},
+        emoji_map={"120": "01JAUTUMNEMOJI00000000A"},
+        created_emoji_names={"120": "party"},
     )
     save_state(prior, tmp_path)
 
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
 
-    assert state.created_channel_names == {"d-100": "general"}
-    assert state.created_role_names == {"d-role-1": "mods"}
-    assert state.created_emoji_names == {"d-e1": "party"}
+    assert state.created_channel_names == {"100": "general"}
+    assert state.created_role_names == {"110": "mods"}
+    assert state.created_emoji_names == {"120": "party"}
 
 
 # ---------------------------------------------------------------------------
@@ -2853,12 +2853,12 @@ async def _incremental_from(tmp_path: Path, prior: MigrationState) -> MigrationS
 async def test_a_2_17_prior_is_carried_intact(tmp_path: Path) -> None:
     """SC-5.6. The ordinary case: names recorded, names carried."""
     prior = MigrationState(
-        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
-        created_channel_names={"d-100": "general"},
+        channel_map={"100": "01J5T000000000000000000001"},
+        created_channel_names={"100": "general"},
     )
     state = await _incremental_from(tmp_path, prior)
     assert_nothing_dropped(prior, state)
-    assert state.created_channel_names == {"d-100": "general"}
+    assert state.created_channel_names == {"100": "general"}
 
 
 async def test_an_incremental_from_a_pre_2_17_state_is_not_flagged(tmp_path: Path) -> None:
@@ -2876,11 +2876,11 @@ async def test_an_incremental_from_a_pre_2_17_state_is_not_flagged(tmp_path: Pat
 
     DO NOT DELETE THIS TEST, and do not "simplify" the two predicates into one.
     """
-    prior = MigrationState(channel_map={"d-100": "01JSTOATCH00000000000AAA"})
+    prior = MigrationState(channel_map={"100": "01J5T000000000000000000001"})
     state = await _incremental_from(tmp_path, prior)
 
     assert_nothing_dropped(prior, state)  # passes: no names recorded, no obligation
-    assert state.channel_map == {"d-100": "01JSTOATCH00000000000AAA"}
+    assert state.channel_map == {"100": "01J5T000000000000000000001"}
     assert state.created_channel_names == {}
 
 
@@ -2893,15 +2893,15 @@ async def test_a_mixed_carried_and_nameless_prior_is_not_flagged(tmp_path: Path)
     """
     prior = MigrationState(
         channel_map={
-            "d-100": "01JSTOATCH00000000000AAA",  # from the old run, no name
-            "d-101": "01JSTOATCH00000000000BBB",  # recorded under 2.17.0
+            "100": "01J5T000000000000000000001",  # from the old run, no name
+            "101": "01J5T000000000000000000002",  # recorded under 2.17.0
         },
-        created_channel_names={"d-101": "announcements"},
+        created_channel_names={"101": "announcements"},
     )
     state = await _incremental_from(tmp_path, prior)
 
     assert_nothing_dropped(prior, state)
-    assert state.created_channel_names == {"d-101": "announcements"}
+    assert state.created_channel_names == {"101": "announcements"}
 
 
 def test_the_carried_map_filter_is_unreachable_today() -> None:
@@ -2914,8 +2914,8 @@ def test_the_carried_map_filter_is_unreachable_today() -> None:
     defensive branch rather than an uncovered one to delete.
     """
     prior = MigrationState(
-        channel_map={"d-100": "01JSTOATCH00000000000AAA"},
-        created_channel_names={"d-100": "general"},
+        channel_map={"100": "01J5T000000000000000000001"},
+        created_channel_names={"100": "general"},
     )
     carried = MigrationState()  # a carry-over that brought nothing forward
     assert_nothing_dropped(prior, carried)  # the filter excludes the absent key

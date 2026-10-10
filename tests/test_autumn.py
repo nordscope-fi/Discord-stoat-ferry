@@ -1045,7 +1045,10 @@ async def test_old_bare_path_cache_entries_are_a_miss(tmp_path: Path) -> None:
 
     f = tmp_path / "a.png"
     f.write_bytes(b"x" * 10)
-    old = {"stoat_server_id": "srv", "upload_cache": {str(f): "old-wrong-tag-id"}}
+    old = {
+        "stoat_server_id": "01J5T000000000000000000001",
+        "upload_cache": {str(f): "old-wrong-tag-id"},
+    }
     (tmp_path / "state.json").write_text(json.dumps(old), encoding="utf-8")
 
     state = load_state(tmp_path)

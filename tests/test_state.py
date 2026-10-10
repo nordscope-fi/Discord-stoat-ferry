@@ -15,18 +15,19 @@ from discord_ferry.state import (
     load_state,
     save_state,
 )
+from tests.stoat_ids import SERVER_ID, stoat_id
 
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     """State survives a save/load round-trip."""
     state = MigrationState(
-        stoat_server_id="01ABC",
+        stoat_server_id=SERVER_ID,
         current_phase="messages",
         started_at="2024-01-01T00:00:00+00:00",
     )
     save_state(state, tmp_path)
     loaded = load_state(tmp_path)
-    assert loaded.stoat_server_id == "01ABC"
+    assert loaded.stoat_server_id == SERVER_ID
     assert loaded.current_phase == "messages"
     assert loaded.started_at == "2024-01-01T00:00:00+00:00"
 
@@ -54,29 +55,29 @@ def test_load_corrupt_json(tmp_path: Path) -> None:
 def test_pending_pins_tuple_roundtrip(tmp_path: Path) -> None:
     """Pending pins tuples survive JSON serialization."""
     state = MigrationState(
-        pending_pins=[("ch1", "msg1"), ("ch2", "msg2")],
+        pending_pins=[(stoat_id(1), stoat_id(11)), (stoat_id(2), stoat_id(12))],
     )
     save_state(state, tmp_path)
     loaded = load_state(tmp_path)
-    assert loaded.pending_pins == [("ch1", "msg1"), ("ch2", "msg2")]
+    assert loaded.pending_pins == [(stoat_id(1), stoat_id(11)), (stoat_id(2), stoat_id(12))]
     assert isinstance(loaded.pending_pins[0], tuple)
 
 
 def test_state_with_populated_maps(tmp_path: Path) -> None:
     """State with data in all maps round-trips correctly."""
     state = MigrationState(
-        role_map={"d_role1": "s_role1"},
-        channel_map={"d_ch1": "s_ch1", "d_ch2": "s_ch2"},
-        category_map={"d_cat1": "s_cat1"},
-        message_map={"d_msg1": "s_msg1"},
-        emoji_map={"d_emoji1": "s_emoji1"},
+        role_map={"810": stoat_id(1)},
+        channel_map={"820": stoat_id(2), "821": stoat_id(3)},
+        category_map={"830": "s_cat1"},
+        message_map={"840": stoat_id(4)},
+        emoji_map={"850": "s_emoji1"},
         avatar_cache={"author1": "autumn_av1"},
         upload_cache={"/path/to/file.png": "autumn_file1"},
         author_names={"12345": "Alice"},
-        pending_reactions=[{"channel_id": "ch1", "message_id": "msg1", "emoji": "👍"}],
+        pending_reactions=[{"channel_id": stoat_id(2), "message_id": stoat_id(4), "emoji": "👍"}],
         errors=[{"phase": "messages", "error": "timeout"}],
         warnings=[{"type": "http_attachment", "message": "missing media"}],
-        stoat_server_id="01STOAT",
+        stoat_server_id=SERVER_ID,
         current_phase="reactions",
         completed_channel_ids={"general"},
         channel_message_offsets={"general": "msg999"},
@@ -85,9 +86,9 @@ def test_state_with_populated_maps(tmp_path: Path) -> None:
     )
     save_state(state, tmp_path)
     loaded = load_state(tmp_path)
-    assert loaded.role_map == {"d_role1": "s_role1"}
-    assert loaded.channel_map == {"d_ch1": "s_ch1", "d_ch2": "s_ch2"}
-    assert loaded.emoji_map == {"d_emoji1": "s_emoji1"}
+    assert loaded.role_map == {"810": stoat_id(1)}
+    assert loaded.channel_map == {"820": stoat_id(2), "821": stoat_id(3)}
+    assert loaded.emoji_map == {"850": "s_emoji1"}
     assert loaded.author_names == {"12345": "Alice"}
     assert loaded.upload_cache == {"/path/to/file.png": "autumn_file1"}
     assert loaded.completed_channel_ids == {"general"}
@@ -111,14 +112,14 @@ def test_load_state_missing_newer_fields(tmp_path: Path) -> None:
     import json
 
     minimal = {
-        "stoat_server_id": "old-server",
+        "stoat_server_id": SERVER_ID,
         "current_phase": "messages",
-        "role_map": {"r1": "sr1"},
+        "role_map": {"810": stoat_id(1)},
     }
     (tmp_path / "state.json").write_text(json.dumps(minimal), encoding="utf-8")
     loaded = load_state(tmp_path)
-    assert loaded.stoat_server_id == "old-server"
-    assert loaded.role_map == {"r1": "sr1"}
+    assert loaded.stoat_server_id == SERVER_ID
+    assert loaded.role_map == {"810": stoat_id(1)}
     # Newer fields should be filled with defaults
     assert loaded.emoji_map == {}
     assert loaded.author_names == {}
@@ -191,7 +192,7 @@ def test_old_state_without_orphan_fields(tmp_path: Path) -> None:
     """State JSON from before orphan tracking fields were added loads with empty defaults."""
     import json
 
-    old_data = {"role_map": {"r1": "sr1"}, "channel_map": {}}
+    old_data = {"role_map": {"810": stoat_id(1)}, "channel_map": {}}
     (tmp_path / "state.json").write_text(json.dumps(old_data))
     loaded = load_state(tmp_path)
     assert loaded.autumn_uploads == {}
@@ -208,8 +209,8 @@ def test_failed_message_round_trip(tmp_path: Path) -> None:
     from discord_ferry.state import FailedMessage
 
     fm = FailedMessage(
-        discord_msg_id="msg123",
-        stoat_channel_id="ch456",
+        discord_msg_id="123456789012345678",
+        stoat_channel_id=stoat_id(456),
         error="API timeout",
         retry_count=1,
         content_preview="Hello world...",
@@ -219,7 +220,7 @@ def test_failed_message_round_trip(tmp_path: Path) -> None:
     loaded = load_state(tmp_path)
     assert len(loaded.failed_messages) == 1
     assert isinstance(loaded.failed_messages[0], FailedMessage)
-    assert loaded.failed_messages[0].discord_msg_id == "msg123"
+    assert loaded.failed_messages[0].discord_msg_id == "123456789012345678"
     assert loaded.failed_messages[0].retry_count == 1
 
 
@@ -288,7 +289,7 @@ def test_v1_state_migration(tmp_path: Path) -> None:
     import json
 
     v1_data = {
-        "channel_map": {"100": "s_ch100", "200": "s_ch200", "300": "s_ch300"},
+        "channel_map": {"100": stoat_id(100), "200": stoat_id(200), "300": stoat_id(300)},
         "last_completed_channel": "200",
         "last_completed_message": "msg_999",
         "role_map": {},
@@ -316,7 +317,7 @@ def test_v1_state_migration_empty_fields(tmp_path: Path) -> None:
     import warnings
 
     v1_data = {
-        "channel_map": {"100": "s_ch100"},
+        "channel_map": {"100": stoat_id(100)},
         "last_completed_channel": "",
         "last_completed_message": "",
         "role_map": {},
@@ -336,7 +337,7 @@ def test_v1_state_backup_created(tmp_path: Path) -> None:
     import warnings
 
     v1_data = {
-        "channel_map": {"100": "s_ch100"},
+        "channel_map": {"100": stoat_id(100)},
         "last_completed_channel": "100",
         "last_completed_message": "msg_42",
     }
@@ -360,7 +361,7 @@ def test_message_map_saved_to_separate_file(tmp_path: Path) -> None:
     """After save_state, message_map.json exists and state.json does not contain message_map."""
     import json
 
-    state = MigrationState(message_map={"d_msg1": "s_msg1", "d_msg2": "s_msg2"})
+    state = MigrationState(message_map={"840": stoat_id(4), "841": stoat_id(5)})
     save_state(state, tmp_path)
 
     # state.json must NOT contain message_map key.
@@ -371,15 +372,15 @@ def test_message_map_saved_to_separate_file(tmp_path: Path) -> None:
     mm_path = tmp_path / "message_map.json"
     assert mm_path.exists()
     mm_data = json.loads(mm_path.read_text())
-    assert mm_data == {"d_msg1": "s_msg1", "d_msg2": "s_msg2"}
+    assert mm_data == {"840": stoat_id(4), "841": stoat_id(5)}
 
 
 def test_message_map_loaded_from_separate_file(tmp_path: Path) -> None:
     """Round-trip through separate message_map.json restores the message_map correctly."""
-    state = MigrationState(message_map={"d_msg1": "s_msg1"})
+    state = MigrationState(message_map={"840": stoat_id(4)})
     save_state(state, tmp_path)
     loaded = load_state(tmp_path)
-    assert loaded.message_map == {"d_msg1": "s_msg1"}
+    assert loaded.message_map == {"840": stoat_id(4)}
 
 
 def test_message_map_v1_fallback(tmp_path: Path) -> None:
@@ -387,7 +388,7 @@ def test_message_map_v1_fallback(tmp_path: Path) -> None:
     import json
 
     v1_data = {
-        "message_map": {"old_msg1": "old_stoat1"},
+        "message_map": {"840": stoat_id(4)},
         "role_map": {},
         "channel_map": {},
     }
@@ -395,7 +396,7 @@ def test_message_map_v1_fallback(tmp_path: Path) -> None:
     # No message_map.json exists.
 
     loaded = load_state(tmp_path)
-    assert loaded.message_map == {"old_msg1": "old_stoat1"}
+    assert loaded.message_map == {"840": stoat_id(4)}
 
 
 def test_message_map_empty_dict(tmp_path: Path) -> None:
@@ -465,12 +466,12 @@ def test_old_state_json_without_rollback_progress_loads_clean(tmp_path: Path) ->
 
     # Hand-crafted v1.7.0-shape state.json.
     raw = {
-        "role_map": {"d1": "s1"},
+        "role_map": {"810": stoat_id(1)},
         "channel_map": {},
         "category_map": {},
         "message_map": {},
         "emoji_map": {},
-        "stoat_server_id": "srv01",
+        "stoat_server_id": SERVER_ID,
     }
     (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
     (tmp_path / "message_map.json").write_text("{}", encoding="utf-8")
@@ -478,7 +479,7 @@ def test_old_state_json_without_rollback_progress_loads_clean(tmp_path: Path) ->
     loaded = load_state(tmp_path)
 
     assert loaded.rollback_progress is None
-    assert loaded.role_map == {"d1": "s1"}
+    assert loaded.role_map == {"810": stoat_id(1)}
 
 
 def test_rollback_failure_with_none_http_status(tmp_path: Path) -> None:
@@ -544,7 +545,7 @@ def test_invite_fields_roundtrip(tmp_path: Path) -> None:
 
 def test_invite_fields_default_when_absent(tmp_path: Path) -> None:
     """Old state.json without invite fields loads with empty defaults."""
-    minimal = {"stoat_server_id": "s", "current_phase": "report"}
+    minimal = {"stoat_server_id": SERVER_ID, "current_phase": "report"}
     (tmp_path / "state.json").write_text(json.dumps(minimal), encoding="utf-8")
     loaded = load_state(tmp_path)
     assert loaded.invite_code == ""
@@ -571,7 +572,9 @@ def test_new_reporting_fields_default_when_absent(tmp_path: Path) -> None:
 
     from discord_ferry.state import load_state
 
-    (tmp_path / "state.json").write_text(json.dumps({"stoat_server_id": "srv1"}), encoding="utf-8")
+    (tmp_path / "state.json").write_text(
+        json.dumps({"stoat_server_id": SERVER_ID}), encoding="utf-8"
+    )
     (tmp_path / "message_map.json").write_text(json.dumps({}), encoding="utf-8")
 
     loaded = load_state(tmp_path)
@@ -589,7 +592,7 @@ def test_channel_high_water_round_trips(tmp_path: Path) -> None:
 
 def test_load_state_defaults_channel_high_water(tmp_path: Path) -> None:
     """A pre-feature state.json without channel_high_water loads with {} (back-compat)."""
-    state = MigrationState(channel_map={"a": "b"})
+    state = MigrationState(channel_map={"820": stoat_id(2)})
     save_state(state, tmp_path)
     path = tmp_path / "state.json"
     data = json.loads(path.read_text())
@@ -615,7 +618,7 @@ def test_roles_finalized_roundtrip(tmp_path: Path) -> None:
 def test_load_seeds_roles_finalized_for_completed_migration(tmp_path: Path) -> None:
     """S3 SC-17: a completed migration with no roles_finalized key is seeded from role_map."""
     state = MigrationState(
-        completed_at="2026-06-26T00:00:00+00:00", role_map={"r1": "s1", "r2": "s2"}
+        completed_at="2026-06-26T00:00:00+00:00", role_map={"810": stoat_id(1), "811": stoat_id(2)}
     )
     save_state(state, tmp_path)
     path = tmp_path / "state.json"
@@ -623,12 +626,12 @@ def test_load_seeds_roles_finalized_for_completed_migration(tmp_path: Path) -> N
     data.pop("roles_finalized", None)  # emulate an older ferry state file
     path.write_text(json.dumps(data))
     loaded = load_state(tmp_path)
-    assert loaded.roles_finalized == {"r1", "r2"}
+    assert loaded.roles_finalized == {"810", "811"}
 
 
 def test_load_does_not_seed_roles_finalized_without_completed_at(tmp_path: Path) -> None:
     """S3 SC-17 (control): a crashed (not completed) migration is NOT seeded."""
-    state = MigrationState(role_map={"r1": "s1"})  # no completed_at
+    state = MigrationState(role_map={"810": stoat_id(1)})  # no completed_at
     save_state(state, tmp_path)
     path = tmp_path / "state.json"
     data = json.loads(path.read_text())
@@ -761,7 +764,7 @@ def test_save_load_save_is_byte_identical(tmp_path: Path) -> None:
     register_secret("proxy_password", "hunter2horse")
     state = MigrationState()
     state.warnings.append({"type": "x", "message": "proxy: hunter2horse"})
-    state.role_map = {"111": "01A"}
+    state.role_map = {"111": stoat_id(1)}
     state.current_phase = "structure"
 
     save_state(state, tmp_path)
@@ -811,7 +814,7 @@ def test_failed_message_members_are_masked_in_state_json(tmp_path: Path) -> None
     state.failed_messages.append(
         FailedMessage(
             discord_msg_id="1123456789012345678",
-            stoat_channel_id="01ABC",
+            stoat_channel_id=SERVER_ID,
             error="send failed: hunter2horse",
             retry_count=2,
             content_preview="hi hunter2horse",
@@ -945,10 +948,10 @@ def test_state_document_has_no_unclassified_fields() -> None:
 
 def test_pending_emoji_rewrites_round_trips(tmp_path: Path) -> None:
     """SC-ST.1: the resume record survives save then load."""
-    state = MigrationState(pending_emoji_rewrites={"d_emo": {"old": "a", "new": "b"}})
+    state = MigrationState(pending_emoji_rewrites={"850": {"old": "a", "new": "b"}})
     save_state(state, tmp_path)
     loaded = load_state(tmp_path)
-    assert loaded.pending_emoji_rewrites == {"d_emo": {"old": "a", "new": "b"}}
+    assert loaded.pending_emoji_rewrites == {"850": {"old": "a", "new": "b"}}
 
 
 def test_pending_emoji_rewrites_defaults_empty(tmp_path: Path) -> None:
@@ -1198,10 +1201,10 @@ def test_save_state_overwrites_existing_files_on_windows(
     (state.py:198-214), so reverting the message_map swap raises on the first and
     reverting the state.json swap raises on the second.
     """
-    save_state(MigrationState(stoat_server_id="first"), tmp_path)
-    save_state(MigrationState(stoat_server_id="second"), tmp_path)
+    save_state(MigrationState(stoat_server_id=stoat_id(1)), tmp_path)
+    save_state(MigrationState(stoat_server_id=stoat_id(2)), tmp_path)
 
-    assert load_state(tmp_path).stoat_server_id == "second"
+    assert load_state(tmp_path).stoat_server_id == stoat_id(2)
     assert (tmp_path / "message_map.json").exists()
 
 
@@ -1213,9 +1216,9 @@ def test_save_state_first_write_succeeds_on_windows(
     If it refused unconditionally, a genuine first-run break would look identical
     to the bug under test and this suite could not tell them apart.
     """
-    save_state(MigrationState(stoat_server_id="only"), tmp_path)
+    save_state(MigrationState(stoat_server_id=stoat_id(3)), tmp_path)
 
-    assert load_state(tmp_path).stoat_server_id == "only"
+    assert load_state(tmp_path).stoat_server_id == stoat_id(3)
 
 
 def test_repeated_checkpoints_overwrite_on_windows(
@@ -1223,9 +1226,9 @@ def test_repeated_checkpoints_overwrite_on_windows(
 ) -> None:
     """save_state runs every checkpoint_interval messages, 50 by default."""
     for n in range(5):
-        save_state(MigrationState(stoat_server_id=f"run-{n}"), tmp_path)
+        save_state(MigrationState(stoat_server_id=stoat_id(n)), tmp_path)
 
-    assert load_state(tmp_path).stoat_server_id == "run-4"
+    assert load_state(tmp_path).stoat_server_id == stoat_id(4)
 
 
 def test_contract_fields_roundtrip(tmp_path: Path) -> None:
@@ -1256,7 +1259,7 @@ def test_contract_fields_default_when_absent(tmp_path: Path) -> None:
     recorded, which is what every migration predating the field will report. A
     default of "flatten" would assert a strategy that was never chosen.
     """
-    minimal = {"stoat_server_id": "s", "current_phase": "report"}
+    minimal = {"stoat_server_id": SERVER_ID, "current_phase": "report"}
     (tmp_path / "state.json").write_text(json.dumps(minimal), encoding="utf-8")
 
     loaded = load_state(tmp_path)

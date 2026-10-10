@@ -54,6 +54,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   cache of earlier keys cannot swallow them. A thread with no merge mark in the state is not sent,
   because `--skip-threads` and `--min-thread-messages` leave no other trace, and the warning
   names it. `--dry-run` still sends nothing.
+### Fixed
+
+- Check the destination ids saved in `state.json` before resuming or recovering with them (#970).
+  `--resume`, `ferry retry`, `ferry rollback`, `ferry repair`, `ferry check` and `ferry stats`
+  read server, channel, role, category, emoji and message ids from the saved state and sent
+  requests to them. A value that was not shaped like an id, such as a number where text
+  belongs, crashed the run late or aimed a request at the wrong place. Ferry now checks every
+  saved id when it loads the state and stops with a message that names the field, for example
+  `channel_map['123']`. Nothing in a rejected state is used. Older states that hold valid ids
+  load as before. A hand-edited or mismatched state is a mistake to fix, and nothing here treats
+  it as an attack.
+  Four recovery steps also check the saved id against what Ferry created. `ferry retry` skips a
+  failed message recorded against a channel that is not in the channel map, and keeps it with a
+  warning. Rollback deletes only the channels the live server lists, which is also what the
+  confirmation summary shows. The pin and reaction steps drop a queued entry aimed at an
+  unmapped channel. The reaction step also drops a reaction with a custom emoji Ferry did not
+  upload. `ferry repair` leaves an emoji rewrite record alone when the emoji map does not point
+  at its new emoji.
+  A bad state now shows as a message, not a traceback, in `ferry migrate --resume` and in the
+  GUI rollback.
 
 ## [2.42.0] - 2026-10-10
 

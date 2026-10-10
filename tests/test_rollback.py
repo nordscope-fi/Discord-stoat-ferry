@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 BASE_URL = "https://api.test"
 TOKEN = "test-session-token"
-SERVER_ID = "srv01"
+SERVER_ID = "01J5T000000000000000009000"
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
@@ -201,11 +201,17 @@ async def test_run_rollback_full_happy_path(mock_aiohttp: aioresponses, tmp_path
             "_id": SERVER_ID,
             "name": "Test",
             "description": "",
-            "channels": ["ch01", "ch02", "ch03", "ch04", "ch05"],
+            "channels": [
+                "01J5T000000000000000000101",
+                "01J5T000000000000000000102",
+                "01J5T000000000000000000103",
+                "01J5T000000000000000000104",
+                "01J5T000000000000000000105",
+            ],
             "roles": {
-                "role01": {"name": "Mod"},
-                "role02": {"name": "User"},
-                "role03": {"name": "Guest"},
+                "01J5T000000000000000000201": {"name": "Mod"},
+                "01J5T000000000000000000202": {"name": "User"},
+                "01J5T000000000000000000203": {"name": "Guest"},
             },
             "categories": [
                 {"id": "cat_uuid_1", "title": "Gaming", "channels": []},
@@ -216,11 +222,21 @@ async def test_run_rollback_full_happy_path(mock_aiohttp: aioresponses, tmp_path
     )
     mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", payload={}, repeat=True)
 
-    for cid in ["ch01", "ch02", "ch03", "ch04", "ch05"]:
+    for cid in [
+        "01J5T000000000000000000101",
+        "01J5T000000000000000000102",
+        "01J5T000000000000000000103",
+        "01J5T000000000000000000104",
+        "01J5T000000000000000000105",
+    ]:
         mock_aiohttp.delete(f"{BASE_URL}/channels/{cid}", status=204)
-    for rid in ["role01", "role02", "role03"]:
+    for rid in [
+        "01J5T000000000000000000201",
+        "01J5T000000000000000000202",
+        "01J5T000000000000000000203",
+    ]:
         mock_aiohttp.delete(f"{BASE_URL}/servers/{SERVER_ID}/roles/{rid}", status=204)
-    for eid in ["em01", "em02"]:
+    for eid in ["01J5T000000000000000000301", "01J5T000000000000000000302"]:
         mock_aiohttp.delete(f"{BASE_URL}/custom/emoji/{eid}", status=204)
 
     events, emit = _emit_collector()
@@ -234,29 +250,29 @@ async def test_run_rollback_full_happy_path(mock_aiohttp: aioresponses, tmp_path
     assert rp.categories_cleaned is True
     assert rp.failures == []
     assert rp.rolled_back_ids == {
-        "ch01",
-        "ch02",
-        "ch03",
-        "ch04",
-        "ch05",
-        "role01",
-        "role02",
-        "role03",
-        "em01",
-        "em02",
+        "01J5T000000000000000000101",
+        "01J5T000000000000000000102",
+        "01J5T000000000000000000103",
+        "01J5T000000000000000000104",
+        "01J5T000000000000000000105",
+        "01J5T000000000000000000201",
+        "01J5T000000000000000000202",
+        "01J5T000000000000000000203",
+        "01J5T000000000000000000301",
+        "01J5T000000000000000000302",
     }
     # Forensic preservation — maps unchanged.
     assert result.channel_map == {
-        "d_ch_1": "ch01",
-        "d_ch_2": "ch02",
-        "d_ch_3": "ch03",
-        "d_ch_4": "ch04",
-        "d_ch_5": "ch05",
+        "810000000000000001": "01J5T000000000000000000101",
+        "810000000000000002": "01J5T000000000000000000102",
+        "810000000000000003": "01J5T000000000000000000103",
+        "810000000000000004": "01J5T000000000000000000104",
+        "810000000000000005": "01J5T000000000000000000105",
     }
     assert result.role_map == {
-        "d_role_1": "role01",
-        "d_role_2": "role02",
-        "d_role_3": "role03",
+        "820000000000000001": "01J5T000000000000000000201",
+        "820000000000000002": "01J5T000000000000000000202",
+        "820000000000000003": "01J5T000000000000000000203",
     }
 
     statuses = [e.status for e in events]
@@ -282,23 +298,43 @@ async def test_run_rollback_all_404s_idempotent(mock_aiohttp: aioresponses, tmp_
             "_id": SERVER_ID,
             "name": "T",
             "description": "",
-            "channels": ["ch01", "ch02", "ch03", "ch04", "ch05"],
-            "roles": {"role01": {}, "role02": {}, "role03": {}},
+            "channels": [
+                "01J5T000000000000000000101",
+                "01J5T000000000000000000102",
+                "01J5T000000000000000000103",
+                "01J5T000000000000000000104",
+                "01J5T000000000000000000105",
+            ],
+            "roles": {
+                "01J5T000000000000000000201": {},
+                "01J5T000000000000000000202": {},
+                "01J5T000000000000000000203": {},
+            },
             "categories": [],
         },
         repeat=True,
     )
     mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", payload={}, repeat=True)
 
-    for cid in ["ch01", "ch02", "ch03", "ch04", "ch05"]:
+    for cid in [
+        "01J5T000000000000000000101",
+        "01J5T000000000000000000102",
+        "01J5T000000000000000000103",
+        "01J5T000000000000000000104",
+        "01J5T000000000000000000105",
+    ]:
         mock_aiohttp.delete(f"{BASE_URL}/channels/{cid}", status=404, payload={"type": "NotFound"})
-    for rid in ["role01", "role02", "role03"]:
+    for rid in [
+        "01J5T000000000000000000201",
+        "01J5T000000000000000000202",
+        "01J5T000000000000000000203",
+    ]:
         mock_aiohttp.delete(
             f"{BASE_URL}/servers/{SERVER_ID}/roles/{rid}",
             status=404,
             payload={"type": "NotFound"},
         )
-    for eid in ["em01", "em02"]:
+    for eid in ["01J5T000000000000000000301", "01J5T000000000000000000302"]:
         mock_aiohttp.delete(
             f"{BASE_URL}/custom/emoji/{eid}", status=404, payload={"type": "NotFound"}
         )
@@ -313,7 +349,7 @@ async def test_run_rollback_all_404s_idempotent(mock_aiohttp: aioresponses, tmp_
     assert rp.emoji_deleted == 2
     assert rp.failures == []
     # Forensic preservation
-    assert result.channel_map["d_ch_1"] == "ch01"
+    assert result.channel_map["810000000000000001"] == "01J5T000000000000000000101"
     # No warning events emitted (idempotent re-rolls shouldn't flood).
     warn_for_already_deleted = [
         e for e in events if e.status == "warning" and "Already deleted" in (e.message or "")
@@ -809,7 +845,11 @@ async def test_cancel_mid_save_recovers_on_rerun(
     """SC-23: cancel kicks in after first save_state; re-run gets 404 (idempotent)."""
     state = MigrationState(
         stoat_server_id=SERVER_ID,
-        channel_map={"d1": "ch1", "d2": "ch2", "d3": "ch3"},
+        channel_map={
+            "850000000000000001": "01J5T000000000000000000401",
+            "850000000000000002": "01J5T000000000000000000402",
+            "850000000000000003": "01J5T000000000000000000403",
+        },
     )
     save_state(state, tmp_path)
 
@@ -821,7 +861,11 @@ async def test_cancel_mid_save_recovers_on_rerun(
         payload={
             "_id": SERVER_ID,
             "description": "",
-            "channels": ["ch1", "ch2", "ch3"],
+            "channels": [
+                "01J5T000000000000000000401",
+                "01J5T000000000000000000402",
+                "01J5T000000000000000000403",
+            ],
             "roles": {},
             "categories": [],
         },
@@ -830,9 +874,9 @@ async def test_cancel_mid_save_recovers_on_rerun(
     mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", payload={}, repeat=True)
 
     # Run 1: all DELETEs return 204.
-    mock_aiohttp.delete(f"{BASE_URL}/channels/ch1", status=204)
-    mock_aiohttp.delete(f"{BASE_URL}/channels/ch2", status=204)
-    mock_aiohttp.delete(f"{BASE_URL}/channels/ch3", status=204)
+    mock_aiohttp.delete(f"{BASE_URL}/channels/01J5T000000000000000000401", status=204)
+    mock_aiohttp.delete(f"{BASE_URL}/channels/01J5T000000000000000000402", status=204)
+    mock_aiohttp.delete(f"{BASE_URL}/channels/01J5T000000000000000000403", status=204)
 
     # Patch save_state to set the cancel event after first call.
     real_save = save_state
@@ -860,9 +904,15 @@ async def test_cancel_mid_save_recovers_on_rerun(
     # Re-load state from disk to simulate fresh process.
     state2 = load_state(tmp_path)
 
-    mock_aiohttp.delete(f"{BASE_URL}/channels/ch1", status=404, payload={}, repeat=True)
-    mock_aiohttp.delete(f"{BASE_URL}/channels/ch2", status=404, payload={}, repeat=True)
-    mock_aiohttp.delete(f"{BASE_URL}/channels/ch3", status=404, payload={}, repeat=True)
+    mock_aiohttp.delete(
+        f"{BASE_URL}/channels/01J5T000000000000000000401", status=404, payload={}, repeat=True
+    )
+    mock_aiohttp.delete(
+        f"{BASE_URL}/channels/01J5T000000000000000000402", status=404, payload={}, repeat=True
+    )
+    mock_aiohttp.delete(
+        f"{BASE_URL}/channels/01J5T000000000000000000403", status=404, payload={}, repeat=True
+    )
 
     events2, emit2 = _emit_collector()
     await run_rollback(config2, state2, exports=[], on_event=emit2)

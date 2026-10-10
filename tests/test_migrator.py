@@ -121,7 +121,7 @@ async def test_dry_run_incremental_raises_migration_error(tmp_path: Path) -> Non
         current_phase="channels",
         started_at="2024-01-01T00:00:00+00:00",
     )
-    prior.message_map = {"m1": "dry-msg-m1"}
+    prior.message_map = {"111": "dry-msg-111"}
     save_state(prior, tmp_path)
 
     config = _make_config(tmp_path, incremental=True)
@@ -141,13 +141,13 @@ async def test_incremental_still_accepts_a_real_prior_state(tmp_path: Path) -> N
         current_phase="channels",
         started_at="2024-01-01T00:00:00+00:00",
     )
-    prior.message_map = {"m1": "stoat-m1"}
+    prior.message_map = {"111": "01J5T000000000000000000011"}
     save_state(prior, tmp_path)
 
     config = _make_config(tmp_path, incremental=True, dry_run=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_CONNECT_NOOP)
 
-    assert state.message_map["m1"] == "stoat-m1", (
+    assert state.message_map["111"] == "01J5T000000000000000000011", (
         "an ordinary prior state must still be carried forward; --incremental that "
         "does not carry message_map breaks reply references with no error at the "
         "point of failure"
