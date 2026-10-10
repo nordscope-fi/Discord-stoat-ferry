@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.41.29] - 2026-10-10
 
 ### Changed
 
@@ -22,29 +22,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Strip control characters from the Markdown migration report (#1080). Text from the export, such
   as an author name, an attachment file name or a channel name, could carry a newline, an
   escape byte or another control character into `migration_report.md`. The writer only masked
-  secrets, so those characters landed in the warning and error lines. The report writer now turns line breaks and
-  tabs into a space and removes every other control character, so each warning and error stays
-  on one line. The JSON reports and `state.json` are unchanged. The server name in the guild
+  secrets, so those characters landed in the warning and error lines. The report writer now
+  turns line breaks and tabs into a space and removes every other control character, so each
+  warning and error stays on one line. Secrets are masked both before and after this step, so
+  neither a control byte inside a secret nor a tab that is part of one can slip past the mask. The JSON reports and `state.json` are unchanged. The server name in the guild
   icon warnings is also shown in quotes with escapes and a 120 character cap, the same way the
   icon path already was. The `ferry check` output uses the same shared helper as before.
-### Fixed
-
 - On Windows, Ferry now retries a file swap that fails because another program has the target
   open (#176). Saving `state.json`, the reports, the blueprint, a saved feedback draft or a
   downloaded banner could stop with `PermissionError` (WinError 5 or 32) while OneDrive or an
   antivirus scan held the old file. Ferry tries up to five times, waiting 0.05, 0.1, 0.2 and
   0.4 seconds between tries, then raises the original error. Other platforms and other errors
-  are not retried. A failed document write now also removes its `.tmp` file.
-- The credential launcher and the Codex and Claude review launchers now find their client
-  program once, as an absolute path, before they do anything else (#977). Before, they passed a
-  bare name such as `pass-cli` to the operating system, which searched `PATH`, including empty,
-  relative and `.` entries and any folder inside the working checkout. A look-alike file planted
-  in one of those places could have been run, in the credential case before the credential was
-  requested. The new helper `resolve-executable.mjs` skips those entries, takes the first
-  executable file on an absolute entry, and the launcher runs that path. A missing program now
-  stops with "executable not found" before a token file is read. Homebrew, `~/.local/bin` and
-  npm global installs are unchanged. The reviewer runtime gains one file, so reinstall it from
-  `main`.
+  are not retried. A failed document write now also removes its `.tmp` file, and if that
+  removal fails too, the original error is the one reported.
 - The credential launcher, the Codex and Claude review launchers and the Context7 launcher now
   find their client program once, as an absolute path, before they do anything else (#977).
   Before, they passed a bare name such as `pass-cli` or `npx` to the operating system, which
@@ -55,7 +45,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   absolute entry, and the launcher runs that path. A missing program now stops with
   "executable not found" before a token file is read or a key is fetched. Where `npx` is a node
   script, the Context7 launcher runs it with the node that started the launcher, so the script's
-  `#!/usr/bin/env node` line does not search `PATH` again. The second-opinion launcher already
+  `#!/usr/bin/env node` line does not search `PATH` again. The Context7 server it starts gets a
+  `PATH` holding only the safe entries, and npx starts in the home folder, because npx puts the
+  `node_modules/.bin` folder of its working folder and every parent ahead of `PATH`. Its own
+  `node` lookup therefore cannot reach a program planted in the checkout either. The second-opinion launcher already
   starts its Python interpreter from a fixed path under the home folder, so it is unchanged.
   Homebrew, `~/.local/bin` and npm global installs work as before. The reviewer runtime gains one
   file, so reinstall it from `main`.
