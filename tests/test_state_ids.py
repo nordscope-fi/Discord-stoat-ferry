@@ -575,3 +575,25 @@ async def test_rollback_refuses_a_dry_run_state(tmp_path: Path) -> None:
     state = MigrationState(is_dry_run=True, stoat_server_id="dry-server-1")
     with pytest.raises(StateError, match="dry run"):
         await run_rollback(config, state, exports=[], on_event=lambda _e: None)
+
+
+def test_gui_reports_unreadable_saved_progress_instead_of_treating_it_as_absent(
+    tmp_path: Path,
+) -> None:
+    """#970 review: the migrate page used to suppress a load error and start fresh on its
+    own, overwriting a state the stricter checks had refused, with no message."""
+    from discord_ferry.gui import _read_previous_state
+
+    _write(tmp_path, channel_map={"111": "not-a-stoat-id"})
+    state, problem = _read_previous_state(tmp_path)
+    assert state is None
+    assert problem is not None and "channel_map" in problem
+
+
+def test_gui_previous_state_read_handles_absent_and_valid_state(tmp_path: Path) -> None:
+    from discord_ferry.gui import _read_previous_state
+
+    assert _read_previous_state(tmp_path) == (None, None)
+    _write(tmp_path)
+    state, problem = _read_previous_state(tmp_path)
+    assert state is not None and problem is None
