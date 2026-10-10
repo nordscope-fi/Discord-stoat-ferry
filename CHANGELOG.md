@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - Stage saved documents and the downloaded server banner under a random, exclusively created temporary name (#960). Ferry used a predictable name such as `state.json.tmp`. In a shared output folder, another account could plant a symlink at that name and send the write to a file it could not otherwise change. The temporary file is now created fresh in the same folder, so an existing entry is never reused or followed. The files Ferry writes (state, reports, blueprints, metadata, banners) are now readable only by the account that ran Ferry. Direct writes that stay in place (avatars, role-icon staging files and thread archives) now refuse to follow a symlink at their path. A planted link makes the avatar or role icon fail with the usual warning, and a thread archive that cannot be written is recorded as a warning while the rest of the phase carries on. The `avatars`, `role-icons` and `threads` folders are checked the same way: if any of them, or a folder inside `threads`, is a symlink, Ferry refuses to use it.
+- Refuse web requests that do not address Ferry as a local machine (#964). A hostile website
+  could point its own name at 127.0.0.1 (DNS rebinding) and then talk to Ferry's local
+  interface from the visitor's browser, reaching pages that write files such as the blueprint
+  export. Ferry now answers only when the Host header is `127.0.0.1`, `localhost` or `[::1]`,
+  with or without Ferry's own port. Any other Host gets a 400 on pages and a closed
+  connection on the live-update websocket. The native window and the browser address Ferry
+  prints use `127.0.0.1:8765`, so they are unaffected.
 
 ## [2.41.29] - 2026-10-10
 

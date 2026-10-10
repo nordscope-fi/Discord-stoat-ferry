@@ -64,6 +64,20 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
 
+@pytest.fixture(autouse=True)
+def _unstarted_nicegui_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let ``gui._run_gui()`` add its Host guard no matter which test ran before.
+
+    ``app.add_middleware`` raises once the app has served a request, and the ``user``
+    fixture serves requests. In production ``_run_gui`` runs before any request, so
+    each test sees the same fresh, unstarted app, and whatever it adds is undone with it.
+    """
+    from nicegui import app
+
+    monkeypatch.setattr(app, "middleware_stack", None)
+    monkeypatch.setattr(app, "user_middleware", list(app.user_middleware))
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     """Return the path to the test fixtures directory."""
