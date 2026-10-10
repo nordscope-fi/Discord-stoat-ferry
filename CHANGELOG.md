@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.41.28] - 2026-10-10
 
 ### Changed
 
@@ -32,15 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   startup or during later store work, so an idle service could keep them past the stated 30
   days. The timer is cancelled and awaited on shutdown, and one failed sweep is logged without
   row data and does not stop later sweeps.
-### Fixed
-
 - Refuse a DiscordChatExporter JSON file over 4 GiB and a blueprint file over 10 MiB before
   reading them, and report JSON nested too deeply as the same clean error instead of a
   `RecursionError` (#988). Both loaders used to read the whole file into memory with no limit.
-  The size comes from the file system, so nothing is allocated for a refused file. A directory
-  scan skips an oversized export and the warning now says why.
-### Fixed
-
+  The size comes from the file system, so nothing is allocated for a refused file. A refused
+  channel file stops the migration with an error naming the file and the limit, so no channel
+  is left out of a run that reports success.
 - Upload reuse now keys on the media tag as well as the file path (#984). Autumn file ids
   belong to the tag they were uploaded under (avatars, emojis, icons, banners,
   attachments). The cache and the in-flight map used the bare file path. One file used
