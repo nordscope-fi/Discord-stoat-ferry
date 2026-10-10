@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.42.0] - 2026-10-10
 
 ### Changed
 
@@ -20,11 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   with the usual "avatar_download_failed" warning, and the member keeps the default
   avatar. Redirects were already refused. Exports made with media downloaded use local
   paths and are unaffected.
-### Fixed
-
-- Give the chat exporter only the environment it needs (#976). Ferry used to start DiscordChatExporter with a full copy of its own environment, so every secret Ferry could see, such as the Stoat token or an unrelated API key, was visible to the exporter. The exporter now receives a short list of variables. These are the path and temp settings, the Windows system folders, and the home and locale settings. They also include the proxy and CA bundle settings (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). The Discord token is set from Ferry's own configuration. Everything else is left out. On Windows the names match without regard to case. The exporter is a self-contained .NET program, so it needs no `DOTNET_ROOT`. Of the `DOTNET_*` settings only `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` is passed on; if you relied on another one reaching the exporter, tell us in an issue.
-### Fixed
-
+- Give the chat exporter only the environment it needs (#976). Ferry used to start DiscordChatExporter with a full copy of its own environment, so every secret Ferry could see, such as the Stoat token or an unrelated API key, was visible to the exporter. The exporter now receives a short list of variables. These are the path and temp settings, the Windows system folders, and the home and locale settings. They also include the proxy and CA bundle settings (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). The Discord token is set from Ferry's own configuration. Everything else is left out. On Windows the names match without regard to case. The exporter is a self-contained .NET program, so it needs no `DOTNET_ROOT`. Of the `DOTNET_*` settings only `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` is passed on; if you relied on another one reaching the exporter, tell us in an issue. The real exporter is now also started on Windows in CI, so a missing Windows setting fails the build instead of a user's export.
 - The feedback service now runs one GitHub search for a pending feedback request at a time (#959).
   A report whose first send was cut off stays pending, and each repeat of that same request
   searched GitHub for the report on its own. Repeats of a pending request do not count against
@@ -41,8 +37,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   After 5 seconds the next caller checks again, so a recovered GitHub reads as ready within that
   time. A delivery failure still forces a fresh check on the next request. The feedback service
   needs a redeploy for this to take effect.
-### Fixed
-
 - `ferry repair` now removes the extra pinned forum index that migrations before v2.41.30 left behind (#1142). Those migrations posted two index messages per forum, and only the second was recorded, so a later `--incremental` run kept the second one current and left the first as a stale copy. For each forum with a recorded index message, repair reads the index channel's pinned messages. It deletes any other message that starts with the same `**Forum: <name>**` heading. For a forum with no posts, older migrations posted the text `No posts migrated.` with no heading, so a message that reads exactly that is deleted too. Either way the message must have been sent by Ferry's own account and carry the "Discord Ferry" name. It never touches the recorded message, and it removes nothing if the recorded message is not among the pinned messages. A delete that fails is recorded as a warning, which gives repair a non-zero exit code, and repair carries on with the rest. `--dry-run` lists what it would remove and deletes nothing. The JSON output gains `removed_duplicate_indexes` under `actions`. Normal migrations are unchanged.
 
 ## [2.41.30] - 2026-10-10
