@@ -13,6 +13,7 @@ from discord_ferry.core.security import (
     sanitize_secrets,
     sanitize_secrets_for_public_output,
     scrub_document,
+    strip_control,
 )
 
 # ---------------------------------------------------------------------------
@@ -573,3 +574,13 @@ def test_contains_registered_secret_checks_complete_non_empty_values() -> None:
     assert contains_registered_secret("prefix stoat-value-1234 suffix") is True
     assert contains_registered_secret("prefix ****1234 suffix") is False
     assert contains_registered_secret("") is False
+
+
+class TestStripControl:
+    """strip_control removes Cc characters except horizontal tab (#1080)."""
+
+    def test_removes_c0_del_and_c1(self) -> None:
+        assert strip_control("a\x00b\x07c\x1bd\ne\rf\x7fg\x85h") == "abcdefgh"
+
+    def test_keeps_tab_and_ordinary_text(self) -> None:
+        assert strip_control("a\tb caf\u00e9 [bold]x[/]") == "a\tb caf\u00e9 [bold]x[/]"

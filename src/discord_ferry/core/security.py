@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -108,6 +109,16 @@ def safe_sanitize(token_store: SecureTokenStore | None, text: str) -> str:
     if token_store is None:
         return text
     return token_store.sanitize(text)
+
+
+def strip_control(text: str) -> str:
+    """Remove C0 and C1 control characters except horizontal tab.
+
+    Display-only: it does not mask secrets and is not redaction (ADR-014). Newline and
+    carriage return are removed, not replaced, so callers that need a value to stay on
+    one line separated from its neighbours must substitute a space first.
+    """
+    return "".join(ch for ch in text if ch == "\t" or unicodedata.category(ch) != "Cc")
 
 
 # ---------------------------------------------------------------------------
