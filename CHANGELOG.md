@@ -36,6 +36,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   retry. A pending one still finds its GitHub item without creating a second, and the retry
   replaces the old hash. Receipts that are never retried drop out after their usual 7 days. The
   Ferry client is unchanged. The feedback service needs a redeploy for this to take effect.
+- Mark a forum index as present when its first send comes back as a duplicate (#560). The
+  message is already on the server but Stoat returns no id for it, so Ferry now records the
+  forum as "present, id unknown", the same way the rebuild step already did (#215). The
+  rebuild at the end of the run then looks for the index among the pinned messages and edits
+  it, instead of posting a second index next to it.
 
 ## [2.41.29] - 2026-10-10
 

@@ -1695,10 +1695,18 @@ async def run_channels(
                     # index_channel_id rather than the message id, so the channel wiring
                     # must still run: letting the broad handler swallow it would lose
                     # the channel_map entry for a channel that exists.
-                    pass
+                    #
+                    # Record it as present with an unknown id, the same signal the
+                    # rebuild path uses (#215), so the REPORT-phase rebuild tries to
+                    # recover the id from the pinned messages (#561) instead of posting
+                    # a second index (#560). Nothing goes into forum_index_message_ids:
+                    # a truthy entry there would drive an edit against a missing id.
+                    state.forum_index_present_unknown_id.add(forum_key)
                 await asyncio.sleep(config.upload_delay)
 
                 if index_msg_id:
+                    # A real id supersedes any carried mark; keep the two disjoint.
+                    state.forum_index_present_unknown_id.discard(forum_key)
                     await api_pin_message(
                         session,
                         config.stoat_url,
