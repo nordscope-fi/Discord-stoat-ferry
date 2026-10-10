@@ -3193,6 +3193,7 @@ switch (mode) {
         fieldReader,
         accessReader,
         spawnChild,
+        resolve: () => '/fixture/npx',
         environment: sourceEnvironment,
         parent,
       });

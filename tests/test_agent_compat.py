@@ -2467,7 +2467,7 @@ def test_context7_launcher_passes_only_the_required_environment() -> None:
     result = _context7_launcher_fixture("success")
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["command"] == "npx"
+    assert report["command"] == "/fixture/npx"
     assert report["args"] == ["-y", "@upstash/context7-mcp@4.1.1"]
     assert re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", report["args"][1])
     assert report["stdio"] == "inherit"
@@ -6170,3 +6170,137 @@ def test_claude_review_resolves_the_absolute_claude_not_a_planted_one(
     assert result.returncode == 0, result.stderr
     assert result.stdout == str(good.resolve())
     assert not (tmp_path / "poisoned.log").exists()
+
+
+_CONTEXT7_PROBE = """
+import {{ runContext7 }} from '{module}';
+const events = [];
+try {{
+  const result = await runContext7({{
+    home: '/fixture/home',
+    accessReader: () => ({{ shareId: 'share', itemId: 'item' }}),
+    {extra}
+  }});
+  process.stdout.write(JSON.stringify({{ result }}));
+}} catch (error) {{
+  process.stdout.write(JSON.stringify({{ error: error.message }}));
+}}
+process.stdout.write('\\n' + JSON.stringify(events));
+"""
+
+_CONTEXT7_FIELD_READER = """
+    fieldReader: async () => {
+      events.push('credential');
+      return 'RECORDER_VALUE';
+    },
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+@pytest.mark.parametrize("layout", ["relative", "dot", "empty", "absolute-in-cwd"])
+def test_context7_launcher_runs_the_absolute_npx_not_a_planted_one(
+    tmp_path: Path, layout: str
+) -> None:
+    layouts = _poisoned_layouts(tmp_path, "npx")
+    good_log = tmp_path / "good.log"
+    _recorder(tmp_path / "good" / "npx", good_log)
+    _, path_value = layouts[layout]
+    result = _probe(
+        tmp_path,
+        _CONTEXT7_PROBE.format(module=_MODULES / "context7-mcp.mjs", extra=_CONTEXT7_FIELD_READER),
+        cwd=tmp_path / "work",
+        path_value=path_value,
+    )
+    assert result.returncode == 0, result.stderr
+    report_line, events_line = result.stdout.splitlines()
+    assert json.loads(report_line) == {"result": {"status": 0, "signal": None, "ready": False}}
+    assert json.loads(events_line) == ["credential"]
+    assert not (tmp_path / "poisoned.log").exists()
+    assert len(good_log.read_text().splitlines()) == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_context7_launcher_resolves_npx_before_fetching_the_key(tmp_path: Path) -> None:
+    (tmp_path / "work").mkdir()
+    extra = """
+    resolve: (name) => { events.push('resolve:' + name); return '/fixture/npx'; },
+    fieldReader: async () => { events.push('credential'); return 'RECORDER_VALUE'; },
+    spawnChild: (command) => {
+      events.push('spawn:' + command);
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', 0, null));
+      return child;
+    },
+    """
+    source = "import { EventEmitter } from 'node:events';\n" + _CONTEXT7_PROBE.format(
+        module=_MODULES / "context7-mcp.mjs", extra=extra
+    )
+    result = _probe(tmp_path, source, cwd=tmp_path / "work", path_value="/usr/bin")
+    assert result.returncode == 0, result.stderr
+    _, events_line = result.stdout.splitlines()
+    assert json.loads(events_line) == ["resolve:npx", "credential", "spawn:/fixture/npx"]
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_context7_launcher_without_npx_fails_before_fetching_the_key(tmp_path: Path) -> None:
+    _poisoned_layouts(tmp_path, "npx")
+    result = _probe(
+        tmp_path,
+        _CONTEXT7_PROBE.format(module=_MODULES / "context7-mcp.mjs", extra=_CONTEXT7_FIELD_READER),
+        cwd=tmp_path / "work",
+        path_value="bin:.:",
+    )
+    assert result.returncode == 0, result.stderr
+    report_line, events_line = result.stdout.splitlines()
+    assert json.loads(report_line) == {"error": "Context7 npx executable not found"}
+    assert json.loads(events_line) == []
+    assert not (tmp_path / "poisoned.log").exists()
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_context7_launcher_runs_a_script_npx_with_the_node_that_started_it(
+    tmp_path: Path,
+) -> None:
+    # An npx that is a node script has a `#!/usr/bin/env node` line, which would search PATH for
+    # node again. The launcher runs the script with its own node instead.
+    (tmp_path / "work").mkdir()
+    extra = """
+    resolve: () => '/fixture/npx-cli.js',
+    fieldReader: async () => 'RECORDER_VALUE',
+    spawnChild: (command, args) => {
+      events.push({ command, args });
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', 0, null));
+      return child;
+    },
+    """
+    source = "import { EventEmitter } from 'node:events';\n" + _CONTEXT7_PROBE.format(
+        module=_MODULES / "context7-mcp.mjs", extra=extra
+    )
+    result = _probe(tmp_path, source, cwd=tmp_path / "work", path_value="/usr/bin")
+    assert result.returncode == 0, result.stderr
+    _, events_line = result.stdout.splitlines()
+    [spawned] = json.loads(events_line)
+    assert spawned["command"] == NODE_EXECUTABLE
+    assert spawned["args"][0] == "/fixture/npx-cli.js"
+    assert spawned["args"][1:] == ["-y", "@upstash/context7-mcp@4.1.1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_second_opinion_launcher_starts_its_interpreter_from_a_fixed_home_path(
+    tmp_path: Path,
+) -> None:
+    # The interpreter is an absolute path under the home directory, never a PATH lookup, so a
+    # planted `python3` in the search path has nothing to substitute for.
+    paths = _probe(
+        tmp_path,
+        f"""
+        import {{ secondOpinionPaths }} from '{_MODULES / "second-opinion-mcp.mjs"}';
+        process.stdout.write(JSON.stringify(secondOpinionPaths('/fixture/home')));
+        """,
+        cwd=tmp_path,
+        path_value="bin:.:",
+    )
+    assert paths.returncode == 0, paths.stderr
+    python = json.loads(paths.stdout)["python"]
+    assert python == "/fixture/home/Documents/GitHub/portalpilot/second-opinion/.venv/bin/python3"
