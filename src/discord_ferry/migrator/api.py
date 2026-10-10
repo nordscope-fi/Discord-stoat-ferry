@@ -1020,7 +1020,9 @@ async def api_fetch_self(
 
     ``connect.py`` already calls this route to verify the token and discards the
     body. Repair reads ``_id`` from it to recognise messages Ferry itself sent,
-    since a message's ``author`` is the sending user's id.
+    since a message's ``author`` is the sending user's id. Stoat serialises the user
+    id as ``_id`` (``stoatchat/stoatchat`` main, ``crates/core/models/src/v0/users.rs``:
+    ``serde(rename = "_id")`` on ``User.id``).
     """
     url = f"{stoat_url.rstrip('/')}/users/@me"
     return await _api_request(session, "GET", url, token)
