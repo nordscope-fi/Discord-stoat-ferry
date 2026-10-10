@@ -82,7 +82,7 @@ These limitations affect use cases involving large servers or non-standard expor
 |------------|--------|------------|
 | GDPR export incompatibility | Ferry is designed for server migrations using DiscordChatExporter guild exports. GDPR personal data packages have a different structure and are not supported. | Use `DiscordChatExporter.Cli exportguild` instead of GDPR downloads |
 | 1M+ message RAM usage | The in-memory `message_map` dict requires approximately 200 MB of RAM for servers with 1 million messages. This is held for the duration of the migration. | Split very large servers into batches, or use the `--incremental` flag to migrate in stages |
-| Export file size cap | Ferry refuses a single DiscordChatExporter JSON file larger than 4 GiB, or nested too deeply, instead of loading it. That is roughly 3 million messages in one channel. In a directory scan the file is skipped, and the warning names the size limit. | Re-export that channel in smaller parts |
+| Export file size cap | Ferry refuses a single DiscordChatExporter JSON file larger than 4 GiB, or nested too deeply, instead of loading it. That is roughly 3 million messages in one channel. The migration stops with an error naming the file and the limit, so no channel is left out without notice. | None yet. A channel that large cannot be migrated |
 | No `X-RateLimit-*` headers | Stoat's API does not expose standard `X-RateLimit-Remaining` or `X-RateLimit-Reset` headers. Ferry uses a 429-response rolling window to adaptively tune its request rate. | None — this is a platform limitation. The adaptive rate limiter handles it automatically |
 
 ---
