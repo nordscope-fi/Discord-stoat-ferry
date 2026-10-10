@@ -2501,6 +2501,9 @@ def test_context7_launcher_passes_only_the_required_environment() -> None:
     assert report["args"] == ["-y", "@upstash/context7-mcp@4.1.1"]
     assert re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", report["args"][1])
     assert report["stdio"] == "inherit"
+    # npx puts node_modules/.bin of its working folder and every parent ahead of PATH,
+    # so starting it in the checkout would let a planted node receive the key (#977).
+    assert report["cwd"] == "/fixture/home"
     assert report["child_env_names"] == [
         "CONTEXT7_API_KEY",
         "HOME",
@@ -6207,7 +6210,8 @@ import {{ runContext7 }} from '{module}';
 const events = [];
 try {{
   const result = await runContext7({{
-    home: '/fixture/home',
+    // A real folder: npx starts in home, and the readers below are stubs.
+    home: process.cwd(),
     accessReader: () => ({{ shareId: 'share', itemId: 'item' }}),
     {extra}
   }});
