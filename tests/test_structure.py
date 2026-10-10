@@ -524,6 +524,7 @@ async def test_run_server_icon_warning_bounds_a_hostile_spelling(
     assert "\n" not in message, "a raw newline reached the warning"
     assert len(message) < 400, "an unbounded iconUrl inflated the warning"
     assert "tok" not in message, "the token leaked into the warning"
+    assert "\u2014" not in message, "an em dash reached the warning"
 
 
 async def test_run_server_icon_uploads_from_a_foreign_working_directory(

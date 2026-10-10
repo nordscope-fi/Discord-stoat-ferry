@@ -4375,6 +4375,7 @@ async def test_attachment_escape_warns_and_skips_upload(tmp_path: Path, variant:
     assert len(sent) == 1
     unsafe = [w for w in state.warnings if w.get("type") == "unsafe_media_path"]
     assert len(unsafe) == 1
+    assert "\u2014" not in unsafe[0]["message"]
     assert state.attachments_skipped == 1
     assert state.failed_messages == []
 

@@ -751,7 +751,7 @@ async def _merge_threads(
                             "type": "unsafe_media_path",
                             "message": (
                                 f"Masquerade avatar for {msg.author.name} failed the "
-                                "export-root containment check — skipped."
+                                "export-root containment check; skipped."
                             ),
                         }
                     )
@@ -760,7 +760,7 @@ async def _merge_threads(
                             phase="messages",
                             status="warning",
                             message=(
-                                f"Masquerade avatar for {msg.author.name} unsafe path — skipped."
+                                f"Masquerade avatar for {msg.author.name} unsafe path; skipped."
                             ),
                         )
                     )
@@ -1352,7 +1352,7 @@ async def _process_message(
                 "phase": "messages",
                 "type": "unsafe_media_path",
                 "message": (
-                    f"Sticker {_escaped_name!r} failed the export-root containment check — skipped."
+                    f"Sticker {_escaped_name!r} failed the export-root containment check; skipped."
                 ),
             }
         )
@@ -1360,7 +1360,7 @@ async def _process_message(
             MigrationEvent(
                 phase="messages",
                 status="warning",
-                message=f"Sticker {_escaped_name!r} unsafe path — skipped.",
+                message=f"Sticker {_escaped_name!r} unsafe path; skipped.",
             )
         )
     for sticker_path in sticker_paths:
@@ -1409,7 +1409,7 @@ async def _process_message(
                 "type": "unsafe_media_path",
                 "message": (
                     f"Masquerade avatar for {msg.author.name} failed the export-root "
-                    "containment check — skipped."
+                    "containment check; skipped."
                 ),
             }
         )
@@ -1417,7 +1417,7 @@ async def _process_message(
             MigrationEvent(
                 phase="messages",
                 status="warning",
-                message=f"Masquerade avatar for {msg.author.name} unsafe path — skipped.",
+                message=f"Masquerade avatar for {msg.author.name} unsafe path; skipped.",
             )
         )
 
@@ -1434,7 +1434,7 @@ async def _process_message(
                         "type": "unsafe_media_path",
                         "message": (
                             f"Embed media in msg {msg.id} failed the export-root "
-                            "containment check — skipped."
+                            "containment check; skipped."
                         ),
                     }
                 )
@@ -1442,7 +1442,7 @@ async def _process_message(
                     MigrationEvent(
                         phase="messages",
                         status="warning",
-                        message=f"Embed media in msg {msg.id} unsafe path — skipped.",
+                        message=f"Embed media in msg {msg.id} unsafe path; skipped.",
                     )
                 )
             # Upload embed media (thumbnail/image) if a local file is available.
@@ -2048,7 +2048,7 @@ async def _upload_attachments(
             if local_path is None and is_media_escape(config.export_dir, att.url):
                 skip_message = (
                     f"Attachment {att.id!r} ({att.file_name!r}) "
-                    "failed the export-root containment check — skipped."
+                    "failed the export-root containment check; skipped."
                 )
                 if channel_result is not None:
                     channel_result.attachments_skipped += 1
@@ -2064,7 +2064,7 @@ async def _upload_attachments(
                     MigrationEvent(
                         phase="messages",
                         status="warning",
-                        message=f"Attachment {att.file_name!r} unsafe path — skipped.",
+                        message=f"Attachment {att.file_name!r} unsafe path; skipped.",
                     )
                 )
                 continue

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Drop the em dash from the warnings Ferry writes when a media path fails the export-root
+  check (#1081). The eight `unsafe_media_path` messages (avatar, emoji, server icon, sticker,
+  masquerade avatar, embed media and attachment) and their matching progress lines now end in
+  `; skipped.` or read `(reason)`. Only the wording changed. A new test fails if an em dash
+  comes back to that family.
+
 ## [2.41.27] - 2026-10-10
 
 ### Changed
