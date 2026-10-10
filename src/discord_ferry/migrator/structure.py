@@ -25,7 +25,7 @@ from discord_ferry.discord.metadata import (
     DiscordMetadata,
     PermissionPair,
     RoleMeta,
-    load_discord_metadata,
+    load_bound_discord_metadata,
 )
 from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
 from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
@@ -340,7 +340,7 @@ async def run_server(
                         )
 
         # Upload and apply server banner if available from Discord metadata.
-        discord_meta = load_discord_metadata(config.output_dir)
+        discord_meta = load_bound_discord_metadata(config, exports)
         if discord_meta and discord_meta.banner_hash:
             guild_id = discord_meta.guild_id
             banner_url = (
@@ -809,7 +809,7 @@ def _collect_roles_to_order(
     # Live role discovery: union the export-derived roles with the full live role
     # list (already captured in discord_metadata.role_metadata, which enumerates
     # every non-managed, non-@everyone role). Live wins on name/color/position.
-    discord_metadata = load_discord_metadata(config.output_dir)
+    discord_metadata = load_bound_discord_metadata(config, exports)
     if discord_metadata is not None:
         merged_roles: dict[str, DCERole] = {r.id: r for r in roles_to_create}
         for role_id, live_rm in discord_metadata.role_metadata.items():
@@ -976,7 +976,7 @@ async def run_roles(
     # set here: the upstream roles_edit handler drops DataEditRole.rank through a
     # rest pattern, so it was accepted with a 200 and never persisted. Ordering
     # lives in _apply_role_ordering.
-    discord_metadata = load_discord_metadata(config.output_dir)
+    discord_metadata = load_bound_discord_metadata(config, exports)
     role_meta = discord_metadata.role_metadata if discord_metadata else {}
     # The sort no longer decides anything the server sees, but deterministic iteration
     # keeps this pass's request order stable across runs.
@@ -1299,7 +1299,7 @@ async def run_channels(
     Raises:
         MigrationError: If any API call fails unrecoverably.
     """
-    discord_metadata = load_discord_metadata(config.output_dir)
+    discord_metadata = load_bound_discord_metadata(config, exports)
 
     # Snapshot already-mapped channels BEFORE the dedup scan so incremental
     # re-runs reuse carried Stoat IDs (no re-create) and the truncation budget

@@ -18,10 +18,11 @@ from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.security import SecureTokenStore, register_secret, safe_sanitize
 from discord_ferry.discord import (
-    ensure_metadata_matches_export,
     fetch_and_translate_guild_metadata,
-    load_discord_metadata,
+    load_bound_discord_metadata,
     load_discord_metadata_for_resume,
+    read_cached_metadata,
+    resume_refusal,
     save_discord_metadata,
 )
 from discord_ferry.errors import DuplicateSendError, MigrationError
@@ -189,6 +190,12 @@ def _ensure_token_store(config: FerryConfig) -> None:
     # has no way to reach this per-config store. See core/logging_setup.py.
     for name, value in tokens.items():
         register_secret(name, value)
+
+
+def _warn_metadata(state: MigrationState, on_event: EventCallback, kind: str, message: str) -> None:
+    """Record one warning about discord_metadata.json in state and as an event."""
+    state.warnings.append({"phase": "export", "type": kind, "message": message})
+    on_event(MigrationEvent(phase="export", status="warning", message=message))
 
 
 async def run_migration(
@@ -518,9 +525,34 @@ async def run_migration(
         state.warnings.append(w)
         on_event(MigrationEvent(phase="validate", status="warning", message=w["message"]))
 
-    if resume_meta is not None:
-        ensure_metadata_matches_export(
-            resume_meta, {e.guild.id for e in exports}, config.output_dir
+    # Bind the cached metadata to this export once, here, where both are known (#971).
+    # Every later reader goes through load_bound_discord_metadata, which applies the
+    # same test and reads an unusable file as absent. A resume stops, because it was
+    # promised the cache; a fresh run goes on without it, as it already does when the
+    # file is missing, and says so once.
+    cache_check = read_cached_metadata(
+        config.output_dir,
+        export_guild_ids={e.guild.id for e in exports},
+        configured_guild_id=config.discord_server_id,
+        check_keys=config.resume,
+    )
+    if cache_check.problem is not None:
+        if config.resume:
+            raise MigrationError(resume_refusal(cache_check.problem))
+        _warn_metadata(
+            state,
+            on_event,
+            "discord_metadata_ignored",
+            f"Ignoring cached Discord metadata: {cache_check.problem}. Role and channel "
+            "permissions from it will not be applied.",
+        )
+    if cache_check.dropped_unknown_bits:
+        _warn_metadata(
+            state,
+            on_event,
+            "discord_metadata_unknown_bits",
+            "discord_metadata.json holds permission bits Stoat does not define. They were "
+            "dropped, as Discord permissions with no Stoat equivalent are on a fresh fetch.",
         )
 
     total_messages = sum(e.message_count for e in exports)
@@ -572,7 +604,7 @@ async def run_migration(
 
     # Pre-creation review: emit summary event and optionally wait for user confirmation
     if not config.dry_run and not config.resume:
-        discord_meta = load_discord_metadata(config.output_dir)
+        discord_meta = load_bound_discord_metadata(config, exports)
         summary = build_review_summary(exports, discord_metadata=discord_meta)
         summary.threads_filtered = threads_filtered
         # Log warnings for user-specific permission overrides that Stoat cannot import
@@ -2624,7 +2656,7 @@ async def run_repair(
             # Loaded once, not per entity. None means the file is absent, which
             # is a real case: it is written during the migration and an operator
             # repairing from a copied output directory may not have brought it.
-            metadata = load_discord_metadata(config.output_dir)
+            metadata = load_bound_discord_metadata(config)
             if metadata is None and structure_work:
                 message = (
                     "discord_metadata.json is not in the output directory, so a recreated "
@@ -2788,7 +2820,7 @@ async def run_repair(
         own_conv_session = session is None
         conv_sess = session or new_session()
         try:
-            convergence_metadata = load_discord_metadata(config.output_dir)
+            convergence_metadata = load_bound_discord_metadata(config)
             server_doc = await api_fetch_server(
                 conv_sess, config.stoat_url, config.token, state.stoat_server_id
             )

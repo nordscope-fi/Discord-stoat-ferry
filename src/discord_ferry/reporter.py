@@ -13,7 +13,7 @@ from discord_ferry.core.security import (
     scrub_document,
     strip_control,
 )
-from discord_ferry.discord.metadata import load_discord_metadata
+from discord_ferry.discord.metadata import load_bound_discord_metadata
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -202,7 +202,7 @@ def generate_report(
         report["orphaned_ids"] = orphaned_ids
 
     # Build post-migration checklist
-    discord_meta = load_discord_metadata(config.output_dir)
+    discord_meta = load_bound_discord_metadata(config)
     checklist = _build_checklist(
         state,
         has_permissions=discord_meta is not None,

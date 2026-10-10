@@ -40,6 +40,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   is a boolean, negative or not a whole number is refused too. The error names the file and
   says to delete it or point at the right output directory. Permission bits Stoat does not
   define are dropped, as they are for freshly fetched metadata. A valid cache is used as before.
+- Bind the cached Discord metadata to the export before anything uses it (#971). A leftover
+  `discord_metadata.json` from another server no longer feeds its role and channel
+  permissions into a migration, on a resume or a fresh run. `--resume` stops with an error
+  that names the file. A fresh run carries on without the file and warns once. The file is
+  rejected when its server differs from the export or the configured server id, and when a
+  permission value is a boolean, negative or not a whole number. A resume also rejects an id
+  that is not all digits. A corrupt file no longer crashes the pre-creation review. Permission
+  bits Stoat does not define are dropped, with one warning. A valid cache is used as before.
 
 ## [2.41.29] - 2026-10-10
 

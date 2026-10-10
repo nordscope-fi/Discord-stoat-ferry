@@ -751,6 +751,77 @@ async def test_a_fresh_run_replaces_an_invalid_cache_instead_of_rejecting_it(
     assert refreshed.guild_id == _GUILD_ID
 
 
+def _warnings_of(state: MigrationState, kind: str) -> list[dict[str, str]]:
+    return [w for w in state.warnings if w.get("type") == kind]
+
+
+async def test_a_fresh_run_without_a_token_ignores_another_guilds_cache(tmp_path: Path) -> None:
+    """The stale file is never applied, and one warning names it."""
+    _write_resume_cache(tmp_path, _OTHER_GUILD_ID)
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
+    state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    ignored = _warnings_of(state, "discord_metadata_ignored")
+    assert len(ignored) == 1
+    assert ignored[0]["phase"] == "export"
+    assert "discord_metadata.json" in ignored[0]["message"]
+    assert _OTHER_GUILD_ID in ignored[0]["message"]
+    assert sum(1 for e in events if e.status == "warning" and "Ignoring cached" in e.message) == 1
+
+
+async def test_a_fresh_run_survives_a_corrupt_cache_in_the_review_step(tmp_path: Path) -> None:
+    """The review step used to read the file raw and crash on bad JSON."""
+    (tmp_path / "discord_metadata.json").write_text("{not json")
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
+    state = await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+    assert len(_warnings_of(state, "discord_metadata_ignored")) == 1
+
+
+async def test_a_fresh_run_still_fetches_and_overwrites_the_file_with_a_token(
+    tmp_path: Path,
+) -> None:
+    from aioresponses import aioresponses
+
+    from discord_ferry.discord.metadata import load_discord_metadata
+
+    _write_resume_cache(tmp_path, _OTHER_GUILD_ID)
+    config = _make_config(tmp_path, discord_token="t", discord_server_id=_GUILD_ID)
+    with aioresponses() as m:
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}", payload={"id": _GUILD_ID})
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles", payload=_MOCK_ROLES)
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels", payload=_MOCK_CHANNELS)
+        state = await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+    refreshed = load_discord_metadata(tmp_path)
+    assert refreshed is not None
+    assert refreshed.guild_id == _GUILD_ID
+    assert _warnings_of(state, "discord_metadata_ignored") == []
+
+
+async def test_unknown_permission_bits_are_reported_once_per_run(tmp_path: Path) -> None:
+    from discord_ferry.discord.metadata import PermissionPair
+
+    _write_resume_cache(
+        tmp_path,
+        _GUILD_ID,
+        server_default_permissions=(1 << 22) | (1 << 41),
+        role_permissions={"222222222222222222": PermissionPair(allow=1 << 55, deny=1 << 5)},
+    )
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
+    state = await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+    assert len(_warnings_of(state, "discord_metadata_unknown_bits")) == 1
+    assert _warnings_of(state, "discord_metadata_ignored") == []
+
+
+async def test_a_valid_cache_with_only_defined_bits_raises_no_metadata_warning(
+    tmp_path: Path,
+) -> None:
+    _write_resume_cache(tmp_path, _GUILD_ID, server_default_permissions=1 << 22)
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
+    state = await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+    assert [w for w in state.warnings if w.get("type", "").startswith("discord_metadata")] == []
+
+
 async def test_no_discord_token_emits_warning(tmp_path: Path) -> None:
     """When discord_token is absent, engine emits status='warning' about permissions."""
     config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
@@ -3081,7 +3152,7 @@ async def test_run_repair_records_recreated_entities(tmp_path: Path) -> None:
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "_live_server_view", _fake_view),
-        patch.object(engine_module, "load_discord_metadata", lambda *a, **k: None),
+        patch.object(engine_module, "load_bound_discord_metadata", lambda *a, **k: None),
         patch.object(engine_module, "_recreate_channel", _fake_ch),
         patch.object(engine_module, "_recreate_role", _fake_role),
         patch.object(engine_module, "_recreate_category", _fake_cat),
@@ -3683,7 +3754,7 @@ async def _repair_recreating_role(
 
     if role_meta is not None or metadata_present:
         meta = DiscordMetadata(
-            guild_id="g",
+            guild_id=_GUILD_ID,
             fetched_at="t",
             server_default_permissions=0,
             role_permissions={},
