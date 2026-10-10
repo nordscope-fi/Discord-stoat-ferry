@@ -188,7 +188,7 @@ async def run_server(
             except MigrationError as exc:
                 raise MigrationError(
                     f"Prior Stoat server '{effective_server_id}' was not found "
-                    f"({exc}). It may have been deleted — start a fresh migration "
+                    f"({exc}). It may have been deleted; start a fresh migration "
                     f"(omit --incremental)."
                 ) from exc
             state.stoat_server_id = effective_server_id
@@ -267,7 +267,7 @@ async def run_server(
                                 "type": "icon_file_missing",
                                 "message": (
                                     f"Guild icon file for server {guild_name} is not present "
-                                    f"in the export — {repr(icon_url)[:120]} — so no icon was "
+                                    f"in the export ({repr(icon_url)[:120]}), so no icon was "
                                     "applied. The export is incomplete. Re-export with media "
                                     "attached, or set the icon in Stoat server settings."
                                 ),
@@ -279,7 +279,7 @@ async def run_server(
                                 status="warning",
                                 message=(
                                     f"Guild icon file for server {guild_name} is missing "
-                                    "from the export — no icon applied"
+                                    "from the export; no icon applied"
                                 ),
                             )
                         )
@@ -988,7 +988,7 @@ async def run_roles(
             MigrationEvent(
                 phase="roles",
                 status="warning",
-                message="Role hoist not migrated (no Discord metadata — discord_token required).",
+                message="Role hoist not migrated (no Discord metadata; discord_token required).",
             )
         )
         state.warnings.append(
@@ -1648,7 +1648,7 @@ async def run_channels(
                 if posts:
                     lines = [f"**Forum: {forum_name}**\n"]
                     for post_ch_id, _post_name, post_count in posts:
-                        lines.append(f"- <#{post_ch_id}> — {post_count} messages")
+                        lines.append(f"- <#{post_ch_id}>: {post_count} messages")
                     content = "\n".join(lines)
                     # Truncate to fit Stoat's 2000-char message limit.
                     if len(content) > 2000:
@@ -1807,7 +1807,7 @@ async def run_channels(
                 status="warning",
                 message=(
                     "Slowmode / voice user-limit not migrated "
-                    "(no Discord metadata — discord_token required)."
+                    "(no Discord metadata; discord_token required)."
                 ),
             )
         )

@@ -93,7 +93,7 @@ async def run_reactions(
                         status="warning",
                         message=(
                             f"Skipping reaction on message {message_id} "
-                            f"— already at {_MAX_REACTIONS_PER_MESSAGE} reactions"
+                            f"(already at {_MAX_REACTIONS_PER_MESSAGE} reactions)"
                         ),
                         current=pos,
                         total=total,
@@ -159,6 +159,6 @@ async def run_reactions(
         MigrationEvent(
             phase="reactions",
             status="completed",
-            message=f"Reactions phase complete — {state.reactions_applied} applied",
+            message=f"Reactions phase complete: {state.reactions_applied} applied",
         )
     )

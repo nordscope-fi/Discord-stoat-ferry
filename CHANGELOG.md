@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Drop the em dash from the rest of the messages Ferry shows while it migrates (#1139).
+  This covers the emoji skip, animation and failure lines, and the oversized, expired and
+  missing attachment skips. It also covers the reaction cap line, the missing guild icon and
+  role hoist warnings, the probe voice and webhook results, and the phase-complete lines for
+  emoji, pins and reactions. They now use a semicolon, a colon or parentheses. Only the
+  wording changed. A new test fails if an em dash comes back into any string in the migrator
+  modules.
+
 ## [2.41.28] - 2026-10-10
 
 ### Changed

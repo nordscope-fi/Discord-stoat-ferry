@@ -327,7 +327,7 @@ async def run_messages(
                 ),
             }
         )
-        logger.warning("Unknown reaction_mode %r — falling back to 'text'", config.reaction_mode)
+        logger.warning("Unknown reaction_mode %r, falling back to 'text'", config.reaction_mode)
 
     # Sort deterministically by Discord channel ID.
     sorted_exports = sorted(exports, key=lambda e: e.channel.id)
@@ -394,7 +394,7 @@ async def run_messages(
                     "type": "channel_not_mapped",
                     "message": (
                         f"Channel {export.channel.id} ({export.channel.name!r}) "
-                        "not found in channel_map — skipping."
+                        "not found in channel_map; skipping."
                     ),
                 }
             )
@@ -547,7 +547,7 @@ async def _merge_threads(
                         "type": "merge_parent_not_found",
                         "message": (
                             f"Thread {export.channel.name!r} parent channel "
-                            f"{parent_name!r} not found — skipping merge."
+                            f"{parent_name!r} not found; skipping merge."
                         ),
                     }
                 )
@@ -931,7 +931,7 @@ def _archive_threads(
             # Simple ISO parse: "2024-01-15T12:00:00+00:00" -> "2024-01-15 12:00 UTC"
             ts_display = ts.replace("T", " ")[:16] + " UTC"
             author_name = msg.author.nickname or msg.author.name
-            lines.append(f"## {author_name} \u2014 {ts_display}")
+            lines.append(f"## {author_name} ({ts_display})")
             # A forward carries its text in the forwarded block, not in `content`, so
             # archiving it raw would write an empty entry.
             lines.append(_merge_forwarded(msg).content)
@@ -1795,7 +1795,7 @@ async def _process_message(
                                 "message": safe_sanitize(
                                     config.token_store,
                                     f"Reaction emoji {reaction.emoji.id} not migrated "
-                                    "(not in emoji_map) — dropped",
+                                    "(not in emoji_map); dropped",
                                 ),
                             }
                         )
@@ -2038,7 +2038,7 @@ async def _upload_attachments(
                 MigrationEvent(
                     phase="messages",
                     status="warning",
-                    message=f"Attachment {att.file_name!r} too large — skipped.",
+                    message=f"Attachment {att.file_name!r} too large; skipped.",
                 )
             )
             continue
@@ -2079,7 +2079,7 @@ async def _upload_attachments(
                     MigrationEvent(
                         phase="messages",
                         status="warning",
-                        message=f"Attachment {att.file_name!r} expired — skipped.",
+                        message=f"Attachment {att.file_name!r} expired; skipped.",
                     )
                 )
             else:
@@ -2091,7 +2091,7 @@ async def _upload_attachments(
                             "type": "missing_media",
                             "message": (
                                 f"Attachment {att.id!r} ({att.file_name!r}) "
-                                "not found locally — skipped."
+                                "not found locally; skipped."
                             ),
                         }
                     )
@@ -2103,7 +2103,7 @@ async def _upload_attachments(
                             "type": "missing_media",
                             "message": (
                                 f"Attachment {att.id!r} ({att.file_name!r}) "
-                                "not found locally — skipped."
+                                "not found locally; skipped."
                             ),
                         }
                     )
@@ -2111,7 +2111,7 @@ async def _upload_attachments(
                     MigrationEvent(
                         phase="messages",
                         status="warning",
-                        message=f"Attachment {att.file_name!r} not found — skipped.",
+                        message=f"Attachment {att.file_name!r} not found; skipped.",
                     )
                 )
             continue

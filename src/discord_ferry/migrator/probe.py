@@ -283,7 +283,7 @@ async def _check_voice_bug(
             report.add(
                 "voice_channel",
                 "warn",
-                f"requested Voice but `voice` field absent (channel_type={discriminator}) — "
+                f"requested Voice but `voice` field absent (channel_type={discriminator}); "
                 "voice unsupported on this instance / Bug #194; Discord voice channels become text",
             )
     except Exception as exc:  # noqa: BLE001
@@ -333,7 +333,7 @@ async def _check_webhook(
         report.add(
             "webhook",
             "warn",
-            "webhooks DISABLED on this instance (features.webhooks_enabled=false by default) — "
+            "webhooks DISABLED on this instance (features.webhooks_enabled=false by default); "
             f"execute unavailable: {type(exc).__name__}: {exc}. This is config, not a bug.",
         )
     finally:

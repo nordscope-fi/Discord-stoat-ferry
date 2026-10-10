@@ -387,7 +387,7 @@ async def _api_request_inner(
                         if recent > 3:
                             _rate_multiplier = min(_rate_multiplier * 1.5, 5.0)
                             logger.info(
-                                "Rate limit pressure — delay multiplier now %.1f×",
+                                "Rate limit pressure: delay multiplier now %.1f×",
                                 _rate_multiplier,
                             )
                     else:
