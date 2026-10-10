@@ -31,7 +31,7 @@ from discord_ferry.exporter.dce_output import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from discord_ferry.config import FerryConfig
@@ -44,6 +44,105 @@ _DISK_WARN_BYTES = 5_000_000_000  # 5 GB
 # Windows console + signal flags. On non-Windows these are 0 (no-op).
 _CREATE_NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 _CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+# The environment the exporter child receives (issue #976). An allowlist, so a secret in
+# Ferry's own environment (STOAT_TOKEN, any API key) never reaches it. The exporter is a
+# self-contained .NET app (runtimeconfig.json lists `includedFrameworks` and the archive
+# ships its own hostfxr and coreclr), so no DOTNET_ROOT or dotnet host lookup is needed.
+# Names are upper case here and matched case-insensitively on Windows only; POSIX
+# environment names are case-sensitive.
+#
+# Sources: the runtime model above (checked in the cached archive), .NET and Windows
+# convention for the rest. Windows startup cannot be exercised by CI, which only
+# unit-tests this function, so the Windows entries are conservative on purpose.
+_DCE_ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # Both: locating the process's own tools, temp space and user profile.
+        "PATH",  # find helper executables and shared libraries
+        "TEMP",  # .NET temp directory on Windows; some Unix tools read it too
+        "TMP",  # fallback temp directory on Windows
+        "TMPDIR",  # .NET temp directory and named-mutex area on Unix
+        "TZ",  # time zone override, used when formatting export timestamps
+        "LANG",  # locale, picks the ICU culture for dates and numbers
+        "LANGUAGE",  # GNU locale fallback list
+        "TERM",  # console capability detection, so output matches what Ferry parsed before
+        "COLORTERM",  # console color detection, same reason
+        "NO_COLOR",  # a user's request for plain output, same reason
+        # Windows: the runtime and Win32 shell-folder lookups read these.
+        "SYSTEMROOT",  # the Windows directory; .NET and Winsock lookups depend on it
+        "WINDIR",  # same directory as SYSTEMROOT, read by older Win32 callers
+        "SYSTEMDRIVE",  # drive that holds Windows, used to resolve profile paths
+        "COMSPEC",  # command interpreter path, used when launching helper processes
+        "PATHEXT",  # executable extensions, needed to resolve a command by name
+        "USERPROFILE",  # user home on Windows, root of the per-user cache and config
+        "HOMEDRIVE",  # drive part of the Windows home path
+        "HOMEPATH",  # path part of the Windows home path
+        "APPDATA",  # roaming app data, Environment.SpecialFolder lookups
+        "LOCALAPPDATA",  # local app data, where .NET keeps its per-user state
+        "PROGRAMDATA",  # machine-wide app data, SpecialFolder lookups
+        "PROGRAMFILES",  # SpecialFolder lookups
+        "PROGRAMFILES(X86)",  # SpecialFolder lookups on 64-bit Windows
+        "PROGRAMW6432",  # SpecialFolder lookups from a 32-bit view
+        "COMMONPROGRAMFILES",  # SpecialFolder lookups
+        "ALLUSERSPROFILE",  # shared profile directory, same family as PROGRAMDATA
+        "PUBLIC",  # public profile directory, SpecialFolder lookups
+        "PROCESSOR_ARCHITECTURE",  # architecture string some runtime paths read
+        "NUMBER_OF_PROCESSORS",  # CPU count some runtime paths read
+        # Unix: home and the XDG base directories the runtime and OpenSSL consult.
+        "HOME",  # per-user state (~/.dotnet, certificate stores), SpecialFolder lookups
+        "USER",  # account name, read by some runtime paths
+        "LOGNAME",  # same, the POSIX spelling
+        "XDG_DATA_HOME",  # .NET resolves its data folders from it
+        "XDG_CONFIG_HOME",  # .NET resolves its config folders from it
+        "XDG_CACHE_HOME",  # .NET resolves its cache folders from it
+        "XDG_RUNTIME_DIR",  # runtime directory for sockets and mutexes
+        # TLS trust. Ferry's own policy (core/http.py) does not set these, but a user
+        # who set them for Ferry's HTTPS needs the exporter to see the same bundle.
+        "SSL_CERT_FILE",  # CA bundle override honoured by OpenSSL on Linux and macOS
+        "SSL_CERT_DIR",  # CA directory override, same
+        # Proxy. The user chose these for Discord traffic, and run_dce_export adds
+        # HTTPS_PROXY below when only the OS knows the proxy.
+        "HTTP_PROXY",  # proxy for plain HTTP
+        "HTTPS_PROXY",  # proxy for HTTPS, the one the exporter's API calls use
+        "ALL_PROXY",  # fallback proxy for every scheme
+        "NO_PROXY",  # hosts that bypass the proxy
+        # The one runtime switch worth keeping: musl and minimal images lack ICU and
+        # need it to start at all. Other DOTNET_* settings are tuning, not startup.
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT",
+    }
+)
+
+# Prefixes admitted as a family: LC_ALL, LC_CTYPE, LC_TIME and the other locale categories.
+_DCE_ENV_PREFIXES: tuple[str, ...] = ("LC_",)
+
+# On POSIX the lower-case proxy spellings are different variables and tools read both, so
+# they are listed by name. Windows folds case, so the upper-case entries already cover them.
+_DCE_ENV_POSIX_EXTRA: frozenset[str] = frozenset(
+    {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+)
+
+
+def _build_dce_environment(parent: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the minimum environment for the exporter child (issue #976).
+
+    Copies only the names in ``_DCE_ENV_ALLOWLIST`` (and the ``LC_*`` locale family)
+    from ``parent``, which defaults to ``os.environ``. Windows environment names are
+    case-insensitive, so there ``SystemRoot`` and ``SYSTEMROOT`` are the same variable
+    and the original spelling is kept. POSIX names match exactly.
+    """
+    source = os.environ if parent is None else parent
+    windows = sys.platform == "win32"
+    env: dict[str, str] = {}
+    for name, value in source.items():
+        key = name.upper() if windows else name
+        if (
+            key in _DCE_ENV_ALLOWLIST
+            or key.startswith(_DCE_ENV_PREFIXES)
+            or (not windows and name in _DCE_ENV_POSIX_EXTRA)
+        ):
+            env[name] = value
+    return env
 
 
 def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
@@ -379,7 +478,7 @@ async def run_dce_export(
     cmd = _build_dce_command(config, dce_path)
     config.export_dir.mkdir(parents=True, exist_ok=True)
 
-    child_env = dict(os.environ)  # full copy: dropping SYSTEMROOT or PATH breaks .NET on Windows
+    child_env = _build_dce_environment()  # allowlist, not a copy (#976)
     # The RAISING sibling, with a boundary here. resolve_proxy would swallow and
     # return None, which is indistinguishable from "this machine has no proxy",
     # and there would be nothing to tell the user. The variable below is an

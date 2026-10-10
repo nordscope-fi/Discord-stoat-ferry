@@ -38,6 +38,32 @@ def _make_config(tmp_path: Path) -> FerryConfig:
     )
 
 
+def _is_dce_allowed(name: str) -> bool:
+    """Whether the allowlist admits ``name`` on this platform (issue #976)."""
+    from discord_ferry.exporter.runner import _build_dce_environment
+
+    return bool(_build_dce_environment({name: "x"}))
+
+
+async def _capture_dce_child_env(tmp_path: Path) -> dict[str, str]:
+    """Run ``run_dce_export`` up to process creation and return the child's env."""
+    captured: dict[str, str] = {}
+
+    async def fake_exec(*args: object, **kwargs: object) -> None:
+        captured.update(kwargs.get("env") or {})
+        raise RuntimeError("stop here")
+
+    with (
+        patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            side_effect=fake_exec,
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await run_dce_export(_make_config(tmp_path), tmp_path / "dce", lambda _e: None)
+    return captured
+
+
 def _make_stream_reader(lines: list[bytes]) -> asyncio.StreamReader:
     """A real StreamReader pre-loaded with lines (supports readuntil + EOF).
 
@@ -1078,11 +1104,16 @@ class TestDceChildProxyEnvironment:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert captured_env.get("HTTPS_PROXY") == "http://corp:8080"
-        # Superset, not `"PATH" in captured_env`. That weaker form passes against a
-        # curated env={"PATH": ..., "HTTPS_PROXY": ...} that dropped SYSTEMROOT, which
-        # is the regression the implementation's own comment warns about and the one
-        # release.yml cannot catch, because the smoke jobs never run a real export.
-        assert set(captured_env) >= before - {"HTTPS_PROXY"}
+        # Issue #976 replaced the old full-copy contract here, which asserted
+        # `set(captured_env) >= before - {"HTTPS_PROXY"}`: every parent variable
+        # must reach the child. The child now gets an allowlist, so the assertion
+        # is two-sided. Everything it holds is allowlisted, the injected proxy or
+        # the token, and every name the parent shares with the allowlist is still
+        # there. The second half stops an empty allowlist passing the first.
+        allowed = {name for name in before if _is_dce_allowed(name)}
+        assert allowed, "the test process has no allowlisted variable, so this proves nothing"
+        assert set(captured_env) <= allowed | {"HTTPS_PROXY", "DISCORD_TOKEN"}
+        assert set(captured_env) >= allowed
 
     @pytest.mark.asyncio
     async def test_the_kill_switch_suppresses_injection(
@@ -1135,6 +1166,158 @@ class TestDceChildProxyEnvironment:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         assert captured_env["HTTPS_PROXY"] == "http://mine:9999"
+
+
+class TestDceChildEnvironmentAllowlist:
+    """Issue #976: the exporter child gets an allowlist, not a copy of Ferry's environment.
+
+    All values are dummies. The exporter is a self-contained .NET app, so it needs the
+    platform's basic variables and the user's proxy and TLS settings, and nothing else.
+    """
+
+    @pytest.mark.asyncio
+    async def test_secrets_in_ferrys_environment_do_not_reach_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proxy_env
+    ) -> None:
+        """Killing: `dict(os.environ)`, which hands the exporter every secret Ferry holds."""
+        monkeypatch.setenv("STOAT_TOKEN", "dummy-stoat-value")
+        monkeypatch.setenv("OTHER_SECRET", "dummy-other-value")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "dummy-aws-value")
+        with proxy_env():
+            env = await _capture_dce_child_env(tmp_path)
+
+        assert env, "an empty capture means the fake exec never ran, not that nothing leaked"
+        for name in ("STOAT_TOKEN", "OTHER_SECRET", "AWS_SECRET_ACCESS_KEY"):
+            assert name not in env
+        assert not any(v.startswith("dummy-") for v in env.values())
+
+    @pytest.mark.asyncio
+    async def test_path_systemroot_and_temp_reach_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proxy_env
+    ) -> None:
+        """Killing: an allowlist that drops what .NET needs to start (the reason the
+        old code copied everything).
+        """
+        monkeypatch.setenv("PATH", "/dummy/bin")
+        monkeypatch.setenv("SYSTEMROOT", "C:\\Dummy\\Windows")
+        monkeypatch.setenv("TEMP", "/dummy/temp")
+        with proxy_env():
+            env = await _capture_dce_child_env(tmp_path)
+
+        by_upper = {k.upper(): v for k, v in env.items()}
+        assert by_upper["PATH"] == "/dummy/bin"
+        assert by_upper["SYSTEMROOT"] == "C:\\Dummy\\Windows"
+        assert by_upper["TEMP"] == "/dummy/temp"
+
+    @pytest.mark.asyncio
+    async def test_proxy_and_tls_variables_still_reach_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proxy_env
+    ) -> None:
+        """Killing: an allowlist without the proxy and CA settings, which breaks every
+        corporate network.
+        """
+        monkeypatch.setenv("SSL_CERT_FILE", "/dummy/ca.pem")
+        monkeypatch.setenv("SSL_CERT_DIR", "/dummy/certs")
+        pairs = {
+            "HTTP_PROXY": "http://dummy-a:1",
+            "HTTPS_PROXY": "http://dummy-b:2",
+            "ALL_PROXY": "http://dummy-c:3",
+            "NO_PROXY": "dummy.example",
+        }
+        if sys.platform != "win32":
+            # os.environ upper-cases names on Windows, so lower-case twins collapse there.
+            pairs |= {k.lower(): v + "x" for k, v in pairs.items()}
+        with proxy_env(**pairs):
+            env = await _capture_dce_child_env(tmp_path)
+
+        assert env["SSL_CERT_FILE"] == "/dummy/ca.pem"
+        assert env["SSL_CERT_DIR"] == "/dummy/certs"
+        for name, value in pairs.items():
+            assert env[name] == value
+
+    @pytest.mark.asyncio
+    async def test_the_discord_token_comes_from_the_config_not_the_parent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, proxy_env
+    ) -> None:
+        """Killing: a DISCORD_TOKEN in Ferry's own environment winning over the config."""
+        monkeypatch.setenv("DISCORD_TOKEN", "dummy-ambient-value")
+        with proxy_env():
+            env = await _capture_dce_child_env(tmp_path)
+
+        assert env["DISCORD_TOKEN"] == "dt"
+
+    def test_locale_variables_pass_by_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Killing: listing LANG only, so LC_ALL and LC_CTYPE are dropped."""
+        from discord_ferry.exporter.runner import _build_dce_environment
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        env = _build_dce_environment(
+            {"LANG": "C", "LC_ALL": "C.UTF-8", "LC_CTYPE": "C", "LCX": "no", "STOAT_TOKEN": "x"}
+        )
+        assert env == {"LANG": "C", "LC_ALL": "C.UTF-8", "LC_CTYPE": "C"}
+
+    def test_posix_names_are_case_sensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Killing: matching case-insensitively on POSIX, where `path` is a different
+        variable from `PATH` and `Home` is not `HOME`. Proxy variables are the
+        exception, listed in both cases because tools read both.
+        """
+        from discord_ferry.exporter.runner import _build_dce_environment
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        env = _build_dce_environment(
+            {"path": "/a", "Home": "/b", "PATH": "/c", "http_proxy": "p", "Http_Proxy": "q"}
+        )
+        assert env == {"PATH": "/c", "http_proxy": "p"}
+
+    def test_windows_names_match_case_insensitively(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Killing: an exact-case match on Windows, where the system spells it
+        `SystemRoot` and `Path` and os.environ may report either.
+        """
+        from discord_ferry.exporter.runner import _build_dce_environment
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        env = _build_dce_environment(
+            {
+                "SystemRoot": "C:\\Dummy",
+                "Path": "C:\\Dummy\\bin",
+                "ComSpec": "C:\\Dummy\\cmd.exe",
+                "LocalAppData": "C:\\Dummy\\Local",
+                "Https_Proxy": "http://dummy:1",
+                "STOAT_TOKEN": "dummy",
+                "OtherSecret": "dummy",
+            }
+        )
+        assert env == {
+            "SystemRoot": "C:\\Dummy",
+            "Path": "C:\\Dummy\\bin",
+            "ComSpec": "C:\\Dummy\\cmd.exe",
+            "LocalAppData": "C:\\Dummy\\Local",
+            "Https_Proxy": "http://dummy:1",
+        }
+
+    def test_the_allowlist_holds_what_each_platform_needs_to_start(self) -> None:
+        """Killing: a trimmed list that loses a name .NET needs on a platform CI cannot
+        run. This names the minimum, so removing one is a deliberate edit to this test.
+        """
+        from discord_ferry.exporter import runner
+
+        windows_required = {
+            "PATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+            "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+        }  # fmt: skip
+        posix_required = {"PATH", "HOME", "TMPDIR", "LANG", "TZ"}
+        assert windows_required <= runner._DCE_ENV_ALLOWLIST
+        assert posix_required <= runner._DCE_ENV_ALLOWLIST
+
+    def test_nothing_secret_shaped_is_on_the_allowlist(self) -> None:
+        """Killing: a wildcard or a prefix entry that sweeps in tokens and keys."""
+        from discord_ferry.exporter import runner
+
+        names = runner._DCE_ENV_ALLOWLIST | set(runner._DCE_ENV_PREFIXES)
+        for name in names:
+            assert not any(
+                w in name.upper() for w in ("TOKEN", "SECRET", "KEY", "PASSWORD", "AUTH")
+            )
 
 
 # ---------------------------------------------------------------------------

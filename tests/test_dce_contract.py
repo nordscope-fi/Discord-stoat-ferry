@@ -7,13 +7,14 @@ GitHub's unauthenticated rate limit (60/hr per IP).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import sentinel
 
 import pytest
 
 from discord_ferry.exporter.manager import DCE_VERSION, download_dce
-from discord_ferry.exporter.runner import _build_dce_command
+from discord_ferry.exporter.runner import _build_dce_command, _build_dce_environment
 
 
 def _required_flags_from_runner() -> tuple[str, ...]:
@@ -66,3 +67,30 @@ async def test_dce_help_lists_all_flags_ferry_uses() -> None:
         f"DCE v{DCE_VERSION} no longer names DISCORD_TOKEN for its token option, so "
         f"run_dce_export would start it with no token."
     )
+
+
+@pytest.mark.asyncio
+async def test_dce_starts_with_only_the_allowlisted_environment() -> None:
+    """Issue #976. The real exporter must still start on the reduced environment.
+
+    Killing: an allowlist that drops a variable the self-contained .NET host needs, which
+    no unit test sees because they all fake the subprocess. The parent carries a dummy
+    secret, and the child environment is built by the same function `run_dce_export` uses.
+    """
+    dce_path = await download_dce(lambda _: None)
+    parent = {**os.environ, "STOAT_TOKEN": "dummy-stoat-value", "OTHER_SECRET": "dummy-other"}
+    env = _build_dce_environment(parent)
+    assert "STOAT_TOKEN" not in env
+    assert "OTHER_SECRET" not in env
+    assert env, "an empty environment would make this test prove nothing about the allowlist"
+
+    result = subprocess.run(
+        [str(dce_path), "exportguild", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "exportguild" in output
