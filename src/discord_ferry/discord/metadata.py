@@ -1,11 +1,15 @@
 """Save/load Discord guild metadata to/from discord_metadata.json."""
 
 import json
+import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
+from discord_ferry.errors import MigrationError
 
 
 @dataclass
@@ -129,13 +133,27 @@ def _channel_meta_to_dict(cm: ChannelMeta) -> dict[str, Any]:
     return d
 
 
+def _known_bits(value: Any) -> Any:
+    """Drop bits Stoat does not define from a saved permission value.
+
+    ``translate_permissions`` drops Discord bits that have no Stoat equivalent, so
+    a fresh fetch can never produce a bit outside ``STOAT_PERMISSION_BITS``. A saved
+    value holding one was not written by Ferry. Dropping it matches the fetch path
+    and can only narrow what is sent. A value that is not an int that is not a bool and not negative
+    is returned untouched for ``validate_cached_metadata`` to reject.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value & ALL_STOAT_PERMISSIONS
+    return value
+
+
 def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
     return DiscordMetadata(
         guild_id=data["guild_id"],
         fetched_at=data["fetched_at"],
-        server_default_permissions=data.get("server_default_permissions", 0),
+        server_default_permissions=_known_bits(data.get("server_default_permissions", 0)),
         role_permissions={
-            k: PermissionPair(allow=v["allow"], deny=v["deny"])
+            k: PermissionPair(allow=_known_bits(v["allow"]), deny=_known_bits(v["deny"]))
             for k, v in data.get("role_permissions", {}).items()
         },
         channel_metadata={
@@ -164,18 +182,121 @@ def _dict_to_channel_meta(data: dict[str, Any]) -> ChannelMeta:
     default_override = None
     if "default_override" in data:
         do = data["default_override"]
-        default_override = PermissionPair(allow=do["allow"], deny=do["deny"])
+        default_override = PermissionPair(
+            allow=_known_bits(do["allow"]), deny=_known_bits(do["deny"])
+        )
     return ChannelMeta(
         nsfw=data.get("nsfw", False),
         default_override=default_override,
         role_overrides=[
             RoleOverride(
                 discord_role_id=ro["discord_role_id"],
-                allow=ro["allow"],
-                deny=ro["deny"],
+                allow=_known_bits(ro["allow"]),
+                deny=_known_bits(ro["deny"]),
             )
             for ro in data.get("role_overrides", [])
         ],
         slowmode=data.get("slowmode", 0),
         user_limit=data.get("user_limit", 0),
     )
+
+
+# --- Resume checks -----------------------------------------------------------
+#
+# A resumed run reuses discord_metadata.json without fetching. These checks run
+# only on that path (#971). The loader above stays permissive because fixtures
+# and older files use arbitrary ids.
+
+_SNOWFLAKE = re.compile(r"[0-9]{1,20}")
+
+
+def _shown(value: object) -> str:
+    return repr(value)[:40]
+
+
+def _bad_id(label: str, value: object) -> str | None:
+    if isinstance(value, str) and _SNOWFLAKE.fullmatch(value):
+        return None
+    return f"{label} {_shown(value)} is not a Discord id (digits only)"
+
+
+def _bad_perm(label: str, value: object) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return None
+    return f"{label} {_shown(value)} is not a non-negative whole number"
+
+
+def _problems(meta: DiscordMetadata) -> list[str]:
+    found: list[str | None] = [
+        _bad_id("guild_id", meta.guild_id),
+        _bad_perm("server_default_permissions", meta.server_default_permissions),
+    ]
+    for rid, pair in meta.role_permissions.items():
+        found.append(_bad_id("role_permissions key", rid))
+        found.append(_bad_perm(f"role {rid} allow", pair.allow))
+        found.append(_bad_perm(f"role {rid} deny", pair.deny))
+    for cid, cm in meta.channel_metadata.items():
+        found.append(_bad_id("channel_metadata key", cid))
+        if cm.default_override is not None:
+            found.append(_bad_perm(f"channel {cid} default allow", cm.default_override.allow))
+            found.append(_bad_perm(f"channel {cid} default deny", cm.default_override.deny))
+        for ro in cm.role_overrides:
+            found.append(_bad_id(f"channel {cid} override role id", ro.discord_role_id))
+            found.append(_bad_perm(f"channel {cid} override allow", ro.allow))
+            found.append(_bad_perm(f"channel {cid} override deny", ro.deny))
+    for rid in meta.role_metadata:
+        found.append(_bad_id("role_metadata key", rid))
+    for cat_id in meta.category_positions:
+        found.append(_bad_id("category_positions key", cat_id))
+    return [p for p in found if p is not None]
+
+
+def load_discord_metadata_for_resume(
+    output_dir: Path, *, configured_guild_id: str | None = None
+) -> DiscordMetadata | None:
+    """Load the cached metadata for a resume, or None when there is no file.
+
+    Raises ``MigrationError`` when the file cannot be read, holds a malformed
+    identifier or permission value, or names a guild other than
+    ``configured_guild_id``. The cache is never used in those cases. It does not
+    fall back to a fresh fetch: that needs a Discord token, which a resume may not
+    carry, and a mismatch means the output directory or the configuration is wrong,
+    which a refetch would paper over.
+    """
+    path = output_dir / "discord_metadata.json"
+    try:
+        meta = load_discord_metadata(output_dir)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise MigrationError(
+            f"Cannot resume: {path} is not a valid Ferry metadata file "
+            f"({type(exc).__name__}). Delete it to fetch fresh metadata, or restore it."
+        ) from exc
+    if meta is None:
+        return None
+    problems = _problems(meta)
+    if problems:
+        raise MigrationError(
+            f"Cannot resume: {path} holds invalid values: {problems[0]}"
+            + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else "")
+            + ". Delete it to fetch fresh metadata, or restore it."
+        )
+    if configured_guild_id and meta.guild_id != configured_guild_id:
+        raise MigrationError(
+            f"Cannot resume: {path} belongs to Discord server {meta.guild_id}, but the "
+            f"configured server is {configured_guild_id}. Delete it to fetch fresh "
+            "metadata, or point at the right output directory."
+        )
+    return meta
+
+
+def ensure_metadata_matches_export(
+    meta: DiscordMetadata, export_guild_ids: Collection[str], output_dir: Path
+) -> None:
+    """Raise ``MigrationError`` unless the cached guild is one the export names."""
+    if export_guild_ids and meta.guild_id not in export_guild_ids:
+        raise MigrationError(
+            f"Cannot resume: {output_dir / 'discord_metadata.json'} belongs to Discord "
+            f"server {meta.guild_id}, but the export is from "
+            f"{', '.join(sorted(export_guild_ids))}. Delete it to fetch fresh metadata, "
+            "or point at the right output directory."
+        )

@@ -34,6 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Stoat returns no id, so Ferry records the forum as "present, id unknown", the same way the
   rebuild step already did (#215). The rebuild then looks for the index among the pinned messages
   and edits it instead of adding a second one.
+- Check the cached Discord metadata before `--resume` reuses it (#971). Ferry now refuses to
+  resume when `discord_metadata.json` is for a different server than the export or the
+  configured server id. It also refuses an id that is not all digits. A permission value that
+  is a boolean, negative or not a whole number is refused too. The error names the file and
+  says to delete it or point at the right output directory. Permission bits Stoat does not
+  define are dropped, as they are for freshly fetched metadata. A valid cache is used as before.
 
 ## [2.41.29] - 2026-10-10
 

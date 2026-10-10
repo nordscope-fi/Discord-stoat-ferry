@@ -18,8 +18,10 @@ from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.security import SecureTokenStore, register_secret, safe_sanitize
 from discord_ferry.discord import (
+    ensure_metadata_matches_export,
     fetch_and_translate_guild_metadata,
     load_discord_metadata,
+    load_discord_metadata_for_resume,
     save_discord_metadata,
 )
 from discord_ferry.errors import DuplicateSendError, MigrationError
@@ -429,9 +431,20 @@ async def run_migration(
 
     # Phase 0b: Fetch Discord guild metadata (permissions, NSFW flags)
     # Independent of skip_export — runs whenever discord_token is available.
+    #
+    # A resume reuses the cached file, so it is checked before anything reads it
+    # (#971): well-formed, and for the configured server. The match against the
+    # parsed export happens after Phase 1, once the export is known. A fresh run
+    # overwrites the file, so it neither reads nor checks the old one.
+    resume_meta = (
+        load_discord_metadata_for_resume(
+            config.output_dir, configured_guild_id=config.discord_server_id
+        )
+        if config.resume
+        else None
+    )
     if config.discord_token and config.discord_server_id:
-        existing_meta = load_discord_metadata(config.output_dir)
-        if existing_meta and config.resume:
+        if resume_meta is not None:
             on_event(
                 MigrationEvent(
                     phase="export",
@@ -504,6 +517,11 @@ async def run_migration(
     for w in warnings:
         state.warnings.append(w)
         on_event(MigrationEvent(phase="validate", status="warning", message=w["message"]))
+
+    if resume_meta is not None:
+        ensure_metadata_matches_export(
+            resume_meta, {e.guild.id for e in exports}, config.output_dir
+        )
 
     total_messages = sum(e.message_count for e in exports)
     on_event(
