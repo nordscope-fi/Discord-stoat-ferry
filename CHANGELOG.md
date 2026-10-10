@@ -41,6 +41,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   forum as "present, id unknown", the same way the rebuild step already did (#215). The
   rebuild at the end of the run then looks for the index among the pinned messages and edits
   it, instead of posting a second index next to it.
+- A forum index is no longer posted twice, and a duplicate index send is now remembered (#560).
+  When Ferry created a forum's index message it never recorded the message id, so the rebuild at
+  the end of the run found none, sent a second index and pinned it too. Every forum ended a
+  normal migration with two pinned index messages. Ferry now records the id when the first send
+  succeeds, and the rebuild edits that message. When the first send comes back as a duplicate,
+  Stoat returns no id, so Ferry records the forum as "present, id unknown", the same way the
+  rebuild step already did (#215). The rebuild then looks for the index among the pinned messages
+  and edits it instead of adding a second one.
 
 ## [2.41.29] - 2026-10-10
 

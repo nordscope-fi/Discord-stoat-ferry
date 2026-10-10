@@ -4459,6 +4459,61 @@ async def test_forum_index_create_success_does_not_mark_the_forum(tmp_path: Path
     assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
 
 
+async def test_forum_index_create_success_records_the_message_id(tmp_path: Path) -> None:
+    """#560: a successful create send records the index message id.
+
+    Without it the REPORT-phase rebuild finds no id and posts a second, separately
+    pinned index message next to this one.
+    """
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+
+    with aioresponses() as m:
+        _register_forum_index_channels(m, 200)
+        await run_channels(config, state, _forum_index_exports(), [].append)
+
+    assert state.forum_index_message_ids == {"forum-my-forum": "idx-msg1"}
+    assert state.forum_index_present_unknown_id == set()
+
+
+async def test_report_rebuild_after_a_create_edits_the_created_message(tmp_path: Path) -> None:
+    """#560: create then REPORT rebuild in one run edits one message and sends none.
+
+    The distinguishing input is the rebuild's own requests: one PATCH to the id the
+    create returned, and zero POSTs to the channel's messages route.
+    """
+    from discord_ferry.core.engine import _rebuild_forum_indexes
+
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+
+    with aioresponses() as m:
+        _register_forum_index_channels(m, 200)
+        await run_channels(config, state, _forum_index_exports(), [].append)
+
+    sends: list[str] = []
+    edits: list[str] = []
+    events: list[MigrationEvent] = []
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            payload={"_id": "second-index"},
+            callback=lambda url, **kwargs: sends.append(str(url)),  # type: ignore[misc]
+            repeat=True,
+        )
+        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages/second-index/pin", payload={})
+        m.patch(
+            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1",
+            payload={},
+            callback=lambda url, **kwargs: edits.append(str(url)),  # type: ignore[misc]
+        )
+        await _rebuild_forum_indexes(config, state, events.append)
+
+    assert sends == [], "the rebuild posted a second index next to the created one"
+    assert edits == [f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1"]
+    assert state.forum_index_message_ids == {"forum-my-forum": "idx-msg1"}
+
+
 async def test_forum_index_create_success_clears_a_stale_mark(tmp_path: Path) -> None:
     """#560: a carried mark does not survive a create that returned a real id."""
     config = _make_config(tmp_path, upload_delay=0)
