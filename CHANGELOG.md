@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Security
+
+- Update locked dependencies with open security advisories: GitPython 3.1.62, PyJWT 2.15.0,
+  urllib3 2.8.0 and multidict 6.9.1. Also update python-dotenv 1.2.4, ruff 0.16.10 and mypy 2.4.0.
+  Supersedes Dependabot pull requests #951, #952, #953, #1058 and #1066.
+- Update the feedback container's pinned uv to 0.12.18 for GHSA-2cv4-cqwr-gwf7 (Windows only, so
+  the Linux container was not exposed). The pin keeps hashes for the same three Linux wheels as
+  before. Supersedes #1056 and #1057, which listed every platform's wheel.
+
 ## [2.41.25] - 2026-10-10
 
 ### Fixed
