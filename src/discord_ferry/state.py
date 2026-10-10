@@ -324,13 +324,19 @@ def load_state(output_dir: Path) -> MigrationState:
 #   Discord ids (map keys): digit snowflakes, plus the synthetic keys Ferry writes:
 #     `forum-index-<key>` in channel_map and `forum-<name>` in category_map.
 #
-# A dry-run state also holds `dry-...` placeholders. Nothing is ever sent to them,
-# and the resume, retry, rollback and check entry points refuse a dry-run state.
+# A dry-run state also holds `dry-<kind>-<id>` placeholders, written by structure.py,
+# messages.py and avatars.py. Nothing is ever sent to them: resume, retry, rollback,
+# check and repair (through check) all refuse a dry-run state. They are still held to
+# the exact shapes Ferry writes, so a hand-edited value cannot carry `/`, `?` or `%`
+# into a request path. Category placeholders hold a forum name (`dry-cat-forum-<name>`)
+# and category ids only ever travel in a request body, so they allow any printable text.
 
 _STOAT_ULID = re.compile(r"[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}")
 _STOAT_CATEGORY_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _STOAT_FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _SNOWFLAKE = re.compile(r"[0-9]{1,20}")
+_DRY_PLACEHOLDER = re.compile(r"dry-(?:ch|role|emoji|msg|server|avatar)-[A-Za-z0-9_-]+")
+_DRY_CATEGORY_PLACEHOLDER = re.compile(r"dry-cat-[^\x00-\x1f\x7f]+")
 
 #: Synthetic Discord-side keys Ferry's own writers add, by map. structure.py writes
 #: `channel_map["forum-index-<forum key>"]` and `category_map["forum-<parent name>"]`.
@@ -368,11 +374,18 @@ class _Problems:
         if len(self.items) < _MAX_PROBLEMS:
             self.items.append(f"{where}: {what}")
 
-    def stoat(self, where: str, value: object, kind: str, pattern: re.Pattern[str]) -> None:
+    def stoat(
+        self,
+        where: str,
+        value: object,
+        kind: str,
+        pattern: re.Pattern[str],
+        placeholder: re.Pattern[str] = _DRY_PLACEHOLDER,
+    ) -> None:
         if not isinstance(value, str):
             self.add(where, f"expected a text {kind}, got {type(value).__name__} {_show(value)}")
         elif pattern.fullmatch(value) is None and not (
-            self.dry_run and value.startswith("dry-") and len(value) > 4
+            self.dry_run and placeholder.fullmatch(value) is not None
         ):
             self.add(where, f"{_show(value)} is not a valid {kind}")
 
@@ -392,6 +405,7 @@ def _check_map(
     kind: str,
     pattern: re.Pattern[str],
     key_prefix: str | None = None,
+    placeholder: re.Pattern[str] = _DRY_PLACEHOLDER,
 ) -> None:
     if not isinstance(mapping, dict):
         problems.add(name, f"expected an object of id pairs, got {type(mapping).__name__}")
@@ -399,7 +413,7 @@ def _check_map(
     for key, value in mapping.items():
         where = f"{name}[{_show(key)}]"
         problems.discord(where, key, key_prefix)
-        problems.stoat(where, value, kind, pattern)
+        problems.stoat(where, value, kind, pattern, placeholder)
 
 
 def check_state_ids(state: MigrationState) -> None:
@@ -429,6 +443,7 @@ def check_state_ids(state: MigrationState) -> None:
         "Stoat category id",
         _STOAT_CATEGORY_ID,
         _FORUM_CATEGORY_KEY_PREFIX,
+        _DRY_CATEGORY_PLACEHOLDER,
     )
     _check_map(p, "emoji_map", state.emoji_map, "Stoat emoji id", _STOAT_FILE_ID)
     _check_map(p, "message_map", state.message_map, "Stoat message id", _STOAT_ULID)

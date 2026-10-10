@@ -25,7 +25,7 @@ from discord_ferry.discord import (
     resume_refusal,
     save_discord_metadata,
 )
-from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.errors import DuplicateSendError, MigrationError, StateError
 from discord_ferry.exporter import (
     download_dce,
     get_dce_path,
@@ -1456,6 +1456,15 @@ async def _repair_duplicate_forum_indexes(
             await sess.close()
 
 
+def _refuse_dry_run_state(state: MigrationState, action: str) -> None:
+    """A dry run creates nothing on Stoat, so its ids are placeholders, never targets."""
+    if state.is_dry_run:
+        raise StateError(
+            f"This state is from a dry run, so there is nothing to {action}. "
+            "Run the migration for real first."
+        )
+
+
 async def run_retry_failed(
     config: FerryConfig,
     state: MigrationState,
@@ -1473,6 +1482,7 @@ async def run_retry_failed(
     # reaches state.failed_messages, and through it report.json, unredacted.
     # Before the early return, so the store exists on every path out.
     _ensure_token_store(config)
+    _refuse_dry_run_state(state, "retry")
 
     if not state.failed_messages:
         on_event(
@@ -3757,6 +3767,7 @@ async def run_rollback(
     # shells call run_rollback directly and never set the store).
     _ensure_token_store(config)
 
+    _refuse_dry_run_state(state, "roll back")
     server_id = _validate_rollback_inputs(state, config)
     # Ensure the lock helpers use the resolved server ID.
     config.server_id = server_id
