@@ -16,9 +16,10 @@ from discord_ferry.discord.metadata import (
     RoleOverride,
     _dict_to_meta,
     _meta_to_dict,
-    ensure_metadata_matches_export,
+    load_bound_discord_metadata,
     load_discord_metadata,
     load_discord_metadata_for_resume,
+    read_cached_metadata,
     save_discord_metadata,
 )
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS, translate_permissions
@@ -774,18 +775,83 @@ def test_every_defined_stoat_bit_survives_the_load(tmp_path: Path) -> None:
     assert loaded.server_default_permissions == ALL_STOAT_PERMISSIONS
 
 
-def test_ensure_metadata_matches_export_accepts_a_listed_guild(tmp_path: Path) -> None:
+def test_read_cached_metadata_accepts_a_listed_export_guild(tmp_path: Path) -> None:
     _write(tmp_path, _good_dict())
-    meta = load_discord_metadata(tmp_path)
-    assert meta is not None
-    ensure_metadata_matches_export(meta, {_GUILD, "555555555555555555"}, tmp_path)
+    cached = read_cached_metadata(tmp_path, export_guild_ids={_GUILD, "555555555555555555"})
+    assert cached.problem is None
+    assert cached.meta is not None
 
 
-def test_ensure_metadata_matches_export_rejects_another_guild(tmp_path: Path) -> None:
+def test_read_cached_metadata_rejects_another_export_guild(tmp_path: Path) -> None:
     _write(tmp_path, _good_dict())
-    meta = load_discord_metadata(tmp_path)
-    assert meta is not None
-    with pytest.raises(MigrationError) as err:
-        ensure_metadata_matches_export(meta, {"555555555555555555"}, tmp_path)
-    assert _GUILD in str(err.value)
-    assert "555555555555555555" in str(err.value)
+    cached = read_cached_metadata(tmp_path, export_guild_ids={"555555555555555555"})
+    assert cached.meta is None
+    assert cached.problem is not None
+    assert _GUILD in cached.problem
+    assert "555555555555555555" in cached.problem
+
+
+def test_read_cached_metadata_never_raises_on_a_bad_file(tmp_path: Path) -> None:
+    (tmp_path / "discord_metadata.json").write_text("{not json")
+    cached = read_cached_metadata(tmp_path)
+    assert cached.meta is None
+    assert cached.problem is not None
+    assert "not a valid Ferry metadata file" in cached.problem
+
+
+def test_read_cached_metadata_reports_a_missing_file_as_absent(tmp_path: Path) -> None:
+    cached = read_cached_metadata(tmp_path, export_guild_ids={_GUILD})
+    assert (cached.meta, cached.problem, cached.dropped_unknown_bits) == (None, None, False)
+
+
+def test_read_cached_metadata_reports_dropped_unknown_bits_only_when_there_are_some(
+    tmp_path: Path,
+) -> None:
+    data = _good_dict()
+    _write(tmp_path, data)
+    assert read_cached_metadata(tmp_path).dropped_unknown_bits is False
+    data["role_permissions"] = {_ROLE: {"allow": (1 << 22) | (1 << 41), "deny": 0}}
+    _write(tmp_path, data)
+    cached = read_cached_metadata(tmp_path)
+    assert cached.dropped_unknown_bits is True
+    assert cached.meta is not None
+    assert cached.meta.role_permissions[_ROLE].allow == 1 << 22
+
+
+def test_a_bool_is_not_counted_as_dropped_bits(tmp_path: Path) -> None:
+    """A bool is rejected as a problem, not silently masked."""
+    data = _good_dict()
+    data["server_default_permissions"] = True
+    _write(tmp_path, data)
+    cached = read_cached_metadata(tmp_path)
+    assert cached.dropped_unknown_bits is False
+    assert cached.problem is not None
+
+
+def test_load_bound_discord_metadata_uses_the_configured_guild_and_exports(
+    tmp_path: Path,
+) -> None:
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
+
+    _write(tmp_path, _good_dict())
+
+    def export(guild_id: str) -> DCEExport:
+        return DCEExport(
+            guild=DCEGuild(id=guild_id, name="g"),
+            channel=DCEChannel(id=_CHAN, type=0, name="c"),
+        )
+
+    def config(server: str | None) -> FerryConfig:
+        return FerryConfig(
+            export_dir=tmp_path,
+            stoat_url="https://api.test",
+            token="t",
+            output_dir=tmp_path,
+            discord_server_id=server,
+        )
+
+    assert load_bound_discord_metadata(config(None)) is not None
+    assert load_bound_discord_metadata(config(_GUILD), [export(_GUILD)]) is not None
+    assert load_bound_discord_metadata(config(None), [export("555555555555555555")]) is None
+    assert load_bound_discord_metadata(config("555555555555555555"), [export(_GUILD)]) is None

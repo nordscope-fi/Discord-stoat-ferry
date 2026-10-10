@@ -2607,6 +2607,72 @@ async def test_run_roles_applies_permissions(tmp_path: Path) -> None:
     assert perm_bodies[0] == {"permissions": {"allow": 4_194_304, "deny": 0}}
 
 
+async def test_run_roles_does_not_apply_another_guilds_permissions(tmp_path: Path) -> None:
+    """A stale discord_metadata.json from a different server grants nothing here (#971)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+
+    meta = DiscordMetadata(
+        guild_id="999",
+        fetched_at="t",
+        server_default_permissions=4_194_304,
+        role_permissions={"r1": PermissionPair(allow=4_194_304, deny=0)},
+        channel_metadata={},
+        role_metadata={"r1": RoleMeta(hoist=True, position=3, name="Other")},
+    )
+    save_discord_metadata(meta, tmp_path)
+
+    role = DCERole(id="r1", name="Mod")
+    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=[role])])]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
+        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
+        m.put(f"{STOAT_URL}/servers/srv1/permissions/default", payload={}, repeat=True)
+        await run_roles(config, state, exports, events.append)
+        sent = [(method, str(url)) for (method, url) in m.requests]
+
+    assert not [r for r in sent if r[0] == "PUT" and "/permissions" in r[1]]
+    patched = [kw for (method, _), calls in m.requests.items() if method == "PATCH" for kw in calls]
+    assert not [c for c in patched if c.kwargs.get("json", {}).get("hoist")]
+
+
+async def test_run_channels_does_not_apply_another_guilds_overrides(tmp_path: Path) -> None:
+    """Channel overwrites from a different server are not sent to this one (#971)."""
+    from discord_ferry.discord.metadata import ChannelMeta
+
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="999",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={"222": ChannelMeta(nsfw=True)},
+        ),
+        tmp_path,
+    )
+    exports = [_make_export(guild_id="111", channel_id="222")]
+
+    with aioresponses() as m:
+        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1"}, repeat=True)
+        m.patch(f"{STOAT_URL}/channels/stoat-ch1", payload={}, repeat=True)
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
+        await run_channels(config, state, exports, [].append)
+        bodies = [
+            c.kwargs.get("json", {})
+            for (method, _), calls in m.requests.items()
+            if method == "POST"
+            for c in calls
+        ]
+
+    assert bodies
+    assert not [b for b in bodies if b.get("nsfw")]
+
+
 def test_ferry_min_permissions_value_pinned() -> None:
     """SC-27: Ferry's operating floor is deliberately narrow.
 
