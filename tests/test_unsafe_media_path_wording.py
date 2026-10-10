@@ -90,3 +90,59 @@ def test_scan_finds_every_known_warning_site() -> None:
     """Eight messages, nine dict sites (the attachment one is built twice)."""
     total = sum(len(_collect(_MIGRATOR / name)[0]) for name in _FILES)
     assert total >= 9, f"expected at least 9 unsafe_media_path warning sites, found {total}"
+
+
+# ---------------------------------------------------------------------------
+# #1139: no migrator string literal carries an em dash
+# ---------------------------------------------------------------------------
+
+_DOCSTRING_OWNERS = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _docstring_nodes(tree: ast.AST) -> set[int]:
+    """Ids of the string nodes that are docstrings (module, class, function)."""
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, _DOCSTRING_OWNERS) and node.body:
+            first = node.body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                found.add(id(first.value))
+    return found
+
+
+def _em_dash_literals(path: Path) -> list[tuple[int, str]]:
+    """Every non-docstring string constant (f-string parts included) holding an em dash."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = _docstring_nodes(tree)
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and _EM_DASH in node.value
+    ]
+
+
+def test_no_migrator_string_literal_has_an_em_dash() -> None:
+    files = sorted(_MIGRATOR.rglob("*.py"))
+    assert len(files) >= 12, f"expected at least 12 migrator modules, scanned {len(files)}"
+    offenders = {path.name: hits for path in files if (hits := _em_dash_literals(path))}
+    assert offenders == {}, f"em dash in a migrator string literal: {offenders}"
+
+
+def test_em_dash_scan_catches_a_planted_literal(tmp_path: Path) -> None:
+    """The scan fails on a bad f-string part and ignores a docstring (it can fail)."""
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        '"""Module docstring — ignored."""\n'
+        "def f(name):\n"
+        '    """Docstring — ignored."""\n'
+        '    return f"Skipping {name} — gone"\n',
+        encoding="utf-8",
+    )
+    assert [text for _, text in _em_dash_literals(planted)] == [" — gone"]

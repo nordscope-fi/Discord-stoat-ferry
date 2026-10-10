@@ -400,14 +400,14 @@ async def run_emoji(
                     {
                         "phase": "emoji",
                         "type": "missing_media",
-                        "message": f"Skipping emoji :{name}: — {reason}",
+                        "message": f"Skipping emoji :{name}: ({reason})",
                     }
                 )
                 on_event(
                     MigrationEvent(
                         phase="emoji",
                         status="warning",
-                        message=f"Skipping :{name}: — {reason}",
+                        message=f"Skipping :{name}: ({reason})",
                         current=idx,
                         total=total,
                     )
@@ -440,14 +440,14 @@ async def run_emoji(
                     {
                         "phase": "emoji",
                         "type": "missing_media",
-                        "message": f"Skipping emoji :{name}: — file not found: {file_path}",
+                        "message": f"Skipping emoji :{name}: (file not found: {file_path})",
                     }
                 )
                 on_event(
                     MigrationEvent(
                         phase="emoji",
                         status="warning",
-                        message=f"Skipping :{name}: — file not found",
+                        message=f"Skipping :{name}: (file not found)",
                         current=idx,
                         total=total,
                     )
@@ -472,7 +472,7 @@ async def run_emoji(
                             "phase": "emoji",
                             "type": "animated_emoji",
                             "message": (
-                                f"Emoji :{name}: is animated — animation will be lost on Stoat"
+                                f"Emoji :{name}: is animated; animation will be lost on Stoat"
                             ),
                         }
                     )
@@ -480,7 +480,7 @@ async def run_emoji(
                         MigrationEvent(
                             phase="emoji",
                             status="warning",
-                            message=f"Emoji :{name}: is animated — animation will be lost",
+                            message=f"Emoji :{name}: is animated; animation will be lost",
                             current=idx,
                             total=total,
                         )
@@ -502,7 +502,7 @@ async def run_emoji(
                         "type": "emoji_create_failed",
                         "message": safe_sanitize(
                             config.token_store,
-                            f"Failed to create emoji :{name}: — {exc}",
+                            f"Failed to create emoji :{name}: ({exc})",
                         ),
                     }
                 )
@@ -510,7 +510,7 @@ async def run_emoji(
                     MigrationEvent(
                         phase="emoji",
                         status="error",
-                        message=f"Failed emoji :{name}: — {exc}",
+                        message=f"Failed emoji :{name}: ({exc})",
                         current=idx,
                         total=total,
                     )
@@ -524,6 +524,6 @@ async def run_emoji(
         MigrationEvent(
             phase="emoji",
             status="completed",
-            message=f"Emoji phase complete — {migrated} emoji migrated",
+            message=f"Emoji phase complete: {migrated} emoji migrated",
         )
     )

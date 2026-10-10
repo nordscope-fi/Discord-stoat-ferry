@@ -1552,7 +1552,7 @@ async def test_oversized_attachment_skipped_before_upload(
         }
     ]
     assert [(e.phase, e.status, e.message) for e in events if e.status == "warning"] == [
-        ("messages", "warning", "Attachment 'huge.bin' too large — skipped.")
+        ("messages", "warning", "Attachment 'huge.bin' too large; skipped.")
     ]
     assert mock_aiohttp.requests == {}
 

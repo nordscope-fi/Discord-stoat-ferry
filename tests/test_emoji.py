@@ -287,12 +287,12 @@ async def test_run_emoji_http_image_url_skipped(tmp_path: Path) -> None:
         {
             "phase": "emoji",
             "type": "missing_media",
-            "message": "Skipping emoji :cloud: \u2014 URL not downloaded",
+            "message": "Skipping emoji :cloud: (URL not downloaded)",
         }
     ]
     warning_events = [e for e in events if e.status == "warning"]
     assert [(e.phase, e.message) for e in warning_events] == [
-        ("emoji", "Skipping :cloud: \u2014 URL not downloaded")
+        ("emoji", "Skipping :cloud: (URL not downloaded)")
     ]
 
 
@@ -497,7 +497,7 @@ async def test_run_emoji_animated_warning(tmp_path: Path) -> None:
     mock_create.assert_awaited_once()
 
     # Warning about animation loss should be emitted.
-    warning_message = "Emoji :spin: is animated \u2014 animation will be lost"
+    warning_message = "Emoji :spin: is animated; animation will be lost"
     assert state.warnings == [
         {
             "phase": "emoji",

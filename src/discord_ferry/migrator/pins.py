@@ -124,6 +124,6 @@ async def run_pins(
         MigrationEvent(
             phase="pins",
             status="completed",
-            message=f"Pins phase complete — {state.pins_applied} messages pinned",
+            message=f"Pins phase complete: {state.pins_applied} messages pinned",
         )
     )
