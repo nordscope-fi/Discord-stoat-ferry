@@ -4832,6 +4832,7 @@ async def _repair_merge_parent(
     merged_thread_ids: tuple[str, ...] = (),
     other_channels: dict[str, str] | None = None,
     fail_content: str | None = None,
+    prior_failed: list[FailedMessage] | None = None,
 ) -> tuple[MigrationState, list[dict[str, str]], list[MigrationEvent]]:
     """Recreate R_D_CHANNEL under the given strategy with the REAL send paths.
 
@@ -4853,6 +4854,7 @@ async def _repair_merge_parent(
             **{tid: "900000000000000001" for tid in merged_thread_ids},
         },
         thread_strategy=thread_strategy,
+        failed_messages=list(prior_failed or []),
     )
     events: list[MigrationEvent] = []
     sends: list[dict[str, str]] = []
@@ -5026,6 +5028,24 @@ async def test_merge_repair_records_thread_messages_the_way_a_merge_does(
         f"thread messages were mapped, which a normal merge never does: {state.message_map}"
     )
     assert state.channel_high_water[R_THREAD_A] == "900000000000000012"
+
+
+async def test_a_thread_message_repair_delivers_leaves_the_failed_queue(
+    tmp_path: Path,
+) -> None:
+    """Review of #310: repair delivered a previously failed thread message under a salted
+    key but left its FailedMessage behind. Repair's own dead-letter drain then sent it
+    again under a different key, and Stoat accepts both, so the message appeared twice."""
+    state, sends, _ = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+        prior_failed=[FailedMessage("900000000000000011", R_S_CHANNEL, "timeout")],
+    )
+    a_one = [s for s in sends if s["content"] == "a-one"]
+    assert len(a_one) == 1, f"the failed thread message was sent {len(a_one)} times: {a_one}"
+    leftover = [f for f in state.failed_messages if f.discord_msg_id == "900000000000000011"]
+    assert leftover == [], f"a delivered message is still queued for retry: {leftover}"
 
 
 async def test_a_failed_thread_message_is_queued_against_the_new_channel(

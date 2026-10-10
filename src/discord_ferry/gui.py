@@ -25,7 +25,7 @@ from discord_ferry.core import entry
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
-from discord_ferry.core.security import register_secret
+from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.feedback import FeedbackInterface
 from discord_ferry.feedback_gui import FeedbackGuiContext, render_feedback_action
@@ -35,7 +35,7 @@ from discord_ferry.parser.dce_parser import (
     parse_export_directory,
     validate_export,
 )
-from discord_ferry.state import load_state
+from discord_ferry.state import MigrationState, load_state
 
 _HAS_WEBVIEW = False
 try:
@@ -103,6 +103,20 @@ _STEP_LABELS: list[str] = ["Configure", "Export", "Validate", "Migrate", "Done"]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _read_previous_state(output_dir: Path) -> tuple[MigrationState | None, str | None]:
+    """Return (saved state, None), (None, why it cannot be used) or (None, None) if absent.
+
+    A state the loader refuses must not read as "no previous migration": the page
+    would then start fresh on its own and overwrite the file (#970 review).
+    """
+    if not (output_dir / "state.json").exists():
+        return None, None
+    try:
+        return load_state(output_dir), None
+    except Exception as exc:  # noqa: BLE001 -- any unreadable state gets the same answer
+        return None, sanitize_secrets(str(exc)) or type(exc).__name__
 
 
 def _proxy_notice_lines() -> list[str]:
@@ -1236,11 +1250,7 @@ async def migrate_page() -> None:
 
     # Check for a previous migration state — offer resume or fresh start.
     output_dir = Path("./ferry-output")
-    state_path = output_dir / "state.json"
-    previous_state = None
-    if state_path.exists():
-        with contextlib.suppress(Exception):
-            previous_state = load_state(output_dir)
+    previous_state, load_problem = _read_previous_state(output_dir)
 
     # Flag to gate migration start behind the resume/fresh choice.
     resume_choice_made = asyncio.Event()
@@ -1250,7 +1260,23 @@ async def migrate_page() -> None:
         with ui.element("div").classes("w-full max-w-3xl fade-in mt-10 mb-0"):
             _render_step_indicator(active_step=4)
 
-    if needs_resume_choice:
+    if load_problem is not None:
+        # Saved progress exists but cannot be used. Never start on our own: a fresh
+        # start overwrites state.json, so the operator must choose it knowingly.
+        with ui.card().classes("w-full max-w-2xl mx-auto mb-4 bg-red-50 border-red-300"):
+            ui.label("Saved progress could not be read").classes("text-lg font-bold text-red-800")
+            ui.label(load_problem).classes("text-red-700")
+            ui.label(
+                "Starting fresh replaces the saved progress in ferry-output/state.json. "
+                "Copy that file somewhere safe first if you may need it."
+            ).classes("text-red-700")
+
+            def _start_fresh_anyway() -> None:
+                storage["resume"] = False
+                resume_choice_made.set()
+
+            ui.button("Start Fresh", on_click=_start_fresh_anyway).classes("bg-gray-400 text-white")
+    elif needs_resume_choice:
         with ui.card().classes("w-full max-w-2xl mx-auto mb-4 bg-amber-50 border-amber-300"):
             msgs_done = len(previous_state.message_map)  # type: ignore[union-attr]
             phase = previous_state.current_phase or "unknown"  # type: ignore[union-attr]

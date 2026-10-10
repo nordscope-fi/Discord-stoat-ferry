@@ -525,6 +525,7 @@ async def _merge_threads(
     parent_name_to_stoat: dict[str, str],
     *,
     idempotency_salt: str = "",
+    reconcile_failed: bool = False,
 ) -> None:
     """Merge thread messages into their parent channels with separators.
 
@@ -613,7 +614,7 @@ async def _merge_threads(
                     for fm in state.failed_messages
                     if fm.stoat_channel_id == parent_stoat_id
                 }
-                if config.incremental
+                if config.incremental or reconcile_failed
                 else set()
             )
             _succeeded_ids: set[str] = set()
@@ -864,7 +865,7 @@ async def _merge_threads(
             # above. Re-attempting under a mode that does not reconcile would leave a
             # succeeded message still recorded as failed — an inaccurate durable
             # record, and a duplicate send the next time it is re-attempted.
-            if config.incremental and _failed_ids_here:
+            if (config.incremental or reconcile_failed) and _failed_ids_here:
                 _seen: set[str] = set()
                 _reconciled: list[FailedMessage] = []
                 for fm in state.failed_messages:
