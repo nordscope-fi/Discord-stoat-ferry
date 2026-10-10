@@ -73,6 +73,7 @@ export const QWEN_SCHEMA_FAILURE_REASONS = Object.freeze([
   'stream-model',
   'stream-finish-reason',
   'stream-content',
+  'stream-runaway',
   'response-envelope',
   'response-json',
   'response-findings',

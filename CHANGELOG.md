@@ -29,6 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   a pull request job write access.
 - New reference page, Release protections, records what the repository settings protect
   today, what could not be read, and the settings the owner can still change.
+### Fixed
+
+- A Qwen review that keeps streaming no longer holds the review slot for the full ten minutes (#739). One 97,137-character plan review kept streaming until the ten-minute total deadline, while two runs of the same prompt finished in 285 and 303 seconds. The 30-second idle deadline never fired because the model kept sending reasoning events. The review now stops 450 seconds after the response starts, and the record shows `failure_class` `schema` with `failure_reason` `stream-runaway` in place of a plain timeout. Normal runs are unaffected. The 600-second total deadline stays as the outer bound.
 
 ## [2.42.0] - 2026-10-10
 
