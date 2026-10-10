@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- Stage saved documents and the downloaded server banner under a random, exclusively created temporary name (#960). Ferry used a predictable name such as `state.json.tmp`. In a shared output folder, another account could plant a symlink at that name and send the write to a file it could not otherwise change. The temporary file is now created fresh in the same folder, so an existing entry is never reused or followed. The files Ferry writes (state, reports, blueprints, metadata, banners) are now readable only by the account that ran Ferry.
+- Stage saved documents and the downloaded server banner under a random, exclusively created temporary name (#960). Ferry used a predictable name such as `state.json.tmp`. In a shared output folder, another account could plant a symlink at that name and send the write to a file it could not otherwise change. The temporary file is now created fresh in the same folder, so an existing entry is never reused or followed. The files Ferry writes (state, reports, blueprints, metadata, banners) are now readable only by the account that ran Ferry. Direct writes that stay in place (avatars, role-icon staging files and thread archives) now refuse to follow a symlink at their path. A planted link makes the avatar or role icon fail with the usual warning, and a thread archive that cannot be written is recorded as a warning while the rest of the phase carries on.
 
 ## [2.41.29] - 2026-10-10
 

@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from discord_ferry.core.atomicio import write_text_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
 from discord_ferry.errors import DuplicateSendError
@@ -500,7 +501,7 @@ async def run_messages(
                     parent_name_to_stoat[exp.channel.name] = stoat_id
         await _merge_threads(thread_exports, config, state, on_event, parent_name_to_stoat)
     elif thread_strategy == "archive" and thread_exports:
-        _archive_threads(thread_exports, config, on_event)
+        _archive_threads(thread_exports, config, state, on_event)
 
     on_event(
         MigrationEvent(
@@ -893,12 +894,14 @@ async def _merge_threads(
 def _archive_threads(
     thread_exports: list[DCEExport],
     config: FerryConfig,
+    state: MigrationState,
     on_event: EventCallback,
 ) -> None:
     """Export thread messages as markdown files. No API calls.
 
     Creates ``{output_dir}/threads/{parent_channel_name}/{thread_name}.md``
     with each message formatted as a markdown heading with author and timestamp.
+    A file name that is a symlink is refused and recorded as a warning (#960).
     """
     used_names: dict[str, dict[str, int]] = {}
     for export in thread_exports:
@@ -939,7 +942,19 @@ def _archive_threads(
             lines.append("")  # blank line between messages
             msg_count += 1
 
-        md_path.write_text("\n".join(lines), encoding="utf-8")
+        try:
+            write_text_no_follow(md_path, "\n".join(lines))
+        except OSError:
+            # Fixed template, no path or error text. A link planted at the archive
+            # name is refused (#960); the rest of the phase carries on.
+            state.warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "thread_archive_write_failed",
+                    "message": f"Thread archive for {export.channel.name!r} could not be written.",
+                }
+            )
+            continue
 
         on_event(
             MigrationEvent(
