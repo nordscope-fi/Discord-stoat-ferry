@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Banner downloads no longer send the Discord token, since Discord's image server does not need
+  it (#975).
 - Require five exporter tests to check the exact low-disk, partial-channel, proxy-resolution, and
   stale-export warning outcomes (#1079). Changes to an event's status, phase, or message no longer
   satisfy the affected coverage.

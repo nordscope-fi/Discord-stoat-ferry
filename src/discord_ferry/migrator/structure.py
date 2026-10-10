@@ -120,7 +120,6 @@ def _stoat_channel_type(channel_type: int) -> str:
 async def _download_banner(
     session: aiohttp.ClientSession,
     url: str,
-    headers: dict[str, str],
     dest: Path,
 ) -> str | None:
     """Download a banner to ``dest``. Return ``None`` on success, else the failure message.
@@ -132,9 +131,10 @@ async def _download_banner(
     existing destination on Windows.
     """
     limit = TAG_SIZE_LIMITS["banners"]
-    # No redirects: the CDN answers directly, and a 3xx would send this request,
-    # with its Authorization header, to a host Ferry never chose.
-    async with session.get(url, headers=headers, allow_redirects=False) as resp:
+    # No Authorization header: Discord's image server serves banners without a
+    # token, so none is sent. No redirects either: the CDN answers directly, and
+    # a 3xx would send this request to a host Ferry never chose.
+    async with session.get(url, allow_redirects=False) as resp:
         if resp.status != 200:
             return f"Banner download returned status {resp.status}"
         data = await read_bounded(resp, limit)
@@ -337,10 +337,7 @@ async def run_server(
                 banner_dir = config.output_dir / "banners"
                 banner_dir.mkdir(parents=True, exist_ok=True)
                 banner_path = banner_dir / f"{guild_id}.png"
-                headers: dict[str, str] = {}
-                if config.discord_token:
-                    headers["Authorization"] = config.discord_token
-                failure = await _download_banner(session, banner_url, headers, banner_path)
+                failure = await _download_banner(session, banner_url, banner_path)
                 if failure is None:
                     banner_id = await upload_with_cache(
                         session,
