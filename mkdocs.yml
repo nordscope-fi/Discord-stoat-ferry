@@ -63,5 +63,6 @@ nav:
     - Architecture: reference/architecture.md
     - Stoat API Notes: reference/stoat-api-notes.md
     - DCE Format: reference/dce-format.md
+    - Release Protections: reference/release-protections.md
   - Contributing: contributing.md
   - Changelog: changelog.md
