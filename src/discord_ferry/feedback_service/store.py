@@ -17,10 +17,12 @@ from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from discord_ferry.feedback import DestinationKind
+from discord_ferry.feedback import DestinationKind, canonical_json
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from discord_ferry.feedback import FeedbackRequest
 
 _RECEIPT_RETENTION = timedelta(days=7)
 _CONTACT_RETENTION = timedelta(days=30)
@@ -73,6 +75,30 @@ class ReceiptClaim:
 class QuotaDecision:
     allowed: bool
     retry_at: datetime | None = None
+
+
+_RECEIPT_HASH_LABEL = b"ferry-feedback-receipt-hash-v2"
+
+
+def receipt_hash_key(contact_key: bytes) -> bytes:
+    """Derive the receipt-hash subkey so the contact encryption key is never used raw."""
+
+    if len(contact_key) != 32:
+        raise ValueError("contact_key must contain exactly 32 bytes")
+    return hmac.new(contact_key, _RECEIPT_HASH_LABEL, hashlib.sha256).digest()
+
+
+def keyed_content_hash(request: FeedbackRequest, contact_key: bytes) -> str:
+    """Return the HMAC-SHA256 receipt hash of the full parsed report, contact email included.
+
+    The key keeps a reader of only the database from confirming an email guess (#962).
+    """
+
+    return hmac.new(
+        receipt_hash_key(contact_key),
+        canonical_json(request.content_for_hash()),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _timestamp(value: datetime) -> int:
@@ -215,7 +241,7 @@ class FeedbackStore:
     ) -> ReceiptClaim:
         """Claim a request id, or report what an earlier claim left behind.
 
-        ``legacy_content_hash`` is the pre-#962 hash of the same request. A row that still
+        ``legacy_content_hash`` is the pre-#962 unkeyed hash of the same request. A row that still
         carries it is accepted as a match and rewritten with ``content_hash``, so a receipt
         written before the upgrade keeps working and sheds the email-bearing hash.
         """

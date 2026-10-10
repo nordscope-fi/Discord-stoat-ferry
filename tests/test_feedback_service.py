@@ -52,7 +52,11 @@ from discord_ferry.feedback_service.github import (
     ReconciledDestination,
     ReconciliationRequiredError,
 )
-from discord_ferry.feedback_service.store import FeedbackStore, ReceiptState
+from discord_ferry.feedback_service.store import (
+    FeedbackStore,
+    ReceiptState,
+    keyed_content_hash,
+)
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 REQUEST_ID = UUID("018f4c8c-3f52-7a89-a901-0123456789ac")
@@ -1135,18 +1139,37 @@ async def test_feedback_route_stores_a_hash_that_cannot_confirm_an_email_guess(
         await client.close()
 
     stored = _stored_content_hash(tmp_path)
+    assert stored == keyed_content_hash(request, _service_config(tmp_path).contact_key)
     known_fields = request.content_for_hash()
     for guess in (email, "another-guess@example.com"):
-        candidate = hashlib.sha256(
-            canonical_json({**known_fields, "contact_email": guess})
-        ).hexdigest()
-        assert candidate != stored
+        # What a database-only reader can compute: the same canonical JSON, no key.
+        unkeyed = hashlib.sha256(canonical_json({**known_fields, "contact_email": guess}))
+        assert unkeyed.hexdigest() != stored
+    assert feedback_content_hash(request) != stored
+
+
+def test_keyed_hash_depends_on_the_key_the_email_and_the_content() -> None:
+    request = _feedback_request()
+    key = b"E" * 32
+    other_key = b"F" * 32
+
+    assert keyed_content_hash(request, key) == keyed_content_hash(request, key)
+    assert keyed_content_hash(request, key) != keyed_content_hash(request, other_key)
+    assert keyed_content_hash(request, key) != keyed_content_hash(
+        replace(request, contact_email="changed@example.com"), key
+    )
+    assert keyed_content_hash(request, key) != keyed_content_hash(
+        replace(request, description="Different report"), key
+    )
+    assert (
+        keyed_content_hash(request, key)
+        != hmac.new(key, canonical_json(request.content_for_hash()), hashlib.sha256).hexdigest()
+    )
 
 
 async def test_feedback_route_accepts_a_pending_receipt_written_with_the_old_hash(
     tmp_path: object,
 ) -> None:
-    from discord_ferry.feedback import legacy_feedback_content_hash
     from discord_ferry.feedback_service.app import STORE_KEY, create_app
 
     destination = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/944"
@@ -1158,8 +1181,8 @@ async def test_feedback_route_accepts_a_pending_receipt_written_with_the_old_has
     await client.start_server()
     try:
         request = _feedback_request()
-        old_hash = legacy_feedback_content_hash(request)
-        assert old_hash != feedback_content_hash(request)
+        old_hash = feedback_content_hash(request)
+        assert old_hash != keyed_content_hash(request, _service_config(tmp_path).contact_key)
         await app[STORE_KEY].claim_receipt(REQUEST_ID, old_hash, DestinationKind.ISSUE, now=NOW)
 
         response = await client.post("/v1/feedback", json=request.to_mapping())
@@ -1170,7 +1193,9 @@ async def test_feedback_route_accepts_a_pending_receipt_written_with_the_old_has
         assert github.reconcile_calls == 1
         record = await app[STORE_KEY].get_receipt(REQUEST_ID)
         assert record is not None and record.state is ReceiptState.DELIVERED
-        assert record.content_hash == feedback_content_hash(request)
+        assert record.content_hash == keyed_content_hash(
+            request, _service_config(tmp_path).contact_key
+        )
     finally:
         await client.close()
 
@@ -1178,7 +1203,6 @@ async def test_feedback_route_accepts_a_pending_receipt_written_with_the_old_has
 async def test_feedback_route_replays_a_delivered_receipt_written_with_the_old_hash(
     tmp_path: object,
 ) -> None:
-    from discord_ferry.feedback import legacy_feedback_content_hash
     from discord_ferry.feedback_service.app import STORE_KEY, create_app
 
     destination = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/945"
@@ -1190,7 +1214,7 @@ async def test_feedback_route_replays_a_delivered_receipt_written_with_the_old_h
         request = _feedback_request()
         store = app[STORE_KEY]
         await store.claim_receipt(
-            REQUEST_ID, legacy_feedback_content_hash(request), DestinationKind.ISSUE, now=NOW
+            REQUEST_ID, feedback_content_hash(request), DestinationKind.ISSUE, now=NOW
         )
         await store.mark_delivered(REQUEST_ID, destination, now=NOW)
 
@@ -1207,7 +1231,6 @@ async def test_feedback_route_replays_a_delivered_receipt_written_with_the_old_h
 async def test_feedback_route_still_rejects_a_changed_report_against_an_old_hash(
     tmp_path: object,
 ) -> None:
-    from discord_ferry.feedback import legacy_feedback_content_hash
     from discord_ferry.feedback_service.app import STORE_KEY, create_app
 
     github = _FeedbackGitHub()
@@ -1217,7 +1240,7 @@ async def test_feedback_route_still_rejects_a_changed_report_against_an_old_hash
     try:
         await app[STORE_KEY].claim_receipt(
             REQUEST_ID,
-            legacy_feedback_content_hash(_feedback_request()),
+            feedback_content_hash(_feedback_request()),
             DestinationKind.ISSUE,
             now=NOW,
         )
@@ -1230,7 +1253,7 @@ async def test_feedback_route_still_rejects_a_changed_report_against_an_old_hash
         await client.close()
 
 
-async def test_feedback_route_ignores_a_changed_email_on_a_replayed_request(
+async def test_feedback_route_rejects_a_different_email_on_a_delivered_receipt(
     tmp_path: object,
 ) -> None:
     from discord_ferry.feedback_service.app import STORE_KEY, create_app
@@ -1245,10 +1268,52 @@ async def test_feedback_route_ignores_a_changed_email_on_a_replayed_request(
             "/v1/feedback",
             json=_feedback_request(contact_email="changed@example.com").to_mapping(),
         )
-        assert first.status == second.status == 200
+        assert first.status == 200
+        assert second.status == 409
+        assert (
+            FeedbackError.from_mapping(await second.json()).code
+            is FeedbackErrorCode.DUPLICATE_ID_CONFLICT
+        )
         assert len(github.issue_requests) == 1
         stored = await app[STORE_KEY].get_contact(REQUEST_ID, now=NOW)
         assert stored == "private-feedback@example.com"
+    finally:
+        await client.close()
+
+
+async def test_feedback_route_rejects_a_different_email_on_a_pending_receipt(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    destination = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/946"
+    github = _FeedbackGitHub(
+        GitHubDeliveryUncertainError("lost response"),
+        reconcile_result=ReconciledDestination(DestinationKind.ISSUE, destination),
+    )
+    app = create_app(_service_config(tmp_path), github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        original = _feedback_request().to_mapping()
+        assert (await client.post("/v1/feedback", json=original)).status == 503
+
+        takeover = await client.post(
+            "/v1/feedback",
+            json=_feedback_request(contact_email="intruder@example.com").to_mapping(),
+        )
+
+        assert takeover.status == 409
+        assert github.reconcile_calls == 0
+        assert await app[STORE_KEY].get_contact(REQUEST_ID, now=NOW) is None
+        record = await app[STORE_KEY].get_receipt(REQUEST_ID)
+        assert record is not None and record.state is ReceiptState.PENDING
+
+        repaired = await client.post("/v1/feedback", json=original)
+        assert repaired.status == 200
+        assert await app[STORE_KEY].get_contact(REQUEST_ID, now=NOW) == (
+            "private-feedback@example.com"
+        )
     finally:
         await client.close()
 
