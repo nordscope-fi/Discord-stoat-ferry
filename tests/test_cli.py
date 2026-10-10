@@ -3875,3 +3875,23 @@ def test_backfill_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path:
     assert "server echoed" in result.output
     assert "event" in result.output
     assert _CMD_TOKEN not in result.output
+
+
+@pytest.mark.parametrize("command", ["validate", "export-blueprint"])
+def test_a_refused_export_file_is_reported_without_a_traceback(
+    runner: CliRunner, tmp_path: Path, command: str
+) -> None:
+    """#988: the scan stops on a refused channel file, and the CLI says why."""
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "chan.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+    if command == "export-blueprint":
+        args = [command, "--from", str(export_dir), "--output", str(tmp_path / "bp.json")]
+    else:
+        args = [command, str(export_dir)]
+
+    result = runner.invoke(main, args)
+
+    assert result.exit_code == 1
+    assert "chan.json is nested too deeply to load" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
