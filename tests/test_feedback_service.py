@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -208,6 +209,8 @@ def test_service_config_defaults_are_positive_and_match_adr_030() -> None:
     assert config.receipt_retention_seconds == 7 * 24 * 60 * 60
     assert config.rate_retention_seconds == 24 * 60 * 60
     assert config.contact_retention_seconds == 30 * 24 * 60 * 60
+    assert config.expiry_sweep_interval_seconds == 60 * 60
+    assert config.expiry_sweep_interval_seconds < config.contact_retention_seconds
     assert config.github_timeout_seconds > 0
 
 
@@ -1383,3 +1386,147 @@ def test_log_privacy_formatter_emits_only_bounded_metadata() -> None:
     }
     assert "198.51.100.200" not in output.getvalue()
     assert "query-marker" not in output.getvalue()
+
+
+_SWEEP_TASK_NAME = "feedback-expiry-sweep"
+_SWEEP_INTERVAL = 0.005
+_SWEEP_DEADLINE = 5.0
+
+
+def _contact_rows(path: Path) -> int:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute("SELECT COUNT(*) FROM contacts").fetchone()
+    finally:
+        connection.close()
+    return int(row[0])
+
+
+class _Clock:
+    """Controlled service clock: tests move time by assigning ``current``."""
+
+    def __init__(self, current: datetime) -> None:
+        self.current = current
+
+    def __call__(self) -> datetime:
+        return self.current
+
+
+async def _wait_until(condition: object) -> None:
+    assert callable(condition)
+    deadline = asyncio.get_running_loop().time() + _SWEEP_DEADLINE
+    while not condition():
+        assert asyncio.get_running_loop().time() < deadline, "condition not reached in time"
+        await asyncio.sleep(_SWEEP_INTERVAL)
+
+
+async def _sweep_client(tmp_path: object, clock: _Clock) -> tuple[TestClient, FeedbackStore, Path]:
+    from discord_ferry.feedback_service.app import create_app
+
+    config = _service_config(tmp_path)
+    store = FeedbackStore(config.database_path, contact_key=config.contact_key)
+    await store.initialize(now=clock.current)
+    await store.claim_receipt(REQUEST_ID, "c" * 64, DestinationKind.ISSUE, now=clock.current)
+    await store.store_contact(REQUEST_ID, "dummy@example.invalid", now=clock.current)
+    app = create_app(
+        config,
+        store=store,
+        github=_GitHubMustNotRun(),
+        now=clock,
+        expiry_sweep_interval_seconds=_SWEEP_INTERVAL,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    return client, store, config.database_path
+
+
+async def test_idle_service_deletes_an_expired_contact_on_the_timer(tmp_path: object) -> None:
+    clock = _Clock(datetime.now(tz=UTC))
+    client, _store, database = await _sweep_client(tmp_path, clock)
+    try:
+        assert _contact_rows(database) == 1
+
+        clock.current += timedelta(days=30, seconds=1)
+        await _wait_until(lambda: _contact_rows(database) == 0)
+    finally:
+        await client.close()
+
+
+async def test_background_sweep_keeps_an_unexpired_contact(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock(datetime.now(tz=UTC))
+    client, store, database = await _sweep_client(tmp_path, clock)
+    sweeps: list[datetime] = []
+    real_expire = store.expire
+
+    async def counting_expire(*, now: datetime) -> int:
+        sweeps.append(now)
+        return await real_expire(now=now)
+
+    monkeypatch.setattr(store, "expire", counting_expire)
+    try:
+        clock.current += timedelta(days=29)
+        await _wait_until(lambda: len(sweeps) >= 3)
+
+        assert _contact_rows(database) == 1
+        assert all(value == clock.current for value in sweeps)
+    finally:
+        await client.close()
+
+
+async def test_sweep_loop_survives_a_failing_sweep_and_logs_no_row_data(
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _Clock(datetime.now(tz=UTC))
+    client, store, database = await _sweep_client(tmp_path, clock)
+    real_expire = store.expire
+    calls = 0
+
+    async def flaky_expire(*, now: datetime) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("row marker dummy@example.invalid must stay private")
+        return await real_expire(now=now)
+
+    monkeypatch.setattr(store, "expire", flaky_expire)
+    caplog.set_level(logging.WARNING, logger="discord_ferry.feedback_service.app")
+    try:
+        clock.current += timedelta(days=31)
+        await _wait_until(lambda: _contact_rows(database) == 0)
+
+        assert calls >= 2
+        assert any(record.getMessage() == "expiry_sweep_failed" for record in caplog.records)
+        assert "marker" not in caplog.text
+        assert "dummy@example.invalid" not in caplog.text
+    finally:
+        await client.close()
+
+
+async def test_shutdown_cancels_and_awaits_the_sweep_task(tmp_path: object) -> None:
+    clock = _Clock(datetime.now(tz=UTC))
+    client, _store, _database = await _sweep_client(tmp_path, clock)
+    tasks = [task for task in asyncio.all_tasks() if task.get_name() == _SWEEP_TASK_NAME]
+    assert len(tasks) == 1
+    assert not tasks[0].done()
+
+    await client.close()
+
+    assert tasks[0].cancelled()
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == _SWEEP_TASK_NAME]
+
+
+async def test_default_sweep_interval_comes_from_the_config(tmp_path: object) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    config = _service_config(tmp_path)
+    client = TestClient(TestServer(create_app(config, github=_GitHubMustNotRun())))
+    await client.start_server()
+    try:
+        assert config.expiry_sweep_interval_seconds == 60 * 60
+        assert [t for t in asyncio.all_tasks() if t.get_name() == _SWEEP_TASK_NAME]
+    finally:
+        await client.close()
