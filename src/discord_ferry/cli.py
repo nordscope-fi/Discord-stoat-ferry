@@ -31,7 +31,7 @@ from discord_ferry.core.engine import (
 )
 from discord_ferry.core.http import format_proxy_notices
 from discord_ferry.core.logging_setup import configure_logging
-from discord_ferry.core.security import register_secret
+from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import CheckError, MigrationError, StateError
 from discord_ferry.feedback_cli import _print_feedback_hint, run_feedback_cli
 from discord_ferry.migrator.api import init_request_semaphore
@@ -841,7 +841,7 @@ def build(
     console.print(f"[bold]Discord Ferry[/] — building server '{_safe(bp.name)}'\n")
 
     def _on_event(event: MigrationEvent) -> None:
-        line = _safe(event.message)
+        line = _safe(sanitize_secrets(event.message))
         if event.status == "warning":
             console.print(f"  [yellow]Warning:[/] {line}")
         elif event.status == "error":
@@ -851,8 +851,8 @@ def build(
 
     # build never builds a FerryConfig or a SecureTokenStore, so the engine's
     # _ensure_token_store hook never fires. Without this line the Stoat token has
-    # no redaction coverage for the whole command, including the MigrationError
-    # printed below (#972). Same reason as probe_cmd.
+    # no redaction coverage in the log file (#972). Same reason as probe_cmd. The
+    # console lines below mask it themselves: _safe only escapes Rich markup.
     register_secret("stoat", token)
 
     try:
@@ -861,7 +861,7 @@ def build(
         # final line. A built server writes no state.json and cannot be rolled back.
         server_id = asyncio.run(run_build(stoat_url, token, bp, _on_event))
     except MigrationError as exc:
-        console.print(f"\n[bold red]Build failed:[/] {_safe(exc)}")
+        console.print(f"\n[bold red]Build failed:[/] {_safe(sanitize_secrets(str(exc)))}")
         _print_feedback_hint()
         sys.exit(1)
     console.print(f"\n[bold green]Done![/] Server '{_safe(bp.name)}' created ({server_id})")
