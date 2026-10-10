@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from discord_ferry.core.atomicio import replace_with_retry
+from discord_ferry.core.atomicio import replace_with_retry, write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, read_bounded, tls_hint
 from discord_ferry.discord.client import download_role_icon
@@ -464,7 +464,7 @@ async def _resolve_role_icon(
     icon_dir.mkdir(parents=True, exist_ok=True)
     temp_path = icon_dir / f"{role_id}.png"
     try:
-        temp_path.write_bytes(icon_bytes)
+        write_bytes_no_follow(temp_path, icon_bytes)
         icon_id = await upload_to_autumn(
             session, state.autumn_url, "icons", temp_path, config.token
         )

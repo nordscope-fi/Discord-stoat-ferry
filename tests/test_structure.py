@@ -3639,7 +3639,10 @@ async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
             "discord_ferry.migrator.structure.download_role_icon",
             new=AsyncMock(return_value=b"pngbytes"),
         ),
-        patch("pathlib.Path.write_bytes", side_effect=OSError("disk full")),
+        patch(
+            "discord_ferry.migrator.structure.write_bytes_no_follow",
+            side_effect=OSError("disk full"),
+        ),
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
@@ -3649,6 +3652,61 @@ async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert any(w.get("type") == "role_icon_upload_failed" for w in state.warnings)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+async def test_role_icon_link_planted_at_the_staging_path_is_not_written_through(
+    tmp_path: Path,
+) -> None:
+    """#960: ``role-icons/<role id>.png`` is a guessable name, so a planted link must fail."""
+    victim = tmp_path / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    (tmp_path / "role-icons").mkdir()
+    (tmp_path / "role-icons" / "111.png").symlink_to(victim)
+
+    with (
+        aioresponses(),
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+    ):
+        async with get_session(config) as session:
+            result = await _resolve_role_icon(session, config, state, "moderator", "111", "abc")
+
+    assert result is None
+    assert victim.read_text(encoding="utf-8") == "secret"
+    assert [w["type"] for w in state.warnings] == ["role_icon_upload_failed"]
+
+
+async def test_role_icon_normal_write_reaches_the_upload(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    seen: list[bytes] = []
+
+    async def fake_upload(
+        session: object, autumn_url: object, tag: object, path: Path, token: object
+    ) -> str:
+        seen.append(path.read_bytes())
+        return "icon-1"
+
+    with (
+        aioresponses(),
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+        patch("discord_ferry.migrator.structure.upload_to_autumn", new=fake_upload),
+    ):
+        async with get_session(config) as session:
+            result = await _resolve_role_icon(session, config, state, "moderator", "111", "abc")
+
+    assert result == "icon-1"
+    assert seen == [b"pngbytes"]
+    assert state.warnings == []
+    assert not (tmp_path / "role-icons" / "111.png").exists()
 
 
 # ---------------------------------------------------------------------------

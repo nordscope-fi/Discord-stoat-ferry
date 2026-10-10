@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from discord_ferry.core.atomicio import write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import read_bounded
 from discord_ferry.migrator.api import get_session
@@ -109,7 +110,8 @@ async def _download_remote_avatar(
                     "Avatar at %s is larger than the %d byte limit", url, _AVATAR_MAX_BYTES
                 )
                 return None, f"larger than the {_AVATAR_MAX_BYTES} byte limit"
-            dest.write_bytes(data)
+            # Refuses a link planted at ``dest`` after the check above (#960).
+            write_bytes_no_follow(dest, data)
             return dest, ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to download avatar from %s: %s", url, exc)

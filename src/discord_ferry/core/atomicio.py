@@ -101,3 +101,40 @@ def atomic_write_text(path: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _open_no_follow(path: Path) -> int:
+    """Open *path* for writing, truncating it, and refuse to follow a symlink.
+
+    ``O_NOFOLLOW`` makes the open fail with ``ELOOP`` when the last component is a
+    symlink, a dangling one included, so a link planted at a guessable name in a
+    shared output folder cannot redirect the write (#960). The file is created
+    with mode 0600 when it does not exist.
+
+    ``O_NOFOLLOW`` does not exist on Windows, where this opens the path the plain
+    way. There the file system, not this call, decides what a link may do.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags, 0o600)
+
+
+def write_bytes_no_follow(path: Path, data: bytes) -> None:
+    """Write *data* to *path* in place, raising ``OSError`` if *path* is a symlink.
+
+    For the writers that stay direct on purpose (avatars, role icons), where the
+    file is read straight back and a temp-then-swap would add nothing. Unlike
+    ``atomic_write_text`` the target is truncated as soon as it is opened, so use
+    it only where a half-written file is harmless.
+    """
+    with os.fdopen(_open_no_follow(path), "wb") as handle:
+        handle.write(data)
+
+
+def write_text_no_follow(path: Path, text: str) -> None:
+    """Write UTF-8 *text* to *path* in place, raising ``OSError`` if *path* is a symlink.
+
+    The text counterpart of :func:`write_bytes_no_follow`, with the same newline
+    handling as ``Path.write_text``.
+    """
+    with os.fdopen(_open_no_follow(path), "w", encoding="utf-8") as handle:
+        handle.write(text)

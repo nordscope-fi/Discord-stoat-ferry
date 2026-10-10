@@ -18,7 +18,12 @@ from typing import IO
 import pytest
 
 from discord_ferry.core import atomicio
-from discord_ferry.core.atomicio import atomic_write_text, replace_with_retry
+from discord_ferry.core.atomicio import (
+    atomic_write_text,
+    replace_with_retry,
+    write_bytes_no_follow,
+    write_text_no_follow,
+)
 
 
 def test_writes_a_new_file(tmp_path: Path) -> None:
@@ -413,3 +418,56 @@ def test_the_written_file_is_owner_only(tmp_path: Path) -> None:
     atomic_write_text(target, "x")
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+# --- Direct writes that refuse a planted link (#960) -------------------------
+
+
+def test_write_bytes_no_follow_writes_a_new_file(tmp_path: Path) -> None:
+    target = tmp_path / "a.png"
+
+    write_bytes_no_follow(target, b"\x89PNG-bytes")
+
+    assert target.read_bytes() == b"\x89PNG-bytes"
+
+
+def test_write_bytes_no_follow_replaces_an_existing_file(tmp_path: Path) -> None:
+    target = tmp_path / "a.png"
+    target.write_bytes(b"a much longer previous body")
+
+    write_bytes_no_follow(target, b"new")
+
+    assert target.read_bytes() == b"new"
+
+
+def test_write_text_no_follow_writes_utf8(tmp_path: Path) -> None:
+    target = tmp_path / "a.md"
+
+    write_text_no_follow(target, "caf\u00e9\nline two")
+
+    assert target.read_bytes().decode("utf-8").replace("\r\n", "\n") == "caf\u00e9\nline two"
+
+
+@posix_only
+def test_write_bytes_no_follow_refuses_a_planted_link(tmp_path: Path) -> None:
+    victim = tmp_path / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    link = tmp_path / "a.png"
+    link.symlink_to(victim)
+
+    with pytest.raises(OSError):
+        write_bytes_no_follow(link, b"new")
+
+    assert victim.read_text(encoding="utf-8") == "secret"
+
+
+@posix_only
+def test_write_text_no_follow_refuses_a_dangling_planted_link(tmp_path: Path) -> None:
+    goal = tmp_path / "created-through-the-link"
+    link = tmp_path / "a.md"
+    link.symlink_to(goal)
+
+    with pytest.raises(OSError):
+        write_text_no_follow(link, "new")
+
+    assert not goal.exists()

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
@@ -224,6 +226,44 @@ async def test_merge_mode_separator_sent(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Archive mode tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+async def test_archive_mode_does_not_write_through_a_planted_link(tmp_path: Path) -> None:
+    """#960: the archive file name is guessable, so a link planted there must not be followed."""
+    victim = tmp_path / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[_make_message("m1", "parent msg")],
+        message_count=1,
+    )
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "thread message")],
+        message_count=1,
+    )
+    archive_dir = tmp_path / "threads" / "general"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "my-thread.md").symlink_to(victim)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/channels/stoat-ch-100/messages",
+            payload={"_id": "msg-result"},
+            repeat=True,
+        )
+        await run_messages(config, state, [parent, thread], [].append)
+
+    assert victim.read_text(encoding="utf-8") == "secret"
+    assert [w["type"] for w in state.warnings] == ["thread_archive_write_failed"]
 
 
 async def test_archive_mode_creates_markdown(tmp_path: Path) -> None:

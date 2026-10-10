@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.migrator import avatars as avatars_module
 from discord_ferry.migrator.avatars import _download_remote_avatar, run_avatars
 from discord_ferry.parser.models import (
     DCEAuthor,
@@ -750,3 +752,68 @@ async def test_avatar_exactly_at_the_cap_is_accepted(tmp_path: Path) -> None:
     assert reason == ""
     assert dest is not None
     assert dest.stat().st_size == _AVATAR_CAP
+
+
+# ---------------------------------------------------------------------------
+# #960: a link planted at the avatar path is never written through
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+async def test_avatar_link_planted_after_the_containment_check_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolve() check runs before the body is read, so a link can land after it.
+
+    The link is planted from inside read_bounded, which sits between the check and
+    the write. Only a write that refuses links survives that window.
+    """
+    victim = tmp_path / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    output = tmp_path / "output"
+    (output / "avatars").mkdir(parents=True)
+    real_read_bounded = avatars_module.read_bounded
+
+    async def plant_then_read(resp: Any, limit: int) -> bytes | None:
+        (output / "avatars" / "42.png").symlink_to(victim)
+        return await real_read_bounded(resp, limit)
+
+    monkeypatch.setattr(avatars_module, "read_bounded", plant_then_read)
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = RewritingSession(real, cdn.url("/body/100"))
+        dest, reason = await asyncio.wait_for(
+            _download_remote_avatar(
+                session,  # type: ignore[arg-type]  # duck-typed stand-in for ClientSession
+                "https://cdn.discordapp.com/avatars/42/a.png",
+                output,
+                "42",
+            ),
+            timeout=5,
+        )
+
+    assert dest is None
+    assert reason
+    assert victim.read_text(encoding="utf-8") == "secret"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+async def test_avatar_link_to_an_outside_file_leaves_it_unchanged(tmp_path: Path) -> None:
+    victim = tmp_path / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    output = tmp_path / "output"
+    (output / "avatars").mkdir(parents=True)
+    (output / "avatars" / "42.png").symlink_to(victim)
+
+    dest, reason, _, _ = await _fetch_avatar(output, "/body/100")
+
+    assert dest is None
+    assert reason
+    assert victim.read_text(encoding="utf-8") == "secret"
+
+
+async def test_avatar_normal_download_writes_the_expected_bytes(tmp_path: Path) -> None:
+    dest, reason, _, _ = await _fetch_avatar(tmp_path, "/body/100")
+
+    assert reason == ""
+    assert dest == tmp_path / "avatars" / "42.png"
+    assert dest.stat().st_size == 100
