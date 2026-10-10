@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Banner downloads no longer send the Discord token, since Discord's image server does not need
   it (#975).
+- Agent compatibility now requires the validated plain-English 1.7.0 release (#1124). The local
+  installer and generated-state check accept `plain-english@1.7.0`, whose Qwen chat hooks use a
+  60000 ms timeout instead of 10000 ms and which no longer writes the Vibe judge launcher. The
+  installer removes a leftover `.vibe/hooks/plain-english-judge.mjs` so the staged check passes.
 - Require five exporter tests to check the exact low-disk, partial-channel, proxy-resolution, and
   stale-export warning outcomes (#1079). Changes to an event's status, phase, or message no longer
   satisfy the affected coverage.

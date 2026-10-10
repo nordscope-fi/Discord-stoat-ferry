@@ -42,7 +42,7 @@ def _write_plain_english_fixture(fake_bin: Path) -> Path:
 
 
 def _installer_checkout(
-    tmp_path: Path, *, version: str = "1.0.0", command: bool = True
+    tmp_path: Path, *, version: str = "1.7.0", command: bool = True
 ) -> tuple[Path, Path, dict[str, str]]:
     root = tmp_path / "repo"
     user_home = tmp_path / "home"
@@ -423,7 +423,7 @@ def test_custom_data_home_routes_every_context7_host_to_the_installed_launcher(
 
 @pytest.mark.parametrize(
     ("version", "command"),
-    [("0.24.1", True), ("plain-english 1.0.0", True), ("1.0.0", False)],
+    [("0.24.1", True), ("1.0.0", True), ("plain-english 1.7.0", True), ("1.7.0", False)],
 )
 def test_installer_rejects_unsupported_plain_english_before_writes(
     tmp_path: Path, version: str, command: bool
@@ -440,12 +440,16 @@ def test_installer_rejects_unsupported_plain_english_before_writes(
     )
     assert result.returncode == 1
     assert _generated_host_snapshot(root) == before
-    assert "expected 1.0.0" in result.stderr
-    assert "npm install -g plain-english@1.0.0" in result.stderr
+    assert "expected 1.7.0" in result.stderr
+    assert "npm install -g plain-english@1.7.0" in result.stderr
 
 
 def test_installer_keeps_native_plain_english_artifacts(tmp_path: Path) -> None:
     root, _, env = _installer_checkout(tmp_path)
+    # Left behind by plain-english 1.0.0, which wrote a Vibe judge launcher (#1124).
+    stale_judge = root / ".vibe/hooks/plain-english-judge.mjs"
+    stale_judge.parent.mkdir(parents=True)
+    stale_judge.write_text("stale\n")
     result = subprocess.run(
         [NODE, "scripts/agent-compat/install-local.mjs"],
         cwd=root,
@@ -458,6 +462,7 @@ def test_installer_keeps_native_plain_english_artifacts(tmp_path: Path) -> None:
     assert (root / ".codex/hooks/plain-english.mjs").exists()
     assert (root / ".vibe/hooks/plain-english.mjs").exists()
     assert (root / ".vibe/hooks/plain-english-docs.prompt.md").exists()
+    assert not stale_judge.exists()
     assert not (root / ".codex/bin/plain-english-chat-hook.mjs").exists()
     assert "npx" not in (root / ".codex/hooks.json").read_text()
     assert "npm exec" not in (root / ".vibe/hooks.toml").read_text()
@@ -498,7 +503,7 @@ def test_installer_adds_native_qwen_chat_hooks_without_duplicate_document_checks
         ]
         assert len(native) == 1
         assert native[0]["command"] == expected
-        assert native[0]["timeout"] == 10_000
+        assert native[0]["timeout"] == 60_000
     assert (root / ".qwen/hooks/plain-english.mjs").is_file()
     stop_commands = [
         hook.get("command", "") for group in settings["hooks"]["Stop"] for hook in group["hooks"]
@@ -961,9 +966,9 @@ def test_plain_english_contract_reports_actionable_failure() -> None:
     )
     mismatch_report = json.loads(mismatch.stdout)
     missing_report = json.loads(missing.stdout)
-    assert mismatch_report["expected"] == "1.0.0"
+    assert mismatch_report["expected"] == "1.7.0"
     assert mismatch_report["detected"] == "0.24.1"
-    assert "npm install -g plain-english@1.0.0" in mismatch_report["message"]
+    assert "npm install -g plain-english@1.7.0" in mismatch_report["message"]
     assert missing_report["detected"] is None
     assert "no version detected" in missing_report["message"]
 
@@ -1070,7 +1075,7 @@ def test_agent_check_gates_only_generated_state_modes_on_the_exact_version(
     assert not marker.exists(), result.stdout + result.stderr
     if requires_tool:
         assert result.returncode == 1
-        assert "plain-English mismatched: expected 1.0.0" in result.stdout + result.stderr
+        assert "plain-English mismatched: expected 1.7.0" in result.stdout + result.stderr
     else:
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -1120,6 +1125,8 @@ def _alter_plain_english_state(root: Path, fixture: str) -> None:
         wrapper.write_text("stale\n")
     elif fixture == "missing-vibe-launcher":
         (root / ".vibe/hooks/plain-english.mjs").unlink()
+    elif fixture == "stale-vibe-judge":
+        (root / ".vibe/hooks/plain-english-judge.mjs").write_text("stale\n")
     else:
         raise AssertionError(f"unknown fixture: {fixture}")
 
@@ -1134,6 +1141,7 @@ def _alter_plain_english_state(root: Path, fixture: str) -> None:
         ("changed-vibe-prompt", "Vibe plain-English artifact differs"),
         ("stale-ferry-wrapper", "stale Ferry plain-English wrapper remains"),
         ("missing-vibe-launcher", "missing Vibe plain-English artifact"),
+        ("stale-vibe-judge", "unexpected Vibe plain-English artifact: plain-english-judge.mjs"),
         ("event-time-git", "expected one native plain-English chat hook for Stop"),
         (
             "outside-codex-launcher",
@@ -1277,6 +1285,38 @@ def test_native_codex_chat_normalization_rejects_unknown_timeout() -> None:
     )
     assert result.returncode == 1
     assert "unexpected plain-English chat timeout for Stop: 30" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("timeout", "accepted"),
+    [(10000, True), (60000, True), (30000, False)],
+)
+def test_native_qwen_chat_normalization_timeout(timeout: int, accepted: bool) -> None:
+    script = (
+        "import { normalizeQwenChatHooks } "
+        "from './scripts/agent-compat/plain-english-contract.mjs';"
+        "const hook = { name: 'plain-english-chat', "
+        "command: 'node .qwen/hooks/plain-english.mjs hook chat --agent qwen', "
+        f"timeout: {timeout} }};"
+        "const doc = { hooks: { Stop: [{ hooks: [hook] }], "
+        "SubagentStop: [{ hooks: [{ ...hook }] }] } };"
+        "try { normalizeQwenChatHooks(doc, '/fixture/owner', []);"
+        "console.log(JSON.stringify(doc.hooks.Stop[0].hooks[0].timeout)); }"
+        "catch (error) { console.error(error.message); process.exit(1); }"
+    )
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == 60_000
+    else:
+        assert result.returncode == 1
+        assert "unexpected plain-English Qwen chat hook for Stop" in result.stderr
 
 
 def test_codex_chat_command_shell_literal_survives_metacharacters(
