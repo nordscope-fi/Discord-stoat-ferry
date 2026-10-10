@@ -15,13 +15,16 @@ on:
   # runs regardless of what changed last.
   workflow_dispatch:
 
+# The tag push uses the App installation token that checkout persists, so the job's own
+# GITHUB_TOKEN only needs to read.
+permissions:
+  contents: read
+
 jobs:
   auto-tag:
     name: Create tag if version changed
     runs-on: ubuntu-latest
     environment: auto-tag
-    permissions:
-      contents: write
     steps:
       - name: Mint App installation token
         id: app-token

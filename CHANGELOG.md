@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Workflows now declare the least token permission each job needs (#968, #969).
+  `release.yml` used to give every job write access and the right to request a PyPI
+  identity token, including the build jobs that also run for pull requests from a branch
+  in this repository. Those jobs now read only, the tag-only release job keeps the write
+  access it needs, and the Windows signing step runs for tags only. `ci.yml`, `auto-tag.yml`
+  and `docs.yml` also state their permissions, with `docs.yml` granting the Pages rights to
+  the deploy job alone. A new test fails if a workflow leaves permissions unstated or gives
+  a pull request job write access.
+- New reference page, Release protections, records what the repository settings protect
+  today, what could not be read, and the settings the owner can still change.
+
 ## [2.42.0] - 2026-10-10
 
 ### Changed

@@ -21,9 +21,12 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only by default. The build jobs also run for pull requests that touch the
+# packaging path, so they must not hold a write token or an OIDC token. The tag-only
+# `release` job below declares the write scope it needs. See
+# docs/reference/release-protections.md.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   build-windows:
@@ -207,7 +210,9 @@ jobs:
           Write-Host "AttachConsole path OK: no redirection, exited 0"
 
       - name: Sign Windows binary
-        if: env.HAS_WINDOWS_CERT == 'true'
+        # Tag runs only: a pull request or a manual run from a branch never hands the
+        # certificate to a step, even when the secret exists.
+        if: env.HAS_WINDOWS_CERT == 'true' && startsWith(github.ref, 'refs/tags/')
         env:
           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -352,6 +357,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      # contents: write creates the GitHub Release. id-token: write is the PyPI trusted
+      # publisher's OIDC request, bound to this workflow and the `release` environment.
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 

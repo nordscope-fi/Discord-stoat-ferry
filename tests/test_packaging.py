@@ -402,3 +402,136 @@ def test_build_backend_is_pinned_to_an_exact_version() -> None:
         assert re.fullmatch(r"[A-Za-z0-9_.-]+==\d+(\.\d+)*", requirement), (
             f"build requirement {requirement!r} is not pinned with =="
         )
+
+
+# --- Workflow token authority (#968, #969) -------------------------------------------
+#
+# A workflow with no `permissions:` block gets the repository default, which is an
+# owner setting this repo cannot pin. A top-level block that grants write scope to every
+# job hands that scope to jobs that only build, including the jobs a pull request starts.
+# These checks read the workflow text with the standard library only, because PyYAML is
+# not a dev dependency of this project.
+
+_WORKFLOW_DIR = _REPO_ROOT / ".github" / "workflows"
+_TOP_PERMISSIONS = re.compile(r"^permissions:[ \t]*(.*)$", re.MULTILINE)
+_JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
+
+
+def _workflow_texts() -> dict[str, str]:
+    paths = sorted(_WORKFLOW_DIR.glob("*.yml"))
+    assert paths, "no workflow files found"
+    return {path.name: path.read_text(encoding="utf-8") for path in paths}
+
+
+def _top_level_permissions(text: str) -> list[str] | None:
+    """Return the `scope: level` lines of the top-level block, or None if it is missing."""
+    match = _TOP_PERMISSIONS.search(text)
+    if match is None:
+        return None
+    if match.group(1).strip():  # `permissions: read-all` or `{}` on one line
+        return [match.group(1).strip()]
+    lines: list[str] = []
+    for line in text[match.end() :].splitlines()[1:]:
+        if line.startswith("  ") and line.strip():
+            lines.append(line.strip())
+        elif line.strip():
+            break
+    return lines
+
+
+def _jobs(text: str) -> dict[str, str]:
+    """Split the `jobs:` section into {job id: job body}."""
+    head, sep, body = text.partition("\njobs:\n")
+    assert sep, "workflow has no jobs: section"
+    headers = list(_JOB_HEADER.finditer(body))
+    jobs: dict[str, str] = {}
+    for index, header in enumerate(headers):
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(body)
+        jobs[header.group(1)] = body[header.end() : end]
+    assert jobs, "no jobs found"
+    return jobs
+
+
+def _job_permissions(job: str) -> list[str]:
+    match = re.search(r"^    permissions:[ \t]*(.*)$", job, re.MULTILINE)
+    if match is None:
+        return []
+    if match.group(1).strip():
+        return [match.group(1).strip()]
+    lines: list[str] = []
+    for line in job[match.end() :].splitlines()[1:]:
+        if line.startswith("      ") and line.strip():
+            lines.append(line.strip())
+        elif line.strip():
+            break
+    return lines
+
+
+def _runs_on_pull_request(text: str) -> bool:
+    triggers = text.split("\njobs:\n", 1)[0]
+    return re.search(r"^  pull_request(_target)?:", triggers, re.MULTILINE) is not None
+
+
+def test_every_workflow_declares_top_level_permissions() -> None:
+    """#968. A workflow that omits `permissions:` inherits a setting this repo cannot pin."""
+    missing = [
+        name for name, text in _workflow_texts().items() if _top_level_permissions(text) is None
+    ]
+    assert not missing, f"workflows without a top-level permissions block: {missing}"
+
+
+def test_no_workflow_uses_pull_request_target() -> None:
+    """#969. `pull_request_target` runs with secrets and a write token on fork-supplied refs."""
+    offenders = [
+        name
+        for name, text in _workflow_texts().items()
+        if re.search(r"^\s*pull_request_target:", text, re.MULTILINE)
+    ]
+    assert not offenders, f"pull_request_target is not allowed: {offenders}"
+
+
+def test_pull_request_jobs_hold_no_write_or_oidc_authority() -> None:
+    """#969. A job a pull request can start must not hold a write token or an OIDC token.
+
+    Same-repository pull requests receive the permissions the workflow declares, and
+    release.yml also builds on `pull_request`. Write scope and `id-token: write` therefore
+    have to sit on a job that only runs for a tag (an `if:` naming `refs/tags/`), never at
+    the top level and never on a build job. The test asserts it saw a pull_request
+    workflow and a gated job, so a parser that finds nothing cannot pass.
+    """
+    problems: list[str] = []
+    pr_workflows = 0
+    gated_jobs = 0
+    for name, text in _workflow_texts().items():
+        if not _runs_on_pull_request(text):
+            continue
+        pr_workflows += 1
+        for line in _top_level_permissions(text) or []:
+            if line.endswith(": write") or line == "write-all":
+                problems.append(f"{name}: top-level permission {line!r} reaches pull_request jobs")
+        for job_id, job in _jobs(text).items():
+            writes = [p for p in _job_permissions(job) if p.endswith(": write")]
+            if not writes:
+                continue
+            if_line = re.search(r"^    if:[ \t]*(.*)$", job, re.MULTILINE)
+            if if_line is not None and "refs/tags/" in if_line.group(1):
+                gated_jobs += 1
+            else:
+                problems.append(f"{name}: job {job_id!r} holds {writes} without a tag-only if:")
+    assert pr_workflows >= 2, (
+        f"expected ci.yml and release.yml to run on pull_request: {pr_workflows}"
+    )
+    assert gated_jobs >= 1, "expected the release job to hold its write scope behind a tag-only if:"
+    assert not problems, "\n".join(problems)
+
+
+def test_windows_signing_step_runs_only_for_tags() -> None:
+    """#969. The signing certificate must not be handed to a step a pull request can reach."""
+    text = _workflow_texts()["release.yml"]
+    marker = "- name: Sign Windows binary"
+    assert marker in text, "signing step not found"
+    step = text.split(marker, 1)[1].split("\n      - ", 1)[0]
+    assert "secrets.WINDOWS_CERT_PFX" in step, "signing step no longer reads the certificate"
+    if_line = re.search(r"^        if:[ \t]*(.*)$", step, re.MULTILINE)
+    assert if_line is not None, "signing step has no if:"
+    assert "refs/tags/" in if_line.group(1), "signing step must be limited to tag runs"
