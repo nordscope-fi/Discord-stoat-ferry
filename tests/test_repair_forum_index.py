@@ -504,3 +504,57 @@ async def test_repair_with_no_forum_indexes_makes_no_request(tmp_path: Path) -> 
 
 def test_duplicate_remove_failed_is_in_exit_set() -> None:
     assert "forum_index_duplicate_remove_failed" in UNREPAIRED_WARNING_TYPES
+
+
+# --- A forum with no posts: the create path sent no heading (#1142) ----------
+
+_NO_POSTS_CREATE = "No posts migrated."
+_NO_POSTS_REBUILT = "**Forum: F**\nNo posts migrated."
+
+
+async def test_repair_removes_the_headerless_copy_of_a_forum_with_no_posts(tmp_path: Path) -> None:
+    """The create path sent exactly `No posts migrated.`; the rebuild sent it under a heading."""
+    config = _config(tmp_path)
+    state = _dup_state()
+    with patch(_CHECK, new=AsyncMock(return_value=_clean_report())), aioresponses() as mock:
+        mock.get(_ME, payload={"_id": "me"})
+        mock.post(
+            _SEARCH,
+            payload=[
+                _pinned("rebuilt", content=_NO_POSTS_REBUILT),
+                _pinned("created", content=_NO_POSTS_CREATE),
+            ],
+        )
+        mock.delete(f"{_API}/channels/idx/messages/created", status=204)
+        outcome = await run_repair(config, state, [], [].append)
+        assert _deletes(mock) == [f"{_API}/channels/idx/messages/created"]
+    assert [r["message_id"] for r in outcome.removed_duplicate_indexes] == ["created"]
+
+
+async def test_repair_keeps_a_headerless_message_that_is_not_ferrys(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    state = _dup_state()
+    pinned = [
+        _pinned("rebuilt", content=_NO_POSTS_REBUILT),
+        _pinned("other-author", author="someone-else", content=_NO_POSTS_CREATE),
+        _pinned("other-name", masquerade_name="Somebody", content=_NO_POSTS_CREATE),
+        _pinned("no-masq", masquerade_name=None, content=_NO_POSTS_CREATE),
+        _pinned("longer", content=_NO_POSTS_CREATE + " Extra words."),
+    ]
+    with patch(_CHECK, new=AsyncMock(return_value=_clean_report())), aioresponses() as mock:
+        mock.get(_ME, payload={"_id": "me"})
+        mock.post(_SEARCH, payload=pinned)
+        await run_repair(config, state, [], [].append)
+        assert _deletes(mock) == []
+
+
+async def test_headerless_copy_is_kept_when_the_recorded_message_is_not_pinned(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    state = _dup_state()
+    with patch(_CHECK, new=AsyncMock(return_value=_clean_report())), aioresponses() as mock:
+        mock.get(_ME, payload={"_id": "me"})
+        mock.post(_SEARCH, payload=[_pinned("created", content=_NO_POSTS_CREATE)])
+        await run_repair(config, state, [], [].append)
+        assert _deletes(mock) == []

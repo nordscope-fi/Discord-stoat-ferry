@@ -1285,6 +1285,12 @@ async def _rebuild_one_forum_index(
 #: removed when its masquerade matches, in addition to its author being Ferry's own user.
 _FERRY_INDEX_MASQUERADE = "Discord Ferry"
 
+#: What the create path (``migrator/structure.py``) posted as the index of a forum with no
+#: posts: exactly this text, with no ``**Forum: <name>**`` heading. The rebuild posts it under
+#: the heading, so the unrecorded create-path copy of such a forum is told apart by this
+#: exact content. A forum's index channel holds that one forum's index only.
+_NO_POSTS_CREATE_CONTENT = "No posts migrated."
+
 
 async def _remove_duplicate_forum_indexes(
     session: aiohttp.ClientSession,
@@ -1307,7 +1313,9 @@ async def _remove_duplicate_forum_indexes(
       and the message sits in that channel's pinned messages;
     - the recorded message is itself among those pinned results (otherwise the unrecorded
       copy may be the only index left);
-    - its content starts with the forum's ``**Forum: {name}**`` header;
+    - its content starts with the forum's ``**Forum: {name}**`` header, or is exactly
+      ``No posts migrated.`` (the headerless text the create path posted for a forum with no
+      posts);
     - its id is not the recorded one;
     - its ``author`` is Ferry's own user id (``GET /users/@me``) AND its ``masquerade.name``
       is ``Discord Ferry``.
@@ -1365,7 +1373,13 @@ async def _remove_duplicate_forum_indexes(
             warn(f"Could not read the pinned messages of the forum index for '{forum_name}': {exc}")
             continue
         with_header = [
-            m for m in pinned if str(m.get("content") or "").startswith(header) and m.get("_id")
+            m
+            for m in pinned
+            if m.get("_id")
+            and (
+                str(m.get("content") or "").startswith(header)
+                or m.get("content") == _NO_POSTS_CREATE_CONTENT
+            )
         ]
         if not any(str(m["_id"]) == recorded_id for m in with_header):
             continue
