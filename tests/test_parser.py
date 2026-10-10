@@ -1013,6 +1013,91 @@ def test_parse_single_export_metadata_only(tmp_path: Path) -> None:
     assert export.json_path == json_path
 
 
+def _forbid_read_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(self: Path, *args: object, **kwargs: object) -> str:
+        raise AssertionError("the file was read before the size check refused it")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+
+@pytest.mark.parametrize("metadata_only", [True, False])
+def test_parse_single_export_refuses_an_oversized_file_before_reading_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, metadata_only: bool
+) -> None:
+    """#988: the size is checked on disk first, so nothing large is allocated."""
+    from discord_ferry.parser import dce_parser
+
+    monkeypatch.setattr(dce_parser, "MAX_EXPORT_JSON_BYTES", 1000)
+    path = tmp_path / "huge.json"
+    # Not valid JSON on purpose: a JSON error here would mean the file was parsed.
+    path.write_bytes(b"x" * 1001)
+    _forbid_read_text(monkeypatch)
+    with pytest.raises(ValueError, match="too large"):
+        parse_single_export(path, metadata_only=metadata_only)
+
+
+def test_parse_single_export_accepts_a_file_exactly_at_the_size_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry.parser import dce_parser
+
+    body = json.dumps(
+        {
+            "guild": {"id": "1", "name": "G"},
+            "channel": {"id": "2", "type": 0, "name": "c"},
+            "messages": [],
+            "messageCount": 0,
+        }
+    ).encode()
+    limit = len(body) + 50
+    path = tmp_path / "edge.json"
+    path.write_bytes(body + b" " * 50)
+    assert path.stat().st_size == limit
+    monkeypatch.setattr(dce_parser, "MAX_EXPORT_JSON_BYTES", limit)
+    assert parse_single_export(path, metadata_only=True).channel.name == "c"
+
+
+@pytest.mark.parametrize("metadata_only", [True, False])
+def test_parse_single_export_refuses_deeply_nested_json_cleanly(
+    tmp_path: Path, metadata_only: bool
+) -> None:
+    path = tmp_path / "deep.json"
+    path.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+    with pytest.raises(ValueError, match="nested too deeply"):
+        parse_single_export(path, metadata_only=metadata_only)
+
+
+def test_the_real_export_limit_accepts_a_million_message_channel() -> None:
+    """About 1.1 KB per message in the fixtures, so 1M messages is about 1.1 GB."""
+    from discord_ferry.parser import dce_parser
+
+    needed = 3 * 1_100_000_000
+    assert needed <= dce_parser.MAX_EXPORT_JSON_BYTES
+
+
+def test_parse_export_directory_skips_an_oversized_file_and_keeps_the_rest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry.parser import dce_parser
+
+    good = tmp_path / "good.json"
+    good.write_text(
+        json.dumps(
+            {
+                "guild": {"id": "1", "name": "G"},
+                "channel": {"id": "2", "type": 0, "name": "c"},
+                "messages": [],
+                "messageCount": 0,
+            }
+        )
+    )
+    (tmp_path / "huge.json").write_bytes(b"x" * 5000)
+    monkeypatch.setattr(dce_parser, "MAX_EXPORT_JSON_BYTES", good.stat().st_size + 10)
+    exports = parse_export_directory(tmp_path, metadata_only=True)
+    assert [e.channel.name for e in exports] == ["c"]
+    assert "huge.json is too large to load" in caplog.text
+
+
 def test_validate_counts_emoji_from_content(tmp_path: Path) -> None:
     """validate_export counts custom emoji in message content, not just reactions."""
     temp_dir = tmp_path / "exports"

@@ -253,6 +253,8 @@ ferry build [OPTIONS]
 
 You must provide either `--template` or `--blueprint`, but not both.
 
+Ferry refuses a blueprint file larger than 10 MiB, or nested too deeply, before loading it. Real blueprints are well under 1 MiB.
+
 ### Preset Templates
 
 Ferry includes three built-in server templates:
