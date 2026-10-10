@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -20,6 +21,7 @@ from discord_ferry.parser.models import (
     DCEMessage,
 )
 from discord_ferry.state import MigrationState
+from tests.local_cdn import ENDLESS_LIMIT, LocalCDN, RewritingSession, local_cdn
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
@@ -517,12 +519,16 @@ async def test_download_failure_includes_specific_reason(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+class _FakeContent:
+    async def iter_chunked(self, size: int) -> Any:
+        yield b"PNG-DUMMY-BYTES"
+
+
 class _FakeResp:
     status = 200
     headers = {"Content-Type": "image/png"}
-
-    async def read(self) -> bytes:
-        return b"PNG-DUMMY-BYTES"
+    content_length = None
+    content = _FakeContent()
 
     async def __aenter__(self) -> _FakeResp:
         return self
@@ -532,7 +538,7 @@ class _FakeResp:
 
 
 class _FakeSession:
-    def get(self, url: object, timeout: object = None) -> _FakeResp:
+    def get(self, url: object, timeout: object = None, allow_redirects: bool = True) -> _FakeResp:
         return _FakeResp()
 
 
@@ -663,3 +669,83 @@ async def test_downloader_rejects_escaped_avatars_directory(tmp_path: Path) -> N
     assert dest is None
     assert reason
     assert list(outside.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# #1108: avatar downloads stop at the Autumn avatars size limit
+# ---------------------------------------------------------------------------
+
+_AVATAR_CAP = 4_000_000  # Autumn "avatars" tag limit, stoatchat Revolt.toml
+
+
+async def _fetch_avatar(
+    tmp_path: Path, cdn_path: str
+) -> tuple[Path | None, str, LocalCDN, RewritingSession]:
+    """Run the real downloader against the local server."""
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = RewritingSession(real, cdn.url(cdn_path))
+        dest, reason = await asyncio.wait_for(
+            _download_remote_avatar(
+                session,  # type: ignore[arg-type]  # duck-typed stand-in for ClientSession
+                "https://cdn.discordapp.com/avatars/42/a.png",
+                tmp_path,
+                "42",
+            ),
+            timeout=5,
+        )
+        await asyncio.sleep(0.2)  # let the server notice a closed connection
+        return dest, reason, cdn, session
+
+
+def _no_avatar_files(tmp_path: Path) -> bool:
+    return not (tmp_path / "avatars").exists() or list((tmp_path / "avatars").iterdir()) == []
+
+
+async def test_avatar_one_byte_over_the_cap_is_refused(tmp_path: Path) -> None:
+    """Kills an implementation with no size check at all (or one off by a byte)."""
+    dest, reason, _, _ = await _fetch_avatar(tmp_path, f"/chunked/{_AVATAR_CAP + 1}")
+    assert dest is None
+    assert "limit" in reason
+    assert _no_avatar_files(tmp_path)
+
+
+async def test_avatar_undeclared_oversize_stops_reading(tmp_path: Path) -> None:
+    """Kills `await resp.read()` followed by a length check: that reads the whole body."""
+    dest, reason, cdn, _ = await _fetch_avatar(tmp_path, "/endless")
+    assert dest is None
+    assert "limit" in reason
+    assert cdn.sent < ENDLESS_LIMIT // 2, f"server sent {cdn.sent} bytes, the client kept reading"
+    assert _no_avatar_files(tmp_path)
+
+
+@pytest.mark.parametrize("route", ["/body/{n}", "/lying/{n}"])
+async def test_avatar_declared_oversize_is_refused_without_reading(
+    tmp_path: Path, route: str
+) -> None:
+    """Kills an implementation that trusts the body and ignores a declared Content-Length."""
+    dest, reason, _, _ = await _fetch_avatar(tmp_path, route.format(n=_AVATAR_CAP + 1))
+    assert dest is None
+    assert "limit" in reason
+    assert _no_avatar_files(tmp_path)
+
+
+async def test_avatar_redirect_is_not_followed(tmp_path: Path) -> None:
+    """Kills an implementation that still follows a 3xx to a host Ferry never chose."""
+    dest, reason, cdn, _ = await _fetch_avatar(tmp_path, "/redirect")
+    assert dest is None
+    assert "302" in reason
+    assert cdn.target_hits == 0
+    assert _no_avatar_files(tmp_path)
+
+
+async def test_avatar_download_requests_without_following_redirects(tmp_path: Path) -> None:
+    _, _, _, session = await _fetch_avatar(tmp_path, "/body/10")
+    assert session.calls[0]["allow_redirects"] is False
+
+
+async def test_avatar_exactly_at_the_cap_is_accepted(tmp_path: Path) -> None:
+    """Kills an off-by-one that refuses a body of exactly the limit."""
+    dest, reason, _, _ = await _fetch_avatar(tmp_path, f"/chunked/{_AVATAR_CAP}")
+    assert reason == ""
+    assert dest is not None
+    assert dest.stat().st_size == _AVATAR_CAP
