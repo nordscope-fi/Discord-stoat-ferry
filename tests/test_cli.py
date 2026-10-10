@@ -19,9 +19,13 @@ from discord_ferry.migrator.verify import CheckReport, RepairOutcome
 from discord_ferry.state import FailedMessage, MigrationState
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from discord_ferry.config import FerryConfig
 
 FIXTURES_DIR = str(Path(__file__).parent / "fixtures")
+# A one-letter token would mask every matching letter in build output (#972).
+_BUILD_TOKEN = "stoat-session-token-0123456789abcdef"
 
 
 @pytest.fixture()
@@ -474,7 +478,7 @@ def test_build_prints_proxy_notice(runner: CliRunner, tmp_path: Path, proxy_env,
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert result.exit_code == 0
@@ -1285,7 +1289,7 @@ def test_build_categorized_voice_preserves_id(runner: CliRunner, tmp_path: Path)
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert result.exit_code == 0
@@ -1307,7 +1311,7 @@ def test_build_uncategorized_voice_fallback(runner: CliRunner, tmp_path: Path) -
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert result.exit_code == 0
@@ -1330,7 +1334,7 @@ def test_build_non_voice_failure_aborts(runner: CliRunner, tmp_path: Path) -> No
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
         )
     assert result.exit_code == 1
     assert "Build failed" in result.output
@@ -1349,7 +1353,7 @@ def test_build_empty_blueprint(runner: CliRunner, tmp_path: Path) -> None:  # SC
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert result.exit_code == 0
@@ -1386,7 +1390,7 @@ def test_build_applies_distinct_ranks(runner: CliRunner, tmp_path: Path) -> None
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert result.exit_code == 0
@@ -1410,7 +1414,7 @@ def test_build_skips_rank_zero(runner: CliRunner, tmp_path: Path) -> None:  # SC
     ):
         runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     ranks_mock.assert_not_awaited()
@@ -1432,7 +1436,7 @@ def test_build_separates_colour_and_rank(runner: CliRunner, tmp_path: Path) -> N
     ):
         runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert edit.await_count == 1
@@ -1458,7 +1462,7 @@ def test_build_ordering_failure_degrades(runner: CliRunner, tmp_path: Path) -> N
     ):
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert result.exit_code == 0
@@ -1481,7 +1485,7 @@ def test_build_preserves_permissions(runner: CliRunner, tmp_path: Path) -> None:
     ):
         runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
     assert perms.await_count == 1
@@ -2195,7 +2199,7 @@ def test_build_parses_the_real_create_response(runner: CliRunner, tmp_path: Path
         )
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
 
@@ -2242,13 +2246,44 @@ def test_build_registers_the_stoat_token_before_any_request(
     assert registered == [("stoat", "tok-972")]
 
 
-def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_path: Path) -> None:
-    """SC-3.2. This path prints the error with no redaction applied.
+def test_build_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """#972: registering the token covered the log file but not the console.
 
-    cli.py catches MigrationError and prints it through _safe, which is Rich markup
-    escaping rather than redaction. Since #972 build registers its token, which covers
-    the log file but not this console print. The message has to be safe on its own, so
-    it carries key names and never a value.
+    The event line and the final error both went through _safe, which escapes
+    Rich markup and hides nothing. A message echoing the token must reach the
+    screen masked on both paths.
+    """
+    from discord_ferry.blueprint import ServerBlueprint
+    from discord_ferry.core.events import MigrationEvent
+
+    token = "tok-972-console-AAAABBBBCCCC"
+    p = _write_bp(tmp_path, ServerBlueprint(name="Rebuilt"))
+
+    async def _run_build(
+        _url: str, _token: str, _bp: object, on_event: Callable[[MigrationEvent], None]
+    ) -> str:
+        on_event(MigrationEvent(phase="build", status="error", message=f"event echoed {token}"))
+        raise MigrationError(f"server echoed {token}")
+
+    with patch("discord_ferry.core.engine.run_build", new=_run_build):
+        result = runner.invoke(
+            main,
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", token],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 1
+    assert "Build failed:" in result.output
+    assert "event echoed" in result.output
+    assert token not in result.output
+
+
+def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_path: Path) -> None:
+    """SC-3.2. This path masks only registered secrets, nothing else.
+
+    cli.py catches MigrationError and prints it with registered secrets masked (#972).
+    A response value is not a registered secret, so the message has to be safe on its
+    own: it carries key names and never a value.
     """
     from aioresponses import aioresponses
 
@@ -2261,7 +2296,7 @@ def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_pa
         m.post("http://x/servers/create", payload={"id": "srv1"}, repeat=True)
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "t"],
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
 

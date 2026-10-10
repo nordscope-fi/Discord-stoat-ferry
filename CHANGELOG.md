@@ -19,7 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   a longer one (a Stoat token) was masked first, the longer value no longer matched, and the rest of
   it stayed in the output. Mask shapes are unchanged.
 - `ferry build` now registers the Stoat token for redaction before its first request (#972).
-  Before, the token had no redaction coverage in the log file during that command.
+  Before, the token had no redaction coverage in the log file during that command. Its progress
+  lines and its final error on screen now mask the token as well.
 
 ### Changed
 
