@@ -849,6 +849,12 @@ def build(
         else:
             console.print(f"  {line}")
 
+    # build never builds a FerryConfig or a SecureTokenStore, so the engine's
+    # _ensure_token_store hook never fires. Without this line the Stoat token has
+    # no redaction coverage for the whole command, including the MigrationError
+    # printed below (#972). Same reason as probe_cmd.
+    register_secret("stoat", token)
+
     try:
         # The build sequence lives in engine.run_build so the CLI and the GUI build
         # page cannot diverge on it; this shell only renders the events and the

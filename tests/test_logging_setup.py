@@ -172,6 +172,46 @@ def test_token_in_deferred_arg_is_masked(log_file: Path) -> None:
     assert "****abcd" in body
 
 
+@pytest.mark.parametrize("short_first", [True, False])
+@pytest.mark.parametrize(
+    ("long_secret", "leaked_remainder", "expected"),
+    [
+        # short is a prefix of the long secret
+        ("PFXshort89ab" + "REMAINDERtail9876", "REMAINDERtail9876", "boom token=****9876 end"),
+        # short is a suffix of the long secret
+        ("LEADINGhead" + "PFXshort89ab", "LEADINGhead", "boom token=****89ab end"),
+    ],
+)
+def test_overlapping_secrets_are_masked_whatever_the_registration_order(
+    log_file: Path,
+    short_first: bool,
+    long_secret: str,
+    leaked_remainder: str,
+    expected: str,
+) -> None:
+    """#972: the formatter masked in registration order, not longest first.
+
+    `ferry` commands register a short, fully masked proxy password before the Stoat
+    token. When that password is a prefix or suffix of the token, masking it first
+    rewrote part of the token, the token no longer matched, and the rest was logged.
+    Both registration orders are driven through the real formatter.
+    """
+    short = "PFXshort89ab"
+    if short_first:
+        register_secret("proxy_password", short, fully_mask=True)
+        register_secret("stoat", long_secret)
+    else:
+        register_secret("stoat", long_secret)
+        register_secret("proxy_password", short, fully_mask=True)
+
+    logging.getLogger("discord_ferry.test").warning("boom token=%s end", long_secret)
+
+    body = _read(log_file)
+    assert long_secret not in body
+    assert leaked_remainder not in body, "part of the longer secret survived masking"
+    assert expected in body
+
+
 def test_unregistered_discord_token_is_caught_by_the_pattern(log_file: Path) -> None:
     """SC-123-19: the regex floor covers records emitted before registration.
 

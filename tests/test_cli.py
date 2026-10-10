@@ -2203,12 +2203,52 @@ def test_build_parses_the_real_create_response(runner: CliRunner, tmp_path: Path
     assert "Created role" in result.output
 
 
+def test_build_registers_the_stoat_token_before_any_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """#972: `ferry build` never registered its token for log and error redaction.
+
+    Asserts the CALL and its order, as the `check` test does. build bypasses
+    FerryConfig, so the engine's store hook never fires, and the regex backstop
+    cannot match Stoat's opaque tokens. The recorded argument pins the name and
+    the value, so a call registering something else does not satisfy it.
+    """
+    from discord_ferry.blueprint import ServerBlueprint
+
+    p = _write_bp(tmp_path, ServerBlueprint(name="Rebuilt"))
+    order: list[str] = []
+    registered: list[tuple[object, ...]] = []
+
+    def _register(*args: object, **_kw: object) -> None:
+        registered.append(args)
+        order.append("register_secret")
+
+    async def _run_build(*_a: object, **_k: object) -> str:
+        order.append("request")
+        return "srv1"
+
+    with (
+        patch("discord_ferry.cli.register_secret", side_effect=_register),
+        patch("discord_ferry.core.engine.run_build", new=_run_build),
+    ):
+        result = runner.invoke(
+            main,
+            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", "tok-972"],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert order == ["register_secret", "request"]
+    assert registered == [("stoat", "tok-972")]
+
+
 def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_path: Path) -> None:
-    """SC-3.2. This path prints the error with no redaction available.
+    """SC-3.2. This path prints the error with no redaction applied.
 
     cli.py catches MigrationError and prints it through _safe, which is Rich markup
-    escaping rather than redaction, and build registers no secret. The message has to be
-    safe on its own, so it carries key names and never a value.
+    escaping rather than redaction. Since #972 build registers its token, which covers
+    the log file but not this console print. The message has to be safe on its own, so
+    it carries key names and never a value.
     """
     from aioresponses import aioresponses
 

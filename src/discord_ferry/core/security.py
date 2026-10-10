@@ -71,10 +71,15 @@ class SecureTokenStore:
         """Strip all known token values from *text*, replacing with masked versions.
 
         Empty-string tokens are skipped to avoid replacing every empty
-        substring in the text.
+        substring in the text. Longer values are masked first (ties keep
+        registration order): masking a short secret that is a prefix or suffix
+        of a longer one would otherwise rewrite part of the longer value, stop
+        it matching, and leave the rest of it in the output (#972).
         """
         result = text
-        for name, value in self._tokens.items():
+        for name, value in sorted(
+            self._tokens.items(), key=lambda item: len(item[1]), reverse=True
+        ):
             if not value:
                 continue
             masked = self.masked(name)
