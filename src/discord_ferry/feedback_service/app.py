@@ -26,7 +26,6 @@ from discord_ferry.feedback import (
     FeedbackRequest,
     FeedbackValidationError,
     feedback_content_hash,
-    legacy_feedback_content_hash,
 )
 from discord_ferry.feedback_service.challenge import (
     ChallengeVerificationError,
@@ -43,7 +42,12 @@ from discord_ferry.feedback_service.github import (
     ReconciledDestination,
     ReconciliationRequiredError,
 )
-from discord_ferry.feedback_service.store import ClaimOutcome, FeedbackStore, ReceiptRecord
+from discord_ferry.feedback_service.store import (
+    ClaimOutcome,
+    FeedbackStore,
+    ReceiptRecord,
+    keyed_content_hash,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -344,7 +348,8 @@ async def _feedback(request: web.Request) -> web.Response:
     destination_kind = (
         DestinationKind.ISSUE if cleaned.kind is FeedbackKind.BUG else DestinationKind.DISCUSSION
     )
-    content_hash = feedback_content_hash(cleaned)
+    contact_key = request.app[CONFIG_KEY].contact_key
+    content_hash = keyed_content_hash(cleaned, contact_key)
     existing = await store.get_receipt(cleaned.request_id)
     if existing is None:
         quota = await store.claim_report_quota_hash(source_hash, now=now)
@@ -362,7 +367,7 @@ async def _feedback(request: web.Request) -> web.Response:
         content_hash,
         destination_kind,
         now=now,
-        legacy_content_hash=legacy_feedback_content_hash(cleaned),
+        legacy_content_hash=feedback_content_hash(cleaned),
     )
     if claim.outcome is ClaimOutcome.CONFLICT:
         _log_feedback(cleaned.request_id, "conflict", destination_kind, 409, started)

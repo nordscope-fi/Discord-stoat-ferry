@@ -26,6 +26,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   so a pending one still finds its GitHub item without creating a second, and the retry replaces
   the old hash. Receipts that are never retried drop out after their usual 7 days. The Ferry
   client is unchanged. The feedback service needs a redeploy for this to take effect.
+- The feedback service now keys the hash it stores with each receipt (#962). The hash was a
+  plain SHA-256 that covered the optional contact email, which is otherwise encrypted. Someone
+  who could read only the database, without the encryption key, could have tested guessed
+  addresses against a report whose other fields were known. The hash is now an HMAC-SHA256 with
+  a subkey derived from the service's contact key, so it cannot be recomputed without that key.
+  The email is still part of what the hash covers, so a request ID replayed with a different
+  address is still refused with a 409. Receipts saved before this change still match on a
+  retry. A pending one still finds its GitHub item without creating a second, and the retry
+  replaces the old hash. Receipts that are never retried drop out after their usual 7 days. The
+  Ferry client is unchanged. The feedback service needs a redeploy for this to take effect.
 
 ## [2.41.29] - 2026-10-10
 
