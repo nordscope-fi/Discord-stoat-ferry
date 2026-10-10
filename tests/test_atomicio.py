@@ -540,3 +540,24 @@ def test_ensure_output_subdir_refuses_a_path_outside_the_root(tmp_path: Path) ->
         ensure_output_subdir(tmp_path / "elsewhere", tmp_path / "out")
 
     assert not (tmp_path / "elsewhere").exists()
+
+
+def test_no_follow_writes_open_in_binary_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On Windows ``os.open`` defaults to CRT text mode, which turns every LF into
+    CRLF and corrupts a PNG signature. The open must carry O_BINARY where it exists.
+    """
+    seen: list[int] = []
+    real_open = atomicio.os.open
+
+    def spy(path: object, flags: int, mode: int = 0o777) -> int:
+        seen.append(flags)
+        return real_open(path, flags & ~0x8000, mode)
+
+    monkeypatch.setattr(atomicio.os, "O_BINARY", 0x8000, raising=False)
+    monkeypatch.setattr(atomicio.os, "open", spy)
+    atomicio.write_bytes_no_follow(tmp_path / "icon.png", b"\x89PNG\r\n\x1a\n")
+    atomicio.write_text_no_follow(tmp_path / "thread.md", "a\nb\n")
+    assert len(seen) == 2
+    assert all(flags & 0x8000 for flags in seen)

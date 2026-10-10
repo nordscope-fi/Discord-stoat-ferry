@@ -349,7 +349,7 @@ async def run_server(
             )
             try:
                 banner_dir = config.output_dir / "banners"
-                banner_dir.mkdir(parents=True, exist_ok=True)
+                ensure_output_subdir(banner_dir, config.output_dir)
                 banner_path = banner_dir / f"{guild_id}.png"
                 failure = await _download_banner(session, banner_url, banner_path)
                 if failure is None:

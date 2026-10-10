@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import re
 import shutil
@@ -4104,8 +4105,14 @@ async def _repair_with_metadata(
     *,
     write_metadata: bool = True,
     bodies_out: dict[str, Any] | None = None,
+    export_guild_id: str | None = None,
 ) -> tuple[MigrationState, list[str], list[MigrationEvent]]:
     config = _make_repair_config(tmp_path)
+    repair_export = _export_for(R_D_CHANNEL)
+    if export_guild_id is not None:
+        repair_export = dataclasses.replace(
+            repair_export, guild=DCEGuild(id=export_guild_id, name="Other")
+        )
     if write_metadata:
         _write_discord_metadata(config.output_dir)
     state = MigrationState(
@@ -4148,11 +4155,21 @@ async def _repair_with_metadata(
         )
         m.post(f"{BASE_URL}/servers/{R_SERVER}/roles", payload={"id": S_ROLE_NEW})
         m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
-        await run_repair(config, state, [_export_for(R_D_CHANNEL)], events.append)
+        await run_repair(config, state, [repair_export], events.append)
         urls = _permission_calls(m)
         if bodies_out is not None:
             bodies_out.update(_permission_bodies(m))
     return state, urls, events
+
+
+async def test_repair_ignores_another_servers_metadata_file(tmp_path: Path) -> None:
+    """#971 review: repair bound the file to the configured server only, which repair
+    configs leave unset, so another server's overrides reached a recreated channel."""
+    state, urls, _ = await _repair_with_metadata(
+        tmp_path, _report_with("channel_missing", "fail"), export_guild_id="555555555555555555"
+    )
+    assert urls == [], f"another server's permissions were applied: {urls}"
+    assert any(w.get("type") == "no_discord_metadata" for w in state.warnings), state.warnings
 
 
 async def test_a_recreated_channel_gets_its_recorded_overrides(tmp_path: Path) -> None:
