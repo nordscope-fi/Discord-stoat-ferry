@@ -21,12 +21,12 @@ check is a recorded result, not the absence of one.
 from __future__ import annotations
 
 import asyncio
-import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session
+from discord_ferry.core.security import strip_control
 from discord_ferry.errors import CheckError, FerryError
 from discord_ferry.migrator.api import (
     api_fetch_emoji_list,
@@ -74,11 +74,6 @@ STATUSES: tuple[CheckStatus, ...] = get_args(CheckStatus)
 #: data type, status, kind, or meaning change. Ordinary result values and free-form
 #: detail text do not change the contract.
 CHECK_REPORT_SCHEMA_VERSION: Final[int] = 1
-
-
-def _strip_control(text: str) -> str:
-    """Remove C0 and C1 control characters except horizontal tab."""
-    return "".join(ch for ch in text if ch == "\t" or unicodedata.category(ch) != "Cc")
 
 
 @dataclass
@@ -261,14 +256,14 @@ class CheckReport:
             "schema_version": CHECK_REPORT_SCHEMA_VERSION,
             "results": [
                 {
-                    "name": _strip_control(r.name),
+                    "name": strip_control(r.name),
                     "status": r.status,
                     "kind": r.kind,
-                    "detail": _strip_control(r.detail),
-                    "discord_id": (_strip_control(r.discord_id) if r.discord_id else r.discord_id),
-                    "stoat_id": (_strip_control(r.stoat_id) if r.stoat_id else r.stoat_id),
-                    "expected": (_strip_control(r.expected) if r.expected is not None else None),
-                    "found": (_strip_control(r.found) if r.found is not None else None),
+                    "detail": strip_control(r.detail),
+                    "discord_id": (strip_control(r.discord_id) if r.discord_id else r.discord_id),
+                    "stoat_id": (strip_control(r.stoat_id) if r.stoat_id else r.stoat_id),
+                    "expected": (strip_control(r.expected) if r.expected is not None else None),
+                    "found": (strip_control(r.found) if r.found is not None else None),
                 }
                 for r in self.results
             ],
@@ -303,12 +298,12 @@ class RepairOutcome:
     def _clean(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip control characters from every string value, matching CheckReport."""
         return [
-            {k: (_strip_control(v) if isinstance(v, str) else v) for k, v in row.items()}
+            {k: (strip_control(v) if isinstance(v, str) else v) for k, v in row.items()}
             for row in rows
         ]
 
     def to_dict(self) -> dict[str, Any]:
-        """Sanitized, JSON-ready dict. Every free-text field goes through _strip_control."""
+        """Sanitized, JSON-ready dict. Every free-text field goes through strip_control."""
         return {
             "dry_run": self.dry_run,
             "actions": {

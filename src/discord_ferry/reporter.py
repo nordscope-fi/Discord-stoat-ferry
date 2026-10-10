@@ -7,7 +7,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.atomicio import atomic_write_text
-from discord_ferry.core.security import safe_sanitize, sanitize_secrets, scrub_document
+from discord_ferry.core.security import (
+    safe_sanitize,
+    sanitize_secrets,
+    scrub_document,
+    strip_control,
+)
 from discord_ferry.discord.metadata import load_discord_metadata
 
 if TYPE_CHECKING:
@@ -347,6 +352,22 @@ def calculate_duration(started_at: str, completed_at: str) -> float:
         return 0.0
 
 
+# Characters that end a line in a text editor or a Markdown renderer. Each becomes a space so a
+# value stays on its own list item or table row and its words do not run together.
+_LINE_BREAKS = str.maketrans(dict.fromkeys("\r\n\t\v\f\u2028\u2029", " "))
+
+
+def _display_safe(value: object) -> str:
+    """Make one value safe to interpolate into migration_report.md (#1080).
+
+    Display-only and separate from secret redaction (ADR-014). Line breaks and tabs
+    become a space, then every remaining control character (escape bytes, NUL, BEL,
+    C1) is removed. Applied per value, never to the finished file, because the
+    document's own newlines must survive.
+    """
+    return strip_control(str(value).translate(_LINE_BREAKS))
+
+
 def generate_markdown_report(
     config: FerryConfig,
     state: MigrationState,
@@ -361,8 +382,8 @@ def generate_markdown_report(
     """
     lines: list[str] = []
     lines.append("# Migration Report\n")
-    lines.append(f"**Started:** {state.started_at}")
-    lines.append(f"**Completed:** {state.completed_at}\n")
+    lines.append(f"**Started:** {_display_safe(state.started_at)}")
+    lines.append(f"**Completed:** {_display_safe(state.completed_at)}\n")
 
     # S18: Fidelity score section.
     total_msgs = state.source_messages_total or sum(e.message_count for e in exports)
@@ -409,27 +430,30 @@ def generate_markdown_report(
 
     if state.invite_code:
         lines.append("\n## Invite\n")
-        lines.append(f"- {state.invite_url or state.invite_code}\n")
+        lines.append(f"- {_display_safe(state.invite_url or state.invite_code)}\n")
 
     # The same free text that reaches report.json reaches this file, so it gets the
     # same redaction. Applied per value rather than to the finished markdown: the
     # document also carries Discord message identifiers, and masking works by
     # substring replacement, so scrubbing the whole string would rewrite them.
     # Issue #140, ADR-014.
+    # The display step runs after the masking, so a secret is matched as written.
     def _text(value: str) -> str:
-        return sanitize_secrets(safe_sanitize(config.token_store, value))
+        return _display_safe(sanitize_secrets(safe_sanitize(config.token_store, value)))
 
     lines.append("## Errors\n")
     if state.failed_messages:
         for fm in state.failed_messages:
-            lines.append(f"- Message `{fm.discord_msg_id}`: {_text(fm.error)}")
+            lines.append(f"- Message `{_display_safe(fm.discord_msg_id)}`: {_text(fm.error)}")
     else:
         lines.append("No errors.\n")
 
     lines.append("\n## Warnings\n")
     if state.warnings:
         for w in state.warnings:
-            lines.append(f"- [{w.get('type', 'unknown')}] {_text(w.get('message', ''))}")
+            lines.append(
+                f"- [{_display_safe(w.get('type', 'unknown'))}] {_text(w.get('message', ''))}"
+            )
     else:
         lines.append("No warnings.\n")
 

@@ -636,6 +636,69 @@ def test_markdown_report_lists_failed_messages(tmp_path: Path) -> None:
     assert "Rate limited" in content
 
 
+_HOSTILE_PARTS = {
+    "author": "Ev\x1b[31mil\r\nAuthor",
+    "attachment": "scr\x00een\x07shot\t.png",
+    "channel": "gen\neral\r",
+}
+
+
+def _markdown_state(author: str, attachment: str, channel: str, msg_id: str) -> MigrationState:
+    return MigrationState(
+        warnings=[
+            {
+                "phase": "avatars",
+                "type": "avatar_upload_failed",
+                "message": f"Failed to upload avatar for {author}: boom",
+            },
+            {
+                "phase": "messages",
+                "type": "attachment_skipped",
+                "message": f"Attachment {attachment} skipped in {channel}",
+            },
+        ],
+        failed_messages=[
+            FailedMessage(discord_msg_id=msg_id, stoat_channel_id="ch1", error=f"bad {channel}"),
+        ],
+    )
+
+
+def test_markdown_report_strips_control_characters_from_free_text(tmp_path: Path) -> None:
+    """No control character from a warning or error reaches migration_report.md (#1080).
+
+    The markdown writer applies secret masking only, so an author name, file name or
+    channel name carrying an escape byte, NUL, BEL, CR or LF would land in the file
+    as written. The structure must also survive: a newline inside a value must not
+    add a line or break a list item.
+    """
+    hostile = _markdown_state(
+        _HOSTILE_PARTS["author"], _HOSTILE_PARTS["attachment"], _HOSTILE_PARTS["channel"], "m\n1"
+    )
+    clean = _markdown_state("EvilAuthor", "screenshot.png", "general", "m1")
+    generate_markdown_report(_make_config(tmp_path / "hostile"), hostile, [_make_export()])
+    generate_markdown_report(_make_config(tmp_path / "clean"), clean, [_make_export()])
+
+    text = (tmp_path / "hostile" / "migration_report.md").read_text(encoding="utf-8")
+    baseline = (tmp_path / "clean" / "migration_report.md").read_text(encoding="utf-8")
+    stray = [ch for ch in text if ch != "\n" and (ord(ch) < 0x20 or ord(ch) == 0x7F)]
+    assert stray == [], f"control characters reached the report: {stray!r}"
+    assert len(text.splitlines()) == len(baseline.splitlines()), "a value changed the structure"
+    bullets = [line for line in text.splitlines() if line.startswith("- ")]
+    assert len(bullets) == 3, bullets  # one error and two warnings, one line each
+
+
+def test_markdown_report_keeps_ordinary_names_verbatim(tmp_path: Path) -> None:
+    """A normal author, file and channel name appears unchanged (#1080)."""
+    state = _markdown_state("Cafe Nordscope", "holiday photo (1).png", "general-chat", "m1")
+
+    generate_markdown_report(_make_config(tmp_path), state, [_make_export()])
+
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "Failed to upload avatar for Cafe Nordscope: boom" in text
+    assert "Attachment holiday photo (1).png skipped in general-chat" in text
+    assert "- Message `m1`: bad general-chat" in text
+
+
 def test_markdown_report_empty_state(tmp_path: Path) -> None:
     """Markdown report handles empty state gracefully with 'No errors.' text."""
     config = _make_config(tmp_path)

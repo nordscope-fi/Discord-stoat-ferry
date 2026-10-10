@@ -1600,7 +1600,8 @@ def _emit_repair_json(
     follow-up check is recorded as check_error and the check section stays null,
     rather than crashing after repair has already written.
     """
-    from discord_ferry.migrator.verify import _strip_control, run_check
+    from discord_ferry.core.security import strip_control
+    from discord_ferry.migrator.verify import run_check
 
     document = outcome.to_dict()
     document["check"] = None
@@ -1609,7 +1610,7 @@ def _emit_repair_json(
             post = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
             document["check"] = post.to_dict()
         except (CheckError, MigrationError) as exc:
-            document["check_error"] = _strip_control(str(exc))
+            document["check_error"] = strip_control(str(exc))
     click.echo(json.dumps(document))
 
 

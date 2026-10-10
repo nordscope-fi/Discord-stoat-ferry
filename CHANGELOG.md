@@ -19,12 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   migrator modules.
 ### Fixed
 
-- Escape the server name in the guild icon warnings (#1080). The "Guild icon path" and
-  "Guild icon file" warnings, and their matching progress lines, now show the export's server
-  name in quotes, with control characters escaped and the length capped at 120 characters. The
-  icon path was already handled this way. A name with a newline, an escape byte or Rich markup
-  can no longer put raw control characters into `migration_report.md`. Ordinary names still
-  appear as before, now inside quotes.
+- Strip control characters from the Markdown migration report (#1080). Text from the export, such
+  as an author name, an attachment file name or a channel name, could carry a newline, an
+  escape byte or another control character into `migration_report.md`. The writer only masked
+  secrets, so those characters landed in the warning and error lines. The report writer now turns line breaks and
+  tabs into a space and removes every other control character, so each warning and error stays
+  on one line. The JSON reports and `state.json` are unchanged. The server name in the guild
+  icon warnings is also shown in quotes with escapes and a 120 character cap, the same way the
+  icon path already was. The `ferry check` output uses the same shared helper as before.
 
 ## [2.41.28] - 2026-10-10
 
