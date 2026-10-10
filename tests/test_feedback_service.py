@@ -35,6 +35,7 @@ from discord_ferry.feedback import (
     FeedbackStage,
     OperatingSystem,
     canonical_json,
+    feedback_content_hash,
     solve_challenge,
 )
 from discord_ferry.feedback_service.challenge import (
@@ -1104,6 +1105,150 @@ async def test_feedback_route_rejects_changed_content_for_same_id(
             is FeedbackErrorCode.DUPLICATE_ID_CONFLICT
         )
         assert len(github.issue_requests) == 1
+    finally:
+        await client.close()
+
+
+def _stored_content_hash(tmp_path: object) -> str:
+    with sqlite3.connect(Path(str(tmp_path)) / "feedback.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT content_hash FROM receipts WHERE request_id = ?", (str(REQUEST_ID),)
+        ).fetchone()
+    return str(row[0])
+
+
+async def test_feedback_route_stores_a_hash_that_cannot_confirm_an_email_guess(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    github = _FeedbackGitHub()
+    client = TestClient(
+        TestServer(create_app(_service_config(tmp_path), github=github, now=lambda: NOW))
+    )
+    await client.start_server()
+    try:
+        email = "private-feedback@example.com"
+        request = _feedback_request(contact_email=email)
+        assert (await client.post("/v1/feedback", json=request.to_mapping())).status == 200
+    finally:
+        await client.close()
+
+    stored = _stored_content_hash(tmp_path)
+    known_fields = request.content_for_hash()
+    for guess in (email, "another-guess@example.com"):
+        candidate = hashlib.sha256(
+            canonical_json({**known_fields, "contact_email": guess})
+        ).hexdigest()
+        assert candidate != stored
+
+
+async def test_feedback_route_accepts_a_pending_receipt_written_with_the_old_hash(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback import legacy_feedback_content_hash
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    destination = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/944"
+    github = _FeedbackGitHub(
+        reconcile_result=ReconciledDestination(DestinationKind.ISSUE, destination),
+    )
+    app = create_app(_service_config(tmp_path), github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        request = _feedback_request()
+        old_hash = legacy_feedback_content_hash(request)
+        assert old_hash != feedback_content_hash(request)
+        await app[STORE_KEY].claim_receipt(REQUEST_ID, old_hash, DestinationKind.ISSUE, now=NOW)
+
+        response = await client.post("/v1/feedback", json=request.to_mapping())
+
+        assert response.status == 200
+        assert (await response.json())["url"] == destination
+        assert github.issue_requests == []
+        assert github.reconcile_calls == 1
+        record = await app[STORE_KEY].get_receipt(REQUEST_ID)
+        assert record is not None and record.state is ReceiptState.DELIVERED
+        assert record.content_hash == feedback_content_hash(request)
+    finally:
+        await client.close()
+
+
+async def test_feedback_route_replays_a_delivered_receipt_written_with_the_old_hash(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback import legacy_feedback_content_hash
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    destination = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/945"
+    github = _FeedbackGitHub()
+    app = create_app(_service_config(tmp_path), github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        request = _feedback_request()
+        store = app[STORE_KEY]
+        await store.claim_receipt(
+            REQUEST_ID, legacy_feedback_content_hash(request), DestinationKind.ISSUE, now=NOW
+        )
+        await store.mark_delivered(REQUEST_ID, destination, now=NOW)
+
+        response = await client.post("/v1/feedback", json=request.to_mapping())
+
+        assert response.status == 200
+        assert (await response.json())["url"] == destination
+        assert github.issue_requests == []
+        assert github.reconcile_calls == 0
+    finally:
+        await client.close()
+
+
+async def test_feedback_route_still_rejects_a_changed_report_against_an_old_hash(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback import legacy_feedback_content_hash
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    github = _FeedbackGitHub()
+    app = create_app(_service_config(tmp_path), github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        await app[STORE_KEY].claim_receipt(
+            REQUEST_ID,
+            legacy_feedback_content_hash(_feedback_request()),
+            DestinationKind.ISSUE,
+            now=NOW,
+        )
+        response = await client.post(
+            "/v1/feedback", json=_feedback_request(description="Changed report").to_mapping()
+        )
+        assert response.status == 409
+        assert github.issue_requests == []
+    finally:
+        await client.close()
+
+
+async def test_feedback_route_ignores_a_changed_email_on_a_replayed_request(
+    tmp_path: object,
+) -> None:
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    github = _FeedbackGitHub()
+    app = create_app(_service_config(tmp_path), github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        first = await client.post("/v1/feedback", json=_feedback_request().to_mapping())
+        second = await client.post(
+            "/v1/feedback",
+            json=_feedback_request(contact_email="changed@example.com").to_mapping(),
+        )
+        assert first.status == second.status == 200
+        assert len(github.issue_requests) == 1
+        stored = await app[STORE_KEY].get_contact(REQUEST_ID, now=NOW)
+        assert stored == "private-feedback@example.com"
     finally:
         await client.close()
 

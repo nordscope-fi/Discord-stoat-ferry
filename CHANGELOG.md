@@ -16,6 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   with or without Ferry's own port. Any other Host gets a 400 on pages and a closed
   connection on the live-update websocket. The native window and the browser address Ferry
   prints use `127.0.0.1:8765`, so they are unaffected.
+- The feedback service no longer puts the optional contact email into the hash it stores with
+  each receipt (#962). The email was already encrypted, but the hash was a plain SHA-256 that
+  also covered it. Someone who could read only the database, without the encryption key, could
+  have tested guessed addresses against a report whose other fields were known. The hash now
+  covers the report content only, so two submissions that differ only in the email count as the
+  same report. A retry with a changed address on a delivered report returns the existing
+  receipt and keeps the address from the first submission. Receipts saved before this change still match on a retry,
+  so a pending one still finds its GitHub item without creating a second, and the retry replaces
+  the old hash. Receipts that are never retried drop out after their usual 7 days. The Ferry
+  client is unchanged. The feedback service needs a redeploy for this to take effect.
 
 ## [2.41.29] - 2026-10-10
 

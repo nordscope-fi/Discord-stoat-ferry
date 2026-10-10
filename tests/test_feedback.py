@@ -322,8 +322,58 @@ def test_content_hash_includes_public_and_private_content() -> None:
         replace(request, description="Different public report")
     )
     assert feedback_content_hash(request) != feedback_content_hash(
+        replace(request, expected="Different expected result")
+    )
+
+
+def test_content_hash_does_not_depend_on_the_contact_email() -> None:
+    request = replace(FeedbackRequest.from_mapping(_valid_request()), contact_email=None)
+
+    assert feedback_content_hash(request) == feedback_content_hash(
         replace(request, contact_email="owner@example.com")
     )
+    assert feedback_content_hash(request) == feedback_content_hash(
+        replace(request, contact_email="someone-else@example.com")
+    )
+
+
+def test_stored_hash_does_not_confirm_a_contact_email_guess() -> None:
+    """The issue's check: known fields plus a guessed email must not match the stored hash."""
+
+    request = replace(
+        FeedbackRequest.from_mapping(_valid_request()),
+        kind=FeedbackKind.BUG,
+        expected=None,
+        reproduction=None,
+        diagnostics=None,
+        contact_email="dummy-owner@example.invalid",
+    )
+    stored = feedback_content_hash(request)
+    known_fields = {
+        "contract_version": request.contract_version,
+        "kind": request.kind.value,
+        "description": request.description,
+        "expected": None,
+        "reproduction": None,
+        "diagnostics": None,
+    }
+
+    for guess in ("dummy-owner@example.invalid", "dummy-other@example.invalid"):
+        recomputed = hashlib.sha256(
+            canonical_json({**known_fields, "contact_email": guess})
+        ).hexdigest()
+        assert recomputed != stored
+
+
+def test_legacy_hash_still_covers_the_contact_email() -> None:
+    from discord_ferry.feedback import legacy_feedback_content_hash
+
+    request = replace(FeedbackRequest.from_mapping(_valid_request()), contact_email=None)
+    with_email = replace(request, contact_email="owner@example.com")
+
+    assert legacy_feedback_content_hash(request) == feedback_content_hash(request)
+    assert legacy_feedback_content_hash(with_email) != feedback_content_hash(with_email)
+    assert legacy_feedback_content_hash(with_email) != legacy_feedback_content_hash(request)
 
 
 def test_content_hash_is_stable_across_processes() -> None:

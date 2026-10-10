@@ -155,6 +155,43 @@ async def test_changed_hash_conflicts_without_altering_the_receipt(tmp_path: Pat
     assert stored.content_hash == CONTENT_HASH
 
 
+async def test_legacy_hash_is_accepted_and_replaced_with_the_current_one(tmp_path: Path) -> None:
+    store = await _store(tmp_path / "feedback.sqlite3")
+    await store.claim_receipt(REQUEST_ID, "c" * 64, DestinationKind.ISSUE, now=NOW)
+
+    claim = await store.claim_receipt(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        now=NOW + timedelta(seconds=1),
+        legacy_content_hash="c" * 64,
+    )
+    stored = await store.get_receipt(REQUEST_ID)
+
+    assert claim.outcome is ClaimOutcome.PENDING
+    assert stored is not None
+    assert stored.content_hash == CONTENT_HASH
+    assert stored.state is ReceiptState.PENDING
+
+
+async def test_legacy_hash_that_matches_nothing_still_conflicts(tmp_path: Path) -> None:
+    store = await _store(tmp_path / "feedback.sqlite3")
+    await store.claim_receipt(REQUEST_ID, "c" * 64, DestinationKind.ISSUE, now=NOW)
+
+    claim = await store.claim_receipt(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        now=NOW + timedelta(seconds=1),
+        legacy_content_hash="d" * 64,
+    )
+    stored = await store.get_receipt(REQUEST_ID)
+
+    assert claim.outcome is ClaimOutcome.CONFLICT
+    assert stored is not None
+    assert stored.content_hash == "c" * 64
+
+
 async def test_receipt_expiry_allows_a_new_claim_after_seven_days(tmp_path: Path) -> None:
     store = await _store(tmp_path / "feedback.sqlite3")
     await store.claim_receipt(REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, now=NOW)
