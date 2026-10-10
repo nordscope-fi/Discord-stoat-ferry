@@ -1583,6 +1583,62 @@ def test_qwen_shell_result_without_exit_code_completes_no_receipt(
     assert receipt_files(root, PENDING_RECEIPTS) == []
 
 
+QWEN_STATUS = "Command: x\nExit Code: "
+
+
+@pytest.mark.parametrize(
+    ("event", "payload", "expected"),
+    [
+        ("PostToolUse", {"tool_response": {"llmContent": QWEN_STATUS + "0"}}, "success"),
+        ("PostToolUse", {"tool_response": {"llmContent": QWEN_STATUS + "1"}}, "failure"),
+        ("PostToolUseFailure", {"error": QWEN_STATUS + "2", "is_interrupt": False}, "failure"),
+        ("PostToolUseFailure", {"error": QWEN_STATUS + "0"}, None),
+        ("PostToolUseFailure", {"error": {"message": QWEN_STATUS + "2"}}, None),
+        ("PostToolUseFailure", {}, None),
+        ("PostToolUseFailure", {"tool_response": {"llmContent": QWEN_STATUS + "2"}}, None),
+        ("PostToolUse", {}, None),
+        ("PostToolUse", {"error": QWEN_STATUS + "2"}, None),
+        ("PostToolUse", {"tool_response": QWEN_STATUS + "0"}, None),
+        ("PostToolUse", {"tool_response": {"returnDisplay": QWEN_STATUS + "0"}}, None),
+    ],
+    ids=[
+        "success-envelope",
+        "nonzero-exit-in-success-envelope",
+        "top-level-error-failure",
+        "failure-event-claiming-exit-0",
+        "failure-error-not-a-string",
+        "failure-event-with-no-error",
+        "failure-event-with-envelope-only",
+        "success-event-with-no-response",
+        "success-event-with-error-only",
+        "success-response-is-a-string",
+        "success-response-without-llm-content",
+    ],
+)
+def test_qwen_outcome_shapes_record_failure_and_reject_ambiguity(
+    event: str, payload: dict[str, object], expected: str | None
+) -> None:
+    assert NODE is not None
+    script = f"""
+import {{ normalizeToolOutcome }} from {json.dumps(MODULE.as_uri())};
+const outcome = normalizeToolOutcome({json.dumps(payload)}, {json.dumps(event)}, 'qwen');
+process.stdout.write(JSON.stringify(outcome));
+"""
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    if expected is None:
+        assert outcome is None
+    else:
+        assert outcome is not None
+        assert outcome["status"] == expected
+
+
 def test_qwen_interrupted_shell_command_completes_no_receipt(tmp_path: Path) -> None:
     root, _ = qwen_active_checkout(tmp_path)
     challenge, command = challenge_case(root, "test_runner")
