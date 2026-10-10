@@ -26,6 +26,7 @@ from discord_ferry.feedback import (
     FeedbackRequest,
     FeedbackValidationError,
     feedback_content_hash,
+    legacy_feedback_content_hash,
 )
 from discord_ferry.feedback_service.challenge import (
     ChallengeVerificationError,
@@ -361,6 +362,7 @@ async def _feedback(request: web.Request) -> web.Response:
         content_hash,
         destination_kind,
         now=now,
+        legacy_content_hash=legacy_feedback_content_hash(cleaned),
     )
     if claim.outcome is ClaimOutcome.CONFLICT:
         _log_feedback(cleaned.request_id, "conflict", destination_kind, 409, started)

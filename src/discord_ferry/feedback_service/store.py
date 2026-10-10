@@ -211,9 +211,19 @@ class FeedbackStore:
         destination_kind: DestinationKind,
         *,
         now: datetime,
+        legacy_content_hash: str | None = None,
     ) -> ReceiptClaim:
+        """Claim a request id, or report what an earlier claim left behind.
+
+        ``legacy_content_hash`` is the pre-#962 hash of the same request. A row that still
+        carries it is accepted as a match and rewritten with ``content_hash``, so a receipt
+        written before the upgrade keeps working and sheds the email-bearing hash.
+        """
+
         if not _CONTENT_HASH.fullmatch(content_hash):
             raise ValueError("content_hash must be a lowercase SHA-256 digest")
+        if legacy_content_hash is not None and not _CONTENT_HASH.fullmatch(legacy_content_hash):
+            raise ValueError("legacy_content_hash must be a lowercase SHA-256 digest")
         async with self._lock:
             return await asyncio.to_thread(
                 self._claim_receipt_sync,
@@ -221,6 +231,7 @@ class FeedbackStore:
                 content_hash,
                 destination_kind,
                 now,
+                legacy_content_hash,
             )
 
     def _claim_receipt_sync(
@@ -229,6 +240,7 @@ class FeedbackStore:
         content_hash: str,
         destination_kind: DestinationKind,
         now: datetime,
+        legacy_content_hash: str | None = None,
     ) -> ReceiptClaim:
         timestamp = _timestamp(now)
         expires_at = _timestamp(now + _RECEIPT_RETENTION)
@@ -259,7 +271,15 @@ class FeedbackStore:
 
             record = self._record(row)
             if record.content_hash != content_hash:
-                return ReceiptClaim(ClaimOutcome.CONFLICT, record)
+                if legacy_content_hash is None or record.content_hash != legacy_content_hash:
+                    return ReceiptClaim(ClaimOutcome.CONFLICT, record)
+                connection.execute(
+                    "UPDATE receipts SET content_hash = ? WHERE request_id = ?",
+                    (content_hash, str(request_id)),
+                )
+                upgraded = self._select_receipt(connection, request_id)
+                assert upgraded is not None
+                record = self._record(upgraded)
             if record.state is ReceiptState.DELIVERED:
                 return ReceiptClaim(ClaimOutcome.DELIVERED, record)
             if record.state is ReceiptState.PENDING:

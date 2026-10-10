@@ -666,8 +666,14 @@ class FeedbackRequest:
             result["contact_email"] = self.contact_email
         return result
 
-    def content_for_hash(self) -> dict[str, object]:
-        """Return parsed public and private content without replaceable identity data."""
+    def content_for_hash(self, *, include_contact: bool = False) -> dict[str, object]:
+        """Return parsed report content without replaceable identity data.
+
+        The contact email is left out and kept as ``None`` (#962). The stored hash is unkeyed,
+        so an email inside it would let anyone who can read only the database test guesses
+        against a report whose other fields are known. ``include_contact`` exists for
+        ``legacy_feedback_content_hash``, which recognises receipts written before that change.
+        """
 
         return {
             "contract_version": self.contract_version,
@@ -676,7 +682,7 @@ class FeedbackRequest:
             "expected": self.expected,
             "reproduction": self.reproduction,
             "diagnostics": None if self.diagnostics is None else self.diagnostics.to_mapping(),
-            "contact_email": self.contact_email,
+            "contact_email": self.contact_email if include_contact else None,
         }
 
     def cleaned_for_send(self) -> FeedbackRequest:
@@ -700,9 +706,20 @@ def canonical_json(value: object) -> bytes:
 
 
 def feedback_content_hash(request: FeedbackRequest) -> str:
-    """Hash the parsed report content used for duplicate protection."""
+    """Hash the parsed report content, minus the contact email, for duplicate protection."""
 
     return hashlib.sha256(canonical_json(request.content_for_hash())).hexdigest()
+
+
+def legacy_feedback_content_hash(request: FeedbackRequest) -> str:
+    """Return the hash that service versions before #962 stored, contact email included.
+
+    Used only to recognise a receipt row written before the change. Never store its result.
+    """
+
+    return hashlib.sha256(
+        canonical_json(request.content_for_hash(include_contact=True))
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1002,6 +1019,7 @@ __all__ = [
     "challenge_proof_input",
     "clean_diagnostics_for_send",
     "feedback_content_hash",
+    "legacy_feedback_content_hash",
     "normalize_text",
     "render_diagnostics",
     "render_public_feedback_body",
