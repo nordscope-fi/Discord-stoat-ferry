@@ -22,6 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   block that tells the model to read them as data and never as instructions. Each subject is
   capped at 100 characters, flattened to one line, and has `&`, `<` and `>` escaped, so no subject
   can close or forge the block. Both hosts share `scripts/agent-compat/session-context.mjs`.
+- The local web interface no longer interprets `X-Forwarded-For` and `X-Forwarded-Proto` headers
+  (#998). uvicorn trusts them from 127.0.0.1 by default, and Ferry has no proxy in front of it and
+  never reads the derived client address or scheme. Browser and native-window use are unchanged.
 
 ## [2.41.26] - 2026-10-10
 
