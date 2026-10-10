@@ -523,6 +523,8 @@ async def _merge_threads(
     state: MigrationState,
     on_event: EventCallback,
     parent_name_to_stoat: dict[str, str],
+    *,
+    idempotency_salt: str = "",
 ) -> None:
     """Merge thread messages into their parent channels with separators.
 
@@ -535,7 +537,13 @@ async def _merge_threads(
         state: Migration state.
         on_event: Event callback.
         parent_name_to_stoat: Mapping of parent channel name to Stoat channel ID.
+        idempotency_salt: Appended to every Idempotency-Key. Empty for the migration,
+            so its keys are unchanged. ``ferry repair`` passes the recreated channel's
+            id (#310): the keys are built from Discord ids that a recreated channel
+            does not change, and a key still in Stoat's cache answers 409 with no
+            message id, which would drop the message from a channel that is new.
     """
+    _salt = f"-{idempotency_salt}" if idempotency_salt else ""
     async with get_session(config) as session:
         for export in thread_exports:
             parent_name = export.parent_channel_name or ""
@@ -634,7 +642,7 @@ async def _merge_threads(
                         parent_stoat_id,
                         content=separator,
                         masquerade={"name": "Discord Ferry"},
-                        idempotency_key=f"ferry-thread-sep-{export.channel.id}",
+                        idempotency_key=f"ferry-thread-sep-{export.channel.id}{_salt}",
                     )
                 except DuplicateSendError:
                     # Already on the server. The return value is discarded here, so a
@@ -770,9 +778,9 @@ async def _merge_threads(
                 _msg_failed = False
                 for part_idx, part_content in enumerate(parts):
                     idem_key = (
-                        f"ferry-merge-{msg.id}"
+                        f"ferry-merge-{msg.id}{_salt}"
                         if len(parts) == 1
-                        else f"ferry-merge-{msg.id}_p{part_idx + 1}"
+                        else f"ferry-merge-{msg.id}{_salt}_p{part_idx + 1}"
                     )
                     try:
                         await api_send_message(

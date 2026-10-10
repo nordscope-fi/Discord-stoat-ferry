@@ -518,6 +518,9 @@ or to find a lost message, and it says so rather than guessing.
   voice user limit.
 - The **messages a recreated channel held**, re-sent in their original order, with the origin
   header if it was a thread.
+- The **thread content a recreated parent absorbed** under `--thread-strategy=merge`, re-sent after
+  the parent's own messages with the same separators. Threads that were never merged are not sent,
+  and repair names them in a warning.
 - A **channel's lost last message**, re-sent into the channel that is still there.
 - Anything left in the **dead-letter queue**, the same work `ferry retry` does.
 - The **extra pinned forum index** that migrations before v2.41.30 left in each forum's index channel. Repair deletes the older copy that Ferry sent and never recorded, and keeps the recorded one. It deletes only messages sent by your own Stoat account under the "Discord Ferry" name.
