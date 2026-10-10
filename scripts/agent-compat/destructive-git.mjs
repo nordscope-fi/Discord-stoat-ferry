@@ -42,9 +42,10 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish']);
 const MAX_DEPTH = 4;
 
 function segments(cmd) {
-  // Shell separators. Separators inside quotes also split, which can only
-  // add false positives, never false negatives.
-  return cmd.split(/[|;&\n`()]|\$\(/);
+  // A backslash before a newline continues the line, so it is removed before
+  // splitting. Shell separators inside quotes also split, which can only add
+  // false positives, never false negatives.
+  return cmd.replace(/\\\r?\n/g, '').split(/[|;&\n`()]|\$\(/);
 }
 
 // Reads one segment as shell words. Quotes and backslash escapes are removed
@@ -63,6 +64,9 @@ function shellWords(segment) {
       if (ch === '"') quote = null;
       else if (ch === '\\' && i + 1 < segment.length) { i += 1; word += segment[i]; }
       else word += ch;
+    } else if (ch === '$' && (segment[i + 1] === "'" || segment[i + 1] === '"')) {
+      // $'...' (ANSI-C) and $"..." (locale) quoting: drop the $, keep the quote.
+      inWord = true;
     } else if (ch === "'" || ch === '"') {
       quote = ch;
       inWord = true;
@@ -114,11 +118,31 @@ function commandIndex(tokens) {
   return i;
 }
 
+// `env -S 'cmd args'` splits its value into a command line and runs it.
+// Only an env in wrapper position, before the command word at commandAt, counts.
+function envSplitString(tokens, commandAt) {
+  const e = tokens.findIndex(t => baseName(t) === 'env');
+  if (e < 0 || e >= commandAt) return null;
+  for (let j = e + 1; j < tokens.length && tokens[j].startsWith('-'); j += 1) {
+    const t = tokens[j];
+    if (t === '-S' || t === '--split-string') return tokens.slice(j + 1).join(' ');
+    if (t.startsWith('--split-string=')) {
+      return [t.slice('--split-string='.length), ...tokens.slice(j + 1)].join(' ');
+    }
+    if (t.startsWith('-S')) return [t.slice(2), ...tokens.slice(j + 1)].join(' ');
+  }
+  return null;
+}
+
 // Returns the git arguments for a segment, or null when it is not git. A shell
 // run with -c, and eval, carry a script that is judged as a command line of its own.
 function gitArgTokens(segment, depth) {
   const tokens = shellWords(segment);
   const i = commandIndex(tokens);
+  if (depth < MAX_DEPTH) {
+    const split = envSplitString(tokens, i);
+    if (split !== null) return { script: split };
+  }
   const binary = tokens[i];
   if (binary === undefined) return null;
   if (isGitBinary(binary)) return { args: tokens.slice(i + 1) };
@@ -126,7 +150,8 @@ function gitArgTokens(segment, depth) {
     if (binary === 'eval') return { script: tokens.slice(i + 1).join(' ') };
     if (SHELLS.has(baseName(binary))) {
       const c = tokens.findIndex((t, j) => j > i && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(t));
-      if (c >= 0 && c + 1 < tokens.length) return { script: tokens[c + 1] };
+      const s = c >= 0 && tokens[c + 1] === '--' ? c + 2 : c + 1;
+      if (c >= 0 && s < tokens.length) return { script: tokens[s] };
     }
   }
   return null;
@@ -164,6 +189,26 @@ function hasLongOption(flags, full, minPrefix = 1) {
   });
 }
 
+// The flags of `git restore` with the --source value removed. -s takes a
+// value, glued (-sSTABLE) or as the next word, so a capital S inside that
+// value must not read as --staged.
+function restoreFlags(args) {
+  const flags = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '--') break;
+    if (a.startsWith('--')) {
+      flags.push(a);
+      if (!a.includes('=') && hasLongOption([a], '--source', 3)) i += 1;
+    } else if (/^-[a-zA-Z]+$/.test(a)) {
+      const s = a.indexOf('s', 1);
+      flags.push(s < 0 ? a : a.slice(0, s));
+      if (s === a.length - 1) i += 1;
+    }
+  }
+  return flags.filter(f => f !== '-');
+}
+
 function isDestructiveGitSegment(segment, depth) {
   const found = gitArgTokens(segment, depth);
   if (!found) return false;
@@ -194,8 +239,9 @@ function isDestructiveGitSegment(segment, depth) {
     case 'restore': {
       if (!rest.some(a => a === '.' || a === './')) return false;
       // --staged alone restores the index, not the working tree.
-      const staged = hasShortFlag(rest, 'S') || hasLongOption(rest, '--staged', 3);
-      const worktree = hasShortFlag(rest, 'W') || hasLongOption(rest, '--worktree', 3);
+      const flags = restoreFlags(rest);
+      const staged = hasShortFlag(flags, 'S') || hasLongOption(flags, '--staged', 3);
+      const worktree = hasShortFlag(flags, 'W') || hasLongOption(flags, '--worktree', 3);
       return !staged || worktree;
     }
     default:

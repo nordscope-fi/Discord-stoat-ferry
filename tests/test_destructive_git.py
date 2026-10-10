@@ -160,11 +160,23 @@ BLOCKED = [
     ("restore-env-prefix", "FOO=1 git restore ."),
     ("restore-chained", "echo a; git restore ."),
     ("restore-bash-c", "bash -c 'git restore .'"),
+    # Found by the security review of this change: spellings the shell reads
+    # differently from a plain word splitter, and a value glued to -s.
+    ("restore-source-value-holds-capital-s", "git restore -sSTABLE ."),
+    ("reset-ansi-c-quoted-subcommand", "git $'reset' --hard"),
+    ("reset-ansi-c-quoted-flag", "git reset $'--hard'"),
+    ("reset-locale-quoted-subcommand", 'git $"reset" --hard'),
+    ("reset-line-continuation-before-flag", "git reset \\\n--hard"),
+    ("reset-line-continuation-before-subcommand", "git \\\nreset --hard"),
+    ("reset-bash-c-double-dash", "bash -c -- 'git reset --hard'"),
+    ("reset-env-split-string", "env -S 'git reset --hard'"),
+    ("push-env-word-after-the-command", "git push env -S +main"),
 ]
 
 # (id, command). Every one of these must stay allowed.
 ALLOWED = [
     ("reset-soft", "git reset --soft HEAD~1"),
+    ("restore-staged-with-separate-source", "git restore -s HEAD -S ."),
     ("reset-mixed", "git reset --mixed HEAD~1"),
     ("reset-plain", "git reset"),
     ("reset-unstage-file", "git reset HEAD path/file"),
