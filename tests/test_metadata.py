@@ -2,8 +2,10 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import aiohttp
+import pytest
 
 from discord_ferry.discord import fetch_and_translate_guild_metadata
 from discord_ferry.discord.metadata import (
@@ -14,10 +16,13 @@ from discord_ferry.discord.metadata import (
     RoleOverride,
     _dict_to_meta,
     _meta_to_dict,
+    ensure_metadata_matches_export,
     load_discord_metadata,
+    load_discord_metadata_for_resume,
     save_discord_metadata,
 )
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS, translate_permissions
+from discord_ferry.errors import MigrationError
 
 
 def test_metadata_roundtrip_preserves_new_fields(tmp_path: Path) -> None:
@@ -587,3 +592,200 @@ def test_save_metadata_overwrites_existing_file_on_windows(
     # Asserting guild_id alone would pass even if the second write landed only
     # partially, because every other field would still read back as `first`'s.
     assert load_discord_metadata(tmp_path) == second
+
+
+# --- Resume checks (#971) ----------------------------------------------------
+
+_GUILD = "111111111111111111"
+_ROLE = "222222222222222222"
+_CHAN = "333333333333333333"
+
+
+def _good_dict() -> dict[str, object]:
+    return {
+        "guild_id": _GUILD,
+        "fetched_at": "2026-06-23T00:00:00+00:00",
+        "server_default_permissions": 1 << 22,
+        "role_permissions": {_ROLE: {"allow": 1 << 22, "deny": 0}},
+        "channel_metadata": {
+            _CHAN: {
+                "nsfw": False,
+                "default_override": {"allow": 0, "deny": 1 << 20},
+                "role_overrides": [{"discord_role_id": _ROLE, "allow": 1 << 22, "deny": 0}],
+            }
+        },
+    }
+
+
+def _write(tmp_path: Path, data: dict[str, object]) -> None:
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(data))
+
+
+def test_resume_load_returns_none_without_a_file(tmp_path: Path) -> None:
+    assert load_discord_metadata_for_resume(tmp_path, configured_guild_id=_GUILD) is None
+
+
+def test_resume_load_keeps_valid_metadata_exactly(tmp_path: Path) -> None:
+    _write(tmp_path, _good_dict())
+    loaded = load_discord_metadata_for_resume(tmp_path, configured_guild_id=_GUILD)
+    assert loaded is not None
+    assert loaded == load_discord_metadata(tmp_path)
+    assert loaded.server_default_permissions == 1 << 22
+    assert loaded.role_permissions[_ROLE] == PermissionPair(allow=1 << 22, deny=0)
+
+
+def test_resume_load_without_a_configured_guild_skips_the_guild_comparison(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, _good_dict())
+    assert load_discord_metadata_for_resume(tmp_path) is not None
+
+
+def test_resume_load_rejects_a_different_configured_guild(tmp_path: Path) -> None:
+    _write(tmp_path, _good_dict())
+    with pytest.raises(MigrationError) as err:
+        load_discord_metadata_for_resume(tmp_path, configured_guild_id="999999999999999999")
+    message = str(err.value)
+    assert _GUILD in message
+    assert "999999999999999999" in message
+    assert "discord_metadata.json" in message
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda d: d.update(guild_id="not-a-guild"), id="guild-id-letters"),
+        pytest.param(lambda d: d.update(guild_id=123), id="guild-id-int"),
+        pytest.param(lambda d: d.update(guild_id=""), id="guild-id-empty"),
+        pytest.param(lambda d: d.update(guild_id="1" * 21), id="guild-id-too-long"),
+        pytest.param(lambda d: d.update(guild_id="１２３"), id="guild-id-unicode-digits"),
+        pytest.param(
+            lambda d: d.update(role_permissions={"role-a": {"allow": 0, "deny": 0}}),
+            id="role-key",
+        ),
+        pytest.param(
+            lambda d: d.update(channel_metadata={"chan-a": {"nsfw": False}}), id="channel-key"
+        ),
+        pytest.param(
+            lambda d: d["channel_metadata"][_CHAN]["role_overrides"][0].update(  # type: ignore[index,union-attr]
+                discord_role_id="x"
+            ),
+            id="override-role-id",
+        ),
+        pytest.param(lambda d: d.update(role_metadata={"r": {}}), id="role-metadata-key"),
+        pytest.param(lambda d: d.update(category_positions={"c": 1}), id="category-key"),
+    ],
+)
+def test_resume_load_rejects_malformed_identifiers(tmp_path: Path, mutate: Any) -> None:
+    data = _good_dict()
+    mutate(data)
+    _write(tmp_path, data)
+    with pytest.raises(MigrationError, match="not a Discord id"):
+        load_discord_metadata_for_resume(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda d: d.update(server_default_permissions=True), id="default-bool"),
+        pytest.param(lambda d: d.update(server_default_permissions=-1), id="default-negative"),
+        pytest.param(lambda d: d.update(server_default_permissions="5"), id="default-string"),
+        pytest.param(lambda d: d.update(server_default_permissions=1.5), id="default-float"),
+        pytest.param(
+            lambda d: d.update(role_permissions={_ROLE: {"allow": True, "deny": 0}}),
+            id="role-allow-bool",
+        ),
+        pytest.param(
+            lambda d: d.update(role_permissions={_ROLE: {"allow": 0, "deny": -4}}),
+            id="role-deny-negative",
+        ),
+        pytest.param(
+            lambda d: d["channel_metadata"][_CHAN]["default_override"].update(allow=False),  # type: ignore[index,union-attr]
+            id="channel-default-bool",
+        ),
+        pytest.param(
+            lambda d: d["channel_metadata"][_CHAN]["role_overrides"][0].update(deny=-1),  # type: ignore[index,union-attr]
+            id="channel-override-negative",
+        ),
+    ],
+)
+def test_resume_load_rejects_bool_negative_and_non_int_permissions(
+    tmp_path: Path, mutate: Any
+) -> None:
+    data = _good_dict()
+    mutate(data)
+    _write(tmp_path, data)
+    with pytest.raises(MigrationError, match="non-negative whole number"):
+        load_discord_metadata_for_resume(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{not json",
+        "[]",
+        '{"fetched_at": "x"}',
+        '{"guild_id": "1", "fetched_at": "x", "role_permissions": {"1": 5}}',
+    ],
+    ids=["bad-json", "not-an-object", "missing-guild-id", "pair-not-an-object"],
+)
+def test_resume_load_rejects_a_file_that_is_not_ferry_metadata(tmp_path: Path, text: str) -> None:
+    (tmp_path / "discord_metadata.json").write_text(text)
+    with pytest.raises(MigrationError, match="not a valid Ferry metadata file"):
+        load_discord_metadata_for_resume(tmp_path)
+
+
+def test_unknown_permission_bits_are_dropped_like_the_fetch_path_drops_them(
+    tmp_path: Path,
+) -> None:
+    """Bits Stoat does not define (5, 14-19, 41+) cannot come from a fetch, so they go."""
+    unknown = (1 << 5) | (1 << 14) | (1 << 41) | (1 << 60)
+    known = 1 << 22  # SendMessage
+    data = _good_dict()
+    data["server_default_permissions"] = known | unknown
+    data["role_permissions"] = {_ROLE: {"allow": known | unknown, "deny": unknown}}
+    data["channel_metadata"] = {
+        _CHAN: {
+            "nsfw": False,
+            "default_override": {"allow": unknown, "deny": known | unknown},
+            "role_overrides": [{"discord_role_id": _ROLE, "allow": known | unknown, "deny": 0}],
+        }
+    }
+    _write(tmp_path, data)
+    loaded = load_discord_metadata_for_resume(tmp_path, configured_guild_id=_GUILD)
+    assert loaded is not None
+    assert loaded.server_default_permissions == known
+    assert loaded.role_permissions[_ROLE] == PermissionPair(allow=known, deny=0)
+    override = loaded.channel_metadata[_CHAN]
+    assert override.default_override == PermissionPair(allow=0, deny=known)
+    assert override.role_overrides == [RoleOverride(discord_role_id=_ROLE, allow=known, deny=0)]
+    # Masking only ever removes bits: nothing outside the defined set survives, and
+    # nothing is added.
+    for value in (known | unknown, unknown):
+        assert (value & ALL_STOAT_PERMISSIONS) & ~value == 0
+
+
+def test_every_defined_stoat_bit_survives_the_load(tmp_path: Path) -> None:
+    data = _good_dict()
+    data["server_default_permissions"] = ALL_STOAT_PERMISSIONS
+    _write(tmp_path, data)
+    loaded = load_discord_metadata_for_resume(tmp_path)
+    assert loaded is not None
+    assert loaded.server_default_permissions == ALL_STOAT_PERMISSIONS
+
+
+def test_ensure_metadata_matches_export_accepts_a_listed_guild(tmp_path: Path) -> None:
+    _write(tmp_path, _good_dict())
+    meta = load_discord_metadata(tmp_path)
+    assert meta is not None
+    ensure_metadata_matches_export(meta, {_GUILD, "555555555555555555"}, tmp_path)
+
+
+def test_ensure_metadata_matches_export_rejects_another_guild(tmp_path: Path) -> None:
+    _write(tmp_path, _good_dict())
+    meta = load_discord_metadata(tmp_path)
+    assert meta is not None
+    with pytest.raises(MigrationError) as err:
+        ensure_metadata_matches_export(meta, {"555555555555555555"}, tmp_path)
+    assert _GUILD in str(err.value)
+    assert "555555555555555555" in str(err.value)

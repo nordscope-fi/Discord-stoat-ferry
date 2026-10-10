@@ -12,7 +12,9 @@ from discord_ferry.discord.metadata import (
     PermissionPair,
     RoleMeta,
     RoleOverride,
+    ensure_metadata_matches_export,
     load_discord_metadata,
+    load_discord_metadata_for_resume,
     save_discord_metadata,
 )
 from discord_ferry.discord.permissions import translate_permissions
@@ -21,8 +23,10 @@ if TYPE_CHECKING:
     import aiohttp
 
 __all__ = [
+    "ensure_metadata_matches_export",
     "fetch_and_translate_guild_metadata",
     "load_discord_metadata",
+    "load_discord_metadata_for_resume",
     "save_discord_metadata",
     "translate_permissions",
 ]

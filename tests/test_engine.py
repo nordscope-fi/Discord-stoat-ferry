@@ -628,6 +628,129 @@ async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
     assert any("cached" in e.message.lower() for e in export_events if e.status == "progress")
 
 
+# Fixture guild ids: simple_channel.json and friends are 111111111111111111, the
+# "Discord Ferry Test" exports are 1505988963628879902. This one is in neither.
+_OTHER_GUILD_ID = "999999999999999999"
+
+
+def _write_resume_cache(tmp_path: Path, guild_id: str, /, **overrides: Any) -> None:
+    """A resumable output dir: state.json plus a cached discord_metadata.json."""
+    from discord_ferry.discord.metadata import DiscordMetadata, save_discord_metadata
+    from discord_ferry.state import save_state
+
+    save_state(MigrationState(started_at="2024-01-01T00:00:00+00:00"), tmp_path)
+    fields: dict[str, Any] = {
+        "guild_id": guild_id,
+        "fetched_at": "2024-01-01T00:00:00+00:00",
+        "server_default_permissions": 1024,
+        "role_permissions": {},
+        "channel_metadata": {},
+    }
+    fields.update(overrides)
+    save_discord_metadata(DiscordMetadata(**fields), tmp_path)
+
+
+def _cached_events(events: list[MigrationEvent]) -> list[MigrationEvent]:
+    return [e for e in events if e.message == "Using cached Discord metadata (resume)"]
+
+
+async def test_resume_uses_cached_metadata_for_this_export(tmp_path: Path) -> None:
+    """The valid case keeps working: the cache is announced and nothing is fetched."""
+    from aioresponses import aioresponses
+
+    _write_resume_cache(tmp_path, _GUILD_ID)
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, discord_token="t", discord_server_id=_GUILD_ID, resume=True)
+    with aioresponses() as m:
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+        assert len(m.requests) == 0
+    assert len(_cached_events(events)) == 1
+
+
+async def test_resume_without_a_token_still_accepts_a_matching_cache(tmp_path: Path) -> None:
+    _write_resume_cache(tmp_path, _GUILD_ID)
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None, resume=True)
+    await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+
+
+async def test_resume_rejects_a_cache_from_a_different_guild_than_the_export(
+    tmp_path: Path,
+) -> None:
+    """The configured server matches the cache, but the export is another guild."""
+    from aioresponses import aioresponses
+
+    _write_resume_cache(tmp_path, _OTHER_GUILD_ID)
+    config = _make_config(
+        tmp_path, discord_token="t", discord_server_id=_OTHER_GUILD_ID, resume=True
+    )
+    with aioresponses() as m:
+        with pytest.raises(MigrationError, match="belongs to Discord server 999999999999999999"):
+            await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+        assert len(m.requests) == 0
+
+
+async def test_resume_rejects_a_cache_from_a_different_guild_than_the_configured_one(
+    tmp_path: Path,
+) -> None:
+    """Rejected before the cache is announced or used."""
+    _write_resume_cache(tmp_path, _GUILD_ID)
+    events: list[MigrationEvent] = []
+    config = _make_config(
+        tmp_path, discord_token="t", discord_server_id=_OTHER_GUILD_ID, resume=True
+    )
+    with pytest.raises(MigrationError, match="configured server is 999999999999999999"):
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+    assert _cached_events(events) == []
+
+
+async def test_resume_rejects_a_mismatched_cache_even_without_a_token(tmp_path: Path) -> None:
+    """Structure still reads the file with no token, so the check cannot need one."""
+    _write_resume_cache(tmp_path, _OTHER_GUILD_ID)
+    config = _make_config(tmp_path, discord_token=None, discord_server_id=None, resume=True)
+    with pytest.raises(MigrationError, match="belongs to Discord server"):
+        await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("guild_id", "not-a-guild", "not a Discord id"),
+        ("server_default_permissions", True, "non-negative whole number"),
+        ("server_default_permissions", -1, "non-negative whole number"),
+    ],
+    ids=["malformed-guild-id", "bool-permission", "negative-permission"],
+)
+async def test_resume_rejects_malformed_cached_metadata(
+    tmp_path: Path, field: str, value: object, expected: str
+) -> None:
+    _write_resume_cache(tmp_path, _GUILD_ID, **{field: value})
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, discord_token="t", discord_server_id=None, resume=True)
+    with pytest.raises(MigrationError, match=expected):
+        await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+    assert _cached_events(events) == []
+
+
+async def test_a_fresh_run_replaces_an_invalid_cache_instead_of_rejecting_it(
+    tmp_path: Path,
+) -> None:
+    """Only a resume reuses the file, so an unusable one must not block a fresh fetch."""
+    from aioresponses import aioresponses
+
+    from discord_ferry.discord.metadata import load_discord_metadata_for_resume
+
+    _write_resume_cache(tmp_path, "not-a-guild", server_default_permissions=-1)
+    config = _make_config(tmp_path, discord_token="t", discord_server_id=_GUILD_ID)
+    with aioresponses() as m:
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}", payload={"id": _GUILD_ID})
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles", payload=_MOCK_ROLES)
+        m.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels", payload=_MOCK_CHANNELS)
+        await run_migration(config, [].append, phase_overrides=_NOOP_OVERRIDES)
+    refreshed = load_discord_metadata_for_resume(tmp_path)
+    assert refreshed is not None
+    assert refreshed.guild_id == _GUILD_ID
+
+
 async def test_no_discord_token_emits_warning(tmp_path: Path) -> None:
     """When discord_token is absent, engine emits status='warning' about permissions."""
     config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
