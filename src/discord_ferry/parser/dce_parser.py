@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import ijson  # type: ignore[import-untyped]
 
+from discord_ferry.core.boundedjson import load_bounded_json
 from discord_ferry.parser.models import (
     DCEAttachment,
     DCEAuthor,
@@ -27,6 +28,10 @@ from discord_ferry.parser.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# DCE writes about 1.1 KB per message, so 1M messages is about 1.1 GB. 4 GiB leaves 3x
+# headroom over that; past it json.loads would need tens of GB of RAM for one channel.
+MAX_EXPORT_JSON_BYTES = 4 * 1024**3
 
 _CONTENT_EMOJI_RE = re.compile(r"<a?:[^:]+:(\d+)>")
 _THREE_SEGMENT_RE = re.compile(r"^(.+?) - (.+?) - (.+?) \[(\d+)\]$")
@@ -211,8 +216,8 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
         try:
             export = parse_single_export(json_path, metadata_only=metadata_only)
             exports.append(export)
-        except (ValueError, json.JSONDecodeError, KeyError):
-            logger.warning("Skipping %s: not a valid DCE export", json_path.name)
+        except (ValueError, json.JSONDecodeError, KeyError) as exc:
+            logger.warning("Skipping %s: not a valid DCE export (%s)", json_path.name, exc)
     exports.sort(key=lambda e: e.channel.name)
     return exports
 
@@ -231,10 +236,11 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         Parsed DCEExport dataclass.
 
     Raises:
-        ValueError: If the file is not a valid DCE export (missing required keys).
+        ValueError: If the file is not a valid DCE export (missing required keys), is
+            larger than ``MAX_EXPORT_JSON_BYTES``, or is nested too deeply.
         json.JSONDecodeError: If the file is not valid JSON.
     """
-    raw: Any = json.loads(json_path.read_text(encoding="utf-8"))
+    raw: Any = load_bounded_json(json_path, MAX_EXPORT_JSON_BYTES)
 
     # Validate required top-level keys
     for key in ("guild", "channel", "messages", "messageCount"):

@@ -7,11 +7,16 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.core.boundedjson import load_bounded_json
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from discord_ferry.parser.models import DCEExport
+
+# A blueprint holds roles, categories and channels, no messages: the shipped templates are
+# about 1.5 KB and 500 channels with 250 roles is about 80 KB. 10 MiB is wide headroom over that.
+MAX_BLUEPRINT_BYTES = 10 * 1024 * 1024
 
 
 @dataclass
@@ -114,10 +119,11 @@ def import_blueprint(input_path: Path) -> ServerBlueprint:
 
     Raises:
         FileNotFoundError: If the file does not exist.
+        ValueError: If the file is larger than ``MAX_BLUEPRINT_BYTES`` or nested too deeply.
         json.JSONDecodeError: If the file is not valid JSON.
         KeyError: If required fields are missing.
     """
-    raw = json.loads(input_path.read_text(encoding="utf-8"))
+    raw = load_bounded_json(input_path, MAX_BLUEPRINT_BYTES)
     return _dict_to_blueprint(raw)
 
 

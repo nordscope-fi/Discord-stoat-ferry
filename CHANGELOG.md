@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   startup or during later store work, so an idle service could keep them past the stated 30
   days. The timer is cancelled and awaited on shutdown, and one failed sweep is logged without
   row data and does not stop later sweeps.
+### Fixed
+
+- Refuse a DiscordChatExporter JSON file over 4 GiB and a blueprint file over 10 MiB before
+  reading them, and report JSON nested too deeply as the same clean error instead of a
+  `RecursionError` (#988). Both loaders used to read the whole file into memory with no limit.
+  The size comes from the file system, so nothing is allocated for a refused file. A directory
+  scan skips an oversized export and the warning now says why.
 
 ## [2.41.27] - 2026-10-10
 

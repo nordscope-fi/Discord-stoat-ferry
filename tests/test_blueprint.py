@@ -222,3 +222,59 @@ def test_a_failed_export_leaves_the_previous_blueprint_importable(
     recovered = import_blueprint(target)
     assert recovered.name == "Test Server"
     assert [r.name for r in recovered.roles] == ["Admin", "Member"]
+
+
+# ---------------------------------------------------------------------------
+# Size and nesting bounds on the whole-document read (#988)
+# ---------------------------------------------------------------------------
+
+
+def _forbid_read_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(self: Path, *args: object, **kwargs: object) -> str:
+        raise AssertionError("the file was read before the size check refused it")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+
+def test_import_refuses_an_oversized_blueprint_before_reading_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry import blueprint
+
+    monkeypatch.setattr(blueprint, "MAX_BLUEPRINT_BYTES", 1000)
+    path = tmp_path / "huge.json"
+    # Not valid JSON on purpose: a JSON error here would mean the file was parsed.
+    path.write_bytes(b"x" * 1001)
+    _forbid_read_text(monkeypatch)
+    with pytest.raises(ValueError, match="too large"):
+        import_blueprint(path)
+
+
+def test_import_accepts_a_blueprint_exactly_at_the_size_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry import blueprint
+
+    body = b'{"name": "Edge"}'
+    limit = 1000
+    path = tmp_path / "edge.json"
+    path.write_bytes(body + b" " * (limit - len(body)))
+    assert path.stat().st_size == limit
+    monkeypatch.setattr(blueprint, "MAX_BLUEPRINT_BYTES", limit)
+    assert import_blueprint(path).name == "Edge"
+
+
+def test_import_refuses_a_deeply_nested_blueprint_cleanly(tmp_path: Path) -> None:
+    path = tmp_path / "deep.json"
+    path.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+    with pytest.raises(ValueError, match="nested too deeply"):
+        import_blueprint(path)
+
+
+def test_the_real_blueprint_limit_leaves_wide_headroom_over_the_shipped_templates() -> None:
+    from discord_ferry import blueprint
+
+    templates = importlib.resources.files("discord_ferry.templates")
+    sizes = [Path(str(templates / f"{n}.json")).stat().st_size for n in ("gaming", "community")]
+    needed = 1000 * max(sizes)
+    assert needed <= blueprint.MAX_BLUEPRINT_BYTES
