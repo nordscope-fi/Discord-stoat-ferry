@@ -211,8 +211,11 @@ def reset_secret_registry() -> None:
 # general error capture in the codebase.
 
 # Fields whose entries are dicts carrying free text, and which members hold it.
+#
+# ``channel_name`` on a ``validate_export`` warning (issue #154) is the channel name
+# copied from the export. A Discord user chose it, so it is free text like ``message``.
 _TEXT_MEMBERS: dict[str, frozenset[str]] = {
-    "warnings": frozenset({"message"}),
+    "warnings": frozenset({"message", "channel_name"}),
     "errors": frozenset({"message", "error"}),
     "failed_messages": frozenset({"error", "content_preview"}),
 }

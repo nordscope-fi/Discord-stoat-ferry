@@ -345,9 +345,13 @@ def validate_export(
 
     Returns:
         List of warning dicts. Every dict has 'type' and 'message'; some carry
-        more. A 'rendered_markdown' dict also carries 'count', the number of
-        affected messages in that export file, as a string, which
-        acknowledgement_required reads.
+        more. The three per-channel types (http_attachment, rendered_markdown,
+        empty_export) also carry 'channel_name', the raw channel name from the
+        export, so no consumer parses it out of the message. It is free text and
+        is classified in ``_TEXT_MEMBERS`` in ``core/security.py``. A
+        'rendered_markdown' dict also carries 'count', the number of affected
+        messages in that export file, as a string, which acknowledgement_required
+        reads.
     """
     warnings: list[dict[str, str]] = []
     unique_channel_ids: set[str] = set()
@@ -382,6 +386,7 @@ def validate_export(
                         warnings.append(
                             {
                                 "type": "http_attachment",
+                                "channel_name": channel_name,
                                 "message": (
                                     f"Channel '{channel_name}': attachment '{att.file_name}' "
                                     f"has an HTTP URL — media was not downloaded locally"
@@ -411,6 +416,7 @@ def validate_export(
             warnings.append(
                 {
                     "type": "rendered_markdown",
+                    "channel_name": channel_name,
                     "count": str(rendered_mention_count),
                     "message": (
                         f"Channel '{channel_name}': {rendered_mention_count} message(s) "
@@ -429,6 +435,7 @@ def validate_export(
             warnings.append(
                 {
                     "type": "empty_export",
+                    "channel_name": channel_name,
                     "message": f"Channel '{channel_name}' has no messages",
                 }
             )

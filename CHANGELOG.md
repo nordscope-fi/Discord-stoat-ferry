@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Export validation warnings now carry the channel name in its own `channel_name` field (#154). The three warnings that concern one channel (`http_attachment`, `rendered_markdown` and `empty_export`) used to hold the name only inside the message text, so anything that needed it had to pick it out of the sentence. The field is also written to `state.json` and `migration_report.json`, where it is masked for secrets exactly as the message is, because a channel name comes from the export. Older `state.json` files without the field still load and resume. The check that keeps unclassified warning fields out of those files now also covers the warnings built by export validation, which it previously missed.
+
 ## [2.41.30] - 2026-10-10
 
 ### Fixed

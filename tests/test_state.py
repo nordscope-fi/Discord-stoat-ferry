@@ -1017,9 +1017,34 @@ def test_text_member_map_matches_its_documented_shape() -> None:
     new member key, because it never looks at an append site. That distinction was
     missed when this test was written and caught by the whole-branch review.
     """
-    assert _TEXT_MEMBERS["warnings"] == frozenset({"message"})
+    assert _TEXT_MEMBERS["warnings"] == frozenset({"message", "channel_name"})
     assert _TEXT_MEMBERS["errors"] == frozenset({"message", "error"})
     assert _TEXT_MEMBERS["failed_messages"] == frozenset({"error", "content_preview"})
+
+
+def _warning_error_append_target(node: object) -> str | None:
+    """The list name when *node* is `<x>.warnings.append(...)` or `warnings.append(...)`.
+
+    The bare-name form is `validate_export`'s local list. The sweeps below used to
+    match only the attribute form (`state.warnings.append`), so a new member key on a
+    `validate_export` dict (issue #154 added `channel_name`) passed them without ever
+    being looked at. Returns None for anything that is not such an append.
+    """
+    import ast
+
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return None
+    if node.func.attr != "append":
+        return None
+    receiver = node.func.value
+    name = (
+        receiver.attr
+        if isinstance(receiver, ast.Attribute)
+        else receiver.id
+        if isinstance(receiver, ast.Name)
+        else None
+    )
+    return name if name in {"warnings", "errors"} else None
 
 
 def test_warning_and_error_append_sites_use_only_classified_member_keys() -> None:
@@ -1039,19 +1064,17 @@ def test_warning_and_error_append_sites_use_only_classified_member_keys() -> Non
     src_root = Path(__file__).resolve().parents[1] / "src" / "discord_ferry"
 
     # Keys that carry no free text. A new one here is a deliberate decision.
-    structural = {"phase", "type", "nsfw", "count", "channel"}
+    structural = {"phase", "type", "nsfw", "count"}
     classified = _TEXT_MEMBERS["warnings"] | _TEXT_MEMBERS["errors"]
 
     observed: dict[str, set[str]] = {}
     for path in sorted(src_root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            if _warning_error_append_target(node) is None:
                 continue
-            if node.func.attr != "append" or not isinstance(node.func.value, ast.Attribute):
-                continue
-            target = node.func.value.attr
-            if target not in {"warnings", "errors"} or not node.args:
+            assert isinstance(node, ast.Call)
+            if not node.args:
                 continue
             arg = node.args[0]
             if not isinstance(arg, ast.Dict):
@@ -1070,6 +1093,69 @@ def test_warning_and_error_append_sites_use_only_classified_member_keys() -> Non
     )
 
 
+def _empty_export_warning_for(channel_name: str) -> dict[str, str]:
+    """The real producer's empty_export warning for a channel with this name."""
+    from discord_ferry.parser.dce_parser import validate_export
+    from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
+
+    export = DCEExport(
+        guild=DCEGuild(id="1", name="g"),
+        channel=DCEChannel(id="2", type=0, name=channel_name),
+        messages=[],
+        message_count=0,
+        json_path=None,
+    )
+    warnings = validate_export([export], Path("."))
+    assert [w["type"] for w in warnings] == ["empty_export"]
+    return warnings[0]
+
+
+def test_channel_name_in_a_validation_warning_is_masked_in_state_json(tmp_path: Path) -> None:
+    """Issue #154: `channel_name` on a validate_export warning is free text.
+
+    The name comes from the export, so anyone who could post in the source server
+    chose it. It is classified in _TEXT_MEMBERS["warnings"] so the writer masks it
+    exactly as it masks `message`. Driven through the real producer and the real
+    writer rather than a hand-built dict.
+
+    Killing: leaving channel_name out of _TEXT_MEMBERS (the secret reaches disk
+    under that key while `message` stays masked). The positive control is the
+    non-secret part of the name surviving, which separates "masked" from "dropped".
+    """
+    register_secret("proxy_password", "hunter2horse")
+    warning = _empty_export_warning_for("room-hunter2horse\x07-end")
+    assert "hunter2horse" in warning["channel_name"]  # the producer keeps it raw
+    state = MigrationState()
+    state.warnings.append(warning)
+
+    save_state(state, tmp_path)
+
+    written = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["warnings"][0]
+    assert "hunter2horse" not in written["channel_name"]
+    assert "hunter2horse" not in written["message"]
+    assert written["channel_name"].startswith("room-")
+    assert written["channel_name"].endswith("\x07-end")
+    assert state.warnings[0]["channel_name"] == "room-hunter2horse\x07-end"  # memory stays raw
+
+
+def test_old_warning_without_channel_name_loads_and_saves_back(tmp_path: Path) -> None:
+    """Issue #154: the key is additive. A state.json written before it existed
+    still loads, resumes and is written back, and the old entry gains no key."""
+    old_warning = {"type": "empty_export", "message": "Channel 'general' has no messages"}
+    (tmp_path / "state.json").write_text(
+        json.dumps({"role_map": {}, "warnings": [old_warning]}), encoding="utf-8"
+    )
+
+    loaded = load_state(tmp_path)
+    assert loaded.warnings == [old_warning]
+
+    save_state(loaded, tmp_path)
+    assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["warnings"] == [
+        old_warning
+    ]
+    assert load_state(tmp_path).warnings == [old_warning]
+
+
 def test_every_classified_text_member_is_actually_used() -> None:
     """The mirror of the sweep: a classified key nobody appends is dead configuration.
 
@@ -1086,10 +1172,7 @@ def test_every_classified_text_member_is_actually_used() -> None:
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "append"
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr in {"warnings", "errors"}
+                and _warning_error_append_target(node) is not None
                 and node.args
                 and isinstance(node.args[0], ast.Dict)
             ):
