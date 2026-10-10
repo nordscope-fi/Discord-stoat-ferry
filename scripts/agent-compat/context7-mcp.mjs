@@ -15,6 +15,11 @@ const PASSTHROUGH_ENVIRONMENT = [
   'NODE_EXTRA_CA_CERTS',
 ];
 
+// Reviewed 2026-10-10: 4.1.1, published 2026-09-14. Raising it is a deliberate edit. npx cannot
+// check an integrity string, so only the version is pinned (see #995). The registry reports
+// sha512-fUARTIZGVKzlzQKDhKUg4aIQ3yEU/12STdfxJDDnLMSN7yyHiPvNHI05iFwxkv3vC8G76Wp27MwK6Jucl/C5pA==
+export const CONTEXT7_PACKAGE = '@upstash/context7-mcp@4.1.1';
+
 export function context7Environment(source, key) {
   const environment = {};
   for (const name of PASSTHROUGH_ENVIRONMENT) {
@@ -69,7 +74,7 @@ export async function runContext7({
 
   let child;
   try {
-    child = spawnChild('npx', ['-y', '@upstash/context7-mcp'], {
+    child = spawnChild('npx', ['-y', CONTEXT7_PACKAGE], {
       env: context7Environment(environment, key),
       stdio: 'inherit',
     });

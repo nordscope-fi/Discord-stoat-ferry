@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   token in the errors and progress lines they print (#1128). Before, they escaped Rich markup and
   nothing else, so a server error that echoed the token reached the screen in full. `ferry build`
   got the same fix in #972.
+- The Context7 documentation helper now starts `@upstash/context7-mcp@4.1.1` (published 2026-09-14)
+  instead of whichever version is newest on each launch (#995). Only the version is pinned:
+  `npx` cannot check an integrity string, and the package's own dependencies still float inside
+  their declared ranges.
 
 ### Security
 
