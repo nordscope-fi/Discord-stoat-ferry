@@ -52,6 +52,29 @@ def test_migrate_help(runner: CliRunner) -> None:
     assert "--stoat-url" in result.output
 
 
+@pytest.mark.parametrize(
+    ("command", "env_vars"),
+    [
+        ("migrate", ["STOAT_TOKEN", "DISCORD_TOKEN"]),
+        ("build", ["STOAT_TOKEN"]),
+        ("rollback", ["STOAT_TOKEN"]),
+        ("probe", ["STOAT_TOKEN"]),
+        ("check", ["STOAT_TOKEN"]),
+        ("retry", ["STOAT_TOKEN"]),
+        ("repair", ["STOAT_TOKEN"]),
+        ("backfill-roles", ["STOAT_TOKEN"]),
+    ],
+)
+def test_token_options_point_at_the_environment_variable(
+    runner: CliRunner, command: str, env_vars: list[str]
+) -> None:
+    """A token typed as an argument lands in shell history (#978), so --help names the env var."""
+    result = runner.invoke(main, [command, "--help"])
+    assert result.exit_code == 0
+    for name in env_vars:
+        assert f"Prefer the {name} environment variable" in " ".join(result.output.split())
+
+
 def test_validate_help(runner: CliRunner) -> None:
     result = runner.invoke(main, ["validate", "--help"])
     assert result.exit_code == 0

@@ -47,17 +47,22 @@ Before you start, confirm you have these ready:
 === "CLI (Linux / advanced)"
 
     1. Open a terminal (the text command window, search "Terminal" in your applications).
-    2. Run the migrate command with your credentials:
+    2. Put your tokens in environment variables, so they stay out of your shell history:
+
+    ```
+    export DISCORD_TOKEN=YOUR_DISCORD_TOKEN
+    export STOAT_TOKEN=YOUR_STOAT_TOKEN
+    ```
+
+    3. Run the migrate command:
 
     ```
     ferry migrate \
-      --discord-token YOUR_DISCORD_TOKEN \
       --discord-server YOUR_SERVER_ID \
-      --stoat-url https://api.stoat.chat \
-      --token YOUR_STOAT_TOKEN
+      --stoat-url https://api.stoat.chat
     ```
 
-    Required flags (`--stoat-url` and `--token`) must be passed on the command line or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
+    Ferry also loads a `.env` file from the folder you run it in, so you can keep `DISCORD_TOKEN` and `STOAT_TOKEN` there instead. The `--discord-token` and `--token` flags still work, but a token typed on the command line is saved in your shell history. The required settings (`--stoat-url` and the Stoat token) can be passed as flags or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
 
 ---
 
@@ -93,14 +98,14 @@ Before you start, confirm you have these ready:
 
 === "CLI (Linux / advanced)"
 
+    These commands read `DISCORD_TOKEN` and `STOAT_TOKEN` from your environment (or a `.env` file), as set in Step 1. Passing `--discord-token` or `--token` also works, but the token then lands in your shell history.
+
     **Orchestrated mode (recommended):**
 
     ```
     ferry migrate \
-      --discord-token YOUR_DISCORD_TOKEN \
       --discord-server YOUR_SERVER_ID \
-      --stoat-url https://api.stoat.chat \
-      --token YOUR_STOAT_TOKEN
+      --stoat-url https://api.stoat.chat
     ```
 
     **Offline mode (with existing exports):**
@@ -108,8 +113,7 @@ Before you start, confirm you have these ready:
     ```
     ferry migrate \
       --export-dir ./path/to/export/ \
-      --stoat-url https://api.stoat.chat \
-      --token YOUR_STOAT_TOKEN
+      --stoat-url https://api.stoat.chat
     ```
 
     Additional flags:
@@ -318,7 +322,7 @@ After a successful migration:
     Add `--resume` to your original command:
 
     ```
-    ferry migrate --discord-token ... --discord-server ... --stoat-url ... --token ... --resume
+    ferry migrate --discord-server ... --stoat-url ... --resume
     ```
 
 **Seeing errors in the log?**

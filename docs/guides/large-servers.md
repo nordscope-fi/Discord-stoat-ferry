@@ -35,9 +35,10 @@ Ferry saves its progress after finishing each channel. If the migration is inter
     ```bash
     ferry migrate --export-dir ~/exports/my-discord-server/ \
       --stoat-url https://api.stoat.chat \
-      --token your_token_here \
       --resume
     ```
+
+    Ferry reads `STOAT_TOKEN` from the environment, which keeps the token out of your shell history. See [Token security](cli-reference.md#environment-variables).
 
 !!! info "State file location"
     The state file is saved as `state.json` in your output directory (default: `./ferry-output/`). Do not delete it until you are satisfied the migration is complete.
@@ -72,7 +73,7 @@ These settings interact: with 3 channels and 5 API slots, each channel averages 
 
 ```bash
 ferry migrate --export-dir ./export \
-  --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
+  --stoat-url https://stoat.example.com \
   --max-concurrent-channels 6 --max-concurrent-requests 12
 ```
 
@@ -86,7 +87,7 @@ ferry migrate --export-dir ./export \
 For active servers where new messages arrive between migration runs:
 
 ```bash
-ferry migrate --incremental --stoat-url ... --token ...
+ferry migrate --incremental --stoat-url ...
 ```
 
 Incremental mode:
@@ -154,7 +155,6 @@ If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted insta
     ```bash
     ferry migrate --export-dir ~/exports/my-discord-server/ \
       --stoat-url https://api.stoat.chat \
-      --token your_token_here \
       > ferry.log 2>&1 &
     ```
 

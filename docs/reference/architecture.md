@@ -1240,7 +1240,7 @@ or IDs. Useful for:
 ferry export-blueprint --from ~/exports/my-server/ --output my-server.json
 
 # Create server from blueprint
-ferry build --blueprint my-server.json --stoat-url ... --token ...
+ferry build --blueprint my-server.json --stoat-url ...
 ```
 
 ### Preset Templates
@@ -1254,7 +1254,7 @@ Three built-in templates in `templates/`:
 | `education` | Instructor, TA, Student | Announcements, Coursework, Discussion | syllabus, assignments, q-and-a, office-hours |
 
 ```bash
-ferry build --template gaming --stoat-url ... --token ...
+ferry build --template gaming --stoat-url ...
 ```
 
 ---

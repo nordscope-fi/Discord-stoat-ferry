@@ -437,7 +437,7 @@ _common_options = [
         "--discord-token",
         envvar="DISCORD_TOKEN",
         default=None,
-        help="Discord user token",
+        help="Discord user token. Prefer the DISCORD_TOKEN environment variable",
     ),
     click.option(
         "--discord-server", envvar="DISCORD_SERVER_ID", default=None, help="Discord server ID"
@@ -447,7 +447,10 @@ _common_options = [
         "--token",
         envvar="STOAT_TOKEN",
         default=None,
-        help="Stoat user token (from browser Local Storage)",
+        help=(
+            "Stoat user token (from browser Local Storage). "
+            "Prefer the STOAT_TOKEN environment variable"
+        ),
     ),
     click.option("--server-id", default=None, help="Use existing Stoat server"),
     click.option("--server-name", default=None, help="Name for new server"),
@@ -809,7 +812,9 @@ def validate(export_dir: str, rate_limit: float) -> None:
     "--token",
     envvar="STOAT_TOKEN",
     required=True,
-    help="Stoat user token (from browser Local Storage)",
+    help=(
+        "Stoat user token (from browser Local Storage). Prefer the STOAT_TOKEN environment variable"
+    ),
 )
 @click.option("--name", default=None, help="Override server name from blueprint")
 def build(
@@ -1123,7 +1128,9 @@ class _RollbackProgressTracker:
     "--token",
     envvar="STOAT_TOKEN",
     default=None,
-    help="Stoat user token (from browser Local Storage)",
+    help=(
+        "Stoat user token (from browser Local Storage). Prefer the STOAT_TOKEN environment variable"
+    ),
 )
 @click.option(
     "--server-id",
@@ -1226,7 +1233,12 @@ def rollback_cmd(
 
 @main.command(name="probe")
 @click.option("--stoat-url", envvar="STOAT_URL", default=None, help="Stoat API base URL")
-@click.option("--token", envvar="STOAT_TOKEN", default=None, help="Stoat user token")
+@click.option(
+    "--token",
+    envvar="STOAT_TOKEN",
+    default=None,
+    help="Stoat user token. Prefer the STOAT_TOKEN environment variable",
+)
 @click.option("--test-server-id", required=True, help="Throwaway server for probe entities")
 @click.option(
     "--deep",
