@@ -158,6 +158,60 @@ def test_sanitize_fully_masked_key_replaces_with_stars_only() -> None:
     assert store.sanitize("failed: hunter2horse") == "failed: ****"
 
 
+# Overlapping secrets (#972). A short secret that is a prefix or a suffix of a long one
+# must not be masked first: masking the short one rewrites part of the long one, the long
+# value no longer matches, and the rest of it stays in the output.
+_SHORT = "PFXshort89ab"
+_PREFIX_LONG = _SHORT + "REMAINDERtail9876"  # the short secret is a PREFIX of the long one
+_SUFFIX_LONG = "LEADINGhead" + _SHORT  # the short secret is a SUFFIX of the long one
+
+
+@pytest.mark.parametrize("short_first", [True, False])
+@pytest.mark.parametrize("short_fully_masked", [True, False])
+def test_sanitize_masks_a_prefix_overlap_whatever_the_registration_order(
+    short_first: bool, short_fully_masked: bool
+) -> None:
+    store = SecureTokenStore({})
+    steps = [
+        lambda: store.register("short", _SHORT, fully_mask=short_fully_masked),
+        lambda: store.register("long", _PREFIX_LONG),
+    ]
+    for step in steps if short_first else reversed(steps):
+        step()
+
+    out = store.sanitize(f"boom token={_PREFIX_LONG} end")
+
+    assert "REMAINDERtail9876" not in out
+    assert out == "boom token=****9876 end"
+
+
+@pytest.mark.parametrize("short_first", [True, False])
+def test_sanitize_masks_a_suffix_overlap_whatever_the_registration_order(
+    short_first: bool,
+) -> None:
+    store = SecureTokenStore({})
+    steps = [
+        lambda: store.register("short", _SHORT, fully_mask=True),
+        lambda: store.register("long", _SUFFIX_LONG),
+    ]
+    for step in steps if short_first else reversed(steps):
+        step()
+
+    out = store.sanitize(f"boom token={_SUFFIX_LONG} end")
+
+    assert "LEADINGhead" not in out
+    assert out == "boom token=****89ab end"
+
+
+def test_sanitize_still_masks_the_short_secret_on_its_own() -> None:
+    """The sort must not drop a shorter value: both secrets stay masked."""
+    store = SecureTokenStore({})
+    store.register("short", _SHORT, fully_mask=True)
+    store.register("long", _PREFIX_LONG)
+
+    assert store.sanitize(f"a {_SHORT} b {_PREFIX_LONG} c") == "a **** b ****9876 c"
+
+
 # ---------------------------------------------------------------------------
 # __repr__ safety
 # ---------------------------------------------------------------------------
