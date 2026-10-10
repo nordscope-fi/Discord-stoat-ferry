@@ -17,6 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   (#1001). It runs in and trusts the current checkout, passes the caller's environment to its
   children, and picks helpers by content, not provenance. Point it at an unreviewed checkout, or
   add it to automation, only behind a reviewed ref or owner approval. No behaviour changed.
+- The Qwen and Codex session-start hooks now present the last five commit subjects as untrusted
+  repository metadata (#997). The subjects sit inside a labelled `<untrusted-commit-subjects>`
+  block that tells the model to read them as data and never as instructions. Each subject is
+  capped at 100 characters, flattened to one line, and has `&`, `<` and `>` escaped, so no subject
+  can close or forge the block. Both hosts share `scripts/agent-compat/session-context.mjs`.
 
 ## [2.41.26] - 2026-10-10
 
