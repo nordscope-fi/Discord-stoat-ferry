@@ -2097,6 +2097,9 @@ def _run_gui() -> None:
             # immediately, so keep this short: a force-quit SIGKILL landing mid-drain
             # would orphan the window, which is the whole failure this prevents.
             timeout_graceful_shutdown=1,
+            # uvicorn trusts X-Forwarded-For/-Proto from 127.0.0.1 by default. Ferry
+            # sits behind no proxy and never reads the derived client address or scheme.
+            proxy_headers=False,
         )
     finally:
         # Covers what the lifespan hook cannot: uvicorn's force_exit path (double

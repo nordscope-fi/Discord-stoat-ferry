@@ -333,6 +333,28 @@ class TestMainLifecycle:
         assert captured["reconnect_timeout"] == 10.0
         assert captured["timeout_graceful_shutdown"] == 1
 
+    def test_ui_run_does_not_trust_proxy_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#998: uvicorn trusts X-Forwarded-For/-Proto from 127.0.0.1 by default and Ferry
+        has no proxy in front of it. The kwarg must reach uvicorn, so build the real
+        config from it and check the middleware is absent (a misspelt key would pass a
+        plain dict check but leave the default in force)."""
+        from nicegui.server import CustomServerConfig
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(gui, "_HAS_WEBVIEW", False)
+        monkeypatch.setattr(gui.ui, "run", lambda **kwargs: captured.update(kwargs))
+        monkeypatch.setattr(gui, "_teardown_native_window", lambda: None)
+        gui._run_gui()
+        assert captured.get("proxy_headers") is False
+
+        async def _app(scope: object, receive: object, send: object) -> None:
+            return None
+
+        config = CustomServerConfig(_app, proxy_headers=bool(captured["proxy_headers"]))
+        config.load()
+        assert not isinstance(config.loaded_app, ProxyHeadersMiddleware)
+
 
 class TestFolderPicker:
     """The picker has never worked in the packaged app.
