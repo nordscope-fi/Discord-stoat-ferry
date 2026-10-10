@@ -66,7 +66,21 @@ async def run_pins(
         )
         return
 
-    queue = list(state.pending_pins)  # snapshot
+    # #970: pins are replayed from state.json on a resume, so each must target a channel
+    # this migration created. A pin aimed anywhere else is dropped with a warning rather
+    # than sent. load_state has already checked the ids are well-formed.
+    mapped_channels = set(state.channel_map.values())
+    queue: list[tuple[str, str]] = []
+    for channel_id, message_id in state.pending_pins:
+        if channel_id in mapped_channels:
+            queue.append((channel_id, message_id))
+            continue
+        notice = (
+            f"Skipping pin of message {message_id}: channel {channel_id} is not one of the "
+            "channels this migration created."
+        )
+        state.warnings.append({"phase": "pins", "type": "pin_unmapped_channel", "message": notice})
+        on_event(MigrationEvent(phase="pins", status="warning", message=notice))
     remaining: list[tuple[str, str]] = []
     checkpoint_interval = max(config.checkpoint_interval, 1)
     last_save = time.monotonic()

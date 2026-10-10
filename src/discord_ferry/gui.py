@@ -1738,7 +1738,7 @@ async def migrate_page() -> None:
                     state = load_state(config.output_dir)
                     await run_rollback(config, state, exports=[], on_event=on_event)
                     ui.notify("Rollback complete!", type="positive")
-                except MigrationError as exc:
+                except (MigrationError, StateError) as exc:
                     log_display.push(f"[ERROR] Rollback failed: {exc}")
                     ui.notify(f"Rollback failed: {exc}", type="negative")
                 except Exception as exc:

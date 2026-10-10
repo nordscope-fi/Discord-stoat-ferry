@@ -1649,11 +1649,11 @@ async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
 async def test_channel_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
     """A hard kill after channel 2 of 3 persists both mappings; resume creates only channel 3."""
     config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
+    state = MigrationState(stoat_server_id="01J5T000000000000000009000")
     exports = [
-        _make_export(channel_id="ch1", channel_name="one", category_id=""),
-        _make_export(channel_id="ch2", channel_name="two", category_id=""),
-        _make_export(channel_id="ch3", channel_name="three", category_id=""),
+        _make_export(channel_id="811", channel_name="one", category_id=""),
+        _make_export(channel_id="812", channel_name="two", category_id=""),
+        _make_export(channel_id="813", channel_name="three", category_id=""),
     ]
 
     call_count = 0
@@ -1673,36 +1673,39 @@ async def test_channel_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
         ),
     ):
         m.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch1", "name": "one"},
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/channels",
+            payload={"_id": "01J5T000000000000000000501", "name": "one"},
         )
         m.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch2", "name": "two"},
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/channels",
+            payload={"_id": "01J5T000000000000000000502", "name": "two"},
         )
         m.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch3", "name": "three"},
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/channels",
+            payload={"_id": "01J5T000000000000000000503", "name": "three"},
         )
         with contextlib.suppress(KeyboardInterrupt):
             await run_channels(config, state, exports, lambda e: None)
 
     loaded = load_state(tmp_path)
     assert len(loaded.channel_map) == 2
-    assert loaded.channel_map == {"ch1": "stoat-ch1", "ch2": "stoat-ch2"}
-    assert set(loaded.created_channel_names) == {"ch1", "ch2"}
+    assert loaded.channel_map == {
+        "811": "01J5T000000000000000000501",
+        "812": "01J5T000000000000000000502",
+    }
+    assert set(loaded.created_channel_names) == {"811", "812"}
 
     # Resume: only channel 3 should be created.
     resumed_state = loaded
     with aioresponses() as m2:
         m2.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch3", "name": "three"},
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/channels",
+            payload={"_id": "01J5T000000000000000000503", "name": "three"},
         )
         await run_channels(config, resumed_state, exports, lambda e: None)
 
     assert len(resumed_state.channel_map) == 3
-    assert resumed_state.channel_map["ch3"] == "stoat-ch3"
+    assert resumed_state.channel_map["813"] == "01J5T000000000000000000503"
 
 
 async def test_run_channels_voice_fallback_to_text(tmp_path: Path) -> None:
@@ -4170,8 +4173,8 @@ async def test_run_roles_mid_phase_save(tmp_path: Path) -> None:
 async def test_role_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
     """A hard kill after role 2 of 3 persists both mappings; resume creates only role 3."""
     config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    roles = [DCERole(id="r1", name="A"), DCERole(id="r2", name="B"), DCERole(id="r3", name="C")]
+    state = MigrationState(stoat_server_id="01J5T000000000000000009000")
+    roles = [DCERole(id="821", name="A"), DCERole(id="822", name="B"), DCERole(id="823", name="C")]
     exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
 
     call_count = 0
@@ -4190,26 +4193,44 @@ async def test_role_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
             side_effect=kill_after_two,
         ),
     ):
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "A"})
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r2", "name": "B"})
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r3", "name": "C"})
+        m.post(
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/roles",
+            payload={"id": "01J5T000000000000000000601", "name": "A"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/roles",
+            payload={"id": "01J5T000000000000000000602", "name": "B"},
+        )
+        m.post(
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/roles",
+            payload={"id": "01J5T000000000000000000603", "name": "C"},
+        )
         with contextlib.suppress(KeyboardInterrupt):
             await run_roles(config, state, exports, lambda e: None)
 
     loaded = load_state(tmp_path)
     assert len(loaded.role_map) == 2
-    assert loaded.role_map == {"r1": "stoat-r1", "r2": "stoat-r2"}
-    assert set(loaded.created_role_names) == {"r1", "r2"}
+    assert loaded.role_map == {
+        "821": "01J5T000000000000000000601",
+        "822": "01J5T000000000000000000602",
+    }
+    assert set(loaded.created_role_names) == {"821", "822"}
 
     # Resume: only role 3 should be created.
     resumed_state = loaded
     with aioresponses() as m2:
-        m2.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r3", "name": "C"})
-        m2.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "roles": {}})
+        m2.post(
+            f"{STOAT_URL}/servers/01J5T000000000000000009000/roles",
+            payload={"id": "01J5T000000000000000000603", "name": "C"},
+        )
+        m2.get(
+            f"{STOAT_URL}/servers/01J5T000000000000000009000",
+            payload={"_id": "01J5T000000000000000009000", "roles": {}},
+        )
         await run_roles(config, resumed_state, exports, lambda e: None)
 
     assert len(resumed_state.role_map) == 3
-    assert resumed_state.role_map["r3"] == "stoat-r3"
+    assert resumed_state.role_map["823"] == "01J5T000000000000000000603"
 
 
 async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) -> None:

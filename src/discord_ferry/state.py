@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -263,7 +264,8 @@ def load_state(output_dir: Path) -> MigrationState:
         output_dir: Directory containing state.json.
 
     Raises:
-        StateError: If the file doesn't exist or contains invalid JSON.
+        StateError: If the file doesn't exist, contains invalid JSON, or holds a saved
+            destination id that is not shaped like one (see ``check_state_ids``).
     """
     state_path = output_dir / "state.json"
     if not state_path.exists():
@@ -272,6 +274,8 @@ def load_state(output_dir: Path) -> MigrationState:
         raw = json.loads(state_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise StateError(f"Corrupt state file: {e}") from e
+    if not isinstance(raw, dict):
+        raise StateError(f"Corrupt state file: expected a JSON object in {state_path}")
 
     # v1→v2 migration: convert snowflake resume fields to completed_channel_ids.
     if "last_completed_channel" in raw and "completed_channel_ids" not in raw:
@@ -286,7 +290,205 @@ def load_state(output_dir: Path) -> MigrationState:
             raise StateError(f"Corrupt message_map.json: {e}") from e
     # If "message_map" is already in raw (v1 embedded), it will be used as-is.
 
-    return _dict_to_state(raw)
+    try:
+        state = _dict_to_state(raw)
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        # A wrongly shaped container (a list where an object belongs, a string where a
+        # record belongs) surfaces as one of these. Say which file, not a traceback.
+        raise StateError(f"Invalid state data: {type(e).__name__}: {e}") from e
+    check_state_ids(state)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Saved destination ids (#970)
+# ---------------------------------------------------------------------------
+#
+# Every recovery path (--resume, retry, rollback, repair, check) reads Stoat ids
+# out of state.json and sends requests to them. A value that is not shaped like an
+# id either crashes the run late or aims it at the wrong thing, so load_state
+# refuses it here, once, before any of those paths see it.
+#
+# Formats, and what each rests on:
+#   Stoat server, channel, role and message ids: 26-character Crockford base32
+#     ULIDs. Messages and the 26-character `before`/`after` bounds are verified in
+#     the memory note gotcha-stoat-response-shapes-and-ids; the server id is called
+#     a ULID in gui_tools.py; review.py decodes channel ids as ULIDs. Case is not
+#     enforced, because Ferry's own category ids (uuid4 hex) use the same alphabet.
+#   Category ids: Ferry generates them (_generate_category_id, 26 hex chars) and
+#     Stoat accepts a 1-32 character string, so the rule is a 1-32 character token.
+#   Emoji ids: the Autumn file id. Its format is NOT verified, so the rule is the
+#     shape a URL path segment needs (1-128 characters of [A-Za-z0-9_-]), which is
+#     the only property the delete and create routes depend on. 128 is the bound
+#     recorded for role icons, which are also Autumn ids.
+#   Discord ids (map keys): digit snowflakes, plus the synthetic keys Ferry writes:
+#     `forum-index-<key>` in channel_map and `forum-<name>` in category_map.
+#
+# A dry-run state also holds `dry-...` placeholders. Nothing is ever sent to them,
+# and the resume, retry, rollback and check entry points refuse a dry-run state.
+
+_STOAT_ULID = re.compile(r"[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}")
+_STOAT_CATEGORY_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
+_STOAT_FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_SNOWFLAKE = re.compile(r"[0-9]{1,20}")
+
+#: Synthetic Discord-side keys Ferry's own writers add, by map. structure.py writes
+#: `channel_map["forum-index-<forum key>"]` and `category_map["forum-<parent name>"]`.
+_FORUM_INDEX_KEY_PREFIX = "forum-index-"
+_FORUM_CATEGORY_KEY_PREFIX = "forum-"
+
+_MAX_PROBLEMS = 50
+
+
+def is_stoat_id(value: object) -> bool:
+    """True when ``value`` is a well-formed Stoat server, channel, role or message id."""
+    return isinstance(value, str) and _STOAT_ULID.fullmatch(value) is not None
+
+
+def is_stoat_file_id(value: object) -> bool:
+    """True when ``value`` is shaped like an emoji (Autumn file) id."""
+    return isinstance(value, str) and _STOAT_FILE_ID.fullmatch(value) is not None
+
+
+def _show(value: object) -> str:
+    text = repr(value)
+    return text if len(text) <= 40 else f"{text[:37]}..."
+
+
+class _Problems:
+    """Collects what is wrong, without letting a huge bad file build a huge message."""
+
+    def __init__(self, *, dry_run: bool) -> None:
+        self.dry_run = dry_run
+        self.items: list[str] = []
+        self.total = 0
+
+    def add(self, where: str, what: str) -> None:
+        self.total += 1
+        if len(self.items) < _MAX_PROBLEMS:
+            self.items.append(f"{where}: {what}")
+
+    def stoat(self, where: str, value: object, kind: str, pattern: re.Pattern[str]) -> None:
+        if not isinstance(value, str):
+            self.add(where, f"expected a text {kind}, got {type(value).__name__} {_show(value)}")
+        elif pattern.fullmatch(value) is None and not (
+            self.dry_run and value.startswith("dry-") and len(value) > 4
+        ):
+            self.add(where, f"{_show(value)} is not a valid {kind}")
+
+    def discord(self, where: str, key: object, prefix: str | None = None) -> None:
+        if not isinstance(key, str):
+            self.add(where, f"expected a text Discord id, got {type(key).__name__} {_show(key)}")
+        elif _SNOWFLAKE.fullmatch(key) is None and not (
+            prefix is not None and key.startswith(prefix) and len(key) > len(prefix)
+        ):
+            self.add(where, f"key {_show(key)} is not a Discord id")
+
+
+def _check_map(
+    problems: _Problems,
+    name: str,
+    mapping: object,
+    kind: str,
+    pattern: re.Pattern[str],
+    key_prefix: str | None = None,
+) -> None:
+    if not isinstance(mapping, dict):
+        problems.add(name, f"expected an object of id pairs, got {type(mapping).__name__}")
+        return
+    for key, value in mapping.items():
+        where = f"{name}[{_show(key)}]"
+        problems.discord(where, key, key_prefix)
+        problems.stoat(where, value, kind, pattern)
+
+
+def check_state_ids(state: MigrationState) -> None:
+    """Refuse a state whose saved destination ids are not shaped like ids.
+
+    Raises:
+        StateError: naming the first offending field, and how many more there are.
+            Nothing is repaired or dropped: a state that fails here is not used.
+    """
+    p = _Problems(dry_run=state.is_dry_run is True)
+
+    if state.stoat_server_id != "":
+        p.stoat("stoat_server_id", state.stoat_server_id, "Stoat server id", _STOAT_ULID)
+    _check_map(p, "role_map", state.role_map, "Stoat role id", _STOAT_ULID)
+    _check_map(
+        p,
+        "channel_map",
+        state.channel_map,
+        "Stoat channel id",
+        _STOAT_ULID,
+        _FORUM_INDEX_KEY_PREFIX,
+    )
+    _check_map(
+        p,
+        "category_map",
+        state.category_map,
+        "Stoat category id",
+        _STOAT_CATEGORY_ID,
+        _FORUM_CATEGORY_KEY_PREFIX,
+    )
+    _check_map(p, "emoji_map", state.emoji_map, "Stoat emoji id", _STOAT_FILE_ID)
+    _check_map(p, "message_map", state.message_map, "Stoat message id", _STOAT_ULID)
+
+    if isinstance(state.forum_index_message_ids, dict):
+        for key, value in state.forum_index_message_ids.items():
+            p.stoat(
+                f"forum_index_message_ids[{_show(key)}]", value, "Stoat message id", _STOAT_ULID
+            )
+    else:
+        p.add("forum_index_message_ids", "expected an object of id pairs")
+
+    for i, fm in enumerate(state.failed_messages):
+        p.discord(f"failed_messages[{i}].discord_msg_id", fm.discord_msg_id)
+        p.stoat(
+            f"failed_messages[{i}].stoat_channel_id",
+            fm.stoat_channel_id,
+            "Stoat channel id",
+            _STOAT_ULID,
+        )
+
+    for i, pin in enumerate(state.pending_pins):
+        p.stoat(f"pending_pins[{i}] channel", pin[0], "Stoat channel id", _STOAT_ULID)
+        p.stoat(f"pending_pins[{i}] message", pin[1], "Stoat message id", _STOAT_ULID)
+
+    for i, entry in enumerate(state.pending_reactions):
+        if not isinstance(entry, dict):
+            p.add(f"pending_reactions[{i}]", f"expected an object, got {type(entry).__name__}")
+            continue
+        p.stoat(
+            f"pending_reactions[{i}].channel_id",
+            entry.get("channel_id"),
+            "Stoat channel id",
+            _STOAT_ULID,
+        )
+        p.stoat(
+            f"pending_reactions[{i}].message_id",
+            entry.get("message_id"),
+            "Stoat message id",
+            _STOAT_ULID,
+        )
+        emoji = entry.get("emoji")
+        if not isinstance(emoji, str) or not emoji:
+            p.add(f"pending_reactions[{i}].emoji", f"expected a text emoji, got {_show(emoji)}")
+
+    if isinstance(state.pending_emoji_rewrites, dict):
+        for key, record in state.pending_emoji_rewrites.items():
+            where = f"pending_emoji_rewrites[{_show(key)}]"
+            p.discord(where, key)
+            if not isinstance(record, dict):
+                p.add(where, f"expected an old/new pair, got {type(record).__name__}")
+                continue
+            for side in ("old", "new"):
+                p.stoat(f"{where}.{side}", record.get(side), "Stoat emoji id", _STOAT_FILE_ID)
+    else:
+        p.add("pending_emoji_rewrites", "expected an object")
+
+    if p.total:
+        more = f" (and {p.total - 1} more)" if p.total > 1 else ""
+        raise StateError(f"state.json holds a saved id that is not valid: {p.items[0]}{more}")
 
 
 def _state_to_dict(state: MigrationState) -> dict[str, Any]:
