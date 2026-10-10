@@ -172,6 +172,9 @@ async def upload_to_autumn(
     if not file_path.exists():
         raise AutumnUploadError(f"File not found: {file_path}")
 
+    if not file_path.is_file():
+        raise AutumnUploadError(f"Not a regular file: {file_path}")
+
     file_size = file_path.stat().st_size
     limit = TAG_SIZE_LIMITS[tag]
     if file_size > limit:

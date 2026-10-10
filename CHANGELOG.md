@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.42.1] - 2026-10-11
+
+### Fixed
+
+- Reject a directory passed to the Autumn uploader before Ferry tries to open it as a file (#1039). Missing paths keep their existing error, and regular-file uploads are unchanged.
+
 ## [2.42.0] - 2026-10-10
 
 ### Changed
