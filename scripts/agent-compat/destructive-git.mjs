@@ -41,11 +41,78 @@ const SHELL_KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish']);
 const MAX_DEPTH = 4;
 
+// Index just past the end of a $( ... ) body starting at `start`, counting
+// nested brackets. An unterminated body runs to the end of the line.
+function substitutionEnd(cmd, start) {
+  let depth = 1;
+  for (let j = start; j < cmd.length; j += 1) {
+    if (cmd[j] === '\\') j += 1;
+    else if (cmd[j] === '(') depth += 1;
+    else if (cmd[j] === ')' && (depth -= 1) === 0) return j;
+  }
+  return cmd.length;
+}
+
+function backtickEnd(cmd, start) {
+  for (let j = start; j < cmd.length; j += 1) {
+    if (cmd[j] === '\\') j += 1;
+    else if (cmd[j] === '`') return j;
+  }
+  return cmd.length;
+}
+
+// Splits a command line into simple commands the way the shell does. A
+// separator or bracket only splits outside quotes and when not escaped, so
+// "feat(x)" and 'a;b' stay one word. $(...) and backticks run even inside
+// double quotes, so their bodies become segments of their own. A backslash
+// before a newline continues the line, and a # that starts a word begins a
+// comment that runs to the end of the line.
 function segments(cmd) {
-  // A backslash before a newline continues the line, so it is removed before
-  // splitting. Shell separators inside quotes also split, which can only add
-  // false positives, never false negatives.
-  return cmd.replace(/\\\r?\n/g, '').split(/[|;&\n`()]|\$\(/);
+  const line = cmd.replace(/\\\r?\n/g, '');
+  const out = [];
+  let cur = '';
+  let quote = null; // null, "'", '"' or "$'"
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote === "'") {
+      cur += ch;
+      if (ch === "'") quote = null;
+    } else if (quote === "$'") {
+      cur += ch;
+      if (ch === '\\' && i + 1 < line.length) { i += 1; cur += line[i]; }
+      else if (ch === "'") quote = null;
+    } else if (ch === '\\' && i + 1 < line.length) {
+      cur += ch + line[i + 1];
+      i += 1;
+    } else if ((ch === '$' && line[i + 1] === '(') || ch === '`') {
+      const start = ch === '`' ? i + 1 : i + 2;
+      const end = ch === '`' ? backtickEnd(line, start) : substitutionEnd(line, start);
+      out.push(...segments(line.slice(start, end)));
+      cur += 'X';
+      i = end;
+    } else if (quote === '"') {
+      cur += ch;
+      if (ch === '"') quote = null;
+    } else if (ch === '$' && line[i + 1] === "'") {
+      cur += "$'";
+      i += 1;
+      quote = "$'";
+    } else if (ch === "'" || ch === '"') {
+      cur += ch;
+      quote = ch;
+    } else if (ch === '#' && (cur === '' || /\s$/.test(cur))) {
+      // A # that starts a word comments out the rest of the line.
+      const nl = line.indexOf('\n', i);
+      i = nl < 0 ? line.length : nl - 1;
+    } else if (/[|;&\n()]/.test(ch)) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
 }
 
 // Reads one segment as shell words. Quotes and backslash escapes are removed
@@ -60,12 +127,21 @@ function shellWords(segment) {
     if (quote === "'") {
       if (ch === "'") quote = null;
       else word += ch;
+    } else if (quote === "$'") {
+      if (ch === "'") quote = null;
+      else if (ch === '\\' && i + 1 < segment.length) { i += 1; word += segment[i]; }
+      else word += ch;
     } else if (quote === '"') {
       if (ch === '"') quote = null;
       else if (ch === '\\' && i + 1 < segment.length) { i += 1; word += segment[i]; }
       else word += ch;
-    } else if (ch === '$' && (segment[i + 1] === "'" || segment[i + 1] === '"')) {
-      // $'...' (ANSI-C) and $"..." (locale) quoting: drop the $, keep the quote.
+    } else if (ch === '$' && segment[i + 1] === "'") {
+      // $'...' (ANSI-C) quoting, where a backslash escapes the next character.
+      quote = "$'";
+      i += 1;
+      inWord = true;
+    } else if (ch === '$' && segment[i + 1] === '"') {
+      // $"..." (locale) quoting reads like a double-quoted word.
       inWord = true;
     } else if (ch === "'" || ch === '"') {
       quote = ch;
@@ -199,11 +275,13 @@ function restoreFlags(args) {
     if (a === '--') break;
     if (a.startsWith('--')) {
       flags.push(a);
-      if (!a.includes('=') && hasLongOption([a], '--source', 3)) i += 1;
+      if (!a.includes('=') && hasLongOption([a], '--source', 3) && args[i + 1] !== '--') i += 1;
     } else if (/^-[a-zA-Z]+$/.test(a)) {
       const s = a.indexOf('s', 1);
       flags.push(s < 0 ? a : a.slice(0, s));
-      if (s === a.length - 1) i += 1;
+      // Whether git takes a following -- as the value of -s is not worth
+      // betting on, so a -- there still ends the options.
+      if (s === a.length - 1 && args[i + 1] !== '--') i += 1;
     }
   }
   return flags.filter(f => f !== '-');
