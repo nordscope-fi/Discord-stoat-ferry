@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.42.2] - 2026-10-11
+
+### Fixed
+
+- Keep collected `discord_ferry` modules connected to their parent packages after NiceGUI cleans up a browser-page test (#1144). Later tests can again patch the collected Autumn module by dotted path.
+
 ## [2.42.1] - 2026-10-11
 
 ### Fixed
