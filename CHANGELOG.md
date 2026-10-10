@@ -17,6 +17,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   thread archive headings, keeps its wording so servers migrated over several runs stay
   consistent. A new test fails if an em dash comes back into any other string in the
   migrator modules.
+### Fixed
+
+- Escape the server name in the guild icon warnings (#1080). The "Guild icon path" and
+  "Guild icon file" warnings, and their matching progress lines, now show the export's server
+  name in quotes, with control characters escaped and the length capped at 120 characters. The
+  icon path was already handled this way. A name with a newline, an escape byte or Rich markup
+  can no longer put raw control characters into `migration_report.md`. Ordinary names still
+  appear as before, now inside quotes.
 
 ## [2.41.28] - 2026-10-10
 
