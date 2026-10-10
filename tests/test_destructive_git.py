@@ -11,6 +11,7 @@ Claude Code is not covered: it uses an inline substring check in the untracked
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -305,7 +306,7 @@ def test_near_miss_stays_allowed(
 def test_non_string_input_is_not_destructive() -> None:
     script = (
         "import { isDestructiveGitCommand as d } from "
-        f"'{REPO / 'scripts' / 'agent-compat' / 'destructive-git.mjs'}';"
+        f"'{(REPO / 'scripts' / 'agent-compat' / 'destructive-git.mjs').as_uri()}';"
         "process.stdout.write(JSON.stringify([d(undefined), d(null), d(42), d({})]));"
     )
     assert NODE is not None
@@ -335,6 +336,21 @@ HOST_ALLOWED = ["git status", "git reset --soft HEAD~1", "git checkout -- path/f
 DENY_REASON = "Destructive git operation. Confirm with the user first."
 
 
+def _host_env(home: Path) -> dict[str, str]:
+    # An empty home keeps the user's own hooks out. Windows also needs its
+    # system variables, or node aborts before the guard runs.
+    assert NODE is not None
+    env = {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "PATH": os.pathsep.join([str(Path(NODE).parent), "/usr/bin", "/bin"]),
+    }
+    for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
 def _run_host(
     script: str, args: list[str], payload: dict[str, object], home: Path
 ) -> subprocess.CompletedProcess[str]:
@@ -346,7 +362,7 @@ def _run_host(
         text=True,
         check=False,
         cwd=REPO,
-        env={"HOME": str(home), "PATH": str(Path(NODE).parent) + ":/usr/bin:/bin"},
+        env=_host_env(home),
         timeout=30,
     )
 
