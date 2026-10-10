@@ -2065,6 +2065,71 @@ def _install_renderer_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Host header allowlist (issue #964)
+# ---------------------------------------------------------------------------
+
+
+def _allowed_host_headers() -> frozenset[str]:
+    """Every Host value a local page or the native window can legitimately send."""
+    names = {_HOST, "127.0.0.1", "localhost", "[::1]"}
+    return frozenset(value for name in names for value in (name.lower(), f"{name.lower()}:{_PORT}"))
+
+
+class _LoopbackHostGuard:
+    """Reject any HTTP or websocket request whose Host is not a loopback name.
+
+    DNS rebinding: a hostile site re-resolves its own name to 127.0.0.1, and the browser
+    then sends requests to this listener with ``Host: evil.example:8765``. Binding to
+    loopback does not stop that, because the browser itself is the local peer.
+
+    Starlette's ``TrustedHostMiddleware`` is not used here: it compares only the text
+    before the first colon, so it ignores the port and cannot match ``[::1]:8765``. This
+    matches the whole header against an exact set instead.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        kind = scope["type"]
+        if kind not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        host = b""
+        for key, value in scope.get("headers", ()):
+            if key == b"host":
+                host = value
+                break
+        if host.decode("latin-1").lower() in _allowed_host_headers():
+            await self.app(scope, receive, send)
+            return
+        if kind == "websocket":
+            # Closing before accept makes the server answer the handshake with a 403.
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        body = b"Invalid host header"
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 400,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def _install_host_guard() -> None:
+    """Put the Host allowlist in front of every route, including the socket.io mount."""
+    # `Middleware.cls` is typed as a factory, so compare it as a plain object.
+    registered: list[object] = [m.cls for m in app.user_middleware]
+    if _LoopbackHostGuard not in registered:
+        app.add_middleware(_LoopbackHostGuard)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -2072,6 +2137,7 @@ def _install_renderer_fallback() -> None:
 def _run_gui() -> None:
     """Start the UI and guarantee the native window child dies with the server."""
     native = _native_enabled()
+    _install_host_guard()
 
     if native:
         _install_renderer_fallback()
