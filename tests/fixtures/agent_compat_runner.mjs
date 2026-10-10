@@ -3209,6 +3209,7 @@ switch (mode) {
       command: spawn?.command ?? null,
       args: spawn?.args ?? null,
       stdio: spawn?.options?.stdio ?? null,
+      cwd: spawn?.options?.cwd ?? null,
       child_env_names: spawn ? Object.keys(spawn.options.env).sort() : [],
       child_has_context7_key: spawn?.options?.env?.CONTEXT7_API_KEY === 'FERRY_CONTEXT7_KEY_CANARY',
       child_has_parent_canary: spawn ? 'OPENAI_API_KEY' in spawn.options.env : false,

@@ -1254,3 +1254,22 @@ def test_markdown_report_masks_a_secret_split_by_a_control_character(tmp_path: P
     text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
     assert "hunter2horse" not in text
     assert "proxy:" in text
+
+
+def test_markdown_report_masks_a_secret_that_contains_a_tab(tmp_path: Path) -> None:
+    """The opposite order fails too: cleaning first turns the tab into a space, and the
+    secret no longer matches its mask. Masking on both sides of the cleaning covers
+    a secret split by a control byte and a secret that holds one (#1080).
+    """
+    register_secret("proxy_password", "hunter2\thorse")
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.warnings.append(
+        {"type": "role_colour_failed", "phase": "structure", "message": "proxy: hunter2\thorse"}
+    )
+
+    generate_markdown_report(config, state, [_make_export()])
+
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "hunter2" not in text
+    assert "proxy:" in text

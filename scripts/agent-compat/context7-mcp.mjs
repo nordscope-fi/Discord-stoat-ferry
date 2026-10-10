@@ -90,7 +90,11 @@ export async function runContext7({
 
   let child;
   try {
+    // npx puts the node_modules/.bin of its working folder and of every parent ahead of
+    // PATH, and the server's `#!/usr/bin/env node` line searches that. Started from the
+    // checkout, a planted node there would receive the key, so start it from home.
     child = spawnChild(command, [...commandArgs, '-y', CONTEXT7_PACKAGE], {
+      cwd: home,
       env: context7Environment(environment, key),
       stdio: 'inherit',
     });
