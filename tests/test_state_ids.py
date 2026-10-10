@@ -538,3 +538,40 @@ async def test_repair_does_not_rewrite_messages_to_an_emoji_it_does_not_own(
     assert "555" in state.pending_emoji_rewrites  # left for the owner to look at
     assert any(w["type"] == "emoji_rewrite_not_owned" for w in state.warnings)
     assert any(e.status == "warning" for e in events)
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "dry-ch-111/../../servers/x",
+        "dry-ch-111\\x",
+        "dry-ch-111?x=1",
+        "dry-ch-111#x",
+        "dry-ch-%2e%2e",
+        "dry-ch-1 1",
+        "dry-zzz-111",
+        "dry-ch-",
+    ],
+)
+def test_a_dry_run_placeholder_must_be_a_known_kind_and_url_safe(
+    tmp_path: Path, placeholder: str
+) -> None:
+    """A dry-run placeholder is only ever dry-<kind>-<id>; anything else is junk that could
+    steer a request path if a recovery command ever used it."""
+    _write(tmp_path, is_dry_run=True, channel_map={"111": placeholder})
+    with pytest.raises(StateError, match="channel_map"):
+        load_state(tmp_path)
+
+
+async def test_retry_refuses_a_dry_run_state(tmp_path: Path) -> None:
+    config = _retry_config(tmp_path)
+    state = MigrationState(is_dry_run=True, channel_map={"111": "dry-ch-111"})
+    with pytest.raises(StateError, match="dry run"):
+        await run_retry_failed(config, state, [], lambda _e: None)
+
+
+async def test_rollback_refuses_a_dry_run_state(tmp_path: Path) -> None:
+    config = _retry_config(tmp_path)
+    state = MigrationState(is_dry_run=True, stoat_server_id="dry-server-1")
+    with pytest.raises(StateError, match="dry run"):
+        await run_rollback(config, state, exports=[], on_event=lambda _e: None)
