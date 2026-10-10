@@ -10,11 +10,12 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.http import read_bounded
 from discord_ferry.migrator.api import get_session
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path, is_safe_filename_component
 from discord_ferry.state import save_state
-from discord_ferry.uploader.autumn import upload_with_cache
+from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_with_cache
 
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from discord_ferry.state import MigrationState
 
 logger = logging.getLogger(__name__)
+
+_AVATAR_MAX_BYTES = TAG_SIZE_LIMITS["avatars"]  # Autumn "avatars" tag limit (stoatchat Revolt.toml)
 
 
 def _collect_unique_authors(exports: list[DCEExport]) -> dict[str, DCEAuthor]:
@@ -68,7 +71,11 @@ async def _download_remote_avatar(
     if not is_safe_filename_component(author_id):
         return None, f"unsafe author id {author_id!r}"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        # No redirects: the CDN answers directly, and a 3xx would send the
+        # download to a host Ferry never chose.
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False
+        ) as resp:
             if resp.status != 200:
                 logger.warning("Avatar download returned status %d for %s", resp.status, url)
                 return None, f"HTTP {resp.status}"
@@ -94,7 +101,14 @@ async def _download_remote_avatar(
             if not dest.resolve().is_relative_to(output_dir.resolve() / "avatars"):
                 return None, "avatar download destination escapes the avatars folder"
 
-            data = await resp.read()
+            # Read in full, within the Autumn avatars limit, before ``dest`` is
+            # touched: an oversize body or a dropped connection writes nothing.
+            data = await read_bounded(resp, _AVATAR_MAX_BYTES)
+            if data is None:
+                logger.warning(
+                    "Avatar at %s is larger than the %d byte limit", url, _AVATAR_MAX_BYTES
+                )
+                return None, f"larger than the {_AVATAR_MAX_BYTES} byte limit"
             dest.write_bytes(data)
             return dest, ""
     except Exception as exc:  # noqa: BLE001

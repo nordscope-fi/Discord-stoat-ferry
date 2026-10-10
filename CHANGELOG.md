@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote avatar downloads now stop at the Autumn avatar size limit of 4,000,000 bytes (#1108). Before,
+  the whole response was read into memory before any size check, so a very large or endless body
+  could use all available memory. A declared length over the limit is refused before any body is
+  read, an undeclared body is cut off as soon as it passes the limit, and nothing is written to disk
+  on refusal. Avatar downloads also no longer follow redirects, matching the banner and role icon
+  downloads.
+
 ### Changed
 
 - Require five exporter tests to check the exact low-disk, partial-channel, proxy-resolution, and

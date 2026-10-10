@@ -45,6 +45,7 @@ class LocalCDN:
         self.last_headers = dict(request.headers)
         total = int(request.match_info["n"])
         resp = web.StreamResponse()
+        resp.content_type = "image/png"  # the avatar downloader refuses non-images
         if chunked:
             resp.enable_chunked_encoding()
         else:
@@ -67,6 +68,7 @@ class LocalCDN:
     async def _lying(self, request: web.Request) -> web.StreamResponse:
         """Declare N bytes, send one chunk, then stall until the client leaves."""
         resp = web.StreamResponse()
+        resp.content_type = "image/png"
         resp.content_length = int(request.match_info["n"])
         await resp.prepare(request)
         await self._write(resp, CHUNK)
@@ -76,6 +78,7 @@ class LocalCDN:
     async def _endless(self, request: web.Request) -> web.StreamResponse:
         """No Content-Length: keep sending until the client stops reading."""
         resp = web.StreamResponse()
+        resp.content_type = "image/png"
         resp.enable_chunked_encoding()
         await resp.prepare(request)
         while self.sent < ENDLESS_LIMIT:
@@ -88,7 +91,7 @@ class LocalCDN:
 
     async def _target(self, request: web.Request) -> web.StreamResponse:
         self.target_hits += 1
-        return web.Response(body=b"redirected-body")
+        return web.Response(body=b"redirected-body", content_type="image/png")
 
     async def _cutoff(self, request: web.Request) -> web.StreamResponse:
         """Declare N bytes, send part of them, then drop the connection."""
