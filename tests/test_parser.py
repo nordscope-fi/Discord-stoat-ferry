@@ -1075,9 +1075,18 @@ def test_the_real_export_limit_accepts_a_million_message_channel() -> None:
     assert needed <= dce_parser.MAX_EXPORT_JSON_BYTES
 
 
-def test_parse_export_directory_skips_an_oversized_file_and_keeps_the_rest(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [(b"x" * 5000, "too large to load"), (b"[" * 200_000 + b"]" * 200_000, "nested too deeply")],
+    ids=["oversized", "deeply-nested"],
+)
+def test_parse_export_directory_stops_on_a_refused_channel_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: bytes, reason: str
 ) -> None:
+    """Killing: a refused channel skipped like a stray file, so the migration
+    reports success with that channel missing. Only a log line recorded it.
+    """
+    from discord_ferry.errors import ExportError
     from discord_ferry.parser import dce_parser
 
     good = tmp_path / "good.json"
@@ -1091,11 +1100,11 @@ def test_parse_export_directory_skips_an_oversized_file_and_keeps_the_rest(
             }
         )
     )
-    (tmp_path / "huge.json").write_bytes(b"x" * 5000)
-    monkeypatch.setattr(dce_parser, "MAX_EXPORT_JSON_BYTES", good.stat().st_size + 10)
-    exports = parse_export_directory(tmp_path, metadata_only=True)
-    assert [e.channel.name for e in exports] == ["c"]
-    assert "huge.json is too large to load" in caplog.text
+    (tmp_path / "refused.json").write_bytes(content)
+    if reason == "too large to load":
+        monkeypatch.setattr(dce_parser, "MAX_EXPORT_JSON_BYTES", good.stat().st_size + 10)
+    with pytest.raises(ExportError, match=f"refused.json is {reason}"):
+        parse_export_directory(tmp_path, metadata_only=True)
 
 
 def test_validate_counts_emoji_from_content(tmp_path: Path) -> None:

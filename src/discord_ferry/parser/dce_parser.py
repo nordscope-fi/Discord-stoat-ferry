@@ -11,7 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 import ijson  # type: ignore[import-untyped]
 
-from discord_ferry.core.boundedjson import load_bounded_json
+from discord_ferry.core.boundedjson import JsonLoadRefusedError, load_bounded_json
+from discord_ferry.errors import ExportError
 from discord_ferry.parser.models import (
     DCEAttachment,
     DCEAuthor,
@@ -210,12 +211,22 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
     Returns:
         List of DCEExport objects sorted by channel name, one per valid file.
         Files that cannot be parsed as valid DCE JSON are skipped with a warning.
+
+    Raises:
+        ExportError: If a file is refused for its size or nesting depth.
     """
     exports: list[DCEExport] = []
     for json_path in sorted(export_dir.glob("*.json")):
         try:
             export = parse_single_export(json_path, metadata_only=metadata_only)
             exports.append(export)
+        except JsonLoadRefusedError as exc:
+            # A refused channel is a real export Ferry cannot read, not a stray
+            # file. Skipping it would report a finished migration with the
+            # channel missing, so stop instead (#988).
+            raise ExportError(
+                f"{exc}. Ferry stopped so that no channel is left out without notice."
+            ) from exc
         except (ValueError, json.JSONDecodeError, KeyError) as exc:
             logger.warning("Skipping %s: not a valid DCE export (%s)", json_path.name, exc)
     exports.sort(key=lambda e: e.channel.name)
