@@ -666,7 +666,9 @@ def blueprint_export_page() -> None:
                 exports = parse_export_directory(Path(from_dir))
             except MigrationError as exc:
                 with results:
-                    ui.label(f"Could not read the export: {exc}").classes("text-red-600")
+                    ui.label(f"Could not read the export: {sanitize_secrets(str(exc))}").classes(
+                        "text-red-600"
+                    )
                 return
             if not exports:
                 with results:
@@ -791,7 +793,14 @@ def validate_page() -> None:
                 ui.notify("Enter a valid export directory.", type="warning")
                 return
             path = Path(export_dir)
-            exports = parse_export_directory(path)
+            try:
+                exports = parse_export_directory(path)
+            except MigrationError as exc:
+                with results:
+                    ui.label(f"Could not read the export: {sanitize_secrets(str(exc))}").classes(
+                        "text-red-600"
+                    )
+                return
             with results:
                 if not exports:
                     ui.label("No valid DCE JSON files found in that directory.").classes(

@@ -1011,6 +1011,18 @@ async def test_validate_page_no_dce_json_error(
         await user.should_see("No valid DCE JSON files found")
 
 
+async def test_validate_page_reports_a_refused_export_file(
+    user: User,
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """#988: a refused channel file stops the scan, and the page says why."""
+    (tmp_path / "chan.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+    await user.open("/tools/validate")
+    user.find("Export directory").elements.pop().set_value(str(tmp_path))
+    user.find("Validate export").click()
+    await user.should_see("chan.json is nested too deeply to load")
+
+
 async def test_validate_page_renders_warnings_and_ack_reason(
     user: User,
     tmp_path,  # type: ignore[no-untyped-def]
