@@ -1145,6 +1145,40 @@ def test_report_masks_a_value_held_only_by_the_config_store(tmp_path: Path) -> N
     assert sentinel not in written["warnings"][0]["message"]
 
 
+def test_report_masks_the_channel_name_of_a_validation_warning(tmp_path: Path) -> None:
+    """Issue #154: `channel_name` is free text from the export, masked like `message`.
+
+    Both secret stores are exercised, since neither is a superset of the other: the
+    registry (proxy password) and the config's token store (API token).
+    """
+    sentinel = "aaaa_bbbb_cccc_dddd"
+    register_secret("proxy_password", "hunter2horse")
+    config = FerryConfig(
+        export_dir=tmp_path,
+        stoat_url="https://api.test",
+        token=sentinel,
+        output_dir=tmp_path,
+        token_store=SecureTokenStore({"stoat": sentinel}),
+    )
+    state = MigrationState()
+    state.warnings.append(
+        {
+            "type": "empty_export",
+            "message": "Channel 'x' has no messages",
+            "channel_name": f"hunter2horse-{sentinel}\x1b[31m",
+        }
+    )
+
+    generate_report(config, state, [])
+
+    written = json.loads((tmp_path / "migration_report.json").read_text(encoding="utf-8"))
+    name = written["warnings"][0]["channel_name"]
+    assert "hunter2horse" not in name
+    assert sentinel not in name
+    assert name.endswith("\x1b[31m")  # positive control: masked, not dropped
+    assert written["warnings"][0]["type"] == "empty_export"
+
+
 def test_report_leaves_state_warnings_raw_in_memory(tmp_path: Path) -> None:
     """Redaction happens on the way out, so in-memory assertions elsewhere still hold."""
     register_secret("proxy_password", "hunter2horse")

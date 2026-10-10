@@ -442,7 +442,7 @@ def test_validate_counts_every_rendered_message_not_just_the_first() -> None:
     # Key by channel name, not by list position: the row order follows the
     # channel-name sort in parse_export_directory, which is not this test's
     # subject.
-    by_channel = {w["message"].split("'")[1]: w for w in hits}
+    by_channel = {w["channel_name"]: w for w in hits}
     assert set(by_channel) == {"rendered-multi", "rendered-multi-b"}
     assert by_channel["rendered-multi"]["count"] == "2"
     assert by_channel["rendered-multi-b"]["count"] == "1"
@@ -627,6 +627,63 @@ def test_validate_warns_empty_export(fixtures_dir: Path, tmp_path: Path) -> None
     warnings = validate_export(exports, temp_dir)
     types = [w["type"] for w in warnings]
     assert "empty_export" in types
+
+
+def _write_channel_export(
+    directory: Path, channel_id: str, channel_name: str, *, with_messages: bool
+) -> None:
+    """Write one DCE file whose first message has a rendered mention and an HTTP
+    attachment, or no messages at all."""
+    source = json.loads((FIXTURES_DIR / "markdown_rendered.json").read_text(encoding="utf-8"))
+    messages = source["messages"][:1] if with_messages else []
+    if with_messages:
+        messages[0]["attachments"] = [
+            {
+                "id": "600000000000000001",
+                "url": "https://example.test/pic.png",
+                "fileName": "pic.png",
+                "fileSizeBytes": 10,
+            }
+        ]
+    source["channel"] = {**source["channel"], "id": channel_id, "name": channel_name}
+    source["messages"] = messages
+    source["messageCount"] = len(messages)
+    (directory / f"Guild - {channel_name} [{channel_id}].json").write_text(
+        json.dumps(source), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("metadata_only", [True, False])
+def test_channel_warnings_carry_the_channel_name_as_a_field(
+    tmp_path: Path, metadata_only: bool
+) -> None:
+    """Issue #154: http_attachment, rendered_markdown and empty_export each name
+    their channel in a `channel_name` field, so no consumer parses the prose.
+
+    The name holds an apostrophe, the character the old `message.split("'")[1]`
+    parse split on, so a regression to reading the prose returns "o" here.
+
+    Killing: a producer that omits the key on any one of the three types; a
+    producer that fills it from the wrong export; a metadata_only (streaming)
+    path that forgets it."""
+    directory = tmp_path / "x"
+    directory.mkdir()
+    _write_channel_export(directory, "222222222222222231", "o'brien", with_messages=True)
+    _write_channel_export(directory, "222222222222222232", "quiet-room", with_messages=False)
+
+    exports = parse_export_directory(directory, metadata_only=metadata_only)
+    warnings = validate_export(exports, directory)
+
+    channel_of = {w["type"]: w["channel_name"] for w in warnings if "channel_name" in w}
+    assert channel_of == {
+        "http_attachment": "o'brien",
+        "rendered_markdown": "o'brien",
+        "empty_export": "quiet-room",
+    }
+    # The aggregate warnings name no single channel and must not grow the key.
+    for w in warnings:
+        if w["type"] not in channel_of:
+            assert "channel_name" not in w
 
 
 def test_validate_no_warnings_clean(fixtures_dir: Path, tmp_path: Path) -> None:
