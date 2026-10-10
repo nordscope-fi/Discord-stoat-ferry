@@ -92,7 +92,11 @@ files carry PyInstaller's ad-hoc signature and are not notarized (see the instal
 
 ## Gaps and what the owner can do
 
-Each line names where to click. None of these were changed by this work.
+Each line names where to click. On 2026-10-10 the owner had these applied through the GitHub
+API: the tag ruleset, the `main` deletion and force-push rules, the `auto-tag` branch limit,
+immutable releases, required SHA pinning and the two extra required checks. The tag ruleset
+also lets the admin role bypass it, so the owner can still repair a bad tag by hand. The
+PyPI publisher was checked by the owner and matches. The rest are still open.
 
 - **Block tag creation by others.** Settings, Rules, Rulesets, New tag ruleset: target
   `v*.*.*`, restrict creations, updates and deletions, and add the Ferry Auto-Tag Bot App
