@@ -3246,12 +3246,34 @@ switch (mode) {
   }
   case 'context7-launch': {
     const fixture = argument;
-    const supported = new Set(['success', 'signal', 'credential-failure', 'check']);
+    const supported = new Set([
+      'success', 'signal', 'credential-failure', 'check', 'not-installed', 'stale-version',
+      'check-not-installed',
+    ]);
     if (!supported.has(fixture)) throw new Error('invalid context7-launch fixture');
     const { EventEmitter } = await import('node:events');
-    const { context7Environment, runContext7 } = await import(
-      '../../scripts/agent-compat/context7-mcp.mjs'
-    );
+    const {
+      CONTEXT7_PACKAGE, context7Environment, context7InstallDirectory, runContext7,
+    } = await import('../../scripts/agent-compat/context7-mcp.mjs');
+    // A release folder holding the lock it shipped with, and, unless the fixture says
+    // otherwise, the install the installer would have made for exactly that lock.
+    const runtimeRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ferry-context7-launch-')));
+    const releaseDirectory = join(runtimeRoot, 'releases', 'fixture-release');
+    mkdirSync(join(releaseDirectory, 'context7'), { recursive: true });
+    const lockBytes = Buffer.from('{"fixture":"lock"}\n');
+    writeFileSync(join(releaseDirectory, 'context7', 'package-lock.json'), lockBytes);
+    if (fixture !== 'not-installed' && fixture !== 'check-not-installed') {
+      const installed = context7InstallDirectory(runtimeRoot, lockBytes);
+      const packageDirectory = join(installed, 'node_modules', '@upstash', 'context7-mcp');
+      mkdirSync(join(packageDirectory, 'dist'), { recursive: true });
+      const expectedVersion = CONTEXT7_PACKAGE.slice(CONTEXT7_PACKAGE.lastIndexOf('@') + 1);
+      writeFileSync(join(packageDirectory, 'package.json'), JSON.stringify({
+        name: '@upstash/context7-mcp',
+        version: fixture === 'stale-version' ? '0.0.1' : expectedVersion,
+        bin: { 'context7-mcp': 'dist/index.js' },
+      }));
+      writeFileSync(join(packageDirectory, 'dist', 'index.js'), 'process.exit(0);\n');
+    }
     const sourceEnvironment = {
       PATH: '/fixture/bin',
       HOME: '/fixture/home',
@@ -3276,7 +3298,9 @@ switch (mode) {
       return child;
     };
     let fieldDescriptor = null;
+    let credentialReads = 0;
     const fieldReader = async (descriptor) => {
+      credentialReads += 1;
       fieldDescriptor = descriptor;
       if (fixture === 'credential-failure') throw new Error('FERRY_SECRET_CANARY');
       return 'FERRY_CONTEXT7_KEY_CANARY';
@@ -3290,11 +3314,11 @@ switch (mode) {
     try {
       result = await runContext7({
         home: '/fixture/home',
-        check: fixture === 'check',
+        check: fixture === 'check' || fixture === 'check-not-installed',
         fieldReader,
         accessReader,
         spawnChild,
-        resolve: () => '/fixture/npx',
+        releaseDirectory,
         environment: sourceEnvironment,
         parent,
       });
@@ -3308,7 +3332,12 @@ switch (mode) {
       error,
       spawn_count: spawns.length,
       command: spawn?.command ?? null,
+      command_is_current_node: spawn?.command === process.execPath,
       args: spawn?.args ?? null,
+      entry_relative: spawn?.args?.[0]?.startsWith(runtimeRoot)
+        ? spawn.args[0].slice(runtimeRoot.length)
+        : null,
+      credential_reads: credentialReads,
       stdio: spawn?.options?.stdio ?? null,
       cwd: spawn?.options?.cwd ?? null,
       child_env_names: spawn ? Object.keys(spawn.options.env).sort() : [],
@@ -3529,6 +3558,7 @@ switch (mode) {
       ? Object.fromEntries([
           'review-contract.mjs', 'resolve-executable.mjs', 'proton-credential.mjs',
           'context7-mcp.mjs',
+          'context7/package.json', 'context7/package-lock.json',
           'vibe-review.mjs', 'qwen-review.mjs', 'claude-review.mjs',
           'review-ensemble.mjs', 'review-verification.mjs', 'shell-words.mjs',
         ].map((name) => [name, `${name}:${version}\n`]))
@@ -3537,10 +3567,14 @@ switch (mode) {
       if (mode === 'reviewer-runtime-check') {
         writeJson(verifyReviewerRuntime({ home, root }));
       } else {
+        // The real package install needs the network; the install itself is tested apart.
         const report = installReviewerRuntime({
           home,
           root,
           files,
+          installPackages: fixtureArgs.includes('--fail-install')
+            ? () => { throw new Error('injected install failure'); }
+            : () => ({ installed: false }),
           beforeActivate: fixtureArgs.includes('--fail-before-activate')
             ? () => { throw new Error('injected stop'); }
             : null,
