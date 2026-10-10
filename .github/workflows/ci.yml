@@ -45,6 +45,21 @@ jobs:
       - name: Type check
         run: uv run mypy src/
 
+      - name: Pull Docker Hub images through Google's mirror
+        # The feedback container test builds from a Docker Hub base image, and all
+        # three Linux jobs pull it at once. Anonymous pulls from shared runner
+        # addresses hit Docker Hub's 429 rate limit (PR #1122 failed three times).
+        # mirror.gcr.io serves the same digest-pinned image without a login. The
+        # existing daemon settings are kept, and the last line fails the job if
+        # the mirror did not take effect.
+        if: runner.os == 'Linux'
+        run: |
+          config=/etc/docker/daemon.json
+          current=$(sudo cat "$config" 2>/dev/null || echo '{}')
+          echo "$current" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee "$config"
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}' | grep -F mirror.gcr.io
+
       - name: Tests
         # Exclude the DCE contract test from the version matrix: it downloads the
         # real DCE binary from GitHub's unauthenticated API, so running it across
