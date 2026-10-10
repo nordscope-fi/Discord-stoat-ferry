@@ -2468,7 +2468,8 @@ def test_context7_launcher_passes_only_the_required_environment() -> None:
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["command"] == "npx"
-    assert report["args"] == ["-y", "@upstash/context7-mcp"]
+    assert report["args"] == ["-y", "@upstash/context7-mcp@4.1.1"]
+    assert re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", report["args"][1])
     assert report["stdio"] == "inherit"
     assert report["child_env_names"] == [
         "CONTEXT7_API_KEY",
