@@ -2,9 +2,10 @@
 
 import { spawn } from 'node:child_process';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readProtonField } from './proton-credential.mjs';
+import { resolveExecutable } from './resolve-executable.mjs';
 
 const PASSTHROUGH_ENVIRONMENT = [
   'PATH',
@@ -53,9 +54,23 @@ export async function runContext7({
   fieldReader = readProtonField,
   accessReader = readContext7Access,
   spawnChild = spawn,
+  resolve = resolveExecutable,
   environment = process.env,
   parent = process,
 }) {
+  // Find npx before the key is fetched, so a missing or substituted program is refused while no
+  // credential is in play. The key reaches the child through its environment.
+  let npx;
+  try {
+    npx = resolve('npx');
+  } catch {
+    throw new Error('Context7 npx executable not found');
+  }
+  // npx is usually a node script whose first line is `#!/usr/bin/env node`, which would search
+  // PATH for node again. Run such a script with the node that started this launcher.
+  const [command, commandArgs] = ['.js', '.cjs', '.mjs'].includes(extname(npx))
+    ? [process.execPath, [npx]]
+    : [npx, []];
   let key;
   try {
     const access = accessReader(home);
@@ -74,7 +89,7 @@ export async function runContext7({
 
   let child;
   try {
-    child = spawnChild('npx', ['-y', CONTEXT7_PACKAGE], {
+    child = spawnChild(command, [...commandArgs, '-y', CONTEXT7_PACKAGE], {
       env: context7Environment(environment, key),
       stdio: 'inherit',
     });

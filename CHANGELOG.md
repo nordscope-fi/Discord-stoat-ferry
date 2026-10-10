@@ -45,6 +45,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   stops with "executable not found" before a token file is read. Homebrew, `~/.local/bin` and
   npm global installs are unchanged. The reviewer runtime gains one file, so reinstall it from
   `main`.
+- The credential launcher, the Codex and Claude review launchers and the Context7 launcher now
+  find their client program once, as an absolute path, before they do anything else (#977).
+  Before, they passed a bare name such as `pass-cli` or `npx` to the operating system, which
+  searched `PATH`, including empty, relative and `.` entries and any folder inside the working
+  checkout. A look-alike file planted in one of those places could have been run, and in the
+  credential and Context7 cases it would have received the access token or the key. The new
+  helper `resolve-executable.mjs` skips those entries, takes the first executable file on an
+  absolute entry, and the launcher runs that path. A missing program now stops with
+  "executable not found" before a token file is read or a key is fetched. Where `npx` is a node
+  script, the Context7 launcher runs it with the node that started the launcher, so the script's
+  `#!/usr/bin/env node` line does not search `PATH` again. The second-opinion launcher already
+  starts its Python interpreter from a fixed path under the home folder, so it is unchanged.
+  Homebrew, `~/.local/bin` and npm global installs work as before. The reviewer runtime gains one
+  file, so reinstall it from `main`.
 
 ## [2.41.28] - 2026-10-10
 
