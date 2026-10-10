@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+// Trust boundary (#1001): this is a local command for a checkout you own. It runs in the current
+// checkout, trusts its files, and passes the caller's whole environment to every child. It picks
+// helpers to run by a content convention (a changed script that advertises --self-test), not by
+// where the file came from. Do not point it at an unreviewed checkout or wire it into automation
+// unless an outer boundary (a reviewed ref or owner approval) comes first.
+
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';

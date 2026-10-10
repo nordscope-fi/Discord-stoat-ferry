@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   selectors were moving (`@v6`, `@release/v1`), so a retag upstream could change what CI and the
   release job ran. Majors are unchanged. Dependabot now also watches the `github-actions`
   ecosystem and proposes SHA bumps weekly. The backend pin is bumped by hand.
+- Document in `scripts/agent-compat/verify-all.mjs` that it is a trusted-checkout local command
+  (#1001). It runs in and trusts the current checkout, passes the caller's environment to its
+  children, and picks helpers by content, not provenance. Point it at an unreviewed checkout, or
+  add it to automation, only behind a reviewed ref or owner approval. No behaviour changed.
 
 ## [2.41.26] - 2026-10-10
 
