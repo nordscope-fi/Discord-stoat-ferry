@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import aiohttp
 
+from discord_ferry.core.atomicio import replace_with_retry
 from discord_ferry.core.http import new_session
 from discord_ferry.core.security import (
     contains_registered_secret,
@@ -872,7 +873,7 @@ class FeedbackDraft:
                 draft_file.flush()
                 os.fsync(draft_file.fileno())
             temporary.chmod(0o600)
-            temporary.replace(path)
+            replace_with_retry(temporary, path)
             path.chmod(0o600)
         except BaseException:
             temporary.unlink(missing_ok=True)

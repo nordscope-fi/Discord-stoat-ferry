@@ -28,7 +28,39 @@ aliased method, ``getattr``, or a fifth module that starts owning a document. It
 is a tripwire on the obvious path, not proof of coverage.
 """
 
+import sys
+import time
 from pathlib import Path
+
+# ADR-038. A holder such as OneDrive or an antivirus scan usually lets go within a
+# few hundred milliseconds, so 5 attempts with delays of 0.05, 0.1, 0.2 and 0.4 s
+# (0.75 s worst case) ride that out without stalling a checkpoint for long.
+REPLACE_ATTEMPTS = 5
+REPLACE_FIRST_DELAY_SECONDS = 0.05
+
+
+def replace_with_retry(source: Path, destination: Path) -> None:
+    """Swap *source* over *destination*, retrying a held-open destination on Windows.
+
+    ``MoveFileEx`` fails with ``PermissionError`` (winerror 5 or 32) while another
+    process holds *destination* open without ``FILE_SHARE_DELETE`` (issue #176).
+    That clears by itself, so on Windows only, ``PermissionError`` only, the swap
+    is retried with a doubling delay. After the last attempt the original error is
+    raised unchanged. Any other error, and any error off Windows, is raised at once.
+
+    The sleep is ``time.sleep``, so a caller inside the event loop blocks for up to
+    0.75 s, and only when a Windows machine is already failing the swap.
+    """
+    delay = REPLACE_FIRST_DELAY_SECONDS
+    for attempt in range(1, REPLACE_ATTEMPTS + 1):
+        try:
+            source.replace(destination)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == REPLACE_ATTEMPTS:
+                raise
+        time.sleep(delay)
+        delay *= 2
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -39,9 +71,9 @@ def atomic_write_text(path: Path, text: str) -> None:
     tidy it.
 
     The temporary file is *path* with ``.tmp`` appended, so a document at
-    ``state.json`` stages through ``state.json.tmp``. Nothing in Ferry reads a
-    ``.tmp`` path, so one left behind by a crash is inert and the next write
-    overwrites it.
+    ``state.json`` stages through ``state.json.tmp``. A failed write or swap
+    removes it. Nothing in Ferry reads a ``.tmp`` path, so one left behind by a
+    crash is inert and the next write overwrites it.
 
     Args:
         path: Final location of the document.
@@ -49,5 +81,9 @@ def atomic_write_text(path: Path, text: str) -> None:
             caller, which is where ADR-014 puts it.
     """
     tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        replace_with_retry(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise

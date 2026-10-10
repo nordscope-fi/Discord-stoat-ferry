@@ -852,3 +852,22 @@ def test_feedback_draft_save_is_explicit_owner_only_and_excludes_contact(
     assert "private@example.com" in saved
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_feedback_draft_save_goes_through_the_retrying_replace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#176: a held-open destination on Windows is retried, so save must use the helper."""
+    calls: list[Path] = []
+    real = feedback_module.replace_with_retry
+
+    def spy(source: Path, destination: Path) -> None:
+        calls.append(destination)
+        real(source, destination)
+
+    monkeypatch.setattr(feedback_module, "replace_with_retry", spy)
+    path = tmp_path / "feedback.md"
+
+    FeedbackDraft(FeedbackKind.BUG, "Saved report").save(path)
+
+    assert calls == [path]

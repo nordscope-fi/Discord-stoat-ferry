@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
+from discord_ferry.core.atomicio import replace_with_retry
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, read_bounded, tls_hint
 from discord_ferry.discord.client import download_role_icon
@@ -143,7 +144,7 @@ async def _download_banner(
     tmp = dest.with_name(dest.name + ".part")
     try:
         tmp.write_bytes(data)
-        tmp.replace(dest)
+        replace_with_retry(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
     return None
