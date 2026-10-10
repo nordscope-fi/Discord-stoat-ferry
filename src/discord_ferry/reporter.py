@@ -202,7 +202,7 @@ def generate_report(
         report["orphaned_ids"] = orphaned_ids
 
     # Build post-migration checklist
-    discord_meta = load_bound_discord_metadata(config)
+    discord_meta = load_bound_discord_metadata(config, exports)
     checklist = _build_checklist(
         state,
         has_permissions=discord_meta is not None,

@@ -253,6 +253,15 @@ def _problems(meta: DiscordMetadata, *, check_keys: bool) -> list[str]:
                 found.append(_bad_id(f"channel {cid} override role id", ro.discord_role_id))
             found.append(_bad_perm(f"channel {cid} override allow", ro.allow))
             found.append(_bad_perm(f"channel {cid} override deny", ro.deny))
+    # The review step and the report read these keys from each entry.
+    for index, entry in enumerate(meta.user_override_channels):
+        if not (
+            isinstance(entry, dict)
+            and isinstance(entry.get("channel_name"), str)
+            and isinstance(entry.get("override_count"), int)
+            and not isinstance(entry.get("override_count"), bool)
+        ):
+            found.append(f"user_override_channels entry {index} is malformed")
     if check_keys:
         for rid in meta.role_metadata:
             found.append(_bad_id("role_metadata key", rid))

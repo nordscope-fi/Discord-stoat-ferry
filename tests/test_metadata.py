@@ -855,3 +855,26 @@ def test_load_bound_discord_metadata_uses_the_configured_guild_and_exports(
     assert load_bound_discord_metadata(config(_GUILD), [export(_GUILD)]) is not None
     assert load_bound_discord_metadata(config(None), [export("555555555555555555")]) is None
     assert load_bound_discord_metadata(config("555555555555555555"), [export(_GUILD)]) is None
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},
+        {"channel_id": "222222222222222222", "override_count": 1},
+        {"channel_id": "222222222222222222", "channel_name": "c", "override_count": "1"},
+        "not a dict",
+    ],
+)
+def test_read_cached_metadata_rejects_a_malformed_user_override_entry(
+    tmp_path: Path, entry: object
+) -> None:
+    """The review step and the report read channel_name and override_count from each
+    entry, so a malformed one used to raise KeyError there (#971 review)."""
+    data = _good_dict()
+    data["user_override_channels"] = [entry]
+    _write(tmp_path, data)
+    cached = read_cached_metadata(tmp_path)
+    assert cached.meta is None
+    assert cached.problem is not None
+    assert "user_override_channels" in cached.problem

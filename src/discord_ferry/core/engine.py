@@ -2656,7 +2656,7 @@ async def run_repair(
             # Loaded once, not per entity. None means the file is absent, which
             # is a real case: it is written during the migration and an operator
             # repairing from a copied output directory may not have brought it.
-            metadata = load_bound_discord_metadata(config)
+            metadata = load_bound_discord_metadata(config, exports)
             if metadata is None and structure_work:
                 message = (
                     "discord_metadata.json is not in the output directory, so a recreated "
@@ -2820,7 +2820,7 @@ async def run_repair(
         own_conv_session = session is None
         conv_sess = session or new_session()
         try:
-            convergence_metadata = load_bound_discord_metadata(config)
+            convergence_metadata = load_bound_discord_metadata(config, exports)
             server_doc = await api_fetch_server(
                 conv_sess, config.stoat_url, config.token, state.stoat_server_id
             )

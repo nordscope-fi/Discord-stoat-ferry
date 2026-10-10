@@ -381,6 +381,27 @@ def test_checklist_with_permissions(tmp_path: Path) -> None:
     assert not any("Set up role permissions manually" in t for t in tasks)
 
 
+def test_checklist_ignores_another_servers_metadata_file(tmp_path: Path) -> None:
+    """#971 review: the report bound the file to the configured server only."""
+    config = _make_config(tmp_path)
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="555",
+            fetched_at="2024-01-01T00:00:00",
+            server_default_permissions=0,
+            role_permissions={"r1": PermissionPair(allow=0, deny=0)},
+            channel_metadata={},
+        ),
+        tmp_path,
+    )
+
+    report = generate_report(config, MigrationState(), [_make_export(guild_id="111")])
+
+    tasks = [item["task"] for item in report["checklist"]]  # type: ignore[index,union-attr]
+    assert any("Set up role permissions manually" in t for t in tasks)
+    assert not any("Review migrated role permissions" in t for t in tasks)
+
+
 def test_checklist_without_permissions(tmp_path: Path) -> None:
     """Checklist includes manual permission setup item when discord_metadata.json is absent."""
     config = _make_config(tmp_path)

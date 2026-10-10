@@ -115,7 +115,15 @@ def _open_no_follow(path: Path) -> int:
     ``O_NOFOLLOW`` does not exist on Windows, where this opens the path the plain
     way. There the file system, not this call, decides what a link may do.
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    # O_BINARY matters on Windows only: without it os.open uses CRT text mode, which
+    # turns every LF into CRLF and corrupts a PNG signature (\r\n\x1a\n).
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_TRUNC
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     return os.open(path, flags, 0o600)
 
 

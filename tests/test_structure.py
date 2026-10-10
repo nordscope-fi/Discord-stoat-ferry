@@ -6323,3 +6323,41 @@ async def test_run_server_warns_and_skips_upload_for_an_oversize_banner(tmp_path
     assert len(warnings) == 1
     assert uploads == []
     assert banner.read_bytes() == GOOD_BANNER
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+async def test_run_server_refuses_a_banners_folder_planted_as_a_link(tmp_path: Path) -> None:
+    """#960 review: the banner folder went through a plain mkdir, so a planted
+    ``banners`` link sent the download into another directory."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(autumn_url=AUTUMN_URL)
+    exports = [_make_export(guild_id="111")]
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={},
+            banner_hash="abc123banner",
+        ),
+        tmp_path,
+    )
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_path / "banners").symlink_to(outside, target_is_directory=True)
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        m.get(f"{BANNER_CDN}/111/abc123banner.png?size=1024", body=GOOD_BANNER)
+        await run_server(config, state, exports, events.append)
+        uploads = [k for k in m.requests if k[1].path == "/banners"]
+
+    assert list(outside.iterdir()) == []
+    assert uploads == []
+    assert [w["type"] for w in state.warnings if "banner" in w["type"]] == ["banner_upload_failed"]
