@@ -26,6 +26,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   instead of whichever version is newest on each launch (#995). Only the version is pinned:
   `npx` cannot check an integrity string, and the package's own dependencies still float inside
   their declared ranges.
+- The destructive git check shared by the Qwen, Codex and Vibe hooks now recognises more spellings of
+  the commands it already targeted (#996). It reads quoted and backslash-escaped words, unambiguous
+  long-option abbreviations such as `--forc`, a `+` on a push refspec, `branch -fd` and `-d -f`,
+  and `git checkout .`. It no longer flags `git restore -S .`, which only touches the index. It sees
+  through the wrappers `env`, `command`, `exec`, `timeout` and `sudo` with options, and looks inside
+  `bash -c`, `sh -c`, `eval`, subshells and `then` blocks.
+  Table-driven tests cover each spelling and each host's deny response. Not covered: commands built
+  at run time (variables, aliases, `find -exec`), `checkout -f`, and the Claude Code hook, which is a
+  separate untracked substring check.
 
 ### Security
 
