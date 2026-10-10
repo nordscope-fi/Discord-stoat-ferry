@@ -1,0 +1,9 @@
+{
+  "name": "discord-ferry-context7-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned Context7 helper for the Discord Ferry reviewer runtime (issue 995)",
+  "dependencies": {
+    "@upstash/context7-mcp": "4.1.1"
+  }
+}

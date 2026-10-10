@@ -21,6 +21,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { installContext7Packages } from './context7-install.mjs';
 import {
   REVIEWER_PROVIDERS,
   REVIEWER_STATE_FILE,
@@ -78,6 +79,8 @@ export const REVIEWER_RUNTIME_FILES = [
   'resolve-executable.mjs',
   'proton-credential.mjs',
   'context7-mcp.mjs',
+  'context7/package.json',
+  'context7/package-lock.json',
   'vibe-review.mjs',
   'qwen-review.mjs',
   'claude-review.mjs',
@@ -204,10 +207,14 @@ export function reviewerRuntimeRoot(home, xdgDataHome = process.env.XDG_DATA_HOM
   return join(dataRoot, 'discord-ferry', 'reviewer-runtime');
 }
 
+// Scripts come from scripts/agent-compat. The Context7 package manifest and lock sit under
+// context7/ in the runtime and come from config/agent-compat/context7 (#995).
 export function reviewerRuntimeSource(root) {
   return Object.fromEntries(REVIEWER_RUNTIME_FILES.map((name) => [
     name,
-    readFileSync(join(root, 'scripts', 'agent-compat', name)),
+    readFileSync(name.startsWith('context7/')
+      ? join(root, 'config', 'agent-compat', name)
+      : join(root, 'scripts', 'agent-compat', name)),
   ]));
 }
 
@@ -291,6 +298,7 @@ export function installReviewerRuntime({
   files = root ? reviewerRuntimeSource(root) : null,
   dryRun = false,
   beforeActivate = null,
+  installPackages = installContext7Packages,
   xdgDataHome = process.env.XDG_DATA_HOME,
 }) {
   if (!home || !files) throw new Error('reviewer runtime install requires home and files');
@@ -331,6 +339,7 @@ export function installReviewerRuntime({
       mkdirSync(staged, { mode: 0o700 });
       for (const name of REVIEWER_RUNTIME_FILES) {
         const bytes = Buffer.isBuffer(files[name]) ? files[name] : Buffer.from(files[name]);
+        mkdirSync(dirname(join(staged, name)), { recursive: true, mode: 0o700 });
         writeFileSync(join(staged, name), bytes, { mode: 0o400, flag: 'wx' });
       }
       writeFileSync(join(staged, 'manifest.json'), `${JSON.stringify(manifest)}\n`, {
@@ -338,6 +347,7 @@ export function installReviewerRuntime({
         flag: 'wx',
       });
       validateRuntimeRelease(staged, manifest);
+      chmodSync(join(staged, 'context7'), 0o500);
       chmodSync(staged, 0o500);
       renameSync(staged, releasePath);
     } catch (error) {
@@ -345,6 +355,10 @@ export function installReviewerRuntime({
       throw error;
     }
   } else validateRuntimeRelease(releasePath, manifest);
+
+  // Install the Context7 packages from the lock before the new release becomes current. A
+  // failed install (for example an integrity mismatch) leaves the previous release in use.
+  const packages = installPackages({ runtimeRoot, files });
 
   if (active !== releasePath) {
     const stagedLink = join(runtimeRoot, `.current.${process.pid}.${randomUUID()}.tmp`);
@@ -365,7 +379,8 @@ export function installReviewerRuntime({
     release: manifest.release,
     currentPath,
     rulesPath,
-    changed: active !== releasePath || existingRules !== rules,
+    changed: active !== releasePath || existingRules !== rules || packages?.installed === true,
+    packagesInstalled: packages?.installed === true,
     dryRun: false,
   };
 }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -11,6 +13,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -2497,12 +2500,17 @@ def test_context7_launcher_passes_only_the_required_environment() -> None:
     result = _context7_launcher_fixture("success")
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["command"] == "/fixture/npx"
-    assert report["args"] == ["-y", "@upstash/context7-mcp@4.1.1"]
-    assert re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", report["args"][1])
+    # The installed server runs under the node that started the launcher. npx is gone, so
+    # nothing searches PATH for a program while the key is in the environment (#995).
+    assert report["command_is_current_node"] is True
+    assert report["args"][0].endswith("/dist/index.js")
+    assert "-y" not in report["args"]
+    assert not any("@upstash/context7-mcp@" in arg for arg in report["args"])
+    assert report["entry_relative"].startswith("/context7/")
+    assert report["entry_relative"].endswith("/node_modules/@upstash/context7-mcp/dist/index.js")
     assert report["stdio"] == "inherit"
-    # npx puts node_modules/.bin of its working folder and every parent ahead of PATH,
-    # so starting it in the checkout would let a planted node receive the key (#977).
+    # The folder the child starts in decides which node_modules/.bin it can see, so it
+    # starts in home and never in the checkout (#977).
     assert report["cwd"] == "/fixture/home"
     assert report["child_env_names"] == [
         "CONTEXT7_API_KEY",
@@ -2520,6 +2528,29 @@ def test_context7_launcher_passes_only_the_required_environment() -> None:
     assert "itemTitle" not in report["field_descriptor"]
     assert report["result"] == {"status": 23, "signal": None, "ready": False}
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("fixture", ["not-installed", "check-not-installed"])
+def test_context7_launcher_without_an_install_names_the_installer_and_fetches_no_key(
+    fixture: str,
+) -> None:
+    result = _context7_launcher_fixture(fixture)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert "not installed" in report["error"]
+    assert "codex-bootstrap.mjs" in report["error"]
+    assert report["credential_reads"] == 0
+    assert report["spawn_count"] == 0
+
+
+def test_context7_launcher_refuses_an_install_of_another_version() -> None:
+    result = _context7_launcher_fixture("stale-version")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert "does not match" in report["error"]
+    assert "codex-bootstrap.mjs" in report["error"]
+    assert report["credential_reads"] == 0
+    assert report["spawn_count"] == 0
 
 
 def test_context7_launcher_forwards_signals_and_removes_listeners() -> None:
@@ -6248,15 +6279,26 @@ def test_claude_review_resolves_the_absolute_claude_not_a_planted_one(
     assert not (tmp_path / "poisoned.log").exists()
 
 
+# The Context7 helper is installed from a committed lockfile with `npm ci` and started from that
+# install with the node that runs the launcher (#995). These tests build a dummy package with
+# `npm pack`, point a handmade lockfile at its tarball by absolute path, and need no network.
+
 _CONTEXT7_PROBE = """
+import {{ EventEmitter }} from 'node:events';
 import {{ runContext7 }} from '{module}';
 const events = [];
 try {{
   const result = await runContext7({{
-    // A real folder: npx starts in home, and the readers below are stubs.
-    home: process.cwd(),
+    home: {home},
+    releaseDirectory: {release},
     accessReader: () => ({{ shareId: 'share', itemId: 'item' }}),
-    {extra}
+    fieldReader: async () => {{ events.push('credential'); return 'RECORDER_VALUE'; }},
+    spawnChild: (command, args, options) => {{
+      events.push({{ command, args, cwd: options.cwd, env: Object.keys(options.env).sort() }});
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', 0, null));
+      return child;
+    }},
   }});
   process.stdout.write(JSON.stringify({{ result }}));
 }} catch (error) {{
@@ -6265,102 +6307,290 @@ try {{
 process.stdout.write('\\n' + JSON.stringify(events));
 """
 
-_CONTEXT7_FIELD_READER = """
-    fieldReader: async () => {
-      events.push('credential');
-      return 'RECORDER_VALUE';
-    },
+_CONTEXT7_INSTALL_PROBE = """
+import {{ readFileSync }} from 'node:fs';
+import {{ spawnSync }} from 'node:child_process';
+import {{ installContext7Packages }} from '{module}';
+const files = JSON.parse(readFileSync({files}, 'utf8'));
+const runs = [];
+try {{
+  const result = installContext7Packages({{
+    runtimeRoot: {root},
+    files,
+    environment: {{ PATH: process.env.PATH, HOME: process.env.HOME }},
+    run: (command, args, options) => {{
+      runs.push({{ command, args, cwd: options.cwd }});
+      return spawnSync(command, args, options);
+    }},
+  }});
+  process.stdout.write(JSON.stringify({{ result, runs }}));
+}} catch (error) {{
+  process.stdout.write(JSON.stringify({{ error: error.message, runs }}));
+}}
 """
 
 
-@pytest.mark.skipif(NODE is None, reason="Node.js is required")
-@pytest.mark.parametrize("layout", ["relative", "dot", "empty", "absolute-in-cwd"])
-def test_context7_launcher_runs_the_absolute_npx_not_a_planted_one(
-    tmp_path: Path, layout: str
-) -> None:
-    layouts = _poisoned_layouts(tmp_path, "npx")
-    good_log = tmp_path / "good.log"
-    _recorder(tmp_path / "good" / "npx", good_log)
-    _, path_value = layouts[layout]
+def _context7_dummy_files(
+    tmp_path: Path, *, version: str = "4.1.1", integrity: str | None = None
+) -> dict[str, str]:
+    """A one-package tree: the real package name, a local tarball, a lock that pins its hash."""
+    npm = shutil.which("npm")
+    assert npm is not None
+    package = tmp_path / f"dummy-{version}"
+    (package / "dist").mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@upstash/context7-mcp",
+                "version": version,
+                "bin": {"context7-mcp": "dist/index.js"},
+            }
+        )
+    )
+    (package / "dist/index.js").write_text("console.log('dummy server');\n")
+    tarballs = tmp_path / "tarballs"
+    tarballs.mkdir(exist_ok=True)
+    environment = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home")}
+    subprocess.run(
+        [npm, "pack", "--pack-destination", str(tarballs), "--silent"],
+        cwd=package,
+        env=environment,
+        check=True,
+        capture_output=True,
+    )
+    tarball = (tarballs / f"upstash-context7-mcp-{version}.tgz").resolve()
+    real = "sha512-" + base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
+    manifest = {
+        "name": "ferry-context7-fixture",
+        "version": "1.0.0",
+        "private": True,
+        "dependencies": {"@upstash/context7-mcp": f"file:{tarball}"},
+    }
+    lock = {
+        "name": "ferry-context7-fixture",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "requires": True,
+        "packages": {
+            "": {
+                "name": "ferry-context7-fixture",
+                "version": "1.0.0",
+                "dependencies": {"@upstash/context7-mcp": f"file:{tarball}"},
+            },
+            "node_modules/@upstash/context7-mcp": {
+                "version": version,
+                "resolved": f"file:{tarball}",
+                "integrity": integrity or real,
+                "bin": {"context7-mcp": "dist/index.js"},
+            },
+        },
+    }
+    return {
+        "context7/package.json": json.dumps(manifest, indent=2) + "\n",
+        "context7/package-lock.json": json.dumps(lock, indent=2) + "\n",
+    }
+
+
+def _context7_install(tmp_path: Path, runtime_root: Path, files: dict[str, str]) -> dict[str, Any]:
+    files_path = tmp_path / "install-files.json"
+    files_path.write_text(json.dumps(files))
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
     result = _probe(
         tmp_path,
-        _CONTEXT7_PROBE.format(module=_MODULES / "context7-mcp.mjs", extra=_CONTEXT7_FIELD_READER),
-        cwd=tmp_path / "work",
-        path_value=path_value,
+        _CONTEXT7_INSTALL_PROBE.format(
+            module=_MODULES / "context7-install.mjs",
+            files=json.dumps(str(files_path)),
+            root=json.dumps(str(runtime_root)),
+        ),
+        cwd=work,
+        path_value=os.environ["PATH"],
+    )
+    assert result.returncode == 0, result.stderr
+    report: dict[str, Any] = json.loads(result.stdout)
+    return report
+
+
+def _context7_launch(
+    tmp_path: Path, runtime_root: Path, files: dict[str, str]
+) -> tuple[dict[str, Any], list[Any]]:
+    """Run the launcher from a release folder that carries the given lock."""
+    release = runtime_root / "releases" / "fixture-release"
+    (release / "context7").mkdir(parents=True, exist_ok=True)
+    (release / "context7/package-lock.json").write_text(files["context7/package-lock.json"])
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    result = _probe(
+        tmp_path,
+        _CONTEXT7_PROBE.format(
+            module=_MODULES / "context7-mcp.mjs",
+            home=json.dumps(str(home)),
+            release=json.dumps(str(release)),
+        ),
+        cwd=tmp_path,
+        path_value="/usr/bin",
     )
     assert result.returncode == 0, result.stderr
     report_line, events_line = result.stdout.splitlines()
-    assert json.loads(report_line) == {"result": {"status": 0, "signal": None, "ready": False}}
-    assert json.loads(events_line) == ["credential"]
-    assert not (tmp_path / "poisoned.log").exists()
-    assert len(good_log.read_text().splitlines()) == 1
+    return json.loads(report_line), json.loads(events_line)
 
 
-@pytest.mark.skipif(NODE is None, reason="Node.js is required")
-def test_context7_launcher_resolves_npx_before_fetching_the_key(tmp_path: Path) -> None:
-    (tmp_path / "work").mkdir()
-    extra = """
-    resolve: (name) => { events.push('resolve:' + name); return '/fixture/npx'; },
-    fieldReader: async () => { events.push('credential'); return 'RECORDER_VALUE'; },
-    spawnChild: (command) => {
-      events.push('spawn:' + command);
-      const child = new EventEmitter();
-      queueMicrotask(() => child.emit('close', 0, null));
-      return child;
-    },
-    """
-    source = "import { EventEmitter } from 'node:events';\n" + _CONTEXT7_PROBE.format(
-        module=_MODULES / "context7-mcp.mjs", extra=extra
-    )
-    result = _probe(tmp_path, source, cwd=tmp_path / "work", path_value="/usr/bin")
-    assert result.returncode == 0, result.stderr
-    _, events_line = result.stdout.splitlines()
-    assert json.loads(events_line) == ["resolve:npx", "credential", "spawn:/fixture/npx"]
+_NEEDS_NPM = pytest.mark.skipif(
+    NODE is None or shutil.which("npm") is None, reason="Node.js and npm are required"
+)
 
 
-@pytest.mark.skipif(NODE is None, reason="Node.js is required")
-def test_context7_launcher_without_npx_fails_before_fetching_the_key(tmp_path: Path) -> None:
-    _poisoned_layouts(tmp_path, "npx")
-    result = _probe(
-        tmp_path,
-        _CONTEXT7_PROBE.format(module=_MODULES / "context7-mcp.mjs", extra=_CONTEXT7_FIELD_READER),
-        cwd=tmp_path / "work",
-        path_value="bin:.:",
-    )
-    assert result.returncode == 0, result.stderr
-    report_line, events_line = result.stdout.splitlines()
-    assert json.loads(report_line) == {"error": "Context7 npx executable not found"}
-    assert json.loads(events_line) == []
-    assert not (tmp_path / "poisoned.log").exists()
-
-
-@pytest.mark.skipif(NODE is None, reason="Node.js is required")
-def test_context7_launcher_runs_a_script_npx_with_the_node_that_started_it(
+@_NEEDS_NPM
+def test_context7_install_from_a_matching_lock_is_launched_with_the_current_node(
     tmp_path: Path,
 ) -> None:
-    # An npx that is a node script has a `#!/usr/bin/env node` line, which would search PATH for
-    # node again. The launcher runs the script with its own node instead.
-    (tmp_path / "work").mkdir()
-    extra = """
-    resolve: () => '/fixture/npx-cli.js',
-    fieldReader: async () => 'RECORDER_VALUE',
-    spawnChild: (command, args) => {
-      events.push({ command, args });
-      const child = new EventEmitter();
-      queueMicrotask(() => child.emit('close', 0, null));
-      return child;
-    },
-    """
-    source = "import { EventEmitter } from 'node:events';\n" + _CONTEXT7_PROBE.format(
-        module=_MODULES / "context7-mcp.mjs", extra=extra
-    )
-    result = _probe(tmp_path, source, cwd=tmp_path / "work", path_value="/usr/bin")
-    assert result.returncode == 0, result.stderr
-    _, events_line = result.stdout.splitlines()
-    [spawned] = json.loads(events_line)
+    files = _context7_dummy_files(tmp_path)
+    runtime_root = tmp_path / "runtime"
+    installed = _context7_install(tmp_path, runtime_root, files)
+    assert "error" not in installed, installed
+    assert installed["result"]["installed"] is True
+
+    # The install folder is private and keyed by the hash of the lock it was made from.
+    lock_hash = hashlib.sha256(files["context7/package-lock.json"].encode()).hexdigest()
+    directory = runtime_root / "context7" / lock_hash
+    assert directory.is_dir()
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert (runtime_root / "context7").stat().st_mode & 0o777 == 0o700
+    entry = directory / "node_modules/@upstash/context7-mcp/dist/index.js"
+    assert entry.is_file()
+
+    # npm ci, scripts off, the public registry named, and an empty user config.
+    [run] = installed["runs"]
+    args = run["args"]
+    assert "ci" in args
+    assert "--ignore-scripts" in args
+    assert args[args.index("--registry") + 1] == "https://registry.npmjs.org/"
+    assert args[args.index("--userconfig") + 1] != ""
+
+    report, events = _context7_launch(tmp_path, runtime_root, files)
+    assert report == {"result": {"status": 0, "signal": None, "ready": False}}
+    assert events[0] == "credential"
+    spawned = events[1]
     assert spawned["command"] == NODE_EXECUTABLE
-    assert spawned["args"][0] == "/fixture/npx-cli.js"
-    assert spawned["args"][1:] == ["-y", "@upstash/context7-mcp@4.1.1"]
+    assert [Path(a).resolve() for a in spawned["args"]] == [entry.resolve()]
+    assert spawned["cwd"] == str(tmp_path / "home")
+    assert spawned["env"] == ["CONTEXT7_API_KEY", "HOME", "PATH"]
+
+
+@_NEEDS_NPM
+def test_context7_install_is_skipped_when_the_lock_is_unchanged(tmp_path: Path) -> None:
+    files = _context7_dummy_files(tmp_path)
+    runtime_root = tmp_path / "runtime"
+    first = _context7_install(tmp_path, runtime_root, files)
+    second = _context7_install(tmp_path, runtime_root, files)
+    assert first["result"]["installed"] is True
+    assert len(first["runs"]) == 1
+    assert second["result"]["installed"] is False
+    assert second["runs"] == []
+    assert second["result"]["directory"] == first["result"]["directory"]
+
+
+@_NEEDS_NPM
+def test_context7_install_rejects_a_tarball_that_does_not_match_its_lock(
+    tmp_path: Path,
+) -> None:
+    wrong = "sha512-" + base64.b64encode(hashlib.sha512(b"another tarball").digest()).decode()
+    files = _context7_dummy_files(tmp_path, integrity=wrong)
+    runtime_root = tmp_path / "runtime"
+    installed = _context7_install(tmp_path, runtime_root, files)
+    assert "Context7 package install failed" in installed["error"]
+    # Nothing half-installed is left where the launcher would look.
+    parent = runtime_root / "context7"
+    assert (list(parent.iterdir()) if parent.exists() else []) == []
+
+    report, events = _context7_launch(tmp_path, runtime_root, files)
+    assert "not installed" in report["error"]
+    assert "codex-bootstrap.mjs" in report["error"]
+    assert events == []
+
+
+@_NEEDS_NPM
+def test_context7_install_refuses_a_lock_for_another_version_of_the_package(
+    tmp_path: Path,
+) -> None:
+    # A consistent lock for 4.1.0: npm would install it, but the launcher is pinned to 4.1.1.
+    files = _context7_dummy_files(tmp_path, version="4.1.0")
+    runtime_root = tmp_path / "runtime"
+    installed = _context7_install(tmp_path, runtime_root, files)
+    assert "Context7 package install failed" in installed["error"]
+    assert "does not match" in installed["error"]
+    parent = runtime_root / "context7"
+    assert (list(parent.iterdir()) if parent.exists() else []) == []
+
+
+@_NEEDS_NPM
+def test_context7_launcher_refuses_an_install_that_was_swapped_for_another_version(
+    tmp_path: Path,
+) -> None:
+    files = _context7_dummy_files(tmp_path)
+    runtime_root = tmp_path / "runtime"
+    installed = _context7_install(tmp_path, runtime_root, files)
+    assert "error" not in installed, installed
+    package_json = (
+        Path(installed["result"]["directory"]) / "node_modules/@upstash/context7-mcp/package.json"
+    )
+    manifest = json.loads(package_json.read_text())
+    manifest["version"] = "4.1.0"
+    package_json.write_text(json.dumps(manifest))
+
+    report, events = _context7_launch(tmp_path, runtime_root, files)
+    assert "does not match" in report["error"]
+    assert "codex-bootstrap.mjs" in report["error"]
+    assert events == []
+
+
+def test_committed_context7_lock_pins_every_package_with_an_integrity_hash() -> None:
+    manifest = json.loads((REPO / "config/agent-compat/context7/package.json").read_text())
+    lock = json.loads((REPO / "config/agent-compat/context7/package-lock.json").read_text())
+    launcher = (REPO / "scripts/agent-compat/context7-mcp.mjs").read_text()
+    pinned = re.search(r"CONTEXT7_PACKAGE = '@upstash/context7-mcp@([^']+)'", launcher)
+    assert pinned is not None
+    assert manifest["dependencies"] == {"@upstash/context7-mcp": pinned.group(1)}
+    assert lock["lockfileVersion"] == 3
+    packages = {name: entry for name, entry in lock["packages"].items() if name}
+    assert packages["node_modules/@upstash/context7-mcp"]["version"] == pinned.group(1)
+    assert len(packages) > 10
+    for name, entry in packages.items():
+        assert entry["integrity"].startswith("sha512-"), name
+        assert entry["resolved"].startswith("https://registry.npmjs.org/"), name
+        assert not entry.get("link"), name
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is required")
+def test_reviewer_runtime_install_failure_keeps_the_previous_release(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    base = [
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "reviewer-runtime-fixture",
+        "--home",
+        str(home),
+        "--json",
+    ]
+    first = subprocess.run(
+        [*base, "--version", "one"], cwd=REPO, capture_output=True, text=True, check=False
+    )
+    current = home / ".local/share/discord-ferry/reviewer-runtime/current"
+    first_target = current.resolve()
+    failed = subprocess.run(
+        [*base, "--version", "two", "--fail-install"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    assert failed.returncode == 1
+    assert "injected install failure" in failed.stderr
+    # The old launcher stays active until the new release has its packages.
+    assert current.resolve() == first_target
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is required")
