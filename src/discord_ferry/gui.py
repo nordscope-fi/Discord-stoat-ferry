@@ -623,7 +623,8 @@ def setup_page() -> None:
 
                 with ui.column().classes("gap-0 -mt-2"):
                     ui.label(
-                        "F12 \u2192 Application \u2192 Local Storage \u2192 copy session_token"
+                        "F12 \u2192 Application \u2192 IndexedDB \u2192 localforage"
+                        " \u2192 keyvaluepairs \u2192 auth \u2192 session.token"
                     ).classes("text-xs text-gray-500")
                     with ui.row().classes("items-center gap-1"):
                         ui.icon("help_outline", size="16px").classes("text-gray-400")
