@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.3] - 2026-10-11
+
+### Fixed
+
+- Require repository evidence selected for a brainstorm recommendation to be read again when its file changed or became unavailable after its receipt was recorded (#991).
+
 ## [2.43.2] - 2026-10-11
 
 ### Fixed
