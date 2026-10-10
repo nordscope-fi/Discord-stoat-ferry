@@ -225,7 +225,7 @@ jobs:
         run: mv dist/Ferry.exe dist/Ferry-windows-x86_64.exe
         shell: bash
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ferry-windows
           path: dist/Ferry-windows-x86_64.exe
@@ -336,7 +336,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ferry-macos-${{ matrix.arch }}
           path: Ferry-macos-${{ matrix.arch }}.zip
