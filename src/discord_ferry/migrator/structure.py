@@ -227,7 +227,9 @@ async def run_server(
         if exports:
             icon_url = exports[0].guild.icon_url
             if icon_url:
-                guild_name = exports[0].guild.name
+                # The guild name is export text, like the icon spelling below: repr-escape
+                # and bound it so no control character reaches migration_report.md (#1080).
+                guild_name = repr(exports[0].guild.name)[:120]
                 icon_path: Path | None = None
                 if icon_url.startswith(("http://", "https://")):
                     # A remote spelling is not a local file. contained_media_path would

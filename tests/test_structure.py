@@ -527,6 +527,89 @@ async def test_run_server_icon_warning_bounds_a_hostile_spelling(
     assert "\u2014" not in message, "an em dash reached the warning"
 
 
+_HOSTILE_GUILD_NAMES = {
+    "newline": "Evil\nGuild",
+    "ansi": "Evil\x1b[31mGuild",
+    "nul": "Evil\x00Guild",
+    "c0_bell_and_carriage_return": "Evil\x07\rGuild",
+    "rich_markup": "[bold red]x[/]",
+}
+
+
+@pytest.mark.parametrize("label", sorted(_HOSTILE_GUILD_NAMES))
+@pytest.mark.parametrize("case", ["unsafe_media_path", "icon_file_missing"])
+async def test_run_server_icon_warning_escapes_a_hostile_guild_name(
+    tmp_path: Path, case: str, label: str
+) -> None:
+    """The export guild name is repr-escaped and bounded in the icon warnings (#1080).
+
+    migration_report.md applies secret masking only and strips no control
+    characters, so a guild name with a newline or an escape byte has to be
+    escaped where the message is built. The same text reaches the event stream.
+    """
+    guild_name = _HOSTILE_GUILD_NAMES[label]
+    icon_url = "../outside-icon.png" if case == "unsafe_media_path" else "media/icon.png"
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(autumn_url=AUTUMN_URL)
+    exports = [_make_export(guild_name=guild_name, guild_icon_url=icon_url)]
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    warns = [w for w in state.warnings if w["type"] == case]
+    assert len(warns) == 1
+    icon_events = [e.message for e in events if e.status == "warning" and "Guild icon" in e.message]
+    assert len(icon_events) == 1
+    texts = [warns[0]["message"], *icon_events]
+    for text in texts:
+        assert not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text), (
+            f"a raw control character reached the text: {text!r}"
+        )
+        assert repr(guild_name) in text, "the name is not shown in its escaped spelling"
+
+
+@pytest.mark.parametrize("case", ["unsafe_media_path", "icon_file_missing"])
+async def test_run_server_icon_warning_bounds_a_long_guild_name(tmp_path: Path, case: str) -> None:
+    """An unbounded guild name does not inflate the icon warning (#1080)."""
+    icon_url = "../outside-icon.png" if case == "unsafe_media_path" else "media/icon.png"
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(autumn_url=AUTUMN_URL)
+    exports = [_make_export(guild_name="G" * 5000, guild_icon_url=icon_url)]
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    warns = [w for w in state.warnings if w["type"] == case]
+    assert len(warns) == 1
+    assert len(warns[0]["message"]) < 500, "an unbounded guild name inflated the warning"
+    assert all(len(e.message) < 500 for e in events if e.status == "warning")
+
+
+@pytest.mark.parametrize("case", ["unsafe_media_path", "icon_file_missing"])
+async def test_run_server_icon_warning_keeps_an_ordinary_guild_name(
+    tmp_path: Path, case: str
+) -> None:
+    """An ordinary guild name still appears, unchanged, in the icon warnings (#1080)."""
+    icon_url = "../outside-icon.png" if case == "unsafe_media_path" else "media/icon.png"
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(autumn_url=AUTUMN_URL)
+    exports = [_make_export(guild_name="Cafe Nordscope", guild_icon_url=icon_url)]
+
+    with aioresponses() as m:
+        _mock_server_create_and_edit(m)
+        await run_server(config, state, exports, events.append)
+
+    warns = [w for w in state.warnings if w["type"] == case]
+    assert len(warns) == 1
+    assert "Cafe Nordscope" in warns[0]["message"]
+    assert any("Cafe Nordscope" in e.message for e in events if e.status == "warning")
+
+
 async def test_run_server_icon_uploads_from_a_foreign_working_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
