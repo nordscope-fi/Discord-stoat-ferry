@@ -25,6 +25,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - The local web interface no longer interprets `X-Forwarded-For` and `X-Forwarded-Proto` headers
   (#998). uvicorn trusts them from 127.0.0.1 by default, and Ferry has no proxy in front of it and
   never reads the derived client address or scheme. Browser and native-window use are unchanged.
+### Fixed
+
+- The Vibe reviewer record now keeps the review session's id. The Vibe client writes it as
+  `sessionId`, and the reader looked only for `session_id`, so every record stored an empty id.
 
 ## [2.41.26] - 2026-10-10
 
