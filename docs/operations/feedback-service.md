@@ -68,7 +68,7 @@ python -m discord_ferry.feedback_service \
   --database /data/feedback.db contact delete RECEIPT_ID
 ```
 
-The contact command reads the encryption key from `FERRY_FEEDBACK_CONTACT_KEY`. Contact is encrypted and expires within 30 days. Receipt metadata expires within 7 days, and quota rows expire within 24 hours.
+The contact command reads the encryption key from `FERRY_FEEDBACK_CONTACT_KEY`. Contact is encrypted and expires within 30 days. Receipt metadata expires within 7 days, and quota rows expire within 24 hours. The service reads nothing past its expiry, and a background sweep deletes expired rows from the database once an hour, with or without traffic.
 
 ## Resolve a pending GitHub receipt without a second post
 

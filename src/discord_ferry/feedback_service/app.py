@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
@@ -61,6 +62,7 @@ class ReadinessGitHub(Protocol):
 
 _HEALTH_PROBE_ID = UUID(int=0)
 _READINESS_CACHE = timedelta(seconds=30)
+_EXPIRY_SWEEP_TASK_NAME = "feedback-expiry-sweep"
 logger = logging.getLogger(__name__)
 
 
@@ -440,6 +442,25 @@ async def _feedback(request: web.Request) -> web.Response:
     return _receipt_response(cleaned.request_id, destination_kind, destination_url)
 
 
+async def _expiry_sweep_loop(
+    store: FeedbackStore,
+    now: Callable[[], datetime],
+    interval_seconds: float,
+) -> None:
+    """Delete expired rows on a timer so an idle service honours its retention."""
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await store.expire(now=now().astimezone(UTC))
+        except Exception:
+            # Log only a fixed event name: the exception text can carry row data.
+            logger.warning(
+                "expiry_sweep_failed",
+                extra={"event": "expiry_sweep_failed", "state": "failed"},
+            )
+
+
 def invalidate_readiness(app: web.Application) -> None:
     """Require the next readiness request to check GitHub again."""
 
@@ -454,6 +475,7 @@ def create_app(
     session: aiohttp.ClientSession | None = None,
     github: ReadinessGitHub | None = None,
     now: Callable[[], datetime] = _utc_now,
+    expiry_sweep_interval_seconds: float | None = None,
 ) -> web.Application:
     """Build the feedback service without starting a network listener."""
 
@@ -480,7 +502,26 @@ def create_app(
             if owned_session:
                 await active_session.close()
 
+    sweep_interval = (
+        config.expiry_sweep_interval_seconds
+        if expiry_sweep_interval_seconds is None
+        else expiry_sweep_interval_seconds
+    )
+
+    async def expiry_sweeper(application: web.Application) -> AsyncIterator[None]:
+        task = asyncio.create_task(
+            _expiry_sweep_loop(application[STORE_KEY], now, sweep_interval),
+            name=_EXPIRY_SWEEP_TASK_NAME,
+        )
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     app.cleanup_ctx.append(lifecycle)
+    app.cleanup_ctx.append(expiry_sweeper)
     app.router.add_get("/health", _health, allow_head=False)
     app.router.add_get("/ready", _ready, allow_head=False)
     app.router.add_post("/v1/challenge", _challenge)

@@ -25,6 +25,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `--token` argument (#978). Before, the token showed in a process listing while the exporter
   ran. Exporter 2.48 reads that variable when the argument is absent, and the contract test
   against the real exporter now checks that it still names it.
+### Fixed
+
+- The feedback service now deletes expired contact details on an hourly timer while it runs
+  (#982). Expiry was already enforced when data was read, but the rows were only removed at
+  startup or during later store work, so an idle service could keep them past the stated 30
+  days. The timer is cancelled and awaited on shutdown, and one failed sweep is logged without
+  row data and does not stop later sweeps.
 
 ## [2.41.27] - 2026-10-10
 

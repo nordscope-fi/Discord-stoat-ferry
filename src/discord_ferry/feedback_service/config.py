@@ -118,6 +118,7 @@ class ServiceConfig:
     receipt_retention_seconds: int = field(default=7 * 24 * 60 * 60, init=False)
     rate_retention_seconds: int = field(default=24 * 60 * 60, init=False)
     contact_retention_seconds: int = field(default=30 * 24 * 60 * 60, init=False)
+    expiry_sweep_interval_seconds: int = field(default=60 * 60, init=False)
     github_timeout_seconds: int = field(default=20, init=False)
 
     @classmethod
