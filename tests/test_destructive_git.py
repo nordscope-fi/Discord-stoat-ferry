@@ -345,6 +345,10 @@ def _host_env(home: Path) -> dict[str, str]:
         "USERPROFILE": str(home),
         "PATH": os.pathsep.join([str(Path(NODE).parent), "/usr/bin", "/bin"]),
     }
+    # The Vibe adapter asks git for the checkout root before it judges anything.
+    git = shutil.which("git")
+    if git is not None:
+        env["PATH"] = os.pathsep.join([env["PATH"], str(Path(git).parent)])
     for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
         if key in os.environ:
             env[key] = os.environ[key]
