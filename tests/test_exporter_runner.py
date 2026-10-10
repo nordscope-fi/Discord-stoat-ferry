@@ -85,8 +85,9 @@ class TestBuildCommand:
         cmd = _build_dce_command(cfg, dce_path)
         assert cmd[0] == str(dce_path)
         assert "exportguild" in cmd
-        assert "--token" in cmd
-        assert "dt" in cmd
+        # The token reaches DCE through DISCORD_TOKEN, never argv (#978).
+        assert "--token" not in cmd
+        assert "dt" not in cmd
         assert "-g" in cmd
         assert "12345" in cmd
         assert "--media" in cmd
@@ -1012,6 +1013,37 @@ async def test_a_refused_proxy_names_the_proxy(fake_proxy, proxy_env, os_proxy) 
 # Ferry silently resolving a proxy from OS settings while the environment
 # stays empty is the one gap that matters: DCE sees nothing.
 # ---------------------------------------------------------------------------
+
+
+class TestDceChildToken:
+    @pytest.mark.asyncio
+    async def test_the_discord_token_reaches_dce_through_the_environment(
+        self, tmp_path: Path
+    ) -> None:
+        """Killing: a token on the child's command line, where any local process
+        listing shows it. DCE reads DISCORD_TOKEN when --token is absent (#978).
+        """
+        cfg = _make_config(tmp_path)
+        captured_args: list[object] = []
+        captured_env: dict[str, str] = {}
+
+        async def fake_exec(*args: object, **kwargs: object) -> None:
+            captured_args.extend(args)
+            captured_env.update(kwargs.get("env") or {})
+            raise RuntimeError("stop here")
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                side_effect=fake_exec,
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
+
+        assert captured_env.get("DISCORD_TOKEN") == "dt"
+        assert "dt" not in [str(arg) for arg in captured_args]
+        assert "--token" not in [str(arg) for arg in captured_args]
 
 
 class TestDceChildProxyEnvironment:

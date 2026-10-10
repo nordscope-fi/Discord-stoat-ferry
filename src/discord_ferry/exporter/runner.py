@@ -47,12 +47,15 @@ _CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
-    """Build the DCE CLI command list."""
+    """Build the DCE CLI command list.
+
+    The token is not on it. DCE reads ``DISCORD_TOKEN`` when ``--token`` is absent,
+    and ``run_dce_export`` sets that in the child environment, so the token never
+    shows in a process listing (#978).
+    """
     return [
         str(dce_path),
         "exportguild",
-        "--token",
-        config.discord_token or "",
         "-g",
         config.discord_server_id or "",
         "--media",
@@ -402,6 +405,8 @@ async def run_dce_export(
         # DCE already inherits it, and overwriting a deliberate setting is a
         # surprise rather than a feature.
         child_env["HTTPS_PROXY"] = str(choice.url)
+
+    child_env["DISCORD_TOKEN"] = config.discord_token or ""
 
     process = await asyncio.create_subprocess_exec(
         *cmd,

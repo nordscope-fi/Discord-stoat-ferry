@@ -19,9 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   up in process listings. They read `STOAT_TOKEN` and `DISCORD_TOKEN` from the environment or a
   `.env` file, and `--help` for `migrate`, `build`, `rollback` and `probe` now says to prefer
   those variables. The literal options still work. The environment route keeps the token out
-  of shell history, but Ferry still hands the Discord token to DiscordChatExporter as a
-  command-line argument in orchestrated mode, so it stays visible in process listings while
-  the export runs.
+  of shell history, but not from every other process on the machine.
+- When Ferry runs the export itself, it now passes the Discord token to the exporter
+  (DiscordChatExporter) through the `DISCORD_TOKEN` environment variable instead of the
+  `--token` argument (#978). Before, the token showed in a process listing while the exporter
+  ran. Exporter 2.48 reads that variable when the argument is absent, and the contract test
+  against the real exporter now checks that it still names it.
 
 ## [2.41.27] - 2026-10-10
 

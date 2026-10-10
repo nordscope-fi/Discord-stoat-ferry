@@ -151,6 +151,13 @@ Replace:
 | `YOUR_TOKEN_HERE` | The token you copied in Step 2 |
 | `YOUR_SERVER_ID` | The server ID you copied in Step 3 |
 
+!!! tip "Keeping the token out of your shell history"
+    A token typed into a command is saved in your shell history. DiscordChatExporter also reads
+    the token from a `DISCORD_TOKEN` environment variable, so you can set that once and leave
+    `--token YOUR_TOKEN_HERE` out of the command. On macOS and Linux run
+    `export DISCORD_TOKEN=YOUR_TOKEN_HERE` first. In PowerShell run
+    `$env:DISCORD_TOKEN="YOUR_TOKEN_HERE"`.
+
 **On Windows**, replace the backslashes `\` at the end of each line with a caret `^`, or paste
 the entire command on a single line:
 

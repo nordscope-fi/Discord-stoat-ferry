@@ -17,7 +17,8 @@ Set every channel's permissions so that regular members cannot send new messages
 Export using **both** of these flags:
 
 ```bash
-DiscordChatExporter.Cli exportguild --token YOUR_DISCORD_TOKEN \
+export DISCORD_TOKEN=YOUR_DISCORD_TOKEN   # read by DiscordChatExporter, kept out of the command
+DiscordChatExporter.Cli exportguild \
   --guild YOUR_SERVER_ID --format Json --markdown false --media
 ```
 
