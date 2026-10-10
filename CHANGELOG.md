@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- Stage saved documents and the downloaded server banner under a random, exclusively created temporary name (#960). Ferry used a predictable name such as `state.json.tmp`. In a shared output folder, another account could plant a symlink at that name and send the write to a file it could not otherwise change. The temporary file is now created fresh in the same folder, so an existing entry is never reused or followed. The files Ferry writes (state, reports, blueprints, metadata, banners) are now readable only by the account that ran Ferry.
+
 ## [2.41.29] - 2026-10-10
 
 ### Changed

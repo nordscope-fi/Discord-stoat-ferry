@@ -101,6 +101,8 @@ def test_atomic_write_no_tmp_leftover(tmp_path: Path) -> None:
     """After save, the .tmp file should not remain."""
     save_state(MigrationState(), tmp_path)
     assert not (tmp_path / "state.json.tmp").exists()
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
     assert (tmp_path / "state.json").exists()
 
 

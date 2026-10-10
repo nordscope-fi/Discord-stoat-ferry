@@ -29,7 +29,9 @@ is a tripwire on the obvious path, not proof of coverage.
 """
 
 import contextlib
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -71,19 +73,27 @@ def atomic_write_text(path: Path, text: str) -> None:
     its own work, and creating it here would change their behaviour rather than
     tidy it.
 
-    The temporary file is *path* with ``.tmp`` appended, so a document at
-    ``state.json`` stages through ``state.json.tmp``. A failed write or swap
-    removes it. Nothing in Ferry reads a ``.tmp`` path, so one left behind by a
-    crash is inert and the next write overwrites it.
+    The temporary file sits in the same directory as *path* (a rename across
+    filesystems would not be atomic) under a random name, ``.<name>.<random>.tmp``.
+    It is created with ``O_CREAT | O_EXCL`` and mode 0600, so an entry another
+    account planted in a shared folder, a symlink included, is never opened or
+    followed (#960). The final document therefore ends up owner-only too. A failed
+    write or swap removes the temporary file. Nothing in Ferry reads a ``.tmp``
+    path, so one left behind by a crash is inert, and a later write picks a new
+    name instead of reusing it.
 
     Args:
         path: Final location of the document.
         text: Complete contents. Any redaction has already been applied by the
             caller, which is where ADR-014 puts it.
     """
-    tmp_path = path.with_name(path.name + ".tmp")
+    descriptor, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
     try:
-        tmp_path.write_text(text, encoding="utf-8")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        # The handle is closed before the swap: Windows refuses to replace a file
+        # this process still holds open.
         replace_with_retry(tmp_path, path)
     except BaseException:
         # A temp file Windows still holds open cannot be removed either. The caller
