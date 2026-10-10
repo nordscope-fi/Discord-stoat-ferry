@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.1] - 2026-10-11
+
+### Changed
+
+- **Weekly dependency update (Dependabot #1137).** `nicegui` 3.17.1 → 3.18.0 (the GUI shell)
+  and `aiohttp` 3.14.3 → 3.14.4. NiceGUI 3.18 made its reconnect handshake asynchronous and
+  added tab ids to it, so the feedback tests' reconnect helper now awaits it and passes the
+  page's own tab id. Ferry's own code does not call it.
+- **GitHub Actions updates (Dependabot #1132 to #1136).** `actions/checkout` 6.1.0 → 7.0.1,
+  `actions/cache` 5.1.0 → 6.1.0, `actions/upload-artifact` 6.0.0 → 7.0.2,
+  `actions/download-artifact` 7.0.0 → 8.0.2 and `astral-sh/setup-uv` 7.6.0 → 10.2.0, still
+  pinned by commit. Each pinned commit was checked against its release tag and declares the
+  Node 24 runtime. Two of these majors change defaults, and neither changes Ferry's builds:
+  setup-uv 10 turns its cache off by default for three event types, but every Ferry workflow
+  turns the cache on explicitly, and download-artifact 8 fails on a checksum mismatch, where it
+  used to warn. Uploads are still zipped by default, so the release job downloads the same
+  files as before.
+
 ## [2.43.0] - 2026-10-11
 
 ### Changed

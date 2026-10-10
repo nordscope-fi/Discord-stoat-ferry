@@ -221,7 +221,10 @@ async def _reconnect(user: User) -> None:
     socket_id, document_id = next(iter(client._socket_to_document_id.items()))
     client.handle_disconnect(socket_id)
     await asyncio.sleep(0)
-    client.handle_handshake("test-reconnect", document_id, next_message_id=None)
+    # NiceGUI 3.18 made the handshake async and added the tab ids (same tab, no prior tab).
+    await client.handle_handshake(
+        "test-reconnect", client.tab_id, None, document_id, next_message_id=None
+    )
     await asyncio.sleep(0)
 
 
