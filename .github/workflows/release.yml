@@ -362,19 +362,19 @@ jobs:
           enable-cache: true
 
       - name: Download Windows artifact
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ferry-windows
           path: release-assets/
 
       - name: Download macOS artifact (Apple Silicon)
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ferry-macos-arm64
           path: release-assets/
 
       - name: Download macOS artifact (Intel)
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ferry-macos-x86_64
           path: release-assets/
