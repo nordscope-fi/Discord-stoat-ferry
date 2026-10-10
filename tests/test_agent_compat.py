@@ -3394,6 +3394,21 @@ def test_vibe_review_rejects_a_reply_with_tool_calls(case: str) -> None:
     assert "response-tool-call" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("truncated", "response-finish-reason"),
+        ("unreadable-body", "response-body"),
+        ("empty-content", "response-content"),
+    ],
+)
+def test_vibe_review_rejects_an_incomplete_reply(case: str, reason: str) -> None:
+    """A reply cut off at the token cap can still parse, so the finish reason decides."""
+    result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", case)
+    assert result.returncode == 1
+    assert f"Vibe response was invalid ({reason})" in result.stderr
+
+
 def test_vibe_review_reads_the_text_chunks_of_a_structured_reply() -> None:
     result = _vibe_review("array-content")
     assert result.returncode == 0, result.stderr

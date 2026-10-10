@@ -1217,6 +1217,27 @@ switch (mode) {
           }],
         });
       }
+      if (argument === 'truncated') {
+        return reply({
+          choices: [{
+            index: 0,
+            finish_reason: 'length',
+            message: { role: 'assistant', content: JSON.stringify(clean) },
+          }],
+        });
+      }
+      if (argument === 'unreadable-body') {
+        return new Response('not json', { status: 200 });
+      }
+      if (argument === 'empty-content') {
+        return reply({
+          choices: [{
+            index: 0,
+            finish_reason: 'stop',
+            message: { role: 'assistant', content: '' },
+          }],
+        });
+      }
       return reply();
     };
     try {
