@@ -21,6 +21,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - A Qwen review that keeps streaming no longer holds the review slot for the full ten minutes (#739). One 97,137-character plan review kept streaming until the ten-minute total deadline, while two runs of the same prompt finished in 285 and 303 seconds. The 30-second idle deadline never fired because the model kept sending reasoning events. The review now stops 450 seconds after the response starts, and the record shows `failure_class` `schema` with `failure_reason` `stream-runaway` in place of a plain timeout. Normal runs are unaffected. The 600-second total deadline stays as the outer bound.
+- The Context7 documentation helper is now installed from a committed lockfile and checked by its
+  hashes (#995). Before, `npx` downloaded version 4.1.1 on each launch and could not verify it,
+  and the 13 packages it depends on were free to change inside their version ranges. The lock in
+  `config/agent-compat/context7/` now records an integrity hash for the helper and for all 104
+  packages in its tree. The installer runs `npm ci --ignore-scripts` against it, and `npm ci`
+  stops if any download does not match. The launcher then starts the installed copy with the same
+  `node` that runs the launcher, so it no longer uses `npx` or searches `PATH` for a program. The
+  install is skipped when the lock has not changed, and a failed install leaves the previous
+  reviewer runtime in use. You need to reinstall the reviewer runtime once to get the helper: run
+  `node scripts/agent-compat/codex-bootstrap.mjs`. Until then the Context7 launcher stops with a
+  message that says so. The installer names the public npm registry and ignores your npm user
+  settings for this one install. Keeping other npm settings and registries out is tracked in #961.
 
 ## [2.42.0] - 2026-10-10
 

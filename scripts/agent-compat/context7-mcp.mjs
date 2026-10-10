@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { extname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readProtonField } from './proton-credential.mjs';
-import { resolveExecutable, trustedSearchPath } from './resolve-executable.mjs';
+import { trustedSearchPath } from './resolve-executable.mjs';
 
 const PASSTHROUGH_ENVIRONMENT = [
   'PATH',
@@ -16,10 +17,72 @@ const PASSTHROUGH_ENVIRONMENT = [
   'NODE_EXTRA_CA_CERTS',
 ];
 
-// Reviewed 2026-10-10: 4.1.1, published 2026-09-14. Raising it is a deliberate edit. npx cannot
-// check an integrity string, so only the version is pinned (see #995). The registry reports
+// Reviewed 2026-10-10: 4.1.1, published 2026-09-14, registry integrity
 // sha512-fUARTIZGVKzlzQKDhKUg4aIQ3yEU/12STdfxJDDnLMSN7yyHiPvNHI05iFwxkv3vC8G76Wp27MwK6Jucl/C5pA==
+// Raising it is a deliberate edit of this line and of config/agent-compat/context7/ together.
+// The installer runs `npm ci` against that committed lock, which records an integrity hash for
+// this package and for every package it depends on (#995). This launcher never fetches anything:
+// it starts the package that `npm ci` verified.
 export const CONTEXT7_PACKAGE = '@upstash/context7-mcp@4.1.1';
+const PACKAGE_NAME = CONTEXT7_PACKAGE.slice(0, CONTEXT7_PACKAGE.lastIndexOf('@'));
+const PACKAGE_VERSION = CONTEXT7_PACKAGE.slice(CONTEXT7_PACKAGE.lastIndexOf('@') + 1);
+const REINSTALL = 'run node scripts/agent-compat/codex-bootstrap.mjs to install it';
+
+// Where `npm ci` puts the packages for one lock: beside the releases, keyed by the hash of the
+// lock bytes, so an unchanged lock is never installed twice and a changed one never reuses an
+// old tree. The installer and this launcher both derive the folder here.
+export function context7InstallDirectory(runtimeRoot, lockBytes) {
+  const hash = createHash('sha256').update(lockBytes).digest('hex');
+  return join(runtimeRoot, 'context7', hash);
+}
+
+// The bin file of the installed package, after checking the package is the reviewed version. The
+// bin path comes from the installed package.json, and must be a regular file inside the package.
+export function context7Entrypoint(installDirectory) {
+  const packageDirectory = join(installDirectory, 'node_modules', ...PACKAGE_NAME.split('/'));
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(packageDirectory, 'package.json'), 'utf8'));
+  } catch {
+    throw new Error(`Context7 helper is not installed (${REINSTALL})`);
+  }
+  if (manifest?.name !== PACKAGE_NAME || manifest.version !== PACKAGE_VERSION) {
+    throw new Error(
+      `Context7 helper install does not match ${CONTEXT7_PACKAGE} (${REINSTALL})`,
+    );
+  }
+  const bin = typeof manifest.bin === 'string'
+    ? manifest.bin
+    : manifest.bin?.['context7-mcp'] ?? Object.values(manifest.bin ?? {})[0];
+  if (typeof bin !== 'string' || bin === '') {
+    throw new Error(`Context7 helper install has no start file (${REINSTALL})`);
+  }
+  let entry;
+  try {
+    entry = realpathSync(join(packageDirectory, bin));
+    const inside = relative(realpathSync(packageDirectory), entry);
+    if (inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)
+        || !statSync(entry).isFile()) {
+      throw new Error('outside');
+    }
+  } catch {
+    throw new Error(`Context7 helper install has no start file (${REINSTALL})`);
+  }
+  return entry;
+}
+
+function installedEntrypoint(releaseDirectory) {
+  let lockBytes;
+  try {
+    lockBytes = readFileSync(join(releaseDirectory, 'context7', 'package-lock.json'));
+  } catch {
+    throw new Error(`Context7 helper is not installed (${REINSTALL})`);
+  }
+  // releaseDirectory is <runtime root>/releases/<release>.
+  return context7Entrypoint(
+    context7InstallDirectory(dirname(dirname(releaseDirectory)), lockBytes),
+  );
+}
 
 export function context7Environment(source, key) {
   const environment = {};
@@ -55,23 +118,13 @@ export async function runContext7({
   fieldReader = readProtonField,
   accessReader = readContext7Access,
   spawnChild = spawn,
-  resolve = resolveExecutable,
+  releaseDirectory = dirname(fileURLToPath(import.meta.url)),
   environment = process.env,
   parent = process,
 }) {
-  // Find npx before the key is fetched, so a missing or substituted program is refused while no
-  // credential is in play. The key reaches the child through its environment.
-  let npx;
-  try {
-    npx = resolve('npx');
-  } catch {
-    throw new Error('Context7 npx executable not found');
-  }
-  // npx is usually a node script whose first line is `#!/usr/bin/env node`, which would search
-  // PATH for node again. Run such a script with the node that started this launcher.
-  const [command, commandArgs] = ['.js', '.cjs', '.mjs'].includes(extname(npx))
-    ? [process.execPath, [npx]]
-    : [npx, []];
+  // Find the install before the key is fetched, so a missing or mismatched install is refused
+  // while no credential is in play. The key reaches the child through its environment.
+  const entry = installedEntrypoint(releaseDirectory);
   let key;
   try {
     const access = accessReader(home);
@@ -90,10 +143,10 @@ export async function runContext7({
 
   let child;
   try {
-    // npx puts the node_modules/.bin of its working folder and of every parent ahead of
-    // PATH, and the server's `#!/usr/bin/env node` line searches that. Started from the
-    // checkout, a planted node there would receive the key, so start it from home.
-    child = spawnChild(command, [...commandArgs, '-y', CONTEXT7_PACKAGE], {
+    // The server runs under the node that started this launcher, from the verified install,
+    // so no program is looked up on PATH while the key is in play. It starts from home and not
+    // from the checkout, so nothing in a checkout's folder tree is in its way.
+    child = spawnChild(process.execPath, [entry], {
       cwd: home,
       env: context7Environment(environment, key),
       stdio: 'inherit',
