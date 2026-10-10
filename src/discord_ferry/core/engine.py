@@ -1880,6 +1880,10 @@ async def _restore_merged_threads(
             on_event,
             {export.channel.name: new_channel_id},
             idempotency_salt=new_channel_id,
+            # The queue predates this run, as under --incremental: drop what this
+            # merge delivers, or repair's own dead-letter drain sends it again under
+            # an unsalted key and Stoat accepts the duplicate.
+            reconcile_failed=True,
         )
     except Exception as exc:  # noqa: BLE001
         # One channel's failure must not stop the rest of the repair. Per-message
