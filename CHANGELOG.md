@@ -39,6 +39,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `RecursionError` (#988). Both loaders used to read the whole file into memory with no limit.
   The size comes from the file system, so nothing is allocated for a refused file. A directory
   scan skips an oversized export and the warning now says why.
+### Fixed
+
+- Upload reuse now keys on the media tag as well as the file path (#984). Autumn file ids
+  belong to the tag they were uploaded under (avatars, emojis, icons, banners,
+  attachments). The cache and the in-flight map used the bare file path. One file used
+  under two tags could therefore get back an id from the wrong tag. Saved entries are now
+  stored as `<tag>:<path>`. A migration resumed from a `state.json` written by an older
+  version does not match its bare-path entries, because they record no tag, so each such
+  file is uploaded once more on that resume. No other state field changes and old
+  `state.json` files still load.
 
 ## [2.41.27] - 2026-10-10
 

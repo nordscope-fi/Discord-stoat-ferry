@@ -100,7 +100,9 @@ class MigrationState:
     # Author ID -> uploaded Autumn avatar ID
     avatar_cache: dict[str, str] = field(default_factory=dict)
 
-    # Autumn upload cache: local_path -> autumn_file_id
+    # Autumn upload cache: "<tag>:<local_path>" -> autumn_file_id (see upload_cache_key).
+    # Entries from before #984 have a bare-path key; they are never matched, so a
+    # resume re-uploads those files once.
     upload_cache: dict[str, str] = field(default_factory=dict)
 
     # Author ID -> display name (for mention remapping)

@@ -150,7 +150,7 @@ async def test_upload_with_cache_hit(tmp_path: Path) -> None:
     file = tmp_path / "cached.png"
     file.write_bytes(b"c" * 100)
 
-    cache: dict[str, str] = {str(file): "cached_id_xyz"}
+    cache: dict[str, str] = {f"attachments:{file}": "cached_id_xyz"}
 
     async with aiohttp.ClientSession() as session:
         result = await upload_with_cache(
@@ -177,7 +177,7 @@ async def test_upload_with_cache_miss(tmp_path: Path, mock_aiohttp: aioresponses
         )
 
     assert result == "new_file_id"
-    assert cache[str(file)] == "new_file_id"
+    assert cache[f"attachments:{file}"] == "new_file_id"
 
 
 def test_tag_size_limits_match_the_live_instance() -> None:
@@ -242,7 +242,7 @@ async def test_upload_with_cache_coalesces_same_key(tmp_path: Path) -> None:
 
     assert calls == 1
     assert results == ["id-1", "id-1"]
-    assert cache[str(f)] == "id-1"
+    assert cache[f"avatars:{f}"] == "id-1"
 
 
 async def test_upload_with_cache_distinct_keys_concurrent(tmp_path: Path) -> None:
@@ -281,7 +281,7 @@ async def test_upload_with_cache_hit_skips_upload_and_inflight(tmp_path: Path) -
 
     f = tmp_path / "a.png"
     f.write_bytes(b"x" * 10)
-    cache = {str(f): "cached-id"}
+    cache = {f"avatars:{f}": "cached-id"}
     mock = AsyncMock(return_value="should-not-be-used")
     with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
         async with aiohttp.ClientSession() as session:
@@ -291,7 +291,7 @@ async def test_upload_with_cache_hit_skips_upload_and_inflight(tmp_path: Path) -
 
     assert result == "cached-id"
     assert mock.call_count == 0
-    assert str(f) not in _inflight_uploads
+    assert f"avatars:{f}" not in _inflight_uploads
 
 
 async def test_upload_with_cache_failure_does_not_poison_key(tmp_path: Path) -> None:
@@ -308,7 +308,7 @@ async def test_upload_with_cache_failure_does_not_poison_key(tmp_path: Path) -> 
         async with aiohttp.ClientSession() as session:
             with pytest.raises(AutumnUploadError):
                 await upload_with_cache(session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0)
-            assert str(f) not in _inflight_uploads  # not poisoned
+            assert f"avatars:{f}" not in _inflight_uploads  # not poisoned
             result = await upload_with_cache(
                 session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0
             )
@@ -331,8 +331,8 @@ async def test_upload_with_cache_self_cleans_inflight(tmp_path: Path) -> None:
         async with aiohttp.ClientSession() as session:
             await upload_with_cache(session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0)
 
-    assert str(f) not in _inflight_uploads
-    assert cache[str(f)] == "id-1"
+    assert f"avatars:{f}" not in _inflight_uploads
+    assert cache[f"avatars:{f}"] == "id-1"
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ async def test_upload_with_cache_skip_cache_gets_fresh_id(
     """With skip_cache=True, a cached key is ignored and a fresh upload runs."""
     f = tmp_path / "shared.png"
     f.write_bytes(b"x" * 50)
-    cache: dict[str, str] = {str(f): "cached-id-111"}
+    cache: dict[str, str] = {f"attachments:{f}": "cached-id-111"}
 
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "fresh-id-222"})
     async with aiohttp.ClientSession() as session:
@@ -361,7 +361,7 @@ async def test_upload_with_cache_skip_cache_gets_fresh_id(
             skip_cache=True,
         )
     assert result == "fresh-id-222"
-    assert cache[str(f)] == "fresh-id-222"
+    assert cache[f"attachments:{f}"] == "fresh-id-222"
 
 
 async def test_upload_with_cache_skip_cache_false_still_hits(
@@ -370,7 +370,7 @@ async def test_upload_with_cache_skip_cache_false_still_hits(
     """With skip_cache=False (default), the cache is consulted as before."""
     f = tmp_path / "shared.png"
     f.write_bytes(b"x" * 50)
-    cache: dict[str, str] = {str(f): "cached-id-111"}
+    cache: dict[str, str] = {f"attachments:{f}": "cached-id-111"}
 
     async with aiohttp.ClientSession() as session:
         result = await upload_with_cache(
@@ -495,7 +495,7 @@ async def test_verify_size_match_returns_and_caches(
             session, AUTUMN_URL, "attachments", file, TOKEN, cache, delay=0, verify_size=True
         )
     assert result == "x"
-    assert cache[str(file)] == "x"
+    assert cache[f"attachments:{file}"] == "x"
 
 
 async def test_verify_size_no_size_field_returns_id(
@@ -934,3 +934,170 @@ async def test_a_refused_proxy_names_the_proxy(
     assert "Upload to Autumn failed" in message
     assert f"The request to autumn.test went through the proxy at 127.0.0.1:{port}" in message
     assert "FERRY_DISABLE_PROXY" in message
+
+
+# ---------------------------------------------------------------------------
+# #984 -- cache and in-flight keys carry the media tag, not only the path
+# ---------------------------------------------------------------------------
+
+
+async def test_same_file_under_two_tags_uploads_twice(tmp_path: Path) -> None:
+    """One file used as an avatar and as an emoji gets two uploads and two ids."""
+    from unittest.mock import AsyncMock, patch
+
+    f = tmp_path / "shared.png"
+    f.write_bytes(b"x" * 10)
+    cache: dict[str, str] = {}
+    mock = AsyncMock(side_effect=["avatar-id", "emoji-id"])
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            first = await upload_with_cache(
+                session, AUTUMN_URL, "avatars", f, TOKEN, cache, delay=0
+            )
+            second = await upload_with_cache(
+                session, AUTUMN_URL, "emojis", f, TOKEN, cache, delay=0
+            )
+
+    assert (first, second) == ("avatar-id", "emoji-id")
+    assert mock.call_count == 2
+    assert cache == {f"avatars:{f}": "avatar-id", f"emojis:{f}": "emoji-id"}
+
+
+async def test_same_file_same_tag_still_hits_cache(tmp_path: Path) -> None:
+    """Same tag and same file: the second call reuses the id (no regression)."""
+    from unittest.mock import AsyncMock, patch
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    cache: dict[str, str] = {}
+    mock = AsyncMock(return_value="id-1")
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            first = await upload_with_cache(session, AUTUMN_URL, "icons", f, TOKEN, cache, delay=0)
+            second = await upload_with_cache(session, AUTUMN_URL, "icons", f, TOKEN, cache, delay=0)
+
+    assert first == second == "id-1"
+    assert mock.call_count == 1
+
+
+async def _concurrent_uploads(
+    f: Path, tag_a: str, tag_b: str
+) -> tuple[list[str], int, dict[str, str]]:
+    import asyncio
+    from unittest.mock import patch
+
+    cache: dict[str, str] = {}
+    calls = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        n = calls
+        entered.set()
+        await release.wait()
+        return f"id-{n}"
+
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", _slow):
+        async with aiohttp.ClientSession() as session:
+            task = asyncio.gather(
+                upload_with_cache(session, AUTUMN_URL, tag_a, f, TOKEN, cache, delay=0),
+                upload_with_cache(session, AUTUMN_URL, tag_b, f, TOKEN, cache, delay=0),
+            )
+            await entered.wait()
+            for _ in range(3):
+                await asyncio.sleep(0)  # let the second caller reach its decision
+            release.set()
+            results = await task
+    return list(results), calls, cache
+
+
+async def test_inflight_same_tag_coalesces(tmp_path: Path) -> None:
+    """Two concurrent uploads of one file under the SAME tag share one upload."""
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    results, calls, _ = await _concurrent_uploads(f, "avatars", "avatars")
+    assert calls == 1
+    assert results == ["id-1", "id-1"]
+
+
+async def test_inflight_different_tags_do_not_coalesce(tmp_path: Path) -> None:
+    """Two concurrent uploads of one file under DIFFERENT tags each upload."""
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    results, calls, cache = await _concurrent_uploads(f, "avatars", "emojis")
+    assert calls == 2
+    assert sorted(results) == ["id-1", "id-2"]
+    assert len(cache) == 2
+
+
+async def test_old_bare_path_cache_entries_are_a_miss(tmp_path: Path) -> None:
+    """A state.json from before #984 loads, and its bare-path ids are never reused.
+
+    The old key carried no tag, so the id might belong to another tag. It is treated
+    as a miss (one extra upload), never reused.
+    """
+    import json
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.state import load_state
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    old = {"stoat_server_id": "srv", "upload_cache": {str(f): "old-wrong-tag-id"}}
+    (tmp_path / "state.json").write_text(json.dumps(old), encoding="utf-8")
+
+    state = load_state(tmp_path)
+    assert state.upload_cache == {str(f): "old-wrong-tag-id"}  # loads untouched
+
+    mock = AsyncMock(return_value="fresh-id")
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            result = await upload_with_cache(
+                session, AUTUMN_URL, "emojis", f, TOKEN, state.upload_cache, delay=0
+            )
+
+    assert result == "fresh-id"
+    assert mock.call_count == 1
+    assert state.upload_cache[f"emojis:{f}"] == "fresh-id"
+
+
+async def test_new_style_cache_survives_state_round_trip(tmp_path: Path) -> None:
+    """A tag-keyed entry saved by save_state is a hit after load_state."""
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.state import MigrationState, load_state, save_state
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    save_state(MigrationState(upload_cache={f"icons:{f}": "icon-id"}), tmp_path)
+    state = load_state(tmp_path)
+
+    mock = AsyncMock(return_value="should-not-be-used")
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            result = await upload_with_cache(
+                session, AUTUMN_URL, "icons", f, TOKEN, state.upload_cache, delay=0
+            )
+
+    assert result == "icon-id"
+    assert mock.call_count == 0
+
+
+async def test_skip_cache_ignores_entry_and_writes_tag_key(tmp_path: Path) -> None:
+    """skip_cache still bypasses a tag-keyed hit and overwrites that same key."""
+    from unittest.mock import AsyncMock, patch
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x" * 10)
+    cache = {f"attachments:{f}": "stale-id"}
+    mock = AsyncMock(return_value="fresh-id")
+    with patch("discord_ferry.uploader.autumn.upload_to_autumn", mock):
+        async with aiohttp.ClientSession() as session:
+            result = await upload_with_cache(
+                session, AUTUMN_URL, "attachments", f, TOKEN, cache, delay=0, skip_cache=True
+            )
+
+    assert result == "fresh-id"
+    assert cache == {f"attachments:{f}": "fresh-id"}

@@ -37,10 +37,27 @@ TAG_SIZE_LIMITS: dict[str, int] = {
 }
 
 # Single-flight registry: coalesces concurrent first-uploads of the same cache key
-# (keyed by str(file_path), the same key upload_with_cache caches under) so two
-# parallel channel workers requesting the same physical file upload it only once.
+# (``upload_cache_key(tag, file_path)``, the same key upload_with_cache caches under) so
+# two parallel channel workers requesting the same physical file under the same tag
+# upload it only once.
 # Self-cleaning — every entry is popped on completion (success or failure).
 _inflight_uploads: dict[str, asyncio.Future[str]] = {}
+
+
+def upload_cache_key(tag: str, file_path: Path) -> str:
+    """Key for ``MigrationState.upload_cache`` and the in-flight map: ``"<tag>:<path>"``.
+
+    An Autumn file id belongs to the tag it was uploaded under (avatars, emojis, icons,
+    banners, attachments), so the same local file under two tags must not share an entry
+    (#984). Tags are fixed lowercase words with no colon, so the first colon always ends
+    the tag.
+
+    Entries written before #984 are keyed by the bare path. They carry no tag, so nothing
+    can prove which one the id belongs to, and they never match this format: a resume
+    treats them as a miss and uploads the file once more. They stay in the saved dict
+    unread.
+    """
+    return f"{tag}:{file_path}"
 
 
 async def _advertised_retry_after_ms(response: aiohttp.ClientResponse) -> float:
@@ -296,7 +313,7 @@ async def upload_with_cache(
         tag: Upload tag/bucket name.
         file_path: Local path to the file.
         token: Stoat session token.
-        cache: Mutable dict mapping str(file_path) -> Autumn file ID.
+        cache: Mutable dict mapping ``upload_cache_key(tag, file_path)`` -> Autumn file ID.
         delay: Seconds to sleep before uploading (rate-limit courtesy). Default 0.5s.
         verify_size: When True, pass size verification to the upload call. On a
             present-and-mismatched size the upload raises ``AutumnUploadError`` and is never
@@ -308,7 +325,7 @@ async def upload_with_cache(
     Returns:
         Autumn file ID string.
     """
-    key = str(file_path)
+    key = upload_cache_key(tag, file_path)
     if not skip_cache:
         if key in cache:
             return cache[key]
