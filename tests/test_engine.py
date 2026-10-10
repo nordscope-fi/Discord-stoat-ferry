@@ -4792,34 +4792,347 @@ async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) 
     assert state.channel_high_water[R_D_CHANNEL] == "100000000000000001"
 
 
-async def test_a_recreated_merge_parent_names_the_threads_it_cannot_restore(
+R_NEW_CHANNEL = "01JSTOATCHN000000000NEW"
+R_THREAD_A = "800000000000000077"
+R_THREAD_B = "800000000000000066"
+
+
+def _text_msg(msg_id: str, content: str, timestamp: str) -> DCEMessage:
+    """A message whose content is unique, so the send order can be read back."""
+    return DCEMessage(
+        id=msg_id,
+        type="Default",
+        timestamp=timestamp,
+        content=content,
+        author=DCEAuthor(id="700000000000000001", name="author", nickname="author"),
+    )
+
+
+def _merge_thread(
+    channel_id: str,
+    *,
+    name: str,
+    parent: str,
+    messages: list[DCEMessage],
+) -> Any:
+    export = _export_for(channel_id, name=name)
+    export.is_thread = True
+    export.parent_channel_name = parent
+    export.messages.extend(messages)
+    export.message_count = len(messages)
+    return export
+
+
+async def _repair_merge_parent(
+    tmp_path: Path,
+    *,
+    exports: list[Any],
+    thread_strategy: str = "merge",
+    dry_run: bool = False,
+    merged_thread_ids: tuple[str, ...] = (),
+    other_channels: dict[str, str] | None = None,
+    fail_content: str | None = None,
+) -> tuple[MigrationState, list[dict[str, str]], list[MigrationEvent]]:
+    """Recreate R_D_CHANNEL under the given strategy with the REAL send paths.
+
+    Unlike _repair_resending, neither _process_message nor _merge_threads is
+    replaced: both run, and only the HTTP edge (api_send_message in each module)
+    is recorded. That is what lets the test see the order, the target channel and
+    the idempotency key of every send, and it is what makes an ordering bug
+    visible: a stub of the send path cannot misorder anything.
+    """
+    config = _make_repair_config(tmp_path, dry_run=dry_run)
+    channel_map = {R_D_CHANNEL: R_S_CHANNEL}
+    channel_map.update(other_channels or {})
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map=channel_map,
+        created_channel_names={R_D_CHANNEL: "general"},
+        channel_high_water={
+            R_D_CHANNEL: "100000000000000009",
+            **{tid: "900000000000000001" for tid in merged_thread_ids},
+        },
+        thread_strategy=thread_strategy,
+    )
+    events: list[MigrationEvent] = []
+    sends: list[dict[str, str]] = []
+
+    async def _check(*_a: Any, **_k: Any) -> CheckReport:
+        return _report_with("channel_missing", "fail")
+
+    async def _record(
+        _session: Any, _url: str, _token: str, channel_id: str, **kwargs: Any
+    ) -> dict[str, str]:
+        # Both paths prefix the original timestamp; the tests read the body.
+        content = re.sub(r"^\*\[[^\]]*\]\* ", "", str(kwargs.get("content", "")))
+        if fail_content is not None and content == fail_content:
+            raise MigrationError("send failed")
+        sends.append(
+            {
+                "channel": channel_id,
+                "content": content,
+                "key": str(kwargs.get("idempotency_key", "")),
+            }
+        )
+        return {"_id": f"01JSTOATMSG{len(sends):013d}"}
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=_check),
+        patch.object(engine_module, "save_state", lambda *a, **k: None),
+        patch.object(messages_module, "save_state", lambda *a, **k: None),
+        patch.object(engine_module, "api_send_message", _record),
+        patch.object(messages_module, "api_send_message", _record),
+        aioresponses() as m,
+    ):
+        m.get(
+            re.compile(r".*/servers/.*include_channels.*"),
+            payload=_server_with_channels(),
+            repeat=True,
+        )
+        m.post(
+            f"{BASE_URL}/servers/{R_SERVER}/channels",
+            payload={"_id": R_NEW_CHANNEL, "name": "general"},
+        )
+        await run_repair(config, state, exports, events.append)
+    return state, sends, events
+
+
+def _merge_fixture() -> list[Any]:
+    """A parent with two messages and two threads, listed out of id order."""
+    parent = _export_for(R_D_CHANNEL, name="general")
+    parent.messages.extend(
+        [
+            _text_msg("100000000000000001", "parent-one", "2026-01-01T00:00:00+00:00"),
+            _text_msg("100000000000000002", "parent-two", "2026-01-05T00:00:00+00:00"),
+        ]
+    )
+    thread_a = _merge_thread(
+        R_THREAD_A,
+        name="thread-a",
+        parent="general",
+        messages=[
+            _text_msg("900000000000000012", "a-two", "2026-01-04T00:00:00+00:00"),
+            _text_msg("900000000000000011", "a-one", "2026-01-03T00:00:00+00:00"),
+        ],
+    )
+    thread_b = _merge_thread(
+        R_THREAD_B,
+        name="thread-b",
+        parent="general",
+        messages=[_text_msg("900000000000000021", "b-one", "2026-01-02T00:00:00+00:00")],
+    )
+    # Listed with the higher thread id first, to show the merge orders by id.
+    return [parent, thread_a, thread_b]
+
+
+async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
     tmp_path: Path,
 ) -> None:
-    """PINS A KNOWN LIMIT (#310), not intended coverage.
+    """#310: parent messages first, then each thread behind its own separator.
 
-    Under --thread-strategy=merge a thread's messages were appended to the
-    PARENT's Stoat channel, and _merge_threads resolves that target by parent
-    channel NAME. A channel-scoped scan keyed on the parent's Discord id cannot
-    reach them, and the merge path never wrote message_map either.
-
-    ASSERTS THE WARNING EXISTS. Never that content is absent: an absence
-    assertion passes against a repair that restored nothing at all.
+    This is the order a normal migration produces. run_messages sends the
+    parent's messages in the per-channel loop, then _merge_threads appends each
+    thread (sorted by channel id) after a separator. Stoat orders by ULID on
+    arrival, so the order sent IS the order the channel keeps.
     """
-    parent = _export_for(R_D_CHANNEL, name="general")
-    parent.messages.append(_dce_msg("100000000000000001"))
-    thread = _thread_export("800000000000000077", parent="general")
-    state, _, events = await _repair_resending(
+    state, sends, _ = await _repair_merge_parent(
         tmp_path,
-        exports=[parent, thread],
-        msg_ids=["100000000000000001"],
-        thread_strategy="merge",
+        exports=_merge_fixture(),
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
     )
+    assert [s["content"] for s in sends] == [
+        "parent-one",
+        "parent-two",
+        "── Thread: thread-b (1 messages) ──",
+        "b-one",
+        "── Thread: thread-a (2 messages) ──",
+        "a-one",
+        "a-two",
+    ], f"wrong content or order: {[s['content'] for s in sends]}"
+    assert {s["channel"] for s in sends} == {R_NEW_CHANNEL}, (
+        "something was sent to a channel other than the recreated one"
+    )
+    assert not [
+        w for w in state.warnings if w.get("type") == "merge_thread_content_not_restored"
+    ], f"a restored thread was still warned about: {state.warnings}"
+
+
+async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
+    tmp_path: Path,
+) -> None:
+    """A repair key must not collide with the one the migration used.
+
+    The migration's keys are ferry-merge-{id} and ferry-thread-sep-{thread id},
+    built from Discord ids a recreated channel does not change, and Stoat's store
+    is a 1000-entry LRU with no TTL. A cached key answers 409 DuplicateNonce with
+    no message id, which would drop the message from a channel that is new. The
+    new channel id salts them, as it already does for the parent's own messages.
+    """
+    _, sends, _ = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+    )
+    keys = [s["key"] for s in sends]
+    assert f"ferry-thread-sep-{R_THREAD_A}-{R_NEW_CHANNEL}" in keys
+    assert f"ferry-merge-900000000000000011-{R_NEW_CHANNEL}" in keys
+    unsalted = [
+        k
+        for k in keys
+        if k.startswith(("ferry-merge-", "ferry-thread-sep-"))
+        and not k.endswith(f"-{R_NEW_CHANNEL}")
+    ]
+    assert not unsalted, f"an unsalted merge key would be swallowed by Stoat's cache: {unsalted}"
+
+
+async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) -> None:
+    """The parent is resent FIRST, so the thread's duplicate of it is suppressed.
+
+    After DCE 2.47.3 a thread's first message is the parent's own origin message.
+    _merge_threads drops it when the id is already in message_map, and that is
+    true here only because the parent's resend ran before the merge. A repair
+    that merged first would send it twice.
+    """
+    exports = _merge_fixture()
+    exports[1].messages.append(
+        _text_msg("100000000000000001", "parent-one", "2026-01-01T00:00:00+00:00")
+    )
+    exports[1].message_count = len(exports[1].messages)
+    _, sends, _ = await _repair_merge_parent(
+        tmp_path, exports=exports, merged_thread_ids=(R_THREAD_A, R_THREAD_B)
+    )
+    assert [s["content"] for s in sends].count("parent-one") == 1, (
+        f"the origin message was sent more than once: {[s['content'] for s in sends]}"
+    )
+
+
+async def test_merge_repair_records_thread_messages_the_way_a_merge_does(
+    tmp_path: Path,
+) -> None:
+    """A merge never writes message_map for thread messages, and repair matches.
+
+    The parent's own messages are mapped by the existing resend. The thread
+    messages are not, exactly as in a normal migration, so a carried-forward map
+    is the same size either way. The thread's high-water mark is rewritten.
+    """
+    state, _, _ = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+    )
+    assert "100000000000000001" in state.message_map
+    assert "100000000000000002" in state.message_map
+    assert not [m for m in state.message_map if m.startswith("9000000000000000")], (
+        f"thread messages were mapped, which a normal merge never does: {state.message_map}"
+    )
+    assert state.channel_high_water[R_THREAD_A] == "900000000000000012"
+
+
+async def test_a_failed_thread_message_is_queued_against_the_new_channel(
+    tmp_path: Path,
+) -> None:
+    """The retry drain sends to FailedMessage.stoat_channel_id, so it must be the new id."""
+    state, sends, _ = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+        fail_content="a-one",
+    )
+    failed = [f for f in state.failed_messages if f.discord_msg_id == "900000000000000011"]
+    assert len(failed) == 1 and failed[0].stoat_channel_id == R_NEW_CHANNEL, state.failed_messages
+    assert "a-two" in [s["content"] for s in sends], "one failure stopped the rest of the thread"
+
+
+async def test_a_dry_run_repair_sends_no_thread_content(tmp_path: Path) -> None:
+    _, sends, events = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        dry_run=True,
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+    )
+    assert sends == [], f"a dry run sent: {sends}"
+    assert any("DRY RUN" in e.message for e in events)
+
+
+@pytest.mark.parametrize("strategy", ["flatten", "archive"])
+async def test_flatten_and_archive_repair_send_no_merged_thread_content(
+    tmp_path: Path, strategy: str
+) -> None:
+    """Flatten gives threads their own channels and archive never sent content."""
+    _, sends, _ = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        thread_strategy=strategy,
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+    )
+    assert [s["content"] for s in sends] == ["parent-one", "parent-two"], sends
+
+
+async def test_a_thread_under_another_parent_is_left_alone(tmp_path: Path) -> None:
+    """Only threads whose parent is the recreated channel are merged, by name."""
+    other_id = "800000000000000002"
+    other = _export_for(other_id, name="elsewhere")
+    stray = _merge_thread(
+        "800000000000000055",
+        name="stray",
+        parent="elsewhere",
+        messages=[_text_msg("900000000000000031", "stray-one", "2026-01-06T00:00:00+00:00")],
+    )
+    state, sends, _ = await _repair_merge_parent(
+        tmp_path,
+        exports=[*_merge_fixture(), other, stray],
+        merged_thread_ids=(R_THREAD_A, R_THREAD_B, "800000000000000055"),
+        other_channels={other_id: "01JSTOATCHN0000000OTHER"},
+    )
+    assert "stray-one" not in [s["content"] for s in sends]
+    assert not [
+        w for w in state.warnings if w.get("type") == "merge_thread_content_not_restored"
+    ], "a thread of a channel that was not recreated was warned about"
+
+
+async def test_a_thread_with_no_record_of_a_merge_is_not_sent_and_is_named(
+    tmp_path: Path,
+) -> None:
+    """--skip-threads and --min-thread-messages are not in state.
+
+    A thread excluded that way was never merged, so sending it now would put
+    content on the server that the operator chose to leave out. The only trace of
+    a completed merge is the thread's own high-water mark, so a thread without
+    one is not sent. It is named in a warning instead, so a state from an older
+    version that never recorded the mark is not silently short.
+    """
+    state, sends, events = await _repair_merge_parent(
+        tmp_path,
+        exports=_merge_fixture(),
+        merged_thread_ids=(R_THREAD_A,),
+    )
+    contents = [s["content"] for s in sends]
+    assert "a-one" in contents and "b-one" not in contents, contents
     warning = [w for w in state.warnings if w.get("type") == "merge_thread_content_not_restored"]
-    assert warning, f"the merge gap was not recorded: {state.warnings}"
-    assert "a-thread" in warning[0]["message"], (
-        f"the warning does not name the thread it left behind: {warning[0]['message']}"
-    )
-    assert any("merge" in e.message for e in events)
+    assert len(warning) == 1, state.warnings
+    assert "thread-b" in warning[0]["message"] and "thread-a" not in warning[0]["message"], warning[
+        0
+    ]["message"]
+    assert any("thread-b" in e.message for e in events if e.status == "warning")
+
+
+async def test_an_error_escaping_the_merge_is_recorded_and_repair_carries_on(
+    tmp_path: Path,
+) -> None:
+    """One channel's merge failing must not abort the repair of the rest."""
+
+    async def _boom(*_a: Any, **_k: Any) -> None:
+        raise MigrationError("merge exploded")
+
+    with patch.object(engine_module, "_merge_threads", _boom):
+        state, sends, _ = await _repair_merge_parent(
+            tmp_path,
+            exports=_merge_fixture(),
+            merged_thread_ids=(R_THREAD_A, R_THREAD_B),
+        )
+    assert [s["content"] for s in sends] == ["parent-one", "parent-two"]
+    warning = [w for w in state.warnings if w.get("type") == "merge_thread_content_not_restored"]
+    assert len(warning) == 1 and "merge exploded" in warning[0]["message"], state.warnings
 
 
 async def test_a_flatten_parent_gets_no_merge_warning(tmp_path: Path) -> None:

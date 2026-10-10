@@ -33,6 +33,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `node scripts/agent-compat/codex-bootstrap.mjs`. Until then the Context7 launcher stops with a
   message that says so. The installer names the public npm registry and ignores your npm user
   settings for this one install. Keeping other npm settings and registries out is tracked in #961.
+### Fixed
+
+- Restore merged thread content when `ferry repair` recreates a parent channel (#310). With
+  `--thread-strategy=merge`, a thread's messages are added to its parent channel. Repair used to
+  bring back only the parent's own messages and warn that the thread content was missing. It now
+  re-sends the parent's messages first, then each thread after its separator line, in the same
+  order and format as the migration. The new messages use their own idempotency keys, so Stoat's
+  cache of earlier keys cannot swallow them. A thread with no merge mark in the state is not sent,
+  because `--skip-threads` and `--min-thread-messages` leave no other trace, and the warning
+  names it. `--dry-run` still sends nothing.
 
 ## [2.42.0] - 2026-10-10
 
