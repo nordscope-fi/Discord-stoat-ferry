@@ -178,6 +178,44 @@ def new_session(**kwargs: Any) -> aiohttp.ClientSession:
     return aiohttp.ClientSession(connector=connector, **kwargs)
 
 
+# Hosts an export-supplied remote media URL may name (#965). DiscordChatExporter
+# writes avatar URLs on cdn.discordapp.com (or media.discordapp.net); with its
+# media option on it rewrites them to local paths. Anything else is a host the
+# export's author chose, which Ferry would then fetch from the operator's
+# network and upload to the Stoat media service.
+REMOTE_MEDIA_HOSTS: frozenset[str] = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
+
+
+def remote_media_refusal(url: str) -> str | None:
+    """Return why Ferry must not download an export-supplied ``url``, or ``None``.
+
+    The URL passes only when it is ``https``, names one of ``REMOTE_MEDIA_HOSTS``
+    exactly (no trailing dot, no subdomain), uses the default port and carries no
+    userinfo. The host comes from the same parser aiohttp hands the request to,
+    so there is no gap between what is checked and what is connected to. A fixed
+    host list also covers a proxy: the proxy resolves a name only Discord owns,
+    and a literal IP address can never match.
+
+    Userinfo is refused because aiohttp turns it into a Basic Authorization
+    header on the request.
+
+    Redirects are a separate control: callers pass ``allow_redirects=False``.
+    """
+    try:
+        target = URL(url)
+    except (ValueError, TypeError):
+        return "not a valid URL"
+    if target.scheme != "https":
+        return "not an https URL"
+    if target.user is not None or target.password is not None:
+        return "URL carries credentials"
+    if target.host not in REMOTE_MEDIA_HOSTS:
+        return "host is not a Discord CDN"
+    if target.explicit_port not in (None, 443):
+        return "non-default port"
+    return None
+
+
 async def read_bounded(resp: aiohttp.ClientResponse, max_bytes: int) -> bytes | None:
     """Read a response body, giving up the moment it exceeds ``max_bytes``.
 

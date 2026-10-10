@@ -9,6 +9,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - Export validation warnings now carry the channel name in its own `channel_name` field (#154). The three warnings that concern one channel (`http_attachment`, `rendered_markdown` and `empty_export`) used to hold the name only inside the message text, so anything that needed it had to pick it out of the sentence. The field is also written to `state.json` and `migration_report.json`, where it is masked for secrets exactly as the message is, because a channel name comes from the export. Older `state.json` files without the field still load and resume. The check that keeps unclassified warning fields out of those files now also covers the warnings built by export validation, which it previously missed.
+### Fixed
+
+- Download an avatar from an export only when its address is an `https` Discord image
+  server address (#965). An export could name any address as an author's avatar, such as a
+  service on the local machine or on the private network. Ferry fetched it and uploaded
+  the response to the Stoat media service, where other people could see it. Ferry now
+  fetches only `cdn.discordapp.com` and `media.discordapp.net` over `https` on the
+  standard port, with no username or password in the address. Any other address is skipped
+  with the usual "avatar_download_failed" warning, and the member keeps the default
+  avatar. Redirects were already refused. Exports made with media downloaded use local
+  paths and are unaffected.
 
 ## [2.41.30] - 2026-10-10
 
