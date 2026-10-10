@@ -157,7 +157,12 @@ export function parseVibeHistory(raw) {
     .map((block) => block.text)
     .join('\n');
   if (!text) throw new Error('Vibe assistant message has no text');
-  const sessionId = history.find((entry) => typeof entry?.session_id === 'string')?.session_id
+  // mistral-vibe serialises history entries by their camelCase alias, so the
+  // client writes sessionId. The snake_case spelling stays for older output.
+  const entryId = (entry) => [entry?.sessionId, entry?.session_id]
+    .find((value) => typeof value === 'string');
+  const sessionId = history.map(entryId).find((value) => value !== undefined)
+    ?? envelope?.sessionId
     ?? envelope?.session_id
     ?? null;
   return { history, text, sessionId };

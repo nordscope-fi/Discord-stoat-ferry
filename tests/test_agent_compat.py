@@ -3362,6 +3362,34 @@ def test_vibe_review_rejects_a_tool_call_in_the_history() -> None:
     assert "tool call" in (result.stdout + result.stderr).lower()
 
 
+def test_vibe_review_reads_the_session_id_the_client_writes() -> None:
+    """mistral-vibe writes history entries with camelCase aliases, so the field is sessionId."""
+    assert NODE is not None
+    clean = {"findings": [], "summary": "clean", "confidence": "high"}
+    history = [
+        {
+            "id": "entry-1",
+            "sessionId": "client-session",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": json.dumps(clean)}],
+        }
+    ]
+    script = (
+        "import { parseVibeHistory } from './scripts/agent-compat/vibe-review.mjs';"
+        f"console.log(JSON.stringify(parseVibeHistory({json.dumps(json.dumps(history))}).sessionId));"
+    )
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == "client-session"
+
+
 def test_vibe_review_redacts_an_injected_child_failure() -> None:
     result = _run(
         "node",
