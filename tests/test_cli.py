@@ -17,6 +17,7 @@ from discord_ferry.core.http import reset_http_state
 from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.verify import CheckReport, RepairOutcome
 from discord_ferry.state import FailedMessage, MigrationState
+from tests.stoat_ids import SERVER_ID, stoat_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -618,7 +619,7 @@ def test_rollback_missing_token(runner: CliRunner, tmp_path: Path) -> None:
 def test_rollback_calls_engine_yes_flag(runner: CliRunner, tmp_path: Path) -> None:
     """SC-2: CLI happy path with --yes — calls run_rollback with correct config."""
     _write_rollback_state(tmp_path)
-    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id="srv01"))
+    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id=SERVER_ID))
     with patch("discord_ferry.cli.run_rollback", mock_engine):
         result = runner.invoke(
             main,
@@ -640,7 +641,7 @@ def test_rollback_calls_engine_yes_flag(runner: CliRunner, tmp_path: Path) -> No
     assert config.stoat_url == "http://localhost"
     assert config.token == "test-token"
     assert config.output_dir == tmp_path
-    assert config.server_id == "srv01"  # loaded from state.json
+    assert config.server_id == SERVER_ID  # loaded from state.json
     assert config.skip_export is True
     assert config.force_unlock is False
     assert config.pause_event is not None  # engine needs this for the confirm gate
@@ -649,7 +650,7 @@ def test_rollback_calls_engine_yes_flag(runner: CliRunner, tmp_path: Path) -> No
 def test_rollback_force_unlock(runner: CliRunner, tmp_path: Path) -> None:
     """SC-29: --force-unlock propagates to FerryConfig."""
     _write_rollback_state(tmp_path)
-    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id="srv01"))
+    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id=SERVER_ID))
     with patch("discord_ferry.cli.run_rollback", mock_engine):
         result = runner.invoke(
             main,
@@ -734,7 +735,7 @@ def test_rollback_prints_proxy_notice(
     work without ever calling _print_proxy_notices. rollback is one of the four
     notice entry points outside run_migration."""
     _write_rollback_state(tmp_path)
-    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id="srv01"))
+    mock_engine = AsyncMock(return_value=MigrationState(stoat_server_id=SERVER_ID))
     with (
         os_proxy({}),
         proxy_env(ALL_PROXY="socks5://sock:1080"),
@@ -786,7 +787,7 @@ def test_rollback_tracker_renders_suspect_columns() -> None:
         ),
     ]
     summary = RollbackSummary(
-        stoat_server_id="srv01",
+        stoat_server_id=SERVER_ID,
         stoat_server_name="Target",
         channels_to_delete=[],
         untracked_ferry_suspect=suspects,
@@ -1134,7 +1135,7 @@ def test_rollback_tracker_escapes_table_cells() -> None:  # SC-6 (I1)
     from discord_ferry.review import RollbackSummary, UntrackedSuspectChannel
 
     summary = RollbackSummary(
-        stoat_server_id="srv01",
+        stoat_server_id=SERVER_ID,
         stoat_server_name="Srv [/] X",
         channels_to_delete=[],
         roles_to_delete=[],
@@ -2025,7 +2026,7 @@ def _patched(order: list[str], report: CheckReport | None = None) -> Any:
         ),
         patch(
             "discord_ferry.cli.load_state",
-            return_value=MigrationState(stoat_server_id="srv1"),
+            return_value=MigrationState(stoat_server_id=SERVER_ID),
         ),
         patch(
             "discord_ferry.migrator.verify.run_check",
@@ -2350,7 +2351,7 @@ def test_check_summary_does_not_offer_merge_on_a_flatten_migration(
     reads, and fixing one without the other leaves half the audience wrong.
     """
     order: list[str] = []
-    state = MigrationState(stoat_server_id="srv1")
+    state = MigrationState(stoat_server_id=SERVER_ID)
     state.thread_strategy = "flatten"
     report = _check_report(("unverifiable", "tail_not_recorded"))
 
@@ -2375,7 +2376,7 @@ def test_check_summary_keeps_the_old_wording_when_no_strategy_was_recorded(
     would read as a defect rather than as an old file.
     """
     order: list[str] = []
-    state = MigrationState(stoat_server_id="srv1")
+    state = MigrationState(stoat_server_id=SERVER_ID)
     assert state.thread_strategy == ""
     report = _check_report(("unverifiable", "tail_not_recorded"))
 
@@ -2660,7 +2661,7 @@ def test_the_summary_does_not_claim_an_exclusive_cause(runner: CliRunner, tmp_pa
     a summary line.
     """
     for strategy in ("flatten", "merge", "archive"):
-        state = MigrationState(stoat_server_id="srv1")
+        state = MigrationState(stoat_server_id=SERVER_ID)
         state.thread_strategy = strategy
         report = _check_report(("unverifiable", "tail_window_exhausted"))
         order: list[str] = []
@@ -2680,7 +2681,7 @@ def test_the_summary_does_not_claim_an_exclusive_cause(runner: CliRunner, tmp_pa
 # ---------------------------------------------------------------------------
 
 D_MSG = "100000000000000001"
-S_CHANNEL = "01JSTOATCHN000000000OLD"
+S_CHANNEL = stoat_id(70)
 
 
 def _write_minimal_export(export_dir: Path, channel_id: str = "800000000000000001") -> Path:
@@ -2737,7 +2738,7 @@ def _write_state_with_one_failure(out_dir: Path) -> Path:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     state = MigrationState(
-        stoat_server_id="01JSTOATSRV000000000AAA",
+        stoat_server_id=SERVER_ID,
         channel_map={"800000000000000001": S_CHANNEL},
         failed_messages=[
             FailedMessage(discord_msg_id=D_MSG, stoat_channel_id=S_CHANNEL, error="timeout")
@@ -2842,7 +2843,7 @@ def test_retry_with_nothing_failed_exits_zero_in_the_coroutines_own_words(
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
 
     result = runner.invoke(main, _retry_argv(out_dir, export_dir))
     assert result.exit_code == 0, result.output
@@ -2936,7 +2937,7 @@ def test_repair_exits_zero_when_nothing_is_left_failing(runner: CliRunner, tmp_p
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
 
     async def _noop(*_a: Any, **_k: Any) -> RepairOutcome:
         return RepairOutcome()
@@ -2997,7 +2998,7 @@ def test_repair_passes_a_real_export_to_the_coroutine(runner: CliRunner, tmp_pat
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
     seen: dict[str, Any] = {}
 
     async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
@@ -3019,7 +3020,7 @@ def test_repair_registers_the_token_and_the_semaphore_before_any_request(
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
     order: list[str] = []
 
     async def _noop(*_a: Any, **_k: Any) -> RepairOutcome:
@@ -3055,7 +3056,7 @@ def test_repair_reports_a_refusal_and_exits_one(runner: CliRunner, tmp_path: Pat
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
 
     async def _raises(*_a: Any, **_k: Any) -> None:
         from discord_ferry.errors import CheckError
@@ -3101,7 +3102,7 @@ def test_repair_exits_non_zero_when_it_declined_a_repair(runner: CliRunner, tmp_
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
 
     async def _declines(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
         decline = {
@@ -3295,7 +3296,7 @@ def test_repair_exit_code_ignores_a_stale_decline_from_an_earlier_run(
     []. The two must agree. This run declines nothing new and fails nothing, so
     it must exit 0 and its document must show declined == [].
     """
-    state = MigrationState(stoat_server_id="srv1")
+    state = MigrationState(stoat_server_id=SERVER_ID)
     state.warnings.append({"phase": "repair", "type": "not_in_export", "message": "old run"})
     result = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json", state=state)
     doc = json.loads(result.stdout)
@@ -3320,7 +3321,7 @@ def test_repair_still_exits_zero_on_a_documented_partial_restore(
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
 
     async def _partial(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
         decline = {
@@ -3354,7 +3355,7 @@ def _invoke_repair(
     monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> Any:
     """Drive repair_cmd with a mocked run_repair outcome and post-repair check."""
-    st = state if state is not None else MigrationState(stoat_server_id="srv1")
+    st = state if state is not None else MigrationState(stoat_server_id=SERVER_ID)
     check_mock = (
         AsyncMock(side_effect=post_check_error)
         if post_check_error is not None
@@ -3449,8 +3450,8 @@ def test_repair_exit_code_identical_with_and_without_json(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """SC-1.4. The --json flag never changes the exit code."""
-    clean = MigrationState(stoat_server_id="srv1")
-    failing = MigrationState(stoat_server_id="srv1")
+    clean = MigrationState(stoat_server_id=SERVER_ID)
+    failing = MigrationState(stoat_server_id=SERVER_ID)
     failing.failed_messages = [FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="x")]
 
     for state, expected in ((clean, 0), (failing, 1)):
@@ -3520,7 +3521,7 @@ def test_repair_json_strips_control_chars_from_stdout(runner: CliRunner, tmp_pat
 
 def test_repair_json_mixed_run_is_consistent(runner: CliRunner, tmp_path: Path) -> None:
     """SC-I1. Every section populated; exit code equals the non-json run's."""
-    state = MigrationState(stoat_server_id="srv1")
+    state = MigrationState(stoat_server_id=SERVER_ID)
     state.failed_messages = [FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="x")]
     outcome = RepairOutcome(
         recreated_channels=[
@@ -3571,7 +3572,7 @@ def _backfill_state(tmp_path: Path) -> tuple[Path, Path]:
     out_dir.mkdir()
     from discord_ferry.state import save_state
 
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
     return out_dir, export_dir
 
 
@@ -3750,7 +3751,7 @@ def _save_plain_state(out_dir: Path) -> Path:
     from discord_ferry.state import save_state
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
     return out_dir
 
 

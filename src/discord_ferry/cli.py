@@ -727,7 +727,7 @@ def migrate(**kwargs: Any) -> None:
     try:
         with tracker.start_live():
             final_state = asyncio.run(run_migration(config, on_event=tracker.on_event))
-    except MigrationError as exc:
+    except (MigrationError, StateError) as exc:
         console.print(f"\n[bold red]Migration failed:[/] {_safe(exc)}")
         _print_feedback_hint()
         sys.exit(1)

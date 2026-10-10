@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PhaseFunction, run_migration
 from discord_ferry.state import FailedMessage, MigrationState, save_state
+from tests.stoat_ids import SERVER_ID
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback, MigrationEvent
@@ -66,19 +67,19 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     """Incremental mode carries forward ID maps and offsets from prior state."""
     prior = _make_prior_state(
         tmp_path,
-        channel_map={"111": "stoat-ch-111", "222": "stoat-ch-222"},
-        role_map={"aaa": "stoat-role-aaa"},
-        category_map={"cat1": "stoat-cat-1"},
-        emoji_map={"em1": "autumn-em-1"},
+        channel_map={"111": "01J5T000000000000000000111", "222": "01J5T000000000000000000222"},
+        role_map={"810": "01J5T000000000000000000810"},
+        category_map={"830": "stoat-cat-1"},
+        emoji_map={"850": "autumn-em-1"},
         avatar_cache={"user1": "autumn-av-1"},
-        stoat_server_id="stoat-server-xyz",
+        stoat_server_id=SERVER_ID,
         autumn_url="https://autumn.test",
         channel_message_offsets={"111": "99999"},
         attachments_uploaded=50,
         attachments_skipped=5,
     )
     # Add a fake message to the message_map so prior_messages_total is non-zero.
-    prior.message_map["discord-msg-1"] = "stoat-msg-1"
+    prior.message_map["860"] = "01J5T000000000000000000860"
     save_state(prior, tmp_path)
 
     events: list[MigrationEvent] = []
@@ -86,12 +87,15 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
 
     # ID maps are carried over
-    assert state.channel_map == {"111": "stoat-ch-111", "222": "stoat-ch-222"}
-    assert state.role_map == {"aaa": "stoat-role-aaa"}
-    assert state.category_map == {"cat1": "stoat-cat-1"}
-    assert state.emoji_map == {"em1": "autumn-em-1"}
+    assert state.channel_map == {
+        "111": "01J5T000000000000000000111",
+        "222": "01J5T000000000000000000222",
+    }
+    assert state.role_map == {"810": "01J5T000000000000000000810"}
+    assert state.category_map == {"830": "stoat-cat-1"}
+    assert state.emoji_map == {"850": "autumn-em-1"}
     assert state.avatar_cache == {"user1": "autumn-av-1"}
-    assert state.stoat_server_id == "stoat-server-xyz"
+    assert state.stoat_server_id == SERVER_ID
     assert state.autumn_url == "https://autumn.test"
 
     # Offsets carried over (channels not completed, so they can receive new messages)
@@ -136,14 +140,14 @@ async def test_incremental_skips_old_messages(tmp_path: Path) -> None:
     """
     _make_prior_state(
         tmp_path,
-        channel_map={"test-ch": "stoat-ch-test"},
-        channel_high_water={"test-ch": "200"},
+        channel_map={"870": "01J5T000000000000000000870"},
+        channel_high_water={"870": "200"},
         channel_message_offsets={},
     )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
     # The carried durable marker is what a real messages phase would skip against.
-    assert state.channel_high_water == {"test-ch": "200"}
+    assert state.channel_high_water == {"870": "200"}
     assert state.completed_channel_ids == set()
 
 
@@ -165,11 +169,11 @@ async def test_incremental_new_channel_full_migration(tmp_path: Path) -> None:
                 continue
             processed_ids.append(msg_id)
 
-    # Prior state only knows about "old-ch", not "new-ch"
+    # Prior state only knows about "880", not "new-ch"
     _make_prior_state(
         tmp_path,
-        channel_map={"old-ch": "stoat-old"},
-        channel_message_offsets={"old-ch": "999"},
+        channel_map={"880": "01J5T000000000000000000880"},
+        channel_message_offsets={"880": "999"},
     )
 
     overrides = {**_NOOP_OVERRIDES, "messages": spy_messages_phase}
@@ -194,18 +198,21 @@ async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> Non
     forum_key = "forum-my-forum"
     prior = _make_prior_state(
         tmp_path,
-        channel_map={"fp1": "stoat-fp1", f"forum-index-{forum_key}": "stoat-idx1"},
-        category_map={forum_key: "stoat-forumcat", "cat1": "stoat-cat1"},
-        category_names={forum_key: "my-forum", "cat1": "General"},
-        forum_channel_members={forum_key: ["fp1"]},
+        channel_map={
+            "890": "01J5T000000000000000000890",
+            f"forum-index-{forum_key}": "01J5T000000000000000000891",
+        },
+        category_map={forum_key: "stoat-forumcat", "830": "stoat-cat1"},
+        category_names={forum_key: "my-forum", "830": "General"},
+        forum_channel_members={forum_key: ["890"]},
         forum_category_names={forum_key: "my-forum"},
-        forum_index_message_ids={forum_key: "idx-msg-1"},
-        channel_message_counts={"fp1": 800},
-        channel_categories={"fp1": forum_key, "ch1": "cat1"},
+        forum_index_message_ids={forum_key: "01J5T000000000000000000892"},
+        channel_message_counts={"890": 800},
+        channel_categories={"890": forum_key, "871": "830"},
         native_fidelity_counts={"slowmode": 2, "user_limit": 1},
     )
     # Non-empty message_map so prior_messages_total is meaningful.
-    prior.message_map["old-1"] = "stoat-old-1"
+    prior.message_map["861"] = "01J5T000000000000000000861"
     save_state(prior, tmp_path)
 
     config = _make_config(tmp_path, incremental=True)
@@ -218,12 +225,12 @@ async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> Non
     rebuild.assert_awaited_once()
 
     # All forum-rebuild + membership fields carried verbatim from the prior run.
-    assert state.forum_channel_members == {forum_key: ["fp1"]}
+    assert state.forum_channel_members == {forum_key: ["890"]}
     assert state.forum_category_names == {forum_key: "my-forum"}
-    assert state.forum_index_message_ids == {forum_key: "idx-msg-1"}
-    assert state.channel_message_counts == {"fp1": 800}
-    assert state.category_names == {forum_key: "my-forum", "cat1": "General"}
-    assert state.channel_categories == {"fp1": forum_key, "ch1": "cat1"}
+    assert state.forum_index_message_ids == {forum_key: "01J5T000000000000000000892"}
+    assert state.channel_message_counts == {"890": 800}
+    assert state.category_names == {forum_key: "my-forum", "830": "General"}
+    assert state.channel_categories == {"890": forum_key, "871": "830"}
     # native_fidelity_counts carried cumulatively so the report reflects all runs.
     assert state.native_fidelity_counts == {"slowmode": 2, "user_limit": 1}
     # Carried lists are copies, not aliases of the prior structures.
@@ -237,7 +244,7 @@ async def test_incremental_delta_stats_in_report(tmp_path: Path) -> None:
     prior = _make_prior_state(tmp_path)
     # Simulate 10 messages were migrated in the prior run
     for i in range(10):
-        prior.message_map[f"old-msg-{i}"] = f"stoat-{i}"
+        prior.message_map[f"{900 + i}"] = f"01J5T{i:021d}"
     save_state(prior, tmp_path)
 
     config = _make_config(tmp_path, incremental=True)
@@ -264,12 +271,12 @@ async def test_incremental_carries_channel_high_water(tmp_path: Path) -> None:
     """Incremental carry-over copies channel_high_water and resets completed_channel_ids."""
     _make_prior_state(
         tmp_path,
-        channel_map={"ch1": "stoat-ch1"},
-        channel_high_water={"ch1": "300"},
+        channel_map={"871": "01J5T000000000000000000871"},
+        channel_high_water={"871": "300"},
     )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
-    assert state.channel_high_water == {"ch1": "300"}
+    assert state.channel_high_water == {"871": "300"}
     assert state.completed_channel_ids == set()
 
 
@@ -277,8 +284,8 @@ async def test_incremental_carries_failed_messages(tmp_path: Path) -> None:
     """SC-1: incremental carry-over copies prior.failed_messages forward."""
     _make_prior_state(
         tmp_path,
-        channel_map={"ch1": "stoat_ch1"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        channel_map={"871": "01J5T000000000000000000871"},
+        failed_messages=[FailedMessage("200", "01J5T000000000000000000871", "boom")],
     )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
@@ -289,8 +296,8 @@ async def test_incremental_carried_failed_messages_are_independent_copies(tmp_pa
     """SC-2: mutating a carried FailedMessage must not affect the prior state object."""
     prior = _make_prior_state(
         tmp_path,
-        channel_map={"ch1": "stoat_ch1"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom", retry_count=2)],
+        channel_map={"871": "01J5T000000000000000000871"},
+        failed_messages=[FailedMessage("200", "01J5T000000000000000000871", "boom", retry_count=2)],
     )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
@@ -308,30 +315,33 @@ async def test_incremental_carries_pending_emoji_rewrites(tmp_path: Path) -> Non
     """
     _make_prior_state(
         tmp_path,
-        emoji_map={"e1": "new_stoat"},
-        pending_emoji_rewrites={"e1": {"old": "old_stoat", "new": "new_stoat"}},
+        emoji_map={"851": "new_stoat"},
+        pending_emoji_rewrites={"851": {"old": "old_stoat", "new": "new_stoat"}},
     )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
-    assert state.pending_emoji_rewrites == {"e1": {"old": "old_stoat", "new": "new_stoat"}}
+    assert state.pending_emoji_rewrites == {"851": {"old": "old_stoat", "new": "new_stoat"}}
 
 
 async def test_incremental_carries_roles_finalized(tmp_path: Path) -> None:
     """SC-19: incremental carry-over copies prior.roles_finalized (C1)."""
     _make_prior_state(
         tmp_path,
-        role_map={"r1": "s1"},
-        roles_finalized={"r1"},
+        role_map={"810": "01J5T000000000000000000810"},
+        roles_finalized={"810"},
     )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
-    assert state.roles_finalized == {"r1"}
+    assert state.roles_finalized == {"810"}
 
 
 async def test_incremental_seeds_then_carries_roles_finalized_for_old_state(tmp_path: Path) -> None:
     """SC-19 (seed+carry): a completed prior state with no roles_finalized is seeded."""
     # _make_prior_state sets completed_at; roles_finalized defaults empty -> simulates an old ferry.
-    _make_prior_state(tmp_path, role_map={"r1": "s1", "r2": "s2"})
+    _make_prior_state(
+        tmp_path,
+        role_map={"810": "01J5T000000000000000000810", "811": "01J5T000000000000000000811"},
+    )
     config = _make_config(tmp_path, incremental=True)
     state = await run_migration(config, lambda e: None, phase_overrides=_NOOP_OVERRIDES)
-    assert state.roles_finalized == {"r1", "r2"}
+    assert state.roles_finalized == {"810", "811"}

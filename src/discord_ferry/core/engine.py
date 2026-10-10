@@ -1498,6 +1498,11 @@ async def run_retry_failed(
     # Collect failed IDs for single-scan lookup
     failed_ids = {fm.discord_msg_id for fm in state.failed_messages}
 
+    # #970: a retry sends to fm.stoat_channel_id, so it must be a channel this state
+    # created. load_state checks the id's shape; this checks it is one of ours. No live
+    # server fetch is added: the channel_map is the record of what Ferry created.
+    mapped_channels = set(state.channel_map.values())
+
     on_event(
         MigrationEvent(
             phase="retry",
@@ -1540,6 +1545,17 @@ async def run_retry_failed(
                 continue
 
             stoat_channel_id = fm.stoat_channel_id
+            if stoat_channel_id not in mapped_channels:
+                message = (
+                    f"Message {fm.discord_msg_id} is recorded against channel {stoat_channel_id}, "
+                    "which is not one of the channels this migration created. Not retried."
+                )
+                state.warnings.append(
+                    {"phase": "retry", "type": "retry_unmapped_channel", "message": message}
+                )
+                on_event(MigrationEvent(phase="retry", status="warning", message=message))
+                still_failed.append(fm)
+                continue
             try:
                 await _process_message(
                     msg=found_msg,
@@ -2533,6 +2549,31 @@ async def _rewrite_emoji_references(
     return rewritten, declined, failed
 
 
+def _owned_pending_rewrites(
+    state: MigrationState,
+) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Split the repair resume records into those this state owns and those it does not.
+
+    A record is written in the same save that points ``emoji_map`` at the new emoji, so
+    a genuine one always has ``emoji_map[discord_id] == record["new"]``. Anything else
+    would rewrite messages to reference an emoji this migration never made (#970).
+    Both the real pass and the dry-run preview read this, so they cannot disagree.
+
+    Returns ``(owned, declined_messages)``. Declined records stay in the state.
+    """
+    owned: dict[str, dict[str, str]] = {}
+    declined: list[str] = []
+    for discord_id, record in state.pending_emoji_rewrites.items():
+        if state.emoji_map.get(discord_id) == record.get("new"):
+            owned[discord_id] = record
+        else:
+            declined.append(
+                f"Emoji rewrite record for {discord_id} names an emoji that is not the one "
+                "this state mapped it to. Left alone."
+            )
+    return owned, declined
+
+
 async def _run_emoji_repair_pass(
     session: aiohttp.ClientSession,
     config: FerryConfig,
@@ -2563,7 +2604,13 @@ async def _run_emoji_repair_pass(
     # rewrites to the (now dead) recorded id and clears the record, then the
     # emoji_work loop recreates a fresh id and rewrites again. Extra edits, correct
     # final state. So this loop must not assume disjointness.
-    for pending_id, pending in list(state.pending_emoji_rewrites.items()):
+    owned_rewrites, declined_rewrites = _owned_pending_rewrites(state)
+    for notice in declined_rewrites:
+        state.warnings.append(
+            {"phase": "repair", "type": "emoji_rewrite_not_owned", "message": notice}
+        )
+        on_event(MigrationEvent(phase="repair", status="warning", message=notice))
+    for pending_id, pending in list(owned_rewrites.items()):
         rewritten, declined, failed = await _rewrite_emoji_references(
             session, config, state, pending_id, pending["new"], exports, on_event
         )
@@ -2849,7 +2896,10 @@ async def run_repair(
             )
         # An outstanding resume record from a crashed run is work a real run would
         # do first. The preview must name it, or it reads as "nothing to do".
-        for pending_id, pending in state.pending_emoji_rewrites.items():
+        preview_rewrites, preview_declined = _owned_pending_rewrites(state)
+        for notice in preview_declined:
+            on_event(MigrationEvent(phase="repair", status="warning", message=notice))
+        for pending_id, pending in preview_rewrites.items():
             record = find_emoji_in_exports(exports, pending_id)
             outcome.recreated_emoji.append(
                 {
@@ -3408,6 +3458,19 @@ def _validate_rollback_inputs(state: MigrationState, config: FerryConfig) -> str
     return server_id
 
 
+def _server_channel_ids(server_obj: dict[str, Any]) -> set[str]:
+    """Every channel id the live server lists (ids, or objects carrying an id)."""
+    ids: set[str] = set()
+    for c in server_obj.get("channels") or []:
+        if isinstance(c, str):
+            ids.add(c)
+        elif isinstance(c, dict):
+            cid = c.get("_id") or c.get("id")
+            if cid:
+                ids.add(cid)
+    return ids
+
+
 def _build_rollback_targets(
     state: MigrationState,
     server_obj: dict[str, Any],
@@ -3428,14 +3491,7 @@ def _build_rollback_targets(
         Sorted list of suspect channels (each with opted_in=False).
     """
     channel_names = _channel_names_from_server(server_obj)
-    server_channel_ids: set[str] = set()
-    for c in server_obj.get("channels", []):
-        if isinstance(c, str):
-            server_channel_ids.add(c)
-        elif isinstance(c, dict):
-            cid = c.get("_id") or c.get("id")
-            if cid:
-                server_channel_ids.add(cid)
+    server_channel_ids = _server_channel_ids(server_obj)
 
     mapped_ids = set(state.channel_map.values())
     untracked_ids = server_channel_ids - mapped_ids
@@ -3802,11 +3858,29 @@ async def run_rollback(
             sem = asyncio.BoundedSemaphore(config.max_concurrent_requests)
             channel_tasks: list[Coroutine[Any, Any, None]] = []
             seen: set[str] = set()
+            # #970: only a channel the live server lists under THIS server is deleted. A
+            # recorded id the server does not list is either already gone or belongs
+            # elsewhere, and a DELETE cannot tell those apart. This is the same set the
+            # confirmation summary above was built from, so the preview and the action agree.
+            server_channel_ids = _server_channel_ids(server_obj)
             for stoat_id in state.channel_map.values():
                 if stoat_id in seen:
                     continue
                 seen.add(stoat_id)
                 if stoat_id in state.rollback_progress.rolled_back_ids:
+                    continue
+                if stoat_id not in server_channel_ids:
+                    skipped = (
+                        f"Channel {stoat_id} is not listed on server {server_id}; not deleting it."
+                    )
+                    state.warnings.append(
+                        {
+                            "phase": "rollback",
+                            "type": "rollback_channel_not_on_server",
+                            "message": skipped,
+                        }
+                    )
+                    on_event(MigrationEvent(phase="rollback", status="warning", message=skipped))
                     continue
                 channel_tasks.append(
                     _delete_one_channel(stoat_id, sem, config, state, session, on_event)

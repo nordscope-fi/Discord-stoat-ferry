@@ -10,9 +10,12 @@ from unittest.mock import AsyncMock, patch
 from discord_ferry.config import FerryConfig
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.state import MigrationState
+from tests.stoat_ids import SERVER_ID, stoat_id
 
 BASE_URL = "https://api.test"
 TOKEN = "test-token"
+CH1, CH2, CH3 = stoat_id(1), stoat_id(2), stoat_id(3)
+MSG1, MSG2 = stoat_id(11), stoat_id(12)
 
 
 # ---------------------------------------------------------------------------
@@ -28,9 +31,12 @@ def _make_config(output_dir: Path) -> FerryConfig:
 
 def _make_state(pending: list[tuple[str, str]] | None = None) -> MigrationState:
     state = MigrationState()
-    state.stoat_server_id = "srv1"
+    state.stoat_server_id = SERVER_ID
     if pending is not None:
         state.pending_pins = pending
+        # Every channel the queue names was created by this migration (#970).
+        channels = sorted({channel for channel, _ in pending})
+        state.channel_map = {str(810 + i): channel for i, channel in enumerate(channels)}
     return state
 
 
@@ -56,7 +62,7 @@ async def test_run_pins_successful_pin(tmp_path: Path) -> None:
     """Pins a message successfully and increments the counter."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    state = _make_state(pending=[("ch1", "msg1")])
+    state = _make_state(pending=[(CH1, MSG1)])
 
     mock_pin = AsyncMock(return_value={})
     with (
@@ -69,8 +75,8 @@ async def test_run_pins_successful_pin(tmp_path: Path) -> None:
         mock_pin.call_args[0][0],  # session
         BASE_URL,
         TOKEN,
-        "ch1",
-        "msg1",
+        CH1,
+        MSG1,
     )
     assert state.pins_applied == 1
 
@@ -79,7 +85,7 @@ async def test_run_pins_error_handling(tmp_path: Path) -> None:
     """Failed pin stays in pending; successful one is consumed."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    state = _make_state(pending=[("ch1", "msg1"), ("ch1", "msg2")])  # 1 fails, 1 ok
+    state = _make_state(pending=[(CH1, MSG1), (CH1, MSG2)])  # 1 fails, 1 ok
 
     call_count = 0
 
@@ -98,14 +104,14 @@ async def test_run_pins_error_handling(tmp_path: Path) -> None:
 
     assert len(state.errors) == 1
     assert state.pins_applied == 1
-    assert state.pending_pins == [("ch1", "msg1")]
+    assert state.pending_pins == [(CH1, MSG1)]
 
 
 async def test_run_pins_counter_increment(tmp_path: Path) -> None:
     """pins_applied increments correctly for each successful pin."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    pending = [("ch1", f"msg{i}") for i in range(4)]
+    pending = [(CH1, stoat_id(20 + i)) for i in range(4)]
     state = _make_state(pending=pending)
 
     mock_pin = AsyncMock(return_value={})
@@ -125,7 +131,7 @@ async def test_run_pins_emits_progress_events(tmp_path: Path) -> None:
     """Progress events are emitted with correct current/total values."""
     events: list[Any] = []
     config = _make_config(tmp_path)
-    pending = [("ch1", "msgA"), ("ch2", "msgB"), ("ch3", "msgC")]
+    pending = [(CH1, stoat_id(31)), (CH2, stoat_id(32)), (CH3, stoat_id(33))]
     state = _make_state(pending=pending)
 
     mock_pin = AsyncMock(return_value={})
@@ -144,7 +150,7 @@ async def test_run_pins_emits_progress_events(tmp_path: Path) -> None:
 
 async def test_run_pins_clears_pending_on_success(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    state = _make_state(pending=[("ch1", f"msg{i}") for i in range(4)])
+    state = _make_state(pending=[(CH1, stoat_id(20 + i)) for i in range(4)])
 
     with (
         patch("discord_ferry.migrator.pins.api_pin_message", new=AsyncMock(return_value={})),
@@ -161,7 +167,7 @@ async def test_run_pins_resume_no_double_count(tmp_path: Path) -> None:
 
     config = _make_config(tmp_path)
     config.checkpoint_interval = 1
-    state = _make_state(pending=[("ch1", f"msg{i}") for i in range(5)])
+    state = _make_state(pending=[(CH1, stoat_id(20 + i)) for i in range(5)])
 
     n = 0
 
@@ -197,7 +203,7 @@ async def test_run_pins_resume_no_double_count(tmp_path: Path) -> None:
 async def test_run_pins_dry_run_reports_full(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.dry_run = True
-    state = _make_state(pending=[("ch1", f"msg{i}") for i in range(3)])
+    state = _make_state(pending=[(CH1, stoat_id(20 + i)) for i in range(3)])
 
     mock_pin = AsyncMock(return_value={})
     with patch("discord_ferry.migrator.pins.api_pin_message", new=mock_pin):
