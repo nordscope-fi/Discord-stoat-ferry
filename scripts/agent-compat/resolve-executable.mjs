@@ -41,6 +41,26 @@ function notFound(name) {
   return error;
 }
 
+// The same rule applied to a whole search path, for a child process that will do its own
+// lookups. The Context7 server starts with `#!/usr/bin/env node`, so the PATH it inherits
+// decides which `node` receives the key.
+export function trustedSearchPath(pathValue, {
+  cwd = process.cwd(),
+  home = homedir(),
+} = {}) {
+  const workingDirectory = realOrSelf(cwd);
+  const subtreeRefused = !isInside(workingDirectory, realOrSelf(home));
+  return String(pathValue ?? '')
+    .split(delimiter)
+    .filter((entry) => {
+      if (!entry || !isAbsolute(entry)) return false;
+      const directory = realOrSelf(entry);
+      return !(directory === workingDirectory
+        || (subtreeRefused && isInside(workingDirectory, directory)));
+    })
+    .join(delimiter);
+}
+
 export function resolveExecutable(name, {
   pathValue = process.env.PATH ?? '',
   cwd = process.cwd(),

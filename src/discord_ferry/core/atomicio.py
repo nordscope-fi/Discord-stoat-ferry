@@ -28,6 +28,7 @@ aliased method, ``getattr``, or a fifth module that starts owning a document. It
 is a tripwire on the obvious path, not proof of coverage.
 """
 
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -85,5 +86,8 @@ def atomic_write_text(path: Path, text: str) -> None:
         tmp_path.write_text(text, encoding="utf-8")
         replace_with_retry(tmp_path, path)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        # A temp file Windows still holds open cannot be removed either. The caller
+        # needs the error that stopped the write, not this one.
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
         raise

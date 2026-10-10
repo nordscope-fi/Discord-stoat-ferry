@@ -277,3 +277,21 @@ def test_document_modules_never_write_text_directly() -> None:
         "these modules own durable documents and must call atomic_write_text "
         f"rather than write_text directly: {offenders}"
     )
+
+
+def test_a_cleanup_failure_does_not_replace_the_original_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If removing the temp file also fails, the caller still sees why the write failed."""
+    target = tmp_path / "doc.json"
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "destination held open")
+
+    def stuck(self: Path, *args: object, **kwargs: object) -> None:
+        raise PermissionError(32, "temp file still open")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    monkeypatch.setattr(Path, "unlink", stuck)
+    with pytest.raises(PermissionError, match="destination held open"):
+        atomic_write_text(target, '{"new": true}')
