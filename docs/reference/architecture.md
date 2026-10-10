@@ -226,7 +226,7 @@ class MigrationState:
 
     # Upload caches (avoid re-uploading identical files)
     avatar_cache: dict[str, str]  # User ID → Autumn avatar file ID
-    upload_cache: dict[str, str]  # Local file path → Autumn file ID
+    upload_cache: dict[str, str]  # "<tag>:<local file path>" → Autumn file ID
 
     # Author context (for mention remapping in transforms)
     author_names: dict[str, str]  # Discord user ID → display name

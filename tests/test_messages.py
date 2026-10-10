@@ -654,7 +654,7 @@ async def test_attachment_upload_cache_used(tmp_path: Path, mock_aiohttp: aiores
     """If an attachment is in upload_cache, it is not re-uploaded."""
     att_file = tmp_path / "cached.png"
     att_file.write_bytes(b"x" * 10)
-    cache_key = str(att_file)
+    cache_key = f"attachments:{att_file}"
 
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
     # No upload mock — if upload is attempted it will raise.
