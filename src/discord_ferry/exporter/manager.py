@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING
 import aiohttp
 from packaging.tags import platform_tags
 
-from discord_ferry.core.http import new_session, proxy_error_is_permanent, proxy_hint, tls_hint
+from discord_ferry.core.http import (
+    new_session,
+    proxy_error_is_permanent,
+    proxy_hint,
+    read_bounded,
+    tls_hint,
+)
 from discord_ferry.errors import DCENotFoundError, ValidationError
 
 if TYPE_CHECKING:
@@ -237,10 +243,11 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
                         raise DCENotFoundError(
                             f"Failed to download {asset_name}: HTTP {resp.status}"
                         )
-                    data = await resp.read()
-                    if len(data) > _MAX_DCE_BYTES:
+                    data = await read_bounded(resp, _MAX_DCE_BYTES)
+                    if data is None:
                         raise DCENotFoundError(
-                            f"DCE download unexpectedly large ({len(data)} bytes); aborting"
+                            f"DCE download exceeded the size limit ({_MAX_DCE_BYTES} bytes); "
+                            "aborting"
                         )
 
             break  # success — exit retry loop
