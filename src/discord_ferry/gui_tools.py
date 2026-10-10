@@ -662,7 +662,12 @@ def blueprint_export_page() -> None:
             if not output:
                 ui.notify("Enter an output path for the blueprint.", type="warning")
                 return
-            exports = parse_export_directory(Path(from_dir))
+            try:
+                exports = parse_export_directory(Path(from_dir))
+            except MigrationError as exc:
+                with results:
+                    ui.label(f"Could not read the export: {exc}").classes("text-red-600")
+                return
             if not exports:
                 with results:
                     ui.label("No valid DCE JSON files found in that directory.").classes(

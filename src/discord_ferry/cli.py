@@ -760,7 +760,12 @@ def migrate(**kwargs: Any) -> None:
 def validate(export_dir: str, rate_limit: float) -> None:
     """Parse and validate export only, no API calls."""
     export_path = Path(export_dir)
-    exports = parse_export_directory(export_path)
+    try:
+        exports = parse_export_directory(export_path)
+    except MigrationError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(exc)}")
+        _print_feedback_hint()
+        sys.exit(1)
 
     if not exports:
         console.print("[bold red]Error:[/] No valid DCE JSON files found.")
@@ -897,7 +902,12 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
     """Export a DCE export directory as a reusable blueprint."""
     from discord_ferry.blueprint import blueprint_from_exports, export_blueprint
 
-    exports = parse_export_directory(Path(from_dir))
+    try:
+        exports = parse_export_directory(Path(from_dir))
+    except MigrationError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(exc)}")
+        _print_feedback_hint()
+        sys.exit(1)
     if not exports:
         console.print("[bold red]Error:[/] No valid DCE JSON files found.")
         _print_feedback_hint()
