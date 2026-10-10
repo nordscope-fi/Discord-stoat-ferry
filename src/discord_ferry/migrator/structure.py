@@ -1705,8 +1705,6 @@ async def run_channels(
                 await asyncio.sleep(config.upload_delay)
 
                 if index_msg_id:
-                    # A real id supersedes any carried mark; keep the two disjoint.
-                    state.forum_index_present_unknown_id.discard(forum_key)
                     await api_pin_message(
                         session,
                         config.stoat_url,
@@ -1719,6 +1717,12 @@ async def run_channels(
                 # Insert at position 0 so it appears at the top of the category.
                 category_channels.setdefault(forum_cat_stoat_id, []).insert(0, index_channel_id)
                 state.channel_map[f"forum-index-{forum_key}"] = index_channel_id
+                if index_msg_id:
+                    # Record the id beside the channel wiring so the REPORT-phase rebuild
+                    # edits this message instead of posting and pinning a second index
+                    # (#560). A real id supersedes any carried mark; keep the two disjoint.
+                    state.forum_index_message_ids[forum_key] = index_msg_id
+                    state.forum_index_present_unknown_id.discard(forum_key)
                 # Keyed identically to the id above, synthetic prefix and all, so
                 # the rename check needs no special case for it. index_name came
                 # from make_unique_channel_name, so it is truncated exactly as an
