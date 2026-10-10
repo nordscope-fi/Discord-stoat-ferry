@@ -448,7 +448,7 @@ _common_options = [
         envvar="STOAT_TOKEN",
         default=None,
         help=(
-            "Stoat user token (from browser Local Storage). "
+            "Stoat user token (from browser IndexedDB, see the setup guide). "
             "Prefer the STOAT_TOKEN environment variable"
         ),
     ),
@@ -818,7 +818,8 @@ def validate(export_dir: str, rate_limit: float) -> None:
     envvar="STOAT_TOKEN",
     required=True,
     help=(
-        "Stoat user token (from browser Local Storage). Prefer the STOAT_TOKEN environment variable"
+        "Stoat user token (from browser IndexedDB, see the setup guide). "
+        "Prefer the STOAT_TOKEN environment variable"
     ),
 )
 @click.option("--name", default=None, help="Override server name from blueprint")
@@ -1139,7 +1140,8 @@ class _RollbackProgressTracker:
     envvar="STOAT_TOKEN",
     default=None,
     help=(
-        "Stoat user token (from browser Local Storage). Prefer the STOAT_TOKEN environment variable"
+        "Stoat user token (from browser IndexedDB, see the setup guide). "
+        "Prefer the STOAT_TOKEN environment variable"
     ),
 )
 @click.option(

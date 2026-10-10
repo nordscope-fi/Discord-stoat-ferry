@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.1] - 2026-10-11
+
+### Fixed
+
+- The guide for finding your Stoat user token now points to the right place. The current Stoat web app keeps the token in the browser's IndexedDB (`localforage`, then `keyvaluepairs`, then the `auth` row, under `session.token`), and its Local Storage is empty, so anyone following the old steps found nothing to copy. The setup guide, the hint under the token field in the browser interface, and the `--token` help text of three commands now name the new location. The guide also warns against copying `userId` from the same preview by mistake.
+
 ## [2.43.0] - 2026-10-11
 
 ### Changed
