@@ -1274,6 +1274,142 @@ def test_recommendation_coverage_complete_allows_turn(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    ["changed", "missing", "unreadable", "invalid_locator"],
+)
+def test_selected_repository_source_freshness_blocks(tmp_path: Path, mutation: str) -> None:
+    root, source_receipt_id, _ = complete_recommendation_coverage(tmp_path)
+    source = root / "docs/reference.md"
+    if mutation == "changed":
+        source.write_text("# Reference\n\nAtomic rename now has different semantics.\n")
+    elif mutation == "missing":
+        source.unlink()
+    elif mutation == "unreadable":
+        source.unlink()
+        source.mkdir()
+    else:
+        receipt_path = root / COMPLETED_RECEIPTS / f"{source_receipt_id}.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["source"]["locator"] = "../outside.md"
+        receipt.pop("integrity_sha256")
+        receipt["integrity_sha256"] = receipt_digest(receipt)
+        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+    result = stop_turn(root, "## Recommendation\n\nUse the file approach.")
+
+    assert result.stdout != ""
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block"
+    assert decision["reason"] == (
+        "Brainstorm repository source changed or is unavailable: "
+        f"{'../outside.md' if mutation == 'invalid_locator' else 'docs/reference.md'}."
+    )
+    assert "Atomic rename" not in decision["reason"]
+
+
+def test_fresh_selected_reread_allows_with_unused_stale_receipt(tmp_path: Path) -> None:
+    root, _, _ = complete_recommendation_coverage(tmp_path)
+    source = root / "docs/reference.md"
+    source.write_text("# Reference\n\nAtomic rename replaces a file.\n\nUpdated guidance.\n")
+    source_input = {"file_path": str(source)}
+    before_tool(root, "Read", source_input, tool_use_id="fresh-drawback-source")
+    after_tool(
+        root,
+        "Read",
+        source_input,
+        "Atomic rename replaces a file.\nUpdated guidance.",
+        tool_use_id="fresh-drawback-source",
+    )
+    receipts = [json.loads(path.read_text()) for path in receipt_files(root, COMPLETED_RECEIPTS)]
+    fresh_receipt = next(
+        receipt
+        for receipt in receipts
+        if receipt["kind"] == "source"
+        and receipt["source"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    )
+    ledger = read_ledger(root)
+    ledger["drawback_resolutions"][0]["receipt_id"] = fresh_receipt["receipt_id"]
+    write_ledger(root, ledger)
+
+    result = stop_turn(root, "## Recommendation\n\nUse the file approach.")
+
+    assert result.stdout == ""
+
+
+def test_earlier_generation_stale_repository_receipt_stays_ignored(tmp_path: Path) -> None:
+    root, source_receipt_id, _ = complete_recommendation_coverage(tmp_path)
+    source = root / "docs/reference.md"
+    source.write_text("# Reference\n\nAtomic rename replaces a file.\n\nUpdated guidance.\n")
+    source_input = {"file_path": str(source)}
+    before_tool(root, "Read", source_input, tool_use_id="fresh-drawback-source")
+    after_tool(
+        root,
+        "Read",
+        source_input,
+        "Atomic rename replaces a file.\nUpdated guidance.",
+        tool_use_id="fresh-drawback-source",
+    )
+    receipt_path = root / COMPLETED_RECEIPTS / f"{source_receipt_id}.json"
+    stale_receipt = json.loads(receipt_path.read_text())
+    stale_receipt["generation"] = "earlier-generation"
+    stale_receipt.pop("integrity_sha256")
+    stale_receipt["integrity_sha256"] = receipt_digest(stale_receipt)
+    receipt_path.write_text(json.dumps(stale_receipt, indent=2) + "\n")
+    fresh_receipt = next(
+        json.loads(path.read_text())
+        for path in receipt_files(root, COMPLETED_RECEIPTS)
+        if path.name != receipt_path.name and json.loads(path.read_text())["kind"] == "source"
+    )
+    ledger = read_ledger(root)
+    ledger["drawback_resolutions"][0]["receipt_id"] = fresh_receipt["receipt_id"]
+    write_ledger(root, ledger)
+
+    result = stop_turn(root, "## Recommendation\n\nUse the file approach.")
+
+    assert result.stdout == ""
+
+
+def test_selected_nonrepository_source_keeps_current_behavior(tmp_path: Path) -> None:
+    root, source_receipt_id, _ = complete_recommendation_coverage(tmp_path)
+    receipt_path = root / COMPLETED_RECEIPTS / f"{source_receipt_id}.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source"] = {
+        "type": "web",
+        "locator": "https://example.invalid/reference",
+        "sha256": hashlib.sha256(b"https://example.invalid/reference").hexdigest(),
+    }
+    receipt.pop("integrity_sha256")
+    receipt["integrity_sha256"] = receipt_digest(receipt)
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+    result = stop_turn(root, "## Recommendation\n\nUse the file approach.")
+
+    assert result.stdout == ""
+
+
+def test_selected_stale_repository_source_has_same_reason_for_every_host(tmp_path: Path) -> None:
+    reasons = []
+    for host in ("claude", "codex", "qwen"):
+        root, _, _ = complete_recommendation_coverage(tmp_path / host)
+        (root / "docs/reference.md").write_text("# Changed reference\n")
+        if host != "claude":
+            for marker in receipt_files(root, PROMPT_MARKERS):
+                marker.unlink()
+            submit_prompt_for_host(root, host, "continue")
+
+        result = stop_turn_for_host(root, host, "## Recommendation\n\nUse the file approach.")
+        assert result.stdout != ""
+        decision = json.loads(result.stdout)
+        assert decision["decision"] == "block"
+        reasons.append(decision["reason"])
+
+    assert (
+        reasons
+        == ["Brainstorm repository source changed or is unavailable: docs/reference.md."] * 3
+    )
+
+
+@pytest.mark.parametrize(
     ("mutation", "expected_identifier"),
     [
         ("missing_drawback_receipt", "drawback-a1"),

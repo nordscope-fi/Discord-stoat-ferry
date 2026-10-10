@@ -1043,6 +1043,37 @@ function normalizedQuotedLine(value) {
   return typeof value === 'string' ? value.trim().replace(/\s+/gu, ' ') : '';
 }
 
+function repositorySourceFreshnessFinding(root, receipt) {
+  if (receipt?.kind !== 'source' || receipt.source?.type !== 'repository') return null;
+  const locator = receipt.source.locator;
+  if (typeof locator !== 'string' || locator.length === 0) {
+    return validationFinding(
+      'source_freshness',
+      [receipt.receipt_id],
+      `Brainstorm repository source changed or is unavailable: ${receipt.receipt_id}.`,
+    );
+  }
+  const relative = worktreeRelativePath(root, locator);
+  let currentSha256;
+  try {
+    if (relative !== locator) throw new Error('invalid repository source locator');
+    currentSha256 = sha256(readFileSync(resolve(root, relative)));
+  } catch {
+    return validationFinding(
+      'source_freshness',
+      [locator],
+      `Brainstorm repository source changed or is unavailable: ${locator}.`,
+    );
+  }
+  return currentSha256 === receipt.source.sha256
+    ? null
+    : validationFinding(
+        'source_freshness',
+        [locator],
+        `Brainstorm repository source changed or is unavailable: ${locator}.`,
+      );
+}
+
 function receiptIntegrityFinding(record, ledger) {
   const id = record.file_id;
   const receipt = record.receipt;
@@ -1198,6 +1229,8 @@ export function validateRecommendation(ledger, receipts, { root }) {
     const matches = resolutions.filter((resolution) => resolution?.drawback_id === drawbackId);
     const resolution = matches.length === 1 ? matches[0] : null;
     const receipt = receiptById.get(resolution?.receipt_id);
+    const freshnessFinding = repositorySourceFreshnessFinding(root, receipt);
+    if (freshnessFinding !== null) return freshnessFinding;
     const quote = normalizedQuotedLine(resolution?.quote);
     if (
       resolution?.status !== 'resolved'
