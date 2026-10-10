@@ -69,8 +69,14 @@ jobs:
         run: uv run pytest -n 4 --dist=load --ignore=tests/test_dce_contract.py --durations=20
 
   contract-test:
-    name: Contract test (DCE binary)
-    runs-on: ubuntu-latest
+    # Windows too: the exporter now starts with an allowlisted environment (#976),
+    # and only a real Windows run proves .NET still finds what it needs there.
+    name: Contract test (DCE binary)${{ matrix.os == 'windows-latest' && ' (Windows)' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
