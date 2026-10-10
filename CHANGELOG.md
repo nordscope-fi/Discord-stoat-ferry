@@ -23,6 +23,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - Give the chat exporter only the environment it needs (#976). Ferry used to start DiscordChatExporter with a full copy of its own environment, so every secret Ferry could see, such as the Stoat token or an unrelated API key, was visible to the exporter. The exporter now receives a short list of variables. These are the path and temp settings, the Windows system folders, and the home and locale settings. They also include the proxy and CA bundle settings (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). The Discord token is set from Ferry's own configuration. Everything else is left out. On Windows the names match without regard to case. The exporter is a self-contained .NET program, so it needs no `DOTNET_ROOT`. Of the `DOTNET_*` settings only `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` is passed on; if you relied on another one reaching the exporter, tell us in an issue.
+### Fixed
+
+- The feedback service now runs one GitHub search for a pending feedback request at a time (#959).
+  A report whose first send was cut off stays pending, and each repeat of that same request
+  searched GitHub for the report on its own. Repeats of a pending request do not count against
+  the report quota, so several at once meant several searches. Repeats that arrive while a search
+  is running now wait for it and get its answer, whether it found the report or not. Once it ends,
+  the next retry searches again. The first search also marks the receipt delivered, so the other
+  repeats no longer fail with a server error when they try to do the same. A request that is
+  already delivered still never reads from GitHub. The feedback service needs a redeploy for this
+  to take effect.
 
 ## [2.41.30] - 2026-10-10
 

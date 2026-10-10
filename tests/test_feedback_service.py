@@ -54,6 +54,7 @@ from discord_ferry.feedback_service.github import (
 )
 from discord_ferry.feedback_service.store import (
     FeedbackStore,
+    ReceiptClaim,
     ReceiptState,
     keyed_content_hash,
 )
@@ -1738,5 +1739,154 @@ async def test_default_sweep_interval_comes_from_the_config(tmp_path: object) ->
     try:
         assert config.expiry_sweep_interval_seconds == 60 * 60
         assert [t for t in asyncio.all_tasks() if t.get_name() == _SWEEP_TASK_NAME]
+    finally:
+        await client.close()
+
+
+_REPLAYS = 4
+_PENDING_DESTINATION = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/959"
+
+
+class _ClaimCountingStore(FeedbackStore):
+    """Real store that counts finished receipt claims, so a test knows when requests arrived."""
+
+    claims_done = 0
+
+    async def claim_receipt(
+        self,
+        request_id: UUID,
+        content_hash: str,
+        destination_kind: DestinationKind,
+        *,
+        now: datetime,
+        legacy_content_hash: str | None = None,
+    ) -> ReceiptClaim:
+        claim = await super().claim_receipt(
+            request_id,
+            content_hash,
+            destination_kind,
+            now=now,
+            legacy_content_hash=legacy_content_hash,
+        )
+        self.claims_done += 1
+        return claim
+
+
+class _HeldReconcileGitHub(_FeedbackGitHub):
+    """Leaves a receipt pending, then holds every reconciliation until ``gate`` is set."""
+
+    def __init__(self, outcome: ReconciledDestination | Exception) -> None:
+        super().__init__(GitHubDeliveryUncertainError("lost response"), reconcile_result=outcome)
+        self.gate = asyncio.Event()
+
+    async def reconcile_pending(self, receipt: object) -> ReconciledDestination:
+        self.reconcile_calls += 1
+        await self.gate.wait()
+        outcome = self.reconcile_result
+        if isinstance(outcome, Exception):
+            raise outcome
+        assert outcome is not None
+        return outcome
+
+
+def _report_quota_events(path: Path) -> int:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+        ).fetchone()
+    finally:
+        connection.close()
+    return int(row[0])
+
+
+async def _pending_replay_client(
+    tmp_path: object, github: _HeldReconcileGitHub
+) -> tuple[TestClient, _ClaimCountingStore, Path, dict[str, object]]:
+    """Start the service and leave one valid receipt pending after an uncertain write."""
+
+    from discord_ferry.feedback_service.app import create_app
+
+    config = _service_config(tmp_path)
+    store = _ClaimCountingStore(
+        config.database_path,
+        contact_key=config.contact_key,
+        source_hash_key=config.source_hash_key,
+    )
+    client = TestClient(TestServer(create_app(config, store=store, github=github, now=lambda: NOW)))
+    await client.start_server()
+    body = _feedback_request().to_mapping()
+    first = await client.post("/v1/feedback", json=body)
+    assert first.status == 503
+    assert store.claims_done == 1
+    return client, store, config.database_path, body
+
+
+async def _replay_while_held(
+    client: TestClient,
+    store: _ClaimCountingStore,
+    github: _HeldReconcileGitHub,
+    body: dict[str, object],
+) -> list[aiohttp.ClientResponse]:
+    """Send identical replays together, release the held reconciliation, return the replies."""
+
+    tasks = [asyncio.create_task(client.post("/v1/feedback", json=body)) for _ in range(_REPLAYS)]
+    # Each claim finishes in the same loop step that enters the reconcile step, so once all
+    # replays have claimed, every one has either started a scan or joined one.
+    await _wait_until(lambda: store.claims_done == 1 + _REPLAYS)
+    github.gate.set()
+    return list(await asyncio.gather(*tasks))
+
+
+async def test_pending_replays_share_one_github_reconciliation(tmp_path: object) -> None:
+    github = _HeldReconcileGitHub(
+        ReconciledDestination(DestinationKind.ISSUE, _PENDING_DESTINATION)
+    )
+    client, store, database, body = await _pending_replay_client(tmp_path, github)
+    try:
+        report_events = _report_quota_events(database)
+        replies = await _replay_while_held(client, store, github, body)
+        assert [reply.status for reply in replies] == [200] * _REPLAYS
+        assert {(await reply.json())["url"] for reply in replies} == {_PENDING_DESTINATION}
+        assert github.reconcile_calls == 1
+        assert len(github.issue_requests) == 1
+        assert report_events == 1
+        assert _report_quota_events(database) == report_events
+    finally:
+        await client.close()
+
+
+async def test_pending_replays_share_an_unresolved_reconciliation_then_scan_again(
+    tmp_path: object,
+) -> None:
+    github = _HeldReconcileGitHub(ReconciliationRequiredError("zero matches"))
+    client, store, _database, body = await _pending_replay_client(tmp_path, github)
+    try:
+        replies = await _replay_while_held(client, store, github, body)
+        assert [reply.status for reply in replies] == [503] * _REPLAYS
+        assert github.reconcile_calls == 1
+        # The shared scan is over, so a later retry is a new request and scans once more.
+        later = await client.post("/v1/feedback", json=body)
+        assert later.status == 503
+        assert github.reconcile_calls == 2
+    finally:
+        await client.close()
+
+
+async def test_delivered_replays_read_no_github_control(tmp_path: object) -> None:
+    github = _HeldReconcileGitHub(
+        ReconciledDestination(DestinationKind.ISSUE, _PENDING_DESTINATION)
+    )
+    github.gate.set()
+    client, store, database, body = await _pending_replay_client(tmp_path, github)
+    try:
+        assert (await client.post("/v1/feedback", json=body)).status == 200
+        assert github.reconcile_calls == 1
+        claims = store.claims_done
+        replies = [await client.post("/v1/feedback", json=body) for _ in range(_REPLAYS)]
+        assert [reply.status for reply in replies] == [200] * _REPLAYS
+        assert store.claims_done == claims + _REPLAYS
+        assert github.reconcile_calls == 1
+        assert _report_quota_events(database) == 1
     finally:
         await client.close()

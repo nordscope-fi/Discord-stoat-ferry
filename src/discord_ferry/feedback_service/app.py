@@ -134,6 +134,7 @@ STORE_KEY = web.AppKey("store", FeedbackStore)
 SESSION_KEY = web.AppKey("session", aiohttp.ClientSession)
 GITHUB_KEY = web.AppKey("github", ReadinessGitHub)
 READINESS_KEY = web.AppKey("readiness", _ReadinessState)
+RECONCILIATIONS_KEY = web.AppKey("reconciliations", dict[UUID, "asyncio.Task[str]"])
 
 
 async def _health(request: web.Request) -> web.Response:
@@ -292,6 +293,57 @@ def _log_feedback(
     )
 
 
+async def _finish_pending(
+    app: web.Application,
+    record: ReceiptRecord,
+    cleaned: FeedbackRequest,
+    destination_kind: DestinationKind,
+    now: datetime,
+) -> str:
+    """Find the GitHub item for a pending receipt and mark the receipt delivered."""
+
+    reconciled = await app[GITHUB_KEY].reconcile_pending(record)
+    if reconciled.kind is not destination_kind:
+        raise ReconciliationRequiredError("GitHub reconciliation requires operator review")
+    store = app[STORE_KEY]
+    await store.store_contact(cleaned.request_id, cleaned.contact_email, now=now)
+    await store.mark_delivered(cleaned.request_id, reconciled.url, now=now)
+    return reconciled.url
+
+
+async def _reconcile_once(
+    app: web.Application,
+    record: ReceiptRecord,
+    cleaned: FeedbackRequest,
+    destination_kind: DestinationKind,
+    now: datetime,
+) -> str:
+    """Run one reconciliation per request id at a time and share its outcome.
+
+    A replay of a still-pending request skips the report quota, so each one used to start its
+    own GitHub scan (#959). Replays that arrive while a scan is running now wait for it and
+    receive its result, including a failure. The scan also owns marking the receipt delivered,
+    which only one caller may do. Once it ends, the next replay starts a fresh scan.
+    """
+
+    in_flight = app[RECONCILIATIONS_KEY]
+    request_id = record.request_id
+    task = in_flight.get(request_id)
+    if task is None:
+        task = asyncio.create_task(_finish_pending(app, record, cleaned, destination_kind, now))
+        in_flight[request_id] = task
+
+        def _done(finished: asyncio.Task[str]) -> None:
+            if in_flight.get(request_id) is finished:
+                del in_flight[request_id]
+            if not finished.cancelled():
+                finished.exception()  # mark retrieved; each waiter re-raises it itself
+
+        task.add_done_callback(_done)
+    # Shield so one client disconnecting does not cancel the scan the others wait on.
+    return await asyncio.shield(task)
+
+
 async def _feedback(request: web.Request) -> web.Response:
     """Validate, claim, deliver, and receipt one reviewed feedback request."""
 
@@ -390,7 +442,9 @@ async def _feedback(request: web.Request) -> web.Response:
     github = request.app[GITHUB_KEY]
     if claim.outcome is ClaimOutcome.PENDING:
         try:
-            reconciled = await github.reconcile_pending(claim.record)
+            destination_url = await _reconcile_once(
+                request.app, claim.record, cleaned, destination_kind, now
+            )
         except ReconciliationRequiredError:
             _log_feedback(cleaned.request_id, "pending", destination_kind, 503, started)
             return _error_response(
@@ -398,14 +452,8 @@ async def _feedback(request: web.Request) -> web.Response:
                 "Feedback delivery requires maintainer review.",
                 status=503,
             )
-        if reconciled.kind is not destination_kind:
-            _log_feedback(cleaned.request_id, "pending", destination_kind, 503, started)
-            return _error_response(
-                FeedbackErrorCode.RECONCILIATION_REQUIRED.value,
-                "Feedback delivery requires maintainer review.",
-                status=503,
-            )
-        destination_url = reconciled.url
+        _log_feedback(cleaned.request_id, "delivered", destination_kind, 200, started)
+        return _receipt_response(cleaned.request_id, destination_kind, destination_url)
     else:
         if not await _github_is_ready(request.app):
             await store.mark_failed(cleaned.request_id, now=now)
@@ -489,6 +537,7 @@ def create_app(
     app = web.Application(client_max_size=config.max_request_bytes)
     app[CONFIG_KEY] = config
     app[READINESS_KEY] = _ReadinessState(now=now)
+    app[RECONCILIATIONS_KEY] = {}
     app[STORE_KEY] = store or FeedbackStore(
         config.database_path,
         contact_key=config.contact_key,
@@ -506,6 +555,8 @@ def create_app(
         try:
             yield
         finally:
+            for scan in list(application[RECONCILIATIONS_KEY].values()):
+                scan.cancel()
             if owned_session:
                 await active_session.close()
 
@@ -540,6 +591,7 @@ __all__ = [
     "CONFIG_KEY",
     "GITHUB_KEY",
     "READINESS_KEY",
+    "RECONCILIATIONS_KEY",
     "SESSION_KEY",
     "STORE_KEY",
     "create_app",
