@@ -16,16 +16,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   with or without Ferry's own port. Any other Host gets a 400 on pages and a closed
   connection on the live-update websocket. The native window and the browser address Ferry
   prints use `127.0.0.1:8765`, so they are unaffected.
-- The feedback service no longer puts the optional contact email into the hash it stores with
-  each receipt (#962). The email was already encrypted, but the hash was a plain SHA-256 that
-  also covered it. Someone who could read only the database, without the encryption key, could
-  have tested guessed addresses against a report whose other fields were known. The hash now
-  covers the report content only, so two submissions that differ only in the email count as the
-  same report. A retry with a changed address on a delivered report returns the existing
-  receipt and keeps the address from the first submission. Receipts saved before this change still match on a retry,
-  so a pending one still finds its GitHub item without creating a second, and the retry replaces
-  the old hash. Receipts that are never retried drop out after their usual 7 days. The Ferry
-  client is unchanged. The feedback service needs a redeploy for this to take effect.
 - The feedback service now keys the hash it stores with each receipt (#962). The hash was a
   plain SHA-256 that covered the optional contact email, which is otherwise encrypted. Someone
   who could read only the database, without the encryption key, could have tested guessed
@@ -36,11 +26,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   retry. A pending one still finds its GitHub item without creating a second, and the retry
   replaces the old hash. Receipts that are never retried drop out after their usual 7 days. The
   Ferry client is unchanged. The feedback service needs a redeploy for this to take effect.
-- Mark a forum index as present when its first send comes back as a duplicate (#560). The
-  message is already on the server but Stoat returns no id for it, so Ferry now records the
-  forum as "present, id unknown", the same way the rebuild step already did (#215). The
-  rebuild at the end of the run then looks for the index among the pinned messages and edits
-  it, instead of posting a second index next to it.
 - A forum index is no longer posted twice, and a duplicate index send is now remembered (#560).
   When Ferry created a forum's index message it never recorded the message id, so the rebuild at
   the end of the run found none, sent a second index and pinned it too. Every forum ended a
