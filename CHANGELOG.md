@@ -4,18 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2.42.2] - 2026-10-11
-
-### Fixed
-
-- Keep collected `discord_ferry` modules connected to their parent packages after NiceGUI cleans up a browser-page test (#1144). Later tests can again patch the collected Autumn module by dotted path.
-
-## [2.42.1] - 2026-10-11
-
-### Fixed
-
-- Reject a directory passed to the Autumn uploader before Ferry tries to open it as a file (#1039). Missing paths keep their existing error, and regular-file uploads are unchanged.
-## [Unreleased]
+## [2.43.0] - 2026-10-11
 
 ### Changed
 
@@ -29,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   a pull request job write access.
 - New reference page, Release protections, records what the repository settings protect
   today, what could not be read, and the settings the owner can still change.
+- The known limitations guide now says the local web interface has no login by design, and that the validation page's acknowledgement is a reminder while the migration's own review is the safety step (#958, #1000).
+
 ### Fixed
 
 - A Qwen review that keeps streaming no longer holds the review slot for the full ten minutes (#739). One 97,137-character plan review kept streaming until the ten-minute total deadline, while two runs of the same prompt finished in 285 and 303 seconds. The 30-second idle deadline never fired because the model kept sending reasoning events. The review now stops 450 seconds after the response starts, and the record shows `failure_class` `schema` with `failure_reason` `stream-runaway` in place of a plain timeout. Normal runs are unaffected. The 600-second total deadline stays as the outer bound.
@@ -44,8 +35,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `node scripts/agent-compat/codex-bootstrap.mjs`. Until then the Context7 launcher stops with a
   message that says so. The installer names the public npm registry and ignores your npm user
   settings for this one install. Keeping other npm settings and registries out is tracked in #961.
-### Fixed
-
 - Restore merged thread content when `ferry repair` recreates a parent channel (#310). With
   `--thread-strategy=merge`, a thread's messages are added to its parent channel. Repair used to
   bring back only the parent's own messages and warn that the thread content was missing. It now
@@ -54,8 +43,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   cache of earlier keys cannot swallow them. A thread with no merge mark in the state is not sent,
   because `--skip-threads` and `--min-thread-messages` leave no other trace, and the warning
   names it. `--dry-run` still sends nothing.
-### Fixed
-
 - Check the destination ids saved in `state.json` before resuming or recovering with them (#970).
   `--resume`, `ferry retry`, `ferry rollback`, `ferry repair`, `ferry check` and `ferry stats`
   read server, channel, role, category, emoji and message ids from the saved state and sent
@@ -73,8 +60,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   upload. `ferry repair` leaves an emoji rewrite record alone when the emoji map does not point
   at its new emoji.
   A bad state now shows as a message, not a traceback, in `ferry migrate --resume` and in the
-  GUI rollback.
+  GUI rollback. `ferry retry` and `ferry rollback` now refuse a dry-run state, as resume, check and repair already did, and a dry-run placeholder must match the exact shape Ferry writes. The web interface shows why saved progress cannot be read and waits for an explicit Start Fresh, instead of starting over on its own.
 
+## [2.42.2] - 2026-10-11
+
+### Fixed
+
+- Keep collected `discord_ferry` modules connected to their parent packages after NiceGUI cleans up a browser-page test (#1144). Later tests can again patch the collected Autumn module by dotted path.
+
+## [2.42.1] - 2026-10-11
+
+### Fixed
+
+- Reject a directory passed to the Autumn uploader before Ferry tries to open it as a file (#1039). Missing paths keep their existing error, and regular-file uploads are unchanged.
 ## [2.42.0] - 2026-10-10
 
 ### Changed
