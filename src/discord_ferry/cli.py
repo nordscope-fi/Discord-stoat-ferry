@@ -260,6 +260,11 @@ def _safe(value: object) -> str:
     return escape(str(value))
 
 
+def _masked(value: object) -> str:
+    """Mask registered secrets, then escape Rich markup (``_safe`` alone masks nothing)."""
+    return _safe(sanitize_secrets(str(value)))
+
+
 class _ProgressTracker:
     """Track migration progress and render Rich output with live progress bars."""
 
@@ -972,35 +977,35 @@ class _RollbackProgressTracker:
         try:
             match event.status:
                 case "started":
-                    console.print(f"[bold cyan][>>][/] {_safe(event.message)}")
+                    console.print(f"[bold cyan][>>][/] {_masked(event.message)}")
                 case "progress":
                     if self.verbose:
-                        console.print(f"[dim]    {_safe(event.message)}[/]")
+                        console.print(f"[dim]    {_masked(event.message)}[/]")
                 case "completed":
-                    console.print(f"[bold green][OK][/] {_safe(event.message)}")
+                    console.print(f"[bold green][OK][/] {_masked(event.message)}")
                     if event.detail is not None:
                         self._render_final(event.detail.get("summary"))
                 case "completed_with_failures":
-                    console.print(f"[bold yellow][!!][/] {_safe(event.message)}")
+                    console.print(f"[bold yellow][!!][/] {_masked(event.message)}")
                     if event.detail is not None:
                         self._render_final(event.detail.get("summary"))
                 case "cancelled":
-                    console.print(f"[yellow][--][/] {_safe(event.message)}")
+                    console.print(f"[yellow][--][/] {_masked(event.message)}")
                 case "warning":
                     self.warning_count += 1
                     if self.verbose:
-                        console.print(f"[yellow]    {_safe(event.message)}[/]")
+                        console.print(f"[yellow]    {_masked(event.message)}[/]")
                 case "notice":
                     # Printed unconditionally. A configuration problem the user
                     # must see before the run, not a per-item warning. Does NOT
                     # increment warning_count, so the "N warning(s) suppressed"
                     # line stays accurate.
-                    console.print(f"[cyan][i][/] {_safe(event.message)}")
+                    console.print(f"[cyan][i][/] {_masked(event.message)}")
                 case "error":
                     self.error_count += 1
-                    console.print(f"[bold red][!!][/] {_safe(event.message)}")
+                    console.print(f"[bold red][!!][/] {_masked(event.message)}")
         except MarkupError:
-            console.print(f"{event.message}", markup=False)
+            console.print(sanitize_secrets(event.message), markup=False)
 
     def _render_summary_and_prompt(self, event: MigrationEvent) -> None:
         """Render the RollbackSummary table and gate on user confirmation."""
@@ -1170,7 +1175,7 @@ def rollback_cmd(
     try:
         state = load_state(out_path)
     except StateError as exc:
-        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_masked(exc)}")
         _print_feedback_hint()
         sys.exit(2)
 
@@ -1208,7 +1213,7 @@ def rollback_cmd(
     try:
         asyncio.run(_runner())
     except MigrationError as exc:
-        console.print(f"\n[bold red]Rollback failed:[/] {_safe(exc)}")
+        console.print(f"\n[bold red]Rollback failed:[/] {_masked(exc)}")
         _print_feedback_hint()
         sys.exit(1)
     except click.exceptions.Abort:
@@ -1341,14 +1346,14 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None, as_json
     try:
         state = load_state(Path(output_dir))
     except StateError as exc:
-        console.print(f"[bold red]Error:[/] {_safe(exc)}")
+        console.print(f"[bold red]Error:[/] {_masked(exc)}")
         _print_feedback_hint(to_stderr=as_json)
         sys.exit(1)
 
     try:
         report = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
     except (CheckError, MigrationError) as exc:
-        console.print(f"[bold red]Cannot check this migration:[/] {_safe(exc)}")
+        console.print(f"[bold red]Cannot check this migration:[/] {_masked(exc)}")
         _print_feedback_hint(to_stderr=as_json)
         sys.exit(1)
 
@@ -1493,7 +1498,7 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     try:
         state = load_state(out_path)
     except StateError as exc:
-        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_masked(exc)}")
         _print_feedback_hint()
         sys.exit(2)
 
@@ -1536,13 +1541,13 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
 
     def _on_event(event: MigrationEvent) -> None:
         colour = {"error": "bold red", "warning": "yellow"}.get(event.status, "cyan")
-        console.print(f"[{colour}]{_safe(event.message)}[/]")
+        console.print(f"[{colour}]{_masked(event.message)}[/]")
 
     console.print("[bold]Discord Ferry[/] — retrying failed messages\n")
     try:
         asyncio.run(run_retry_failed(config, state, exports, _on_event))
     except MigrationError as exc:
-        console.print(f"\n[bold red]Retry failed:[/] {_safe(exc)}")
+        console.print(f"\n[bold red]Retry failed:[/] {_masked(exc)}")
         _print_feedback_hint()
         sys.exit(1)
     except KeyboardInterrupt:
@@ -1642,7 +1647,7 @@ def repair_cmd(
     try:
         state = load_state(out_path)
     except StateError as exc:
-        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_masked(exc)}")
         _print_feedback_hint(to_stderr=as_json)
         sys.exit(2)
 
@@ -1677,13 +1682,13 @@ def repair_cmd(
 
     def _on_event(event: MigrationEvent) -> None:
         colour = {"error": "bold red", "warning": "yellow"}.get(event.status, "cyan")
-        human.print(f"[{colour}]{_safe(event.message)}[/]")
+        human.print(f"[{colour}]{_masked(event.message)}[/]")
 
     human.print("[bold]Discord Ferry[/] — repairing\n")
     try:
         outcome = asyncio.run(run_repair(config, state, exports, _on_event))
     except (CheckError, MigrationError) as exc:
-        human.print(f"\n[bold red]Repair failed:[/] {_safe(exc)}")
+        human.print(f"\n[bold red]Repair failed:[/] {_masked(exc)}")
         _print_feedback_hint(to_stderr=as_json)
         sys.exit(1)
     except KeyboardInterrupt:
@@ -1784,7 +1789,7 @@ def backfill_roles_cmd(
     try:
         state = load_state(out_path)
     except StateError as exc:
-        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_safe(exc)}")
+        console.print(f"[bold red]Error:[/] state.json not found or unreadable: {_masked(exc)}")
         _print_feedback_hint()
         sys.exit(2)
 
@@ -1824,13 +1829,13 @@ def backfill_roles_cmd(
         if event.status == "progress" and event.message.startswith("Applied role ordering"):
             reordered = True
         colour = {"error": "bold red", "warning": "yellow"}.get(event.status, "cyan")
-        console.print(f"[{colour}]{_safe(event.message)}[/]")
+        console.print(f"[{colour}]{_masked(event.message)}[/]")
 
     console.print("[bold]Discord Ferry[/] — backfilling role order\n")
     try:
         asyncio.run(run_role_backfill(config, state, exports, _on_event))
     except (CheckError, MigrationError) as exc:
-        console.print(f"\n[bold red]Backfill failed:[/] {_safe(exc)}")
+        console.print(f"\n[bold red]Backfill failed:[/] {_masked(exc)}")
         _print_feedback_hint()
         sys.exit(1)
     except KeyboardInterrupt:

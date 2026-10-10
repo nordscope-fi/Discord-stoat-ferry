@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 FIXTURES_DIR = str(Path(__file__).parent / "fixtures")
 # A one-letter token would mask every matching letter in build output (#972).
 _BUILD_TOKEN = "stoat-session-token-0123456789abcdef"
+# Same reason for retry, repair and backfill-roles (#1128): their errors and event lines are masked.
+_CMD_TOKEN = "stoat-cmd-token-AAAABBBBCCCC9876"
 
 
 @pytest.fixture()
@@ -2731,7 +2733,7 @@ def _retry_argv(out_dir: Path, export_dir: Path) -> list[str]:
         "--stoat-url",
         "https://api.test",
         "--token",
-        "t",
+        _CMD_TOKEN,
     ]
 
 
@@ -2899,7 +2901,7 @@ def _repair_argv(out_dir: Path, export_dir: Path, *extra: str) -> list[str]:
         "--stoat-url",
         "https://api.test",
         "--token",
-        "t",
+        _CMD_TOKEN,
         *extra,
     ]
 
@@ -3534,7 +3536,7 @@ def _backfill_argv(out_dir: Path, export_dir: Path, *extra: str) -> list[str]:
         "--stoat-url",
         "https://api.test",
         "--token",
-        "t",
+        _CMD_TOKEN,
         *extra,
     ]
 
@@ -3714,3 +3716,139 @@ def test_backfill_stale_warning_from_prior_run_does_not_cause_false_failure(
     with patch("discord_ferry.cli.run_role_backfill", new=_noop):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# On-screen masking in rollback, retry, repair, check, backfill-roles (#1128)
+# ---------------------------------------------------------------------------
+
+
+def _save_plain_state(out_dir: Path) -> Path:
+    from discord_ferry.state import save_state
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_state(MigrationState(stoat_server_id="01JSTOATSRV000000000AAA"), out_dir)
+    return out_dir
+
+
+def test_rollback_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """#1128. run_rollback registers the token itself (the CLI does not), so the
+    stand-in registers it first, as the engine's _ensure_token_store does."""
+    from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.core.security import register_secret
+
+    _write_rollback_state(tmp_path)
+
+    async def _run(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        register_secret("stoat", config.token)
+        on_event(MigrationEvent(phase="rollback", status="error", message=f"event {_CMD_TOKEN}"))
+        raise MigrationError(f"server echoed {_CMD_TOKEN}")
+
+    with patch("discord_ferry.cli.run_rollback", new=_run):
+        result = runner.invoke(
+            main,
+            [
+                "rollback",
+                "--output-dir",
+                str(tmp_path),
+                "--yes",
+                "--stoat-url",
+                "http://localhost",
+                "--token",
+                _CMD_TOKEN,
+            ],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "Rollback failed:" in result.output
+    assert "server echoed" in result.output
+    assert "event" in result.output
+    assert _CMD_TOKEN not in result.output
+
+
+def test_retry_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """#1128."""
+    from discord_ferry.core.events import MigrationEvent
+
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _write_state_with_one_failure(tmp_path / "out")
+
+    async def _run(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        on_event(MigrationEvent(phase="retry", status="error", message=f"event {_CMD_TOKEN}"))
+        raise MigrationError(f"server echoed {_CMD_TOKEN}")
+
+    argv = _retry_argv(out_dir, export_dir)
+    with patch("discord_ferry.cli.run_retry_failed", new=_run):
+        result = runner.invoke(main, argv, catch_exceptions=False)
+
+    assert result.exit_code == 1, result.output
+    assert "Retry failed:" in result.output
+    assert "server echoed" in result.output
+    assert "event" in result.output
+    assert _CMD_TOKEN not in result.output
+
+
+def test_repair_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """#1128. Covers both the event handler and the final error, on the stdout
+    console and on the stderr one --json switches to."""
+    from discord_ferry.core.events import MigrationEvent
+
+    export_dir = _write_minimal_export(tmp_path / "export")
+    out_dir = _save_plain_state(tmp_path / "out")
+
+    async def _run(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        on_event(MigrationEvent(phase="repair", status="error", message=f"event {_CMD_TOKEN}"))
+        raise MigrationError(f"server echoed {_CMD_TOKEN}")
+
+    for extra in ((), ("--json",)):
+        argv = _repair_argv(out_dir, export_dir, *extra)
+        with patch("discord_ferry.cli.run_repair", new=_run):
+            result = runner.invoke(main, argv, catch_exceptions=False)
+
+        assert result.exit_code == 1, result.output
+        assert "Repair failed:" in result.output
+        assert "server echoed" in result.output
+        assert "event" in result.output
+        assert _CMD_TOKEN not in result.output
+
+
+def test_check_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """#1128."""
+    out_dir = _save_plain_state(tmp_path / "out")
+
+    async def _run(*_a: Any, **_k: Any) -> None:
+        raise MigrationError(f"server echoed {_CMD_TOKEN}")
+
+    with patch("discord_ferry.migrator.verify.run_check", new=_run):
+        result = runner.invoke(
+            main,
+            ["check", str(out_dir), "--stoat-url", "https://api.test", "--token", _CMD_TOKEN],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "Cannot check this migration:" in result.output
+    assert "server echoed" in result.output
+    assert _CMD_TOKEN not in result.output
+
+
+def test_backfill_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """#1128."""
+    from discord_ferry.core.events import MigrationEvent
+
+    out_dir, export_dir = _backfill_state(tmp_path)
+
+    async def _run(config: Any, state: Any, exports: Any, on_event: Any) -> None:
+        on_event(MigrationEvent(phase="roles", status="error", message=f"event {_CMD_TOKEN}"))
+        raise MigrationError(f"server echoed {_CMD_TOKEN}")
+
+    argv = _backfill_argv(out_dir, export_dir)
+    with patch("discord_ferry.cli.run_role_backfill", new=_run):
+        result = runner.invoke(main, argv, catch_exceptions=False)
+
+    assert result.exit_code == 1, result.output
+    assert "Backfill failed:" in result.output
+    assert "server echoed" in result.output
+    assert "event" in result.output
+    assert _CMD_TOKEN not in result.output

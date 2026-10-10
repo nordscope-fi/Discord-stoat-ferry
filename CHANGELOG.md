@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   the whole response and only then compare its size, so an oversized or endless response was held
   in memory in full. A declared Content-Length over the limit is now refused before any of the body
   is read (#1127).
+### Fixed
+
+- `ferry rollback`, `retry`, `repair`, `check` and `backfill-roles` now mask the registered Stoat
+  token in the errors and progress lines they print (#1128). Before, they escaped Rich markup and
+  nothing else, so a server error that echoed the token reached the screen in full. `ferry build`
+  got the same fix in #972.
 
 ### Security
 
