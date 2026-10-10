@@ -147,6 +147,9 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         # forces a non-zero exit rather than a silent empty index. A REPORT-phase rebuild
         # failure is tagged phase="report" and never reaches the repair exit code.
         "forum_index_rebuild_failed",
+        # An extra pinned forum index copy that repair found but could not remove (#1142),
+        # or could not look for. The duplicate is still on the server.
+        "forum_index_duplicate_remove_failed",
         # A missing emoji repair could not recreate (its image is not in the
         # export). emoji_rewrite_failed too: a reference edit failed, so a message
         # still points at the dead id and the resume record stays open. Both leave
@@ -291,6 +294,9 @@ class RepairOutcome:
     recreated_categories: list[dict[str, Any]] = field(default_factory=list)
     restored_tails: list[dict[str, Any]] = field(default_factory=list)
     recreated_emoji: list[dict[str, Any]] = field(default_factory=list)
+    #: Extra pinned forum index messages left by migrations before v2.41.30 (#1142).
+    #: ``removed`` is False for a dry-run preview.
+    removed_duplicate_indexes: list[dict[str, Any]] = field(default_factory=list)
     dead_letter: dict[str, int] = field(default_factory=lambda: {"drained": 0, "remaining": 0})
     declined: list[dict[str, Any]] = field(default_factory=list)
     failed_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -312,6 +318,7 @@ class RepairOutcome:
                 "recreated_categories": self._clean(self.recreated_categories),
                 "restored_tails": self._clean(self.restored_tails),
                 "recreated_emoji": self._clean(self.recreated_emoji),
+                "removed_duplicate_indexes": self._clean(self.removed_duplicate_indexes),
                 "dead_letter": dict(self.dead_letter),
             },
             "declined": self._clean(self.declined),

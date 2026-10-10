@@ -39,12 +39,14 @@ from discord_ferry.migrator.api import (
     api_create_server,
     api_delete_channel,
     api_delete_emoji,
+    api_delete_message,
     api_delete_role,
     api_edit_channel,
     api_edit_message,
     api_edit_role,
     api_edit_role_ranks,
     api_edit_server,
+    api_fetch_self,
     api_fetch_server,
     api_fetch_server_with_channels,
     api_pin_message,
@@ -1277,6 +1279,166 @@ async def _rebuild_one_forum_index(
                 message=_safe(config, f"Forum index rebuild for '{forum_name}' failed: {exc}"),
             )
         )
+
+
+#: The masquerade name Ferry sends its forum index messages under. A duplicate is only
+#: removed when its masquerade matches, in addition to its author being Ferry's own user.
+_FERRY_INDEX_MASQUERADE = "Discord Ferry"
+
+
+async def _remove_duplicate_forum_indexes(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    outcome: RepairOutcome,
+    on_event: EventCallback,
+) -> None:
+    """Remove the extra pinned forum index left by migrations before v2.41.30 (#1142).
+
+    Those migrations posted the index twice: the create path sent
+    ``ferry-forum-index-{key}`` and never recorded its id, then the REPORT rebuild sent
+    ``ferry-forum-index-rebuilt-{key}``, the only one recorded in
+    ``forum_index_message_ids``. Both start with ``**Forum: {name}**``. This deletes the
+    unrecorded copy.
+
+    A message is removed only when ALL of these hold:
+
+    - its forum has a recorded index message id AND a mapped ``forum-index-{key}`` channel,
+      and the message sits in that channel's pinned messages;
+    - the recorded message is itself among those pinned results (otherwise the unrecorded
+      copy may be the only index left);
+    - its content starts with the forum's ``**Forum: {name}**`` header;
+    - its id is not the recorded one;
+    - its ``author`` is Ferry's own user id (``GET /users/@me``) AND its ``masquerade.name``
+      is ``Discord Ferry``.
+
+    Under ``--dry-run`` the reads still happen and each candidate is reported, but nothing is
+    deleted and no warning is written to state. A failed delete or read becomes a repair-phase
+    ``forum_index_duplicate_remove_failed`` warning, and the pass carries on.
+    """
+    targets = [
+        (forum_key, state.channel_map[f"forum-index-{forum_key}"], recorded_id)
+        for forum_key, recorded_id in state.forum_index_message_ids.items()
+        if recorded_id and state.channel_map.get(f"forum-index-{forum_key}")
+    ]
+    if not targets:
+        return
+
+    dry = config.dry_run
+    prefix = "[DRY RUN] " if dry else ""
+
+    def warn(message: str) -> None:
+        message = _safe(config, message)
+        if not dry:
+            state.warnings.append(
+                {
+                    "phase": "repair",
+                    "type": "forum_index_duplicate_remove_failed",
+                    "message": message,
+                }
+            )
+        on_event(MigrationEvent(phase="repair", status="warning", message=message))
+
+    try:
+        me = await api_fetch_self(session, config.stoat_url, config.token)
+        self_id = str(me.get("_id") or "")
+    except Exception as exc:  # noqa: BLE001
+        warn(
+            "Could not look up Ferry's own user, so extra forum index messages "
+            f"were not removed: {exc}"
+        )
+        return
+    if not self_id:
+        warn(
+            "Ferry's own user id was not returned, so extra forum index messages were not removed."
+        )
+        return
+
+    for forum_key, index_channel_id, recorded_id in targets:
+        forum_name = state.forum_category_names.get(forum_key, forum_key)
+        header = f"**Forum: {forum_name}**"
+        try:
+            pinned = await api_search_pinned_messages(
+                session, config.stoat_url, config.token, index_channel_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not read the pinned messages of the forum index for '{forum_name}': {exc}")
+            continue
+        with_header = [
+            m for m in pinned if str(m.get("content") or "").startswith(header) and m.get("_id")
+        ]
+        if not any(str(m["_id"]) == recorded_id for m in with_header):
+            continue
+        for msg in with_header:
+            message_id = str(msg["_id"])
+            if message_id == recorded_id or msg.get("author") != self_id:
+                continue
+            masquerade = msg.get("masquerade")
+            if (
+                not isinstance(masquerade, dict)
+                or masquerade.get("name") != _FERRY_INDEX_MASQUERADE
+            ):
+                continue
+            row = {
+                "forum_key": forum_key,
+                "stoat_channel_id": index_channel_id,
+                "message_id": message_id,
+                "removed": False,
+            }
+            if dry:
+                outcome.removed_duplicate_indexes.append(row)
+                on_event(
+                    MigrationEvent(
+                        phase="repair",
+                        status="progress",
+                        message=_safe(
+                            config,
+                            f"{prefix}Would remove the extra pinned index message {message_id} "
+                            f"for '{forum_name}'.",
+                        ),
+                    )
+                )
+                continue
+            try:
+                await api_delete_message(
+                    session, config.stoat_url, config.token, index_channel_id, message_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                warn(
+                    f"Could not remove the extra pinned index message {message_id} "
+                    f"for '{forum_name}': {exc}"
+                )
+                continue
+            row["removed"] = True
+            outcome.removed_duplicate_indexes.append(row)
+            on_event(
+                MigrationEvent(
+                    phase="repair",
+                    status="progress",
+                    message=_safe(
+                        config,
+                        f"Removed the extra pinned index message {message_id} for '{forum_name}'.",
+                    ),
+                )
+            )
+            await asyncio.sleep(config.upload_delay)
+
+
+async def _repair_duplicate_forum_indexes(
+    config: FerryConfig,
+    state: MigrationState,
+    outcome: RepairOutcome,
+    on_event: EventCallback,
+    session: aiohttp.ClientSession | None,
+) -> None:
+    """Open a session if the caller gave none, then run the duplicate-index cleanup."""
+    own_session = session is None
+    sess = session or new_session()
+    try:
+        await _remove_duplicate_forum_indexes(sess, config, state, outcome, on_event)
+    finally:
+        if own_session:
+            await sess.close()
 
 
 async def run_retry_failed(
@@ -2616,6 +2778,7 @@ async def run_repair(
                 message="[DRY RUN] Nothing was created, sent or written.",
             )
         )
+        await _repair_duplicate_forum_indexes(config, state, outcome, on_event, session)
         outcome.declined = _repair_declined(state, warnings_start)
         return outcome
 
@@ -2949,6 +3112,10 @@ async def run_repair(
         finally:
             if own_fi_session:
                 await fi_sess.close()
+
+    # After the rebuild above, so a freshly recorded index id is the one kept and any older
+    # Ferry copy is removed (#1142). Not part of the REPORT phase: it needs delete rights.
+    await _repair_duplicate_forum_indexes(config, state, outcome, on_event, session)
 
     if tail_work:
         own_tail_session = session is None

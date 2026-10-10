@@ -986,6 +986,46 @@ async def api_edit_message(
     return await _api_request(session, "PATCH", url, token, data)
 
 
+async def api_delete_message(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    channel_id: str,
+    message_id: str,
+) -> None:
+    """Delete a message (DELETE /channels/{channel_id}/messages/{message_id}).
+
+    Verified against ``stoatchat/stoatchat`` main at 3938ca5d50 (2026-10-10),
+    ``crates/delta/src/routes/channels/message_delete.rs``, mounted in
+    ``channels/mod.rs`` as ``message_delete::delete``. The route answers with an
+    empty response. The message's own author may always delete it; anyone else
+    needs ``ManageMessages``. Deleting removes the message itself, so a pinned
+    message needs no separate unpin.
+
+    A 404 is treated as success (the message is already gone) via
+    ``expected_404_ok=True``. Lands in the ``channels`` rate bucket, 15 per 10
+    seconds keyed per channel id, because upstream routes to ``messaging`` only
+    on POST.
+    """
+    url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/messages/{message_id}"
+    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+
+
+async def api_fetch_self(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+) -> dict[str, Any]:
+    """Fetch the authenticated user (GET /users/@me).
+
+    ``connect.py`` already calls this route to verify the token and discards the
+    body. Repair reads ``_id`` from it to recognise messages Ferry itself sent,
+    since a message's ``author`` is the sending user's id.
+    """
+    url = f"{stoat_url.rstrip('/')}/users/@me"
+    return await _api_request(session, "GET", url, token)
+
+
 async def api_add_reaction(
     session: aiohttp.ClientSession,
     stoat_url: str,
