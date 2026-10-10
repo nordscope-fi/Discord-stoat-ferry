@@ -4,15 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.41.27] - 2026-10-10
 
 ### Changed
 
-- Pin every remote GitHub Actions reference in `.github/workflows/` to a full commit SHA with a
-  trailing `# vX.Y.Z` comment, and pin the build backend to `hatchling==1.32.4` (#1003). The
-  selectors were moving (`@v6`, `@release/v1`), so a retag upstream could change what CI and the
-  release job ran. Majors are unchanged. Dependabot now also watches the `github-actions`
-  ecosystem and proposes SHA bumps weekly. The backend pin is bumped by hand.
+- Pin every remote GitHub Actions reference in `.github/workflows/` to the exact commit it
+  names (its full SHA, a fixed ID), with a trailing `# vX.Y.Z` comment, and pin the build
+  backend to `hatchling==1.32.4` (#1003). The selectors were moving (`@v6`, `@release/v1`), so
+  a retag upstream could change what CI and the release job ran. Majors are unchanged.
+  Dependabot now also watches the `github-actions` ecosystem and proposes SHA bumps weekly. The
+  backend pin is bumped by hand.
 - Document in `scripts/agent-compat/verify-all.mjs` that it is a trusted-checkout local command
   (#1001). It runs in and trusts the current checkout, passes the caller's environment to its
   children, and picks helpers by content, not provenance. Point it at an unreviewed checkout, or
@@ -25,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - The local web interface no longer interprets `X-Forwarded-For` and `X-Forwarded-Proto` headers
   (#998). uvicorn trusts them from 127.0.0.1 by default, and Ferry has no proxy in front of it and
   never reads the derived client address or scheme. Browser and native-window use are unchanged.
+
 ### Fixed
 
 - The Vibe reviewer now calls Mistral directly and rejects a reply that does not name
