@@ -29,6 +29,7 @@ is a tripwire on the obvious path, not proof of coverage.
 """
 
 import contextlib
+import errno
 import os
 import sys
 import tempfile
@@ -138,3 +139,32 @@ def write_text_no_follow(path: Path, text: str) -> None:
     """
     with os.fdopen(_open_no_follow(path), "w", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def ensure_output_subdir(path: Path, root: Path) -> None:
+    """Create *path* under *root* and raise ``OSError`` if a symlink sits on the way.
+
+    Each component from *root* down to *path* is checked with ``is_symlink`` before
+    it is created or used, so a link planted at ``role-icons`` or ``threads/<name>``
+    cannot send later writes to another folder (#960). A link is refused even when
+    it points back inside *root*. The resolved path must also stay inside the
+    resolved *root*. *root* itself is the operator's choice and may be a link.
+
+    New folders get mode 0700. There is a window between the check and the next
+    ``mkdir`` that this does not close, which would need descriptor-relative
+    operations the platform does not offer everywhere. The final ``resolve`` check
+    narrows it.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise OSError(errno.EINVAL, "output subfolder is outside the output folder") from None
+    root.mkdir(parents=True, exist_ok=True)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise OSError(errno.ELOOP, "output subfolder is a symlink")
+        current.mkdir(mode=0o700, exist_ok=True)
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise OSError(errno.EINVAL, "output subfolder resolves outside the output folder")
