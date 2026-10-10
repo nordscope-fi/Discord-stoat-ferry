@@ -82,9 +82,11 @@ These two settings interact: with 3 channels and 5 API slots, each channel avera
 
 ```bash
 ferry migrate --export-dir ./export \
-  --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
+  --stoat-url https://stoat.example.com \
   --max-concurrent-channels 6 --max-concurrent-requests 12
 ```
+
+Ferry reads `STOAT_TOKEN` from the environment, which keeps the token out of your shell history. See [Token security](cli-reference.md#environment-variables).
 
 In the GUI, the same settings live under Advanced Options → **Speed**. Monitor your Stoat server load and reduce the values if you encounter frequent 429 errors. Ferry warns if you raise them while targeting the official `api.stoat.chat` (where they usually make runs slower, not faster).
 

@@ -13,6 +13,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   masquerade avatar, embed media and attachment) and their matching progress lines now end in
   `; skipped.` or read `(reason)`. Only the wording changed. A new test fails if an em dash
   comes back to that family.
+- Show tokens passed through environment variables in the docs, and point to them in the
+  help text (#978). The guides and CLI reference examples no longer put `--token` or
+  `--discord-token` on the command line, where a token is saved in shell history and can show
+  up in process listings. They read `STOAT_TOKEN` and `DISCORD_TOKEN` from the environment or a
+  `.env` file, and `--help` for `migrate`, `build`, `rollback` and `probe` now says to prefer
+  those variables. The literal options still work. The environment route keeps the token out
+  of shell history, but Ferry still hands the Discord token to DiscordChatExporter as a
+  command-line argument in orchestrated mode, so it stays visible in process listings while
+  the export runs.
 
 ## [2.41.27] - 2026-10-10
 

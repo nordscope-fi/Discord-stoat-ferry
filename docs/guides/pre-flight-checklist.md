@@ -85,8 +85,11 @@ Run `ferry validate` on your export to see the projected channel count before st
 If your Discord server has private channels (channels visible only to certain roles), you need to provide a Discord token so Ferry can fetch permission metadata.
 
 ```bash
-ferry migrate --discord-token YOUR_DISCORD_TOKEN ...
+export DISCORD_TOKEN=YOUR_DISCORD_TOKEN
+ferry migrate ...
 ```
+
+Set the token as an environment variable, as shown. A token passed with `--discord-token` is saved in your shell history.
 
 **Why:** Without the Discord token, Ferry has no way to know which channels were private. All channels will be created as public on Stoat, potentially exposing content that was restricted on Discord.
 

@@ -72,11 +72,11 @@ ferry migrate [OPTIONS]
 
 | Flag | Environment Variable | Default | Description |
 |------|----------------------|---------|-------------|
-| `--discord-token TEXT` | `DISCORD_TOKEN` | | Discord user token (orchestrated mode) |
+| `--discord-token TEXT` | `DISCORD_TOKEN` | | Discord user token (orchestrated mode). Prefer the `DISCORD_TOKEN` environment variable |
 | `--discord-server TEXT` | `DISCORD_SERVER_ID` | | Discord server ID (orchestrated mode) |
 | `--export-dir PATH` | | | Path to DCE exports (offline mode) |
 | `--stoat-url TEXT` | `STOAT_URL` | *(required)* | Stoat API base URL (e.g. `https://api.stoat.chat`) |
-| `--token TEXT` | `STOAT_TOKEN` | *(required)* | Your Stoat user token (copied from your browser — see [setup guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token)) |
+| `--token TEXT` | `STOAT_TOKEN` | *(required)* | Your Stoat user token (copied from your browser, see [setup guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token)). Prefer the `STOAT_TOKEN` environment variable |
 | `--server-id TEXT` | | | Migrate into an existing Stoat server by ID |
 | `--server-name TEXT` | | | Name for the new server (defaults to the Discord server name) |
 | `--create-invite` / `--no-create-invite` | | on | Create an invite link to the migrated server when the migration finishes. The invite URL is printed in the completion summary and included in the reports. |
@@ -110,7 +110,7 @@ ferry migrate [OPTIONS]
 | `--yes` / `-y` | | false | Skip the terms-of-service confirmation prompt (for scripted runs) |
 
 !!! warning "Token security"
-    Avoid passing `--token` or `--discord-token` directly on the command line — they may appear in shell history. Use environment variables or a `.env` file instead.
+    Set `STOAT_TOKEN` and `DISCORD_TOKEN` as environment variables or in a `.env` file, and leave `--token` and `--discord-token` off the command line. A token typed as an argument is saved in your shell history and can show up in process listings. Writing `--token "$STOAT_TOKEN"` does not help, because the shell expands it before Ferry starts. The literal options still work, for one-off use. The environment route keeps the token out of your shell history, but it does not hide it from every other process on the machine.
 
 ### Environment Variables
 
@@ -164,14 +164,14 @@ ferry migrate --export-dir ~/exports/my-server/ && echo "Migration complete!"
 
 ## Examples
 
+The examples below leave the tokens out of the command. Set `STOAT_TOKEN` (and `DISCORD_TOKEN` for orchestrated mode) in your environment or in a `.env` file first, as described under [Environment Variables](#environment-variables).
+
 **1-Click migration (orchestrated):**
 
 ```bash
 ferry migrate \
-  --discord-token "$DISCORD_TOKEN" \
   --discord-server 123456789012345678 \
-  --stoat-url https://api.stoat.chat \
-  --token "$STOAT_TOKEN"
+  --stoat-url https://api.stoat.chat
 ```
 
 **Validate an export before migrating:**
@@ -193,7 +193,6 @@ ferry migrate --export-dir ~/exports/my-discord-server/
 ```bash
 ferry migrate --export-dir ~/exports/my-discord-server/ \
   --stoat-url https://api.stoat.chat \
-  --token your_token_here \
   --server-id 01ABCDEF234567890ABCDEFGH
 ```
 
@@ -202,7 +201,6 @@ ferry migrate --export-dir ~/exports/my-discord-server/ \
 ```bash
 ferry migrate --export-dir ~/exports/my-discord-server/ \
   --stoat-url https://api.stoat.chat \
-  --token your_token_here \
   --skip-messages \
   --skip-emoji \
   --skip-reactions
@@ -211,7 +209,7 @@ ferry migrate --export-dir ~/exports/my-discord-server/ \
 **Validate the full migration pipeline without making any API calls:**
 
 ```bash
-ferry migrate --export-dir ./export --stoat-url https://api.stoat.chat --token "$TOKEN" --dry-run
+ferry migrate --export-dir ./export --stoat-url https://api.stoat.chat --dry-run
 ```
 
 **Resume an interrupted migration:**
@@ -219,7 +217,6 @@ ferry migrate --export-dir ./export --stoat-url https://api.stoat.chat --token "
 ```bash
 ferry migrate --export-dir ~/exports/my-discord-server/ \
   --stoat-url https://api.stoat.chat \
-  --token your_token_here \
   --resume
 ```
 
@@ -228,7 +225,6 @@ ferry migrate --export-dir ~/exports/my-discord-server/ \
 ```bash
 ferry migrate --export-dir ~/exports/my-discord-server/ \
   --stoat-url https://stoat.example.com \
-  --token your_token_here \
   --rate-limit 0.5
 ```
 
@@ -252,7 +248,7 @@ ferry build [OPTIONS]
 | `--template TEXT` | Use a preset template: `gaming`, `community`, or `education` |
 | `--blueprint PATH` | Path to a custom blueprint JSON file |
 | `--stoat-url TEXT` | Stoat API base URL *(required)* |
-| `--token TEXT` | Your Stoat user token *(required)* |
+| `--token TEXT` | Your Stoat user token *(required)*. Prefer the `STOAT_TOKEN` environment variable |
 | `--name TEXT` | Override the server name from the template/blueprint |
 
 You must provide either `--template` or `--blueprint`, but not both.
@@ -271,10 +267,10 @@ Each template includes appropriate role permissions and channel structures.
 
 ```bash
 # Create a gaming server from a preset template
-ferry build --template gaming --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+ferry build --template gaming --stoat-url https://api.stoat.chat
 
 # Create from a custom blueprint with a custom name
-ferry build --blueprint my-server.json --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN" --name "My Server"
+ferry build --blueprint my-server.json --stoat-url https://api.stoat.chat --name "My Server"
 ```
 
 ---
@@ -302,7 +298,7 @@ ferry export-blueprint [OPTIONS]
 ferry export-blueprint --from ~/exports/my-discord-server/ --output my-server-blueprint.json
 
 # Then use it to create a new server
-ferry build --blueprint my-server-blueprint.json --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+ferry build --blueprint my-server-blueprint.json --stoat-url https://api.stoat.chat
 ```
 
 !!! tip "Blueprints use names, not IDs"
@@ -324,7 +320,7 @@ ferry rollback --output-dir <path> [OPTIONS]
 |------|-------------|
 | `--output-dir PATH` | Directory containing the migration's `state.json` *(required)* |
 | `--stoat-url URL` | Stoat API base URL (or env `STOAT_URL`) *(required)* |
-| `--token TOKEN` | Stoat session token (or env `STOAT_TOKEN`) *(required)* |
+| `--token TOKEN` | Stoat session token *(required)*. Prefer the `STOAT_TOKEN` environment variable |
 | `--server-id ID` | Override the Stoat server ID from `state.json` (rarely needed) |
 | `--yes` / `-y` | Skip the confirmation prompt and per-item opt-in for suspect channels |
 | `--force-unlock` | Override a stale `[FERRY_LOCK:...]` marker on the target server |
@@ -348,7 +344,7 @@ Before any DELETE call, rollback prints a Rich table with the counts of entities
 
 ```bash
 # Roll back the migration recorded in ./ferry-output, with confirmation prompt
-ferry rollback --output-dir ./ferry-output --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+ferry rollback --output-dir ./ferry-output --stoat-url https://api.stoat.chat
 
 # Same, but skip the confirmation prompt (CI / automation)
 ferry rollback --output-dir ./ferry-output --yes
@@ -434,7 +430,7 @@ This is not the same command as [`ferry validate`](#ferry-validate), which inspe
 | Flag | Environment Variable | Description |
 |------|----------------------|-------------|
 | `--stoat-url TEXT` | `STOAT_URL` | Stoat API base URL *(required)* |
-| `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)* |
+| `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)*. Prefer the `STOAT_TOKEN` environment variable |
 | `--json` | | Print the report as a single JSON document instead of a table |
 
 ### What the four statuses mean
@@ -483,7 +479,7 @@ Check reads the most recent 100 messages in each channel and confirms the last o
 
 ```bash
 # Check a migration you have just run
-ferry check ./ferry-output --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+ferry check ./ferry-output --stoat-url https://api.stoat.chat
 
 # In a script: fail the job if anything is missing
 if ! ferry check ./ferry-output; then
@@ -555,7 +551,7 @@ non-zero code as "act now" is not misled by a preview.
 
 ```bash
 # See what is wrong, then fix it
-ferry check ./ferry-output --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN"
+ferry check ./ferry-output --stoat-url https://api.stoat.chat
 ferry repair ./ferry-output --export-dir ./export --stoat-url https://api.stoat.chat
 
 # Preview first
@@ -659,7 +655,7 @@ Probe creates its test entities (channels, uploads) on the server you point it a
 | Flag | Environment Variable | Description |
 |------|----------------------|-------------|
 | `--stoat-url TEXT` | `STOAT_URL` | Stoat API base URL *(required)* |
-| `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)* |
+| `--token TEXT` | `STOAT_TOKEN` | Your Stoat user token *(required)*. Prefer the `STOAT_TOKEN` environment variable |
 | `--test-server-id TEXT` | | ID of a throwaway Stoat server to create test entities on *(required)* |
 | `--deep` | | Upload test files at each Autumn size boundary and report where enforced limits disagree with advertised ones. Creates and tears down probe entities (channels, emoji, server icon/banner). Leaves a small number of orphaned files in Autumn storage. |
 | `--json` | | Print results as machine-readable JSON instead of a table |
@@ -684,11 +680,11 @@ Probe creates its test entities (channels, uploads) on the server you point it a
 
 ```bash
 # Probe the official hosted service
-ferry probe --stoat-url https://api.stoat.chat --token "$STOAT_TOKEN" \
+ferry probe --stoat-url https://api.stoat.chat \
   --test-server-id 01ABCDEF234567890ABCDEFGH
 
 # Probe a self-hosted instance and save the results as JSON
-ferry probe --stoat-url https://stoat.example.com --token "$STOAT_TOKEN" \
+ferry probe --stoat-url https://stoat.example.com \
   --test-server-id 01ABCDEF234567890ABCDEFGH --json > probe-results.json
 ```
 
