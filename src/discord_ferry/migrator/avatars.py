@@ -11,7 +11,7 @@ import aiohttp
 
 from discord_ferry.core.atomicio import ensure_output_subdir, write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
-from discord_ferry.core.http import read_bounded
+from discord_ferry.core.http import read_bounded, remote_media_refusal
 from discord_ferry.migrator.api import get_session
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path, is_safe_filename_component
@@ -71,6 +71,13 @@ async def _download_remote_avatar(
     """
     if not is_safe_filename_component(author_id):
         return None, f"unsafe author id {author_id!r}"
+    # The URL is export text. Only an https Discord CDN address is fetched, so an
+    # export cannot point Ferry at a private or loopback address and have the
+    # response uploaded to the Stoat media service (#965).
+    refusal = remote_media_refusal(url)
+    if refusal is not None:
+        logger.warning("Refused to download an avatar: %s", refusal)
+        return None, f"avatar URL refused ({refusal})"
     try:
         # No redirects: the CDN answers directly, and a 3xx would send the
         # download to a host Ferry never chose.

@@ -97,7 +97,7 @@ def write_case(author_id: str) -> Path:
         "author": {
             "id": author_id,
             "name": "ProbeAuthor",
-            "avatarUrl": "https://cdn.invalid/a.png",
+            "avatarUrl": "https://cdn.discordapp.com/a.png",
         },
         "attachments": [],
         "stickers": [],
@@ -112,7 +112,7 @@ async def direct_download(author_id: str) -> dict[str, object]:
     MARKER.write_text(ORIGINAL)
     before = MARKER.read_text()
     dest, reason = await _download_remote_avatar(
-        FakeSession(), "https://cdn.invalid/a.png", OUT, author_id
+        FakeSession(), "https://cdn.discordapp.com/a.png", OUT, author_id
     )
     after = MARKER.read_text()
     return {

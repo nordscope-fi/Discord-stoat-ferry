@@ -124,7 +124,9 @@ async def test_local_avatars_uploaded_and_cached(tmp_path: Path) -> None:
 
 async def test_remote_avatar_downloaded_and_uploaded(tmp_path: Path) -> None:
     """Remote avatar URL is downloaded, then uploaded to Autumn, then cached."""
-    author = _make_author("user1", "Alice", avatar_url="https://cdn.example.com/avatars/abc.webp")
+    author = _make_author(
+        "user1", "Alice", avatar_url="https://cdn.discordapp.com/avatars/abc.webp"
+    )
     export = _make_export([_make_message("m1", author)])
     config = _make_config(tmp_path)
     state = _make_state()
@@ -135,7 +137,7 @@ async def test_remote_avatar_downloaded_and_uploaded(tmp_path: Path) -> None:
         with aioresponses() as mocked:
             # Mock the remote avatar GET
             mocked.get(
-                "https://cdn.example.com/avatars/abc.webp",
+                "https://cdn.discordapp.com/avatars/abc.webp",
                 body=b"RIFF\x00\x00\x00\x00WEBP",
                 content_type="image/webp",
             )
@@ -158,7 +160,7 @@ async def test_remote_avatar_downloaded_and_uploaded(tmp_path: Path) -> None:
 
 async def test_remote_non_image_content_type_rejected(tmp_path: Path) -> None:
     """Remote URL returning non-image Content-Type is rejected (not cached)."""
-    author = _make_author("user1", "Alice", avatar_url="https://cdn.example.com/error.html")
+    author = _make_author("user1", "Alice", avatar_url="https://cdn.discordapp.com/error.html")
     export = _make_export([_make_message("m1", author)])
     config = _make_config(tmp_path)
     state = _make_state()
@@ -168,7 +170,7 @@ async def test_remote_non_image_content_type_rejected(tmp_path: Path) -> None:
         config.session = session
         with aioresponses() as mocked:
             mocked.get(
-                "https://cdn.example.com/error.html",
+                "https://cdn.discordapp.com/error.html",
                 body=b"<html>Error</html>",
                 content_type="text/html",
             )
@@ -189,7 +191,7 @@ async def test_remote_non_image_content_type_rejected(tmp_path: Path) -> None:
 
 async def test_remote_download_timeout_nonfatal(tmp_path: Path) -> None:
     """Timeout during remote avatar download logs warning, phase continues."""
-    author1 = _make_author("user1", "Alice", avatar_url="https://cdn.example.com/slow.webp")
+    author1 = _make_author("user1", "Alice", avatar_url="https://cdn.discordapp.com/slow.webp")
     author2 = _make_author("user2", "Bob", avatar_url="avatar_user2.webp")
     # Create local file for second author
     avatar2 = tmp_path / "avatar_user2.webp"
@@ -204,7 +206,7 @@ async def test_remote_download_timeout_nonfatal(tmp_path: Path) -> None:
         config.session = session
         with aioresponses() as mocked:
             mocked.get(
-                "https://cdn.example.com/slow.webp",
+                "https://cdn.discordapp.com/slow.webp",
                 exception=TimeoutError("Connection timed out"),
             )
             with patch(
@@ -270,8 +272,8 @@ async def test_empty_avatar_url_filtered(tmp_path: Path) -> None:
 
 async def test_all_avatars_fail_completes_with_summary(tmp_path: Path) -> None:
     """When all remote downloads fail, phase completes with '0 of N' summary."""
-    author1 = _make_author("user1", "Alice", avatar_url="https://cdn.example.com/a.webp")
-    author2 = _make_author("user2", "Bob", avatar_url="https://cdn.example.com/b.webp")
+    author1 = _make_author("user1", "Alice", avatar_url="https://cdn.discordapp.com/a.webp")
+    author2 = _make_author("user2", "Bob", avatar_url="https://cdn.discordapp.com/b.webp")
     export = _make_export([_make_message("m1", author1), _make_message("m2", author2)])
     config = _make_config(tmp_path)
     state = _make_state()
@@ -281,11 +283,11 @@ async def test_all_avatars_fail_completes_with_summary(tmp_path: Path) -> None:
         config.session = session
         with aioresponses() as mocked:
             mocked.get(
-                "https://cdn.example.com/a.webp",
+                "https://cdn.discordapp.com/a.webp",
                 exception=TimeoutError("timeout"),
             )
             mocked.get(
-                "https://cdn.example.com/b.webp",
+                "https://cdn.discordapp.com/b.webp",
                 exception=TimeoutError("timeout"),
             )
             await run_avatars(config, state, [export], events.append)
@@ -490,7 +492,7 @@ async def test_run_avatars_dry_run_skips_cached(tmp_path: Path) -> None:
 
 async def test_download_failure_includes_specific_reason(tmp_path: Path) -> None:
     """Download failure warning includes specific reason, not generic text."""
-    author = _make_author("user1", "Alice", avatar_url="https://cdn.example.com/gone.webp")
+    author = _make_author("user1", "Alice", avatar_url="https://cdn.discordapp.com/gone.webp")
     export = _make_export([_make_message("m1", author)])
     config = _make_config(tmp_path)
     state = _make_state()
@@ -499,7 +501,7 @@ async def test_download_failure_includes_specific_reason(tmp_path: Path) -> None
     async with aiohttp.ClientSession() as session:
         config.session = session
         with aioresponses() as mocked:
-            mocked.get("https://cdn.example.com/gone.webp", status=404)
+            mocked.get("https://cdn.discordapp.com/gone.webp", status=404)
             with patch(
                 "discord_ferry.migrator.avatars.upload_with_cache",
                 new=AsyncMock(return_value="autumn_av1"),
@@ -617,7 +619,7 @@ async def test_downloader_rejects_unsafe_author_id(tmp_path: Path, author_id: st
     marker = tmp_path / "outside-marker.png"
     marker.write_bytes(b"MARKER")
     dest, reason = await _download_remote_avatar(
-        _FakeSession(), "https://cdn.invalid/a.png", tmp_path, author_id
+        _FakeSession(), "https://cdn.discordapp.com/a.png", tmp_path, author_id
     )
     assert dest is None
     assert reason
@@ -626,7 +628,7 @@ async def test_downloader_rejects_unsafe_author_id(tmp_path: Path, author_id: st
 
 async def test_downloader_snowflake_destination_unchanged(tmp_path: Path) -> None:
     dest, reason = await _download_remote_avatar(
-        _FakeSession(), "https://cdn.invalid/a.png", tmp_path, "1234567890"
+        _FakeSession(), "https://cdn.discordapp.com/a.png", tmp_path, "1234567890"
     )
     assert reason == ""
     assert dest == (tmp_path / "avatars" / "1234567890.png").resolve()
@@ -638,8 +640,10 @@ async def test_avatar_phase_crafted_id_leaves_marker_untouched(tmp_path: Path) -
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_bytes(b"MARKER")
     (tmp_path / "safe.png").write_bytes(b"x")
-    crafted = _make_author(author_id="../../outside-marker", avatar_url="https://cdn.invalid/a.png")
-    safe = _make_author(author_id="555", name="Safe", avatar_url="https://cdn.invalid/b.png")
+    crafted = _make_author(
+        author_id="../../outside-marker", avatar_url="https://cdn.discordapp.com/a.png"
+    )
+    safe = _make_author(author_id="555", name="Safe", avatar_url="https://cdn.discordapp.com/b.png")
     config = _make_config(tmp_path)
     state = _make_state()
     export = DCEExport(
@@ -667,7 +671,7 @@ async def test_downloader_rejects_escaped_avatars_directory(tmp_path: Path) -> N
     output.mkdir(parents=True, exist_ok=True)
     (output / "avatars").symlink_to(outside, target_is_directory=True)
     dest, reason = await _download_remote_avatar(
-        _FakeSession(), "https://cdn.invalid/a.png", output, "1234567890"
+        _FakeSession(), "https://cdn.discordapp.com/a.png", output, "1234567890"
     )
     assert dest is None
     assert reason
@@ -817,3 +821,162 @@ async def test_avatar_normal_download_writes_the_expected_bytes(tmp_path: Path) 
     assert reason == ""
     assert dest == tmp_path / "avatars" / "42.png"
     assert dest.stat().st_size == 100
+
+
+# ---------------------------------------------------------------------------
+# #965: an export-supplied avatar URL cannot reach a private network address
+# ---------------------------------------------------------------------------
+
+
+class _SessionCM:
+    """What ``get_session`` returns: hands the phase one chosen session."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> Any:
+        return self._session
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _ForbiddenSession:
+    """Fails the test if the downloader opens any request at all."""
+
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        self.requested.append(url)
+        raise AssertionError(f"a request was attempted for {url}")
+
+
+_PRIVATE_AVATAR_URLS = [
+    "http://127.0.0.1:8080/a.png",
+    "https://127.0.0.1/a.png",
+    "https://10.1.2.3/a.png",
+    "https://169.254.169.254/latest/meta-data/iam/a.png",
+    "https://[::1]/a.png",
+    "https://[::ffff:10.0.0.5]/a.png",
+    "https://cdn.discordapp.com@10.1.2.3/a.png",
+    "http://cdn.discordapp.com/avatars/42/a.png",
+]
+
+
+@pytest.mark.parametrize("url", _PRIVATE_AVATAR_URLS)
+async def test_private_avatar_url_is_refused_before_any_request(tmp_path: Path, url: str) -> None:
+    """Kills a downloader that fetches whatever URL the export names."""
+    session = _ForbiddenSession()
+    dest, reason = await _download_remote_avatar(
+        session,  # type: ignore[arg-type]  # duck-typed stand-in for ClientSession
+        url,
+        tmp_path,
+        "42",
+    )
+    assert dest is None
+    assert reason.startswith("avatar URL refused")
+    assert session.requested == []
+    assert _no_avatar_files(tmp_path)
+
+
+@pytest.mark.parametrize("url", _PRIVATE_AVATAR_URLS)
+async def test_private_avatar_url_warns_and_nothing_reaches_the_upload(
+    tmp_path: Path, url: str
+) -> None:
+    session = _ForbiddenSession()
+    author = _make_author("42", "Alice", avatar_url=url)
+    config = _make_config(tmp_path)
+    state = _make_state()
+    uploads: list[tuple[str, Path]] = []
+    with (
+        patch("discord_ferry.migrator.avatars.get_session", lambda _cfg: _SessionCM(session)),
+        patch("discord_ferry.migrator.avatars.upload_with_cache", _recording_uploads(uploads)),
+    ):
+        await run_avatars(config, state, [_export_with_author(author)], lambda e: None)
+
+    # The forbidden session raises if used, and the downloader would swallow that
+    # into the same warning, so the request list is what proves nothing was sent.
+    assert session.requested == []
+    assert uploads == []
+    assert state.avatar_cache == {}
+    assert [w["type"] for w in state.warnings] == ["avatar_download_failed"]
+    assert "refused" in state.warnings[0]["message"]
+
+
+async def test_loopback_service_is_never_contacted_for_an_export_avatar(tmp_path: Path) -> None:
+    """The scenario from the issue, with a real dummy service.
+
+    The URL points at a live local image server. Before the fix the phase
+    downloaded its marker image and handed it to the (recorded) upload.
+    """
+    async with local_cdn() as private, aiohttp.ClientSession() as real:
+        author = _make_author("42", "Alice", avatar_url=private.url("/body/10"))
+        config = _make_config(tmp_path)
+        state = _make_state()
+        uploads: list[tuple[str, Path]] = []
+        with (
+            patch("discord_ferry.migrator.avatars.get_session", lambda _cfg: _SessionCM(real)),
+            patch("discord_ferry.migrator.avatars.upload_with_cache", _recording_uploads(uploads)),
+        ):
+            await run_avatars(config, state, [_export_with_author(author)], lambda e: None)
+
+        assert private.sent == 0
+        assert private.last_headers == {}, "the dummy service saw a request"
+    assert uploads == []
+    assert _no_avatar_files(tmp_path / "output")
+    assert [w["type"] for w in state.warnings] == ["avatar_download_failed"]
+
+
+async def test_redirect_from_the_cdn_to_a_private_service_is_not_followed(tmp_path: Path) -> None:
+    """Two local services: the CDN stand-in redirects to the private one."""
+    async with local_cdn() as cdn, local_cdn() as private, aiohttp.ClientSession() as real:
+        cdn.redirect_to = private.url("/body/10")
+        session = RewritingSession(real, cdn.url("/redirect"))
+        dest, reason = await _download_remote_avatar(
+            session,  # type: ignore[arg-type]  # duck-typed stand-in for ClientSession
+            "https://cdn.discordapp.com/avatars/42/a.png",
+            tmp_path,
+            "42",
+        )
+        await asyncio.sleep(0.1)
+        assert dest is None
+        assert "302" in reason
+        assert private.sent == 0
+        assert private.target_hits == 0
+        assert private.last_headers == {}, "the private service saw a request"
+    assert _no_avatar_files(tmp_path)
+
+
+async def test_allowed_avatar_request_carries_no_credential_and_reaches_the_upload(
+    tmp_path: Path,
+) -> None:
+    """A normal Discord CDN URL still works, sends no credential, and uploads once."""
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = RewritingSession(real, cdn.url("/body/10"))
+        author = _make_author(
+            "42", "Alice", avatar_url="https://cdn.discordapp.com/avatars/42/a.png"
+        )
+        config = _make_config(tmp_path, token="stoat-session-token")
+        state = _make_state()
+        uploaded: list[tuple[str, bytes, str]] = []
+
+        async def _upload(
+            _session: Any, _autumn: Any, tag: Any, path: Any, token: Any, *a: Any, **kw: Any
+        ) -> str:
+            uploaded.append((tag, Path(path).read_bytes(), token))
+            return "autumn-1"
+
+        with (
+            patch("discord_ferry.migrator.avatars.get_session", lambda _cfg: _SessionCM(session)),
+            patch("discord_ferry.migrator.avatars.upload_with_cache", _upload),
+        ):
+            await run_avatars(config, state, [_export_with_author(author)], lambda e: None)
+
+        sent = {name.lower() for name in cdn.last_headers}
+        assert cdn.last_headers, "the dummy CDN received no request"
+        assert not sent & {"authorization", "x-session-token", "cookie", "proxy-authorization"}
+        assert "stoat-session-token" not in " ".join(cdn.last_headers.values())
+    # Exactly what reaches the upload: the avatars tag, the marker bytes, the operator's token.
+    assert uploaded == [("avatars", b"x" * 10, "stoat-session-token")]
+    assert state.avatar_cache == {"42": "autumn-1"}

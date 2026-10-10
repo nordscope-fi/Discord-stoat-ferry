@@ -31,6 +31,8 @@ class LocalCDN:
         self.sent = 0
         self.target_hits = 0
         self.last_headers: dict[str, str] = {}
+        # Where /redirect sends the client. Default: this server's own /target.
+        self.redirect_to = "/target"
         self._server: TestServer | None = None
 
     def url(self, path: str) -> str:
@@ -87,10 +89,11 @@ class LocalCDN:
         return resp
 
     async def _redirect(self, request: web.Request) -> web.StreamResponse:
-        raise web.HTTPFound("/target")
+        raise web.HTTPFound(self.redirect_to)
 
     async def _target(self, request: web.Request) -> web.StreamResponse:
         self.target_hits += 1
+        self.last_headers = dict(request.headers)
         return web.Response(body=b"redirected-body", content_type="image/png")
 
     async def _cutoff(self, request: web.Request) -> web.StreamResponse:

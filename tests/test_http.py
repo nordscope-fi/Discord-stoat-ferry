@@ -1960,3 +1960,58 @@ async def test_read_bounded_lets_a_mid_body_disconnect_propagate() -> None:
     async with local_cdn() as cdn:
         with pytest.raises(aiohttp.ClientPayloadError):
             await _read_bounded(cdn, "/cutoff/1000000")
+
+
+# ---------------------------------------------------------------------------
+# #965: which export-supplied URLs Ferry may download
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://cdn.discordapp.com/avatars/1/abc.png",
+        "https://cdn.discordapp.com/embed/avatars/3.png",
+        "https://media.discordapp.net/avatars/1/abc.webp?size=128",
+        "https://CDN.DiscordApp.com/avatars/1/abc.png",
+        "https://cdn.discordapp.com:443/avatars/1/abc.png",
+    ],
+)
+def test_remote_media_url_on_a_discord_cdn_is_allowed(url: str) -> None:
+    assert http.remote_media_refusal(url) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://cdn.discordapp.com/avatars/1/abc.png",  # not https
+        "http://127.0.0.1:8080/a.png",
+        "https://127.0.0.1/a.png",
+        "https://localhost/a.png",
+        "https://10.1.2.3/a.png",
+        "https://192.168.0.10/a.png",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/a.png",
+        "https://[::ffff:10.0.0.5]/a.png",  # IPv4-mapped private address
+        "https://[::ffff:a00:5]/a.png",
+        "https://[fe80::1]/a.png",
+        "https://0.0.0.0/a.png",
+        "https://2130706433/a.png",  # 127.0.0.1 as one integer
+        "https://evil.test/cdn.discordapp.com/a.png",
+        "https://cdn.discordapp.com.evil.test/a.png",
+        "https://evilcdn.discordapp.com/a.png",
+        "https://sub.cdn.discordapp.com/a.png",
+        "https://cdn.discordapp.com./a.png",  # trailing dot
+        "https://cdn.discordapp.com@127.0.0.1/a.png",  # real host is after the @
+        "https://cdn.discordapp.com\\@127.0.0.1/a.png",
+        "https://user:pw@cdn.discordapp.com/a.png",  # aiohttp would send Basic auth
+        "https://user@cdn.discordapp.com/a.png",
+        "https://cdn.discordapp.com:8443/a.png",
+        "ftp://cdn.discordapp.com/a.png",
+        "//cdn.discordapp.com/a.png",
+        "cdn.discordapp.com/a.png",
+        "",
+    ],
+)
+def test_remote_media_url_off_a_discord_cdn_is_refused(url: str) -> None:
+    assert http.remote_media_refusal(url) is not None
