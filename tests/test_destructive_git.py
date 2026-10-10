@@ -171,12 +171,43 @@ BLOCKED = [
     ("reset-bash-c-double-dash", "bash -c -- 'git reset --hard'"),
     ("reset-env-split-string", "env -S 'git reset --hard'"),
     ("push-env-word-after-the-command", "git push env -S +main"),
+    # Found by the release review: a separator or bracket inside quotes or
+    # after a backslash is part of a word, so it must not split the command.
+    ("push-branch-with-brackets-double-quoted", 'git push origin "feat(x)" --force'),
+    ("push-branch-with-brackets-single-quoted", "git push origin 'feat(x)' --force"),
+    ("push-branch-with-escaped-brackets", "git push origin feat\\(x\\) --force"),
+    ("push-branch-with-semicolon-quoted", 'git push origin "a;b" --force'),
+    ("push-url-with-ampersand-quoted", 'git push "https://x/?a=1&b=2" --force'),
+    ("reset-dir-with-brackets", 'git -C "proj(copy)" reset --hard'),
+    ("reset-work-tree-with-brackets", 'git --work-tree="a(b)" reset --hard'),
+    ("reset-config-value-with-brackets", 'git -c user.name="Foo(bar)" reset --hard'),
+    ("clean-path-with-brackets", 'git clean "dir(1)" -f'),
+    ("branch-name-with-brackets", 'git branch "fix(a)" -D'),
+    ("checkout-ref-with-brackets", 'git checkout "a(b)" -- .'),
+    ("restore-path-with-brackets", 'git restore "p(q)" .'),
+    ("push-ansi-c-escaped-quote", "git push origin $'it\\'s' --force"),
+    # The shell runs $(...) and backticks even inside double quotes.
+    ("reset-substitution-in-double-quotes", 'echo "$(git reset --hard)"'),
+    ("reset-backticks-in-double-quotes", 'echo "`git reset --hard`"'),
+    ("reset-nested-substitution", "echo $(echo $(git reset --hard))"),
+    ("reset-bash-c-with-separator-inside", "bash -c 'git status; git reset --hard'"),
+    # A # that starts a word begins a comment, so flags after it never run.
+    ("restore-staged-flag-only-in-comment", "git restore . # -S"),
+    ("restore-source-flag-before-double-dash", "git restore . -s -- -S"),
+    ("restore-staged-flag-after-comment-word", "git restore . #c -S a && true"),
+    ("reset-with-trailing-comment", "git reset --hard # tidy up"),
+    ("push-hash-inside-a-word-is-not-a-comment", "git push origin main#tag --force"),
+    ("reset-after-comment-line", "# note\ngit reset --hard"),
 ]
 
 # (id, command). Every one of these must stay allowed.
 ALLOWED = [
     ("reset-soft", "git reset --soft HEAD~1"),
     ("restore-staged-with-separate-source", "git restore -s HEAD -S ."),
+    ("commit-message-quoting-a-command", 'git commit -m "x; git reset --hard"'),
+    ("echo-single-quoted-substitution", "echo '$(git reset --hard)'"),
+    ("destructive-flags-only-in-comment", "git branch --force x # --delete -f"),
+    ("whole-command-commented-out", "# git reset --hard"),
     ("reset-mixed", "git reset --mixed HEAD~1"),
     ("reset-plain", "git reset"),
     ("reset-unstage-file", "git reset HEAD path/file"),

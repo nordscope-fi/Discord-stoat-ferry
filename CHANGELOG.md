@@ -10,31 +10,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Ignore common credential file names in `.gitignore`: `credentials.json`, `*.pem` and `*.key`
   (#979). None are tracked today, so this only stops an accidental `git add` from picking one up.
+- The Context7 documentation helper now starts `@upstash/context7-mcp@4.1.1` (published 2026-09-14)
+  instead of whichever version is newest on each launch (#995). Only the version is pinned:
+  `npx` cannot check an integrity string, and the package's own dependencies still float inside
+  their declared ranges.
+- The destructive git check shared by the Qwen, Codex and Vibe hooks now recognises more spellings of
+  the commands it already targeted (#996). It splits a line into commands only at separators and
+  brackets outside quotes, skips shell comments, and reads quoted and backslash-escaped words,
+  including `$'...'` and `$"..."` quoting and a backslash before a newline, unambiguous long-option
+  abbreviations such as `--forc`, a `+` on a push refspec, `branch -fd` and `-d -f`, and
+  `git checkout .`. It no longer flags `git restore -S .`, which only touches the index, and it reads
+  a value glued to `restore -s` as that value, so it cannot pass for `-S`. It sees through the
+  wrappers `env` (including `env -S`), `command`, `exec`, `timeout` and `sudo` with options, and
+  looks inside `bash -c` (also with `--`), `sh -c`, `eval`, `$(...)` and backticks (also inside
+  double quotes), subshells and `then` blocks.
+  Table-driven tests cover each spelling and each host's deny response. Not covered: commands built
+  at run time (variables, aliases, `find -exec`), a git command run by another program such as
+  `python -c` or `ssh`, `checkout -f`, and the Claude Code hook, which is a separate untracked
+  substring check (#1129).
+
 ### Fixed
 
 - The DiscordChatExporter download now stops reading at the 150 MB size limit. It used to buffer
   the whole response and only then compare its size, so an oversized or endless response was held
   in memory in full. A declared Content-Length over the limit is now refused before any of the body
   is read (#1127).
-### Fixed
-
 - `ferry rollback`, `retry`, `repair`, `check` and `backfill-roles` now mask the registered Stoat
   token in the errors and progress lines they print (#1128). Before, they escaped Rich markup and
   nothing else, so a server error that echoed the token reached the screen in full. `ferry build`
   got the same fix in #972.
-- The Context7 documentation helper now starts `@upstash/context7-mcp@4.1.1` (published 2026-09-14)
-  instead of whichever version is newest on each launch (#995). Only the version is pinned:
-  `npx` cannot check an integrity string, and the package's own dependencies still float inside
-  their declared ranges.
-- The destructive git check shared by the Qwen, Codex and Vibe hooks now recognises more spellings of
-  the commands it already targeted (#996). It reads quoted and backslash-escaped words, unambiguous
-  long-option abbreviations such as `--forc`, a `+` on a push refspec, `branch -fd` and `-d -f`,
-  and `git checkout .`. It no longer flags `git restore -S .`, which only touches the index. It sees
-  through the wrappers `env`, `command`, `exec`, `timeout` and `sudo` with options, and looks inside
-  `bash -c`, `sh -c`, `eval`, subshells and `then` blocks.
-  Table-driven tests cover each spelling and each host's deny response. Not covered: commands built
-  at run time (variables, aliases, `find -exec`), `checkout -f`, and the Claude Code hook, which is a
-  separate untracked substring check.
 
 ### Security
 
