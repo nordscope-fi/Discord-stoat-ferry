@@ -115,6 +115,8 @@ def _read_previous_state(output_dir: Path) -> tuple[MigrationState | None, str |
         return None, None
     try:
         return load_state(output_dir), None
+    except FileNotFoundError:
+        return None, None  # removed between the check and the read: absent, not unreadable
     except Exception as exc:  # noqa: BLE001 -- any unreadable state gets the same answer
         return None, sanitize_secrets(str(exc)) or type(exc).__name__
 
