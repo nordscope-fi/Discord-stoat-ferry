@@ -194,6 +194,14 @@ BLOCKED = [
     # A # that starts a word begins a comment, so flags after it never run.
     ("restore-staged-flag-only-in-comment", "git restore . # -S"),
     ("restore-source-flag-before-double-dash", "git restore . -s -- -S"),
+    # A quoted ) inside $( ... ) does not close it.
+    ("reset-substitution-with-quoted-bracket", "echo $(echo ')'; git reset --hard)"),
+    ("reset-substitution-with-double-quoted-bracket", 'echo $(echo "a)b"; git reset --hard)'),
+    (
+        "reset-quoted-substitution-with-quoted-bracket",
+        "echo \"$(echo ')'; git reset --hard)\"",
+    ),
+    ("reset-coproc", "coproc git reset --hard"),
     ("restore-staged-flag-after-comment-word", "git restore . #c -S a && true"),
     ("reset-with-trailing-comment", "git reset --hard # tidy up"),
     ("push-hash-inside-a-word-is-not-a-comment", "git push origin main#tag --force"),

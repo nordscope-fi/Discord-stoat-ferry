@@ -37,18 +37,33 @@ const WRAPPERS = new Map([
 ]);
 
 // Words that can start a command position without being the command.
-const SHELL_KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
+const SHELL_KEYWORDS = new Set([
+  '{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'coproc',
+]);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish']);
 const MAX_DEPTH = 4;
 
-// Index just past the end of a $( ... ) body starting at `start`, counting
-// nested brackets. An unterminated body runs to the end of the line.
+// Index of the ) that closes a $( ... ) body starting at `start`. Brackets
+// inside quotes do not count, and nested ones do. An unterminated body runs
+// to the end of the line.
 function substitutionEnd(cmd, start) {
   let depth = 1;
+  let quote = null;
   for (let j = start; j < cmd.length; j += 1) {
-    if (cmd[j] === '\\') j += 1;
-    else if (cmd[j] === '(') depth += 1;
-    else if (cmd[j] === ')' && (depth -= 1) === 0) return j;
+    const c = cmd[j];
+    if (quote === "'") {
+      if (c === "'") quote = null;
+    } else if (c === '\\') {
+      j += 1;
+    } else if (quote === '"') {
+      if (c === '"') quote = null;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (c === '(') {
+      depth += 1;
+    } else if (c === ')' && (depth -= 1) === 0) {
+      return j;
+    }
   }
   return cmd.length;
 }
