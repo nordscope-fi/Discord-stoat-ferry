@@ -20,6 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   with the usual "avatar_download_failed" warning, and the member keeps the default
   avatar. Redirects were already refused. Exports made with media downloaded use local
   paths and are unaffected.
+### Fixed
+
+- Give the chat exporter only the environment it needs (#976). Ferry used to start DiscordChatExporter with a full copy of its own environment, so every secret Ferry could see, such as the Stoat token or an unrelated API key, was visible to the exporter. The exporter now receives a short list of variables. These are the path and temp settings, the Windows system folders, and the home and locale settings. They also include the proxy and CA bundle settings (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). The Discord token is set from Ferry's own configuration. Everything else is left out. On Windows the names match without regard to case. The exporter is a self-contained .NET program, so it needs no `DOTNET_ROOT`. Of the `DOTNET_*` settings only `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT` is passed on; if you relied on another one reaching the exporter, tell us in an issue.
 
 ## [2.41.30] - 2026-10-10
 
