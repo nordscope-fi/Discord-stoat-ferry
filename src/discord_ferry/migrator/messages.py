@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from discord_ferry.core.atomicio import write_text_no_follow
+from discord_ferry.core.atomicio import ensure_output_subdir, write_text_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
 from discord_ferry.errors import DuplicateSendError
@@ -891,6 +891,17 @@ async def _merge_threads(
             )
 
 
+def _warn_archive_failed(state: MigrationState, export: DCEExport) -> None:
+    """Record a thread archive that could not be written. Fixed template, no path or error text."""
+    state.warnings.append(
+        {
+            "phase": "messages",
+            "type": "thread_archive_write_failed",
+            "message": f"Thread archive for {export.channel.name!r} could not be written.",
+        }
+    )
+
+
 def _archive_threads(
     thread_exports: list[DCEExport],
     config: FerryConfig,
@@ -901,13 +912,18 @@ def _archive_threads(
 
     Creates ``{output_dir}/threads/{parent_channel_name}/{thread_name}.md``
     with each message formatted as a markdown heading with author and timestamp.
-    A file name that is a symlink is refused and recorded as a warning (#960).
+    A file or folder that is a symlink is refused and recorded as a warning (#960).
     """
     used_names: dict[str, dict[str, int]] = {}
     for export in thread_exports:
         parent_name = sanitize_filename(export.parent_channel_name or "uncategorized")
         thread_dir = config.output_dir / "threads" / parent_name
-        thread_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ensure_output_subdir(thread_dir, config.output_dir)
+        except OSError:
+            # A link planted as ``threads`` or ``threads/<parent>`` (#960).
+            _warn_archive_failed(state, export)
+            continue
 
         base_name = sanitize_filename(export.channel.name)
         dir_used = used_names.setdefault(parent_name, {})
@@ -945,15 +961,8 @@ def _archive_threads(
         try:
             write_text_no_follow(md_path, "\n".join(lines))
         except OSError:
-            # Fixed template, no path or error text. A link planted at the archive
-            # name is refused (#960); the rest of the phase carries on.
-            state.warnings.append(
-                {
-                    "phase": "messages",
-                    "type": "thread_archive_write_failed",
-                    "message": f"Thread archive for {export.channel.name!r} could not be written.",
-                }
-            )
+            # A link planted at the archive name is refused (#960).
+            _warn_archive_failed(state, export)
             continue
 
         on_event(

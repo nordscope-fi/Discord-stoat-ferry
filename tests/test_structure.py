@@ -3681,6 +3681,44 @@ async def test_role_icon_link_planted_at_the_staging_path_is_not_written_through
     assert [w["type"] for w in state.warnings] == ["role_icon_upload_failed"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+async def test_role_icon_folder_planted_as_a_link_is_refused(tmp_path: Path) -> None:
+    """#960: ``role-icons`` itself can be a planted link to somewhere else."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "role-icons").symlink_to(outside, target_is_directory=True)
+    config = _make_config(output)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+
+    uploaded: list[Path] = []
+
+    async def fake_upload(
+        session: object, autumn_url: object, tag: object, path: Path, token: object
+    ) -> str:
+        # Reached only if the icon was written somewhere. The staging file is deleted
+        # after the upload, so the folder alone would look clean afterwards.
+        uploaded.append(path)
+        return "icon-1"
+
+    with (
+        aioresponses(),
+        patch(
+            "discord_ferry.migrator.structure.download_role_icon",
+            new=AsyncMock(return_value=b"pngbytes"),
+        ),
+        patch("discord_ferry.migrator.structure.upload_to_autumn", new=fake_upload),
+    ):
+        async with get_session(config) as session:
+            result = await _resolve_role_icon(session, config, state, "moderator", "111", "abc")
+
+    assert result is None
+    assert uploaded == []
+    assert list(outside.iterdir()) == []
+    assert [w["type"] for w in state.warnings] == ["role_icon_upload_failed"]
+
+
 async def test_role_icon_normal_write_reaches_the_upload(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)

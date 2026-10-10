@@ -20,6 +20,7 @@ import pytest
 from discord_ferry.core import atomicio
 from discord_ferry.core.atomicio import (
     atomic_write_text,
+    ensure_output_subdir,
     replace_with_retry,
     write_bytes_no_follow,
     write_text_no_follow,
@@ -471,3 +472,71 @@ def test_write_text_no_follow_refuses_a_dangling_planted_link(tmp_path: Path) ->
         write_text_no_follow(link, "new")
 
     assert not goal.exists()
+
+
+# --- Output subfolders that refuse a planted link (#960) ---------------------
+
+
+def test_ensure_output_subdir_creates_nested_folders(tmp_path: Path) -> None:
+    target = tmp_path / "out" / "threads" / "general"
+
+    ensure_output_subdir(target, tmp_path / "out")
+
+    assert target.is_dir()
+
+
+def test_ensure_output_subdir_accepts_an_existing_real_folder(tmp_path: Path) -> None:
+    (tmp_path / "icons").mkdir()
+
+    ensure_output_subdir(tmp_path / "icons", tmp_path)
+    ensure_output_subdir(tmp_path / "icons", tmp_path)
+
+    assert (tmp_path / "icons").is_dir()
+
+
+@posix_only
+def test_ensure_output_subdir_makes_new_folders_owner_only(tmp_path: Path) -> None:
+    ensure_output_subdir(tmp_path / "a" / "b", tmp_path)
+
+    assert stat.S_IMODE((tmp_path / "a").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "a" / "b").stat().st_mode) == 0o700
+
+
+@posix_only
+@pytest.mark.parametrize("planted", ["leaf", "middle"])
+def test_ensure_output_subdir_refuses_a_planted_link(tmp_path: Path, planted: str) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "out"
+    root.mkdir()
+    if planted == "leaf":
+        (root / "icons").symlink_to(outside, target_is_directory=True)
+        target = root / "icons"
+    else:
+        (root / "threads").symlink_to(outside, target_is_directory=True)
+        target = root / "threads" / "general"
+
+    with pytest.raises(OSError):
+        ensure_output_subdir(target, root)
+
+    assert list(outside.iterdir()) == []
+
+
+@posix_only
+def test_ensure_output_subdir_refuses_a_link_to_a_folder_inside_the_root(tmp_path: Path) -> None:
+    """A link is refused even when it stays inside the root: the check is per component."""
+    root = tmp_path / "out"
+    (root / "real").mkdir(parents=True)
+    (root / "icons").symlink_to(root / "real", target_is_directory=True)
+
+    with pytest.raises(OSError):
+        ensure_output_subdir(root / "icons", root)
+
+
+def test_ensure_output_subdir_refuses_a_path_outside_the_root(tmp_path: Path) -> None:
+    (tmp_path / "out").mkdir()
+
+    with pytest.raises(OSError):
+        ensure_output_subdir(tmp_path / "elsewhere", tmp_path / "out")
+
+    assert not (tmp_path / "elsewhere").exists()

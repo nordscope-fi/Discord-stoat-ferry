@@ -266,6 +266,51 @@ async def test_archive_mode_does_not_write_through_a_planted_link(tmp_path: Path
     assert [w["type"] for w in state.warnings] == ["thread_archive_write_failed"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+@pytest.mark.parametrize("planted", ["threads", "parent"])
+async def test_archive_mode_refuses_a_planted_link_as_a_folder(
+    tmp_path: Path, planted: str
+) -> None:
+    """#960: ``threads`` or ``threads/<parent>`` can be a link planted to another folder."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    if planted == "threads":
+        (output / "threads").symlink_to(outside, target_is_directory=True)
+    else:
+        (output / "threads").mkdir()
+        (output / "threads" / "general").symlink_to(outside, target_is_directory=True)
+    config = _make_config(output, thread_strategy="archive", message_rate_limit=0.0)
+    state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
+    state.channel_map["100"] = "stoat-ch-100"
+    parent = _make_export(
+        channel_id="100",
+        channel_name="general",
+        messages=[_make_message("m1", "parent msg")],
+        message_count=1,
+    )
+    thread = _make_export(
+        channel_id="200",
+        channel_name="my-thread",
+        is_thread=True,
+        parent_channel_name="general",
+        messages=[_make_message("m2", "thread message")],
+        message_count=1,
+    )
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/channels/stoat-ch-100/messages",
+            payload={"_id": "msg-result"},
+            repeat=True,
+        )
+        await run_messages(config, state, [parent, thread], [].append)
+
+    assert list(outside.iterdir()) == []
+    assert [w["type"] for w in state.warnings] == ["thread_archive_write_failed"]
+
+
 async def test_archive_mode_creates_markdown(tmp_path: Path) -> None:
     """Archive mode creates a markdown file for each thread."""
     config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)

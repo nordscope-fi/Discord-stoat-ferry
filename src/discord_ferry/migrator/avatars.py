@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from discord_ferry.core.atomicio import write_bytes_no_follow
+from discord_ferry.core.atomicio import ensure_output_subdir, write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import read_bounded
 from discord_ferry.migrator.api import get_session
@@ -95,7 +95,7 @@ async def _download_remote_avatar(
             ext = url_path.suffix if url_path.suffix else ".webp"
 
             avatar_dir = output_dir / "avatars"
-            avatar_dir.mkdir(parents=True, exist_ok=True)
+            ensure_output_subdir(avatar_dir, output_dir)
             dest = avatar_dir / f"{author_id}{ext}"
             # Compare against the resolved output root so a symlinked avatars
             # directory cannot redirect the write outside output_dir.
