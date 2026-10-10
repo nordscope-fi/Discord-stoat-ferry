@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Pin every remote GitHub Actions reference in `.github/workflows/` to a full commit SHA with a
+  trailing `# vX.Y.Z` comment, and pin the build backend to `hatchling==1.32.4` (#1003). The
+  selectors were moving (`@v6`, `@release/v1`), so a retag upstream could change what CI and the
+  release job ran. Majors are unchanged. Dependabot now also watches the `github-actions`
+  ecosystem and proposes SHA bumps weekly. The backend pin is bumped by hand.
+
 ## [2.41.26] - 2026-10-10
 
 ### Changed
