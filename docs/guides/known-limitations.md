@@ -155,12 +155,15 @@ channel, so repair has nothing to act on.
 **A message accepted as a duplicate cannot be restored.** Ferry holds no identifier for it, so
 neither the check nor the repair can tell whether it is there.
 
-**Merged thread content is not restored.** Under `--thread-strategy=merge` a thread's messages were
-appended to its parent channel, and Ferry finds them by the parent's *name* rather than its
-identifier. A repair working from a channel's own export cannot reach them. If repair recreates a
-parent that absorbed thread content, it restores the parent's own messages. It records a warning
-naming each thread it left behind. `flatten`, the default, gives every thread its own channel and
-is restored completely.
+**Merged thread content comes back only for threads Ferry recorded as merged.** Under
+`--thread-strategy=merge` a thread's messages were appended to its parent channel. When repair
+recreates that parent, it re-sends the parent's own messages first and then each thread behind its
+separator, in the order a normal migration uses. A thread is restored only if the state holds the
+mark Ferry writes when it merges a thread. A thread left out by `--skip-threads` or
+`--min-thread-messages` has no such mark and was never merged, so repair leaves it out too. A
+migration from an older version may also lack the mark. Repair records a warning naming each
+thread it did not restore. `flatten`, the default, gives every thread its own channel and is
+restored completely.
 
 **A missing forum index is recreated and rebuilt.** Repair recreates the index channel, puts it
 back at the top of its forum category, and rebuilds its pinned index message from Ferry's own record

@@ -69,6 +69,7 @@ from discord_ferry.migrator.emoji import (
 from discord_ferry.migrator.messages import (
     _THREAD_STRATEGIES,
     _build_content,
+    _merge_threads,
     _process_message,
     _split_message,
     run_messages,
@@ -1760,39 +1761,114 @@ def _ordered_messages(export: DCEExport) -> Iterator[DCEMessage]:
 def _warn_unrestored_merge_threads(
     state: MigrationState,
     export: DCEExport,
-    exports: list[DCEExport],
+    threads: list[DCEExport],
+    reason: str,
     on_event: EventCallback,
 ) -> None:
-    """Name the merged thread content a recreated parent does not get back.
-
-    Under ``--thread-strategy=merge`` a thread's messages were appended to the
-    PARENT's Stoat channel, and ``_merge_threads`` resolves that target by parent
-    channel NAME. A channel-scoped scan keyed on the parent's Discord id
-    therefore cannot reach them, and the merge path never wrote ``message_map``
-    either, so nothing in the state points at them.
-
-    The gap is stated rather than silent, which is the whole difference between
-    this and the defect a critique round found. Deferred as #310.
-    """
-    orphans = [
-        e.channel.name
-        for e in exports
-        if e.is_thread and e.parent_channel_name == export.channel.name
-    ]
-    if not orphans:
-        return
-    names = ", ".join(sorted(orphans))
+    """Name the merged thread content a recreated parent did not get back."""
+    names = ", ".join(sorted(t.channel.name for t in threads))
     message = (
-        f"Channel '{export.channel.name}' was migrated with --thread-strategy=merge, so "
-        f"{len(orphans)} thread(s) had their messages appended to it: {names}. "
-        "Repair restored the channel's own messages only. The merged thread content is "
-        "reachable by parent channel name rather than by id, so a channel-scoped resend "
-        "cannot find it (see issue #310)."
+        f"Channel '{export.channel.name}' was migrated with --thread-strategy=merge, and "
+        f"{len(threads)} thread(s) were not restored into the recreated channel: {names}. "
+        f"{reason}"
     )
     state.warnings.append(
         {"phase": "repair", "type": "merge_thread_content_not_restored", "message": message}
     )
     on_event(MigrationEvent(phase="repair", status="warning", message=message))
+
+
+async def _restore_merged_threads(
+    config: FerryConfig,
+    state: MigrationState,
+    export: DCEExport,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> int:
+    """Re-merge the thread content a recreated parent channel held (#310).
+
+    Under ``--thread-strategy=merge`` ``_merge_threads`` appended every thread's
+    messages to the PARENT's Stoat channel, found by parent channel NAME, so a
+    scan keyed on the parent's Discord id (``_resend_channel``) cannot reach
+    them. This runs the same function over the same threads in the same order,
+    pointed at the recreated channel. Call it AFTER ``_resend_channel``: a
+    thread's first message is the parent's own origin message, and
+    ``_merge_threads`` only suppresses it when the parent's resend has already
+    put it in ``message_map``.
+
+    The target is resolved the way ``run_messages`` resolves it: a name to Stoat id
+    map over the non-thread exports in channel id order, last one winning. A thread
+    is merged here only when that map sends it to the channel just recreated, so a
+    thread whose name resolves to a different parent is left alone.
+
+    ``--skip-threads`` and ``--min-thread-messages`` are not recorded in the state,
+    and a thread they excluded was never merged. The only trace of a completed
+    merge is the thread's own high-water mark (or, after a crash, its offset), so a
+    thread with neither is not sent and is named in a warning instead. Sending it
+    would put content on the server that the operator chose to leave out.
+
+    Like a normal merge this writes no ``message_map`` entries for the thread
+    messages. Returns the number of threads merged.
+    """
+    if export.is_thread:
+        return 0
+    new_channel_id = state.channel_map[export.channel.id]
+
+    ordered = sorted(exports, key=lambda e: e.channel.id)
+    parent_name_to_stoat: dict[str, str] = {}
+    for exp in ordered:
+        if not exp.is_thread:
+            stoat_id = state.channel_map.get(exp.channel.id)
+            if stoat_id:
+                parent_name_to_stoat[exp.channel.name] = stoat_id
+    threads = [
+        e
+        for e in ordered
+        if e.is_thread and parent_name_to_stoat.get(e.parent_channel_name or "") == new_channel_id
+    ]
+
+    recorded = [
+        t
+        for t in threads
+        if t.channel.id in state.channel_high_water or t.channel.id in state.channel_message_offsets
+    ]
+    unrecorded = [t for t in threads if t not in recorded]
+    if unrecorded:
+        _warn_unrestored_merge_threads(
+            state,
+            export,
+            unrecorded,
+            "Nothing in the state shows they were merged, so they were left out. A thread "
+            "excluded by --skip-threads or --min-thread-messages was never merged, and a "
+            "migration from an older version did not record the mark repair relies on.",
+            on_event,
+        )
+    if not recorded:
+        return 0
+
+    try:
+        await _merge_threads(
+            recorded,
+            config,
+            state,
+            on_event,
+            {export.channel.name: new_channel_id},
+            idempotency_salt=new_channel_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # One channel's failure must not stop the rest of the repair. Per-message
+        # send failures never reach here: _merge_threads queues them in
+        # state.failed_messages. This is something that escaped it.
+        safe_exc = safe_sanitize(config.token_store, str(exc))
+        _warn_unrestored_merge_threads(
+            state,
+            export,
+            recorded,
+            f"Restoring them stopped with an error and may be incomplete: {safe_exc}",
+            on_event,
+        )
+        return 0
+    return len(recorded)
 
 
 async def _resend_channel(
@@ -2937,8 +3013,6 @@ async def run_repair(
                         label = state.created_channel_names.get(discord_id, discord_id)
                         count = 0
                         if matching is not None:
-                            if state.thread_strategy == "merge":
-                                _warn_unrestored_merge_threads(state, matching, exports, on_event)
                             count = await _resend_channel(sess, config, state, matching, on_event)
                             on_event(
                                 MigrationEvent(
@@ -2947,6 +3021,18 @@ async def run_repair(
                                     message=f"Re-sent {count} message(s) into {label}.",
                                 )
                             )
+                            if state.thread_strategy == "merge":
+                                merged = await _restore_merged_threads(
+                                    config, state, matching, exports, on_event
+                                )
+                                if merged:
+                                    on_event(
+                                        MigrationEvent(
+                                            phase="repair",
+                                            status="progress",
+                                            message=(f"Re-merged {merged} thread(s) into {label}."),
+                                        )
+                                    )
                         outcome.recreated_channels.append(
                             {
                                 "discord_id": discord_id,
