@@ -192,6 +192,19 @@ warning and left alone, because a rename almost always means you made it.
 audit trail, so a check against that state reports every channel missing. Repair stops rather than
 rebuilding a server you chose to remove.
 
+## The Local Web Interface
+
+**It has no login.** The interface listens only on this computer (`127.0.0.1`), and it answers
+only requests addressed to `127.0.0.1` or `localhost`, so an outside website cannot reach it.
+Another user account on the same computer can still open it while Ferry is running, and use it the
+way you can, for example to export a blueprint to a file. Run Ferry under your own account on a
+computer you do not share, and close it when you are done.
+
+**The validation acknowledgement is a reminder, not a gate.** Ticking "I have reviewed the
+warnings" only moves the interface to the next page. The safety step is the review that the
+migration engine itself shows before it changes anything on Stoat, and that review runs however
+you reach the migration page.
+
 ## See Also
 
 - [Troubleshooting](troubleshooting.md) (solutions for common migration errors)
