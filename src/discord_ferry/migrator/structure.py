@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -49,8 +52,6 @@ from discord_ferry.state import save_state
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.parser.models import DCEChannel, DCEExport
@@ -141,9 +142,15 @@ async def _download_banner(
         data = await read_bounded(resp, limit)
     if data is None:
         return f"Banner is larger than the {limit} byte limit"
-    tmp = dest.with_name(dest.name + ".part")
+    # A random name created exclusively (O_EXCL, mode 0600), so a link planted in a
+    # shared output folder at a guessable name is never followed (#960).
+    descriptor, tmp_name = tempfile.mkstemp(
+        dir=dest.parent, prefix=f".{dest.name}.", suffix=".part"
+    )
+    tmp = Path(tmp_name)
     try:
-        tmp.write_bytes(data)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
         replace_with_retry(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)

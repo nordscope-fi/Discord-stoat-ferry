@@ -9,8 +9,11 @@ pair, so a truncated export outlived the run that produced it.
 from __future__ import annotations
 
 import ast
+import os
+import stat
 import sys
 from pathlib import Path
+from typing import IO
 
 import pytest
 
@@ -26,12 +29,18 @@ def test_writes_a_new_file(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == '{"a": 1}'
 
 
+def _leftovers(directory: Path, name: str = "doc.json") -> list[str]:
+    """Every staging file left in *directory*, whatever name the writer gave it."""
+    return sorted(p.name for p in directory.iterdir() if p.name != name)
+
+
 def test_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     target = tmp_path / "doc.json"
 
     atomic_write_text(target, "x")
 
     assert not (tmp_path / "doc.json.tmp").exists()
+    assert _leftovers(tmp_path) == []
     assert [p.name for p in tmp_path.iterdir()] == ["doc.json"]
 
 
@@ -74,18 +83,29 @@ def test_a_partial_write_leaves_the_previous_file_intact(
     """
     target = tmp_path / "doc.json"
     atomic_write_text(target, '{"good": true}')
-    real_write_text = Path.write_text
+    real_fdopen = os.fdopen
 
-    def half_then_fail(self: Path, data: str, *args: object, **kwargs: object) -> None:
-        real_write_text(self, data[: len(data) // 2], encoding="utf-8")
-        raise OSError(28, "No space left on device")
+    class _HalfThenFail:
+        def __init__(self, handle: IO[str]) -> None:
+            self._handle = handle
 
-    monkeypatch.setattr(Path, "write_text", half_then_fail)
+        def __enter__(self) -> _HalfThenFail:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._handle.close()
+
+        def write(self, data: str) -> int:
+            self._handle.write(data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(atomicio.os, "fdopen", lambda *a, **k: _HalfThenFail(real_fdopen(*a, **k)))
     with pytest.raises(OSError):
         atomic_write_text(target, '{"replacement": true}')
 
     monkeypatch.undo()
     assert target.read_text(encoding="utf-8") == '{"good": true}'
+    assert _leftovers(tmp_path) == []
 
 
 def test_a_failed_swap_leaves_the_previous_file_intact(
@@ -104,6 +124,7 @@ def test_a_failed_swap_leaves_the_previous_file_intact(
 
     monkeypatch.undo()
     assert target.read_text(encoding="utf-8") == '{"good": true}'
+    assert _leftovers(tmp_path) == []
 
 
 # --- Retry on a held-open destination (#176) --------------------------------
@@ -158,7 +179,7 @@ def test_retries_a_held_open_destination_on_windows(
     assert flaky.calls == 4
     assert sleeps == [0.05, 0.1, 0.2]
     assert target.read_text(encoding="utf-8") == "new"
-    assert not (tmp_path / "doc.json.tmp").exists()
+    assert _leftovers(tmp_path) == []
 
 
 def test_succeeds_on_the_last_attempt(
@@ -193,7 +214,7 @@ def test_gives_up_after_the_last_attempt_and_cleans_up(
     assert sleeps == [0.05, 0.1, 0.2, 0.4]
     monkeypatch.undo()
     assert target.read_text(encoding="utf-8") == "old"
-    assert [p.name for p in tmp_path.iterdir()] == ["doc.json"]
+    assert _leftovers(tmp_path) == []
 
 
 def test_does_not_retry_other_oserrors_on_windows(
@@ -295,3 +316,100 @@ def test_a_cleanup_failure_does_not_replace_the_original_error(
     monkeypatch.setattr(Path, "unlink", stuck)
     with pytest.raises(PermissionError, match="destination held open"):
         atomic_write_text(target, '{"new": true}')
+
+
+# --- Random exclusive staging name (#960) ------------------------------------
+# The staging file used to be "<name>.tmp", a name anyone with entry-creation
+# rights in a shared folder could predict and plant a symlink at. write_text
+# follows symlinks, so the write landed in whatever the link pointed at.
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks and modes")
+
+
+@posix_only
+def test_a_symlink_at_the_old_staging_name_is_not_written_through(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "state.json.tmp").symlink_to(victim)
+    target = shared / "state.json"
+
+    atomic_write_text(target, "new content")
+
+    assert victim.read_text(encoding="utf-8") == "secret"
+    assert target.read_text(encoding="utf-8") == "new content"
+    assert not target.is_symlink()
+
+
+@posix_only
+def test_a_dangling_symlink_at_the_old_staging_name_creates_nothing_outside(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    planted_goal = outside / "created-by-attacker-link"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "doc.json.tmp").symlink_to(planted_goal)
+
+    atomic_write_text(shared / "doc.json", "new content")
+
+    assert not planted_goal.exists()
+    assert (shared / "doc.json").read_text(encoding="utf-8") == "new content"
+
+
+def test_the_staging_name_is_not_predictable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+    real_replace = atomicio.replace_with_retry
+
+    def spy(source: Path, destination: Path) -> None:
+        seen.append(source.name)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(atomicio, "replace_with_retry", spy)
+    target = tmp_path / "doc.json"
+
+    atomic_write_text(target, "a")
+    atomic_write_text(target, "b")
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert "doc.json.tmp" not in seen
+    assert all(name.startswith(".doc.json.") and name.endswith(".tmp") for name in seen)
+
+
+def test_two_writes_to_one_target_do_not_collide(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "doc.json"
+    staged: list[Path] = []
+    real_replace = atomicio.replace_with_retry
+
+    def hold(source: Path, destination: Path) -> None:
+        # Start a second write while the first one's staging file still exists.
+        staged.append(source)
+        if len(staged) == 1:
+            atomic_write_text(target, "inner")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(atomicio, "replace_with_retry", hold)
+    atomic_write_text(target, "outer")
+
+    assert len({p.name for p in staged}) == 2
+    assert target.read_text(encoding="utf-8") == "outer"
+    assert _leftovers(tmp_path) == []
+
+
+@posix_only
+def test_the_written_file_is_owner_only(tmp_path: Path) -> None:
+    """Staging through mkstemp gives 0600, and the swap carries it onto the document."""
+    target = tmp_path / "doc.json"
+
+    atomic_write_text(target, "x")
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600

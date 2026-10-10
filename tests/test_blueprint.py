@@ -1,7 +1,11 @@
 """Tests for server blueprint export/import."""
 
+from __future__ import annotations
+
 import importlib.resources
+import os
 from pathlib import Path
+from typing import IO
 
 import pytest
 
@@ -206,15 +210,25 @@ def test_a_failed_export_leaves_the_previous_blueprint_importable(
     """
     target = tmp_path / "server.json"
     export_blueprint(_make_blueprint(), target)
-    real_write_text = Path.write_text
+    real_fdopen = os.fdopen
 
-    def half_then_fail(self: Path, data: str, *args: object, **kwargs: object) -> None:
-        # Half the content, then fail. A failure that writes nothing leaves the
-        # target intact even without the temp file, so it would not detect the bug.
-        real_write_text(self, data[: len(data) // 2], encoding="utf-8")
-        raise OSError(28, "No space left on device")
+    class _HalfThenFail:
+        def __init__(self, handle: IO[str]) -> None:
+            self._handle = handle
 
-    monkeypatch.setattr(Path, "write_text", half_then_fail)
+        def __enter__(self) -> _HalfThenFail:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._handle.close()
+
+        def write(self, data: str) -> int:
+            # Half the content, then fail. A failure that writes nothing leaves the
+            # target intact even without the temp file, so it would not detect the bug.
+            self._handle.write(data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "fdopen", lambda *a, **k: _HalfThenFail(real_fdopen(*a, **k)))
     with pytest.raises(OSError):
         export_blueprint(ServerBlueprint(name="Replacement"), target)
     monkeypatch.undo()

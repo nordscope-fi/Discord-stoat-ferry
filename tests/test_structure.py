@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import ssl
-from typing import TYPE_CHECKING
+import sys
+from typing import IO, TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -5893,24 +5895,54 @@ async def test_banner_write_failure_keeps_the_previous_file_and_leaves_no_temp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A disk error half way through writing must not damage the good banner."""
-    from pathlib import Path as RealPath
+    real_fdopen = os.fdopen
 
-    real_write_bytes = RealPath.write_bytes
+    class _HalfWriteThenFail:
+        def __init__(self, handle: IO[bytes]) -> None:
+            self._handle = handle
 
-    def _half_write_then_fail(self: Path, data: bytes) -> int:
-        if data == GOOD_BANNER:  # seeding the previous file must succeed
-            return real_write_bytes(self, data)
-        with self.open("wb") as fh:
-            fh.write(data[: len(data) // 2])
-        raise OSError(28, "No space left on device")
+        def __enter__(self) -> _HalfWriteThenFail:
+            return self
 
-    monkeypatch.setattr(RealPath, "write_bytes", _half_write_then_fail)
+        def __exit__(self, *exc: object) -> None:
+            self._handle.close()
+
+        def write(self, data: bytes) -> int:
+            self._handle.write(data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "fdopen", lambda *a, **k: _HalfWriteThenFail(real_fdopen(*a, **k)))
     with pytest.raises(OSError, match="No space left"):
         await _fetch_banner(tmp_path, "/body/1000")
     dest = tmp_path / "banners" / "111.png"
     monkeypatch.undo()
     assert dest.read_bytes() == GOOD_BANNER
     assert _only_the_banner_remains(dest)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+async def test_banner_symlink_at_the_old_part_name_is_not_written_through(
+    tmp_path: Path,
+) -> None:
+    """#960: the staging name used to be ``<banner>.part``, which anyone could plant a link at."""
+    victim = tmp_path / "owner-only.txt"
+    victim.write_text("secret", encoding="utf-8")
+    banner_dir = tmp_path / "banners"
+    banner_dir.mkdir()
+    (banner_dir / "111.png.part").symlink_to(victim)
+    dest = banner_dir / "111.png"
+    async with local_cdn() as cdn, aiohttp.ClientSession() as real:
+        session = RewritingSession(real, cdn.url("/body/1000"))
+        failure = await asyncio.wait_for(
+            _download_banner(session, "https://cdn.discordapp.com/b.png", dest),  # type: ignore[arg-type]
+            timeout=10,
+        )
+
+    assert failure is None
+    assert victim.read_text(encoding="utf-8") == "secret"
+    assert dest.stat().st_size == 1000
+    assert not dest.is_symlink()
+    assert sorted(p.name for p in banner_dir.iterdir()) == ["111.png", "111.png.part"]
 
 
 async def test_banner_download_requests_without_following_redirects(tmp_path: Path) -> None:
