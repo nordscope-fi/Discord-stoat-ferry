@@ -359,3 +359,46 @@ def test_release_workflow_asserts_the_proxy_keys() -> None:
     assert _fails_the_build_after(text, '*"proxy-source: "*', "esac"), (
         "the macOS proxy-key case must reach an exit 1"
     )
+
+
+_USES_LINE = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)(.*)$", re.MULTILINE)
+_FULL_SHA = re.compile(r"@[0-9a-f]{40}$")
+_RELEASE_COMMENT = re.compile(r"^\s+#\s+v\d+\.\d+\.\d+\s*$")
+
+
+def test_workflow_actions_are_pinned_to_commit_shas() -> None:
+    """#1003. A moving selector such as `@v6` or `@release/v1` lets a retag change what CI runs.
+
+    Every remote `uses:` must name a 40-hex commit SHA and carry a trailing `# vX.Y.Z` comment so
+    a reader can tell which release the SHA is. Local (`./`) and `docker://` references are not
+    remote actions and are skipped. The test also asserts it found `uses:` lines at all, so a
+    glob that matches nothing cannot pass vacuously.
+    """
+    workflows = sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflow files found"
+    seen = 0
+    problems: list[str] = []
+    for workflow in workflows:
+        for match in _USES_LINE.finditer(workflow.read_text(encoding="utf-8")):
+            ref, rest = match.group(1), match.group(2)
+            if ref.startswith(("./", "docker://")):
+                continue
+            seen += 1
+            if not _FULL_SHA.search(ref):
+                problems.append(f"{workflow.name}: {ref} is not pinned to a 40-hex commit SHA")
+            elif not _RELEASE_COMMENT.match(rest):
+                problems.append(f"{workflow.name}: {ref} has no trailing '# vX.Y.Z' comment")
+    assert seen >= 10, f"expected the remote actions to be found, saw {seen}"
+    assert not problems, "\n".join(problems)
+
+
+def test_build_backend_is_pinned_to_an_exact_version() -> None:
+    """#1003. `requires = ["hatchling"]` lets any future release build the shipped wheel."""
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requires = pyproject["build-system"]["requires"]
+    assert pyproject["build-system"]["build-backend"] == "hatchling.build"
+    assert requires, "build-system.requires is empty"
+    for requirement in requires:
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+==\d+(\.\d+)*", requirement), (
+            f"build requirement {requirement!r} is not pinned with =="
+        )
