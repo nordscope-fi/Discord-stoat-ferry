@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import importlib
 import inspect
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -62,6 +64,25 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # at module level. Selenium is not a dependency of this project, so the umbrella
 # raises ModuleNotFoundError at collection time and aborts the ENTIRE suite.
 pytest_plugins = ["nicegui.testing.user_plugin"]
+
+
+@pytest.fixture(autouse=True)
+def _restore_discord_ferry_module_links() -> Iterator[None]:
+    """Reconnect modules that NiceGUI leaves resident after removing their package."""
+    yield
+
+    modules = {
+        name: module for name, module in sys.modules.items() if name.startswith("discord_ferry.")
+    }
+    if not modules:
+        return
+
+    importlib.import_module("discord_ferry")
+    for name in sorted(modules, key=lambda module_name: (module_name.count("."), module_name)):
+        parent_name, _, attribute = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and getattr(parent, attribute, None) is not modules[name]:
+            setattr(parent, attribute, modules[name])
 
 
 @pytest.fixture(autouse=True)
