@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- Ignore common credential file names in `.gitignore`: `credentials.json`, `*.pem` and `*.key`
+  (#979). None are tracked today, so this only stops an accidental `git add` from picking one up.
+
 ### Security
 
 - Update locked dependencies with open security advisories: GitPython 3.1.62, PyJWT 2.15.0,

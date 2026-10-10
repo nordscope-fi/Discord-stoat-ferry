@@ -1375,6 +1375,12 @@ def test_gitignore_covers_qwen_instructions() -> None:
     assert result.returncode == 0, "QWEN.md must be gitignored like CLAUDE.md"
 
 
+def test_gitignore_covers_common_credential_file_names() -> None:
+    for name in ("credentials.json", "server.pem", "private.key"):
+        result = _run("git", "check-ignore", name)
+        assert result.returncode == 0, f"{name} must be gitignored"
+
+
 def test_installer_skips_linked_host_directories() -> None:
     text = (REPO / "scripts/agent-compat/install-local.mjs").read_text()
     assert "hostDirIsLinked(agentsDir)" in text

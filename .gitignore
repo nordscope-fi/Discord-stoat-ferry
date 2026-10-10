@@ -25,6 +25,12 @@ venv/
 .env.local
 .env.*.local
 
+# Credential files: keep an accidental `git add .` from committing key material (#979).
+# None are tracked. Test data that needs one of these names should build it in tmp_path.
+credentials.json
+*.pem
+*.key
+
 # IDE
 .vscode/
 .idea/
