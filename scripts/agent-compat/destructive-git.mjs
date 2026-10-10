@@ -1,31 +1,135 @@
 // Discord Ferry — shared destructive git detection.
 // Used by the Qwen guard and the Codex and Vibe adapters.
 //
-// The detector splits a shell line into segments, locates each git invocation
-// (through env assignments and common wrappers), skips git global options,
-// and then judges the subcommand and its flags. That survives whitespace,
-// option order, short-option clustering (-df, -uf), long options, and global
+// The detector splits a shell line into segments, reads each segment as shell
+// words (quotes and backslashes removed), locates each git invocation (through
+// env assignments, shell keywords, common wrappers and `sh -c` strings), skips
+// git global options, and then judges the subcommand and its flags. That
+// survives whitespace, quoting, option order, short-option clustering (-df,
+// -uf), long options and their unambiguous abbreviations (--forc), and global
 // arguments like -C <path>. It is deliberately conservative: anything
 // ambiguous in a destructive direction asks the user, so false positives are
 // acceptable and false negatives are not.
+//
+// It does not expand variables, aliases, functions or command substitutions
+// that build the git command at run time (for example git${IFS}reset), and it
+// does not follow `find -exec`. Tests in tests/test_destructive_git.py pin
+// what is covered.
 
-const VALUE_GLOBAL_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix']);
-const WRAPPERS = new Set(['sudo', 'nohup', 'time', 'nice', 'env']);
+const VALUE_GLOBAL_OPTIONS = new Set([
+  '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix',
+  '--config-env', '--attr-source',
+]);
+
+// Wrapper commands, each with the options that consume a following value.
+// `timeout` also takes one positional (the duration) before the command.
+const WRAPPERS = new Map([
+  ['sudo', new Set(['-u', '-g', '-h', '-p', '-r', '-t', '-C', '-D', '-R', '-T', '-U'])],
+  ['env', new Set(['-u', '-C', '-S'])],
+  ['nice', new Set(['-n'])],
+  ['xargs', new Set(['-n', '-I', '-P', '-L', '-s', '-d', '-E', '-a'])],
+  ['timeout', new Set(['-s', '-k'])],
+  ['nohup', new Set()],
+  ['time', new Set()],
+  ['command', new Set()],
+  ['builtin', new Set()],
+  ['exec', new Set(['-a'])],
+]);
+
+// Words that can start a command position without being the command.
+const SHELL_KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish']);
+const MAX_DEPTH = 4;
 
 function segments(cmd) {
   // Shell separators. Separators inside quotes also split, which can only
   // add false positives, never false negatives.
-  return cmd.split(/[|;&\n`]|\$\(/);
+  return cmd.split(/[|;&\n`()]|\$\(/);
 }
 
-function gitArgTokens(segment) {
-  const tokens = segment.trim().split(/\s+/).filter(Boolean);
+// Reads one segment as shell words. Quotes and backslash escapes are removed
+// and an unterminated quote runs to the end, so 'a b' and a\ b are one word.
+function shellWords(segment) {
+  const words = [];
+  let word = '';
+  let inWord = false;
+  let quote = null;
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word += ch;
+    } else if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === '\\' && i + 1 < segment.length) { i += 1; word += segment[i]; }
+      else word += ch;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      inWord = true;
+    } else if (ch === '\\' && i + 1 < segment.length) {
+      i += 1;
+      word += segment[i];
+      inWord = true;
+    } else if (/\s/.test(ch)) {
+      if (inWord) words.push(word);
+      word = '';
+      inWord = false;
+    } else {
+      word += ch;
+      inWord = true;
+    }
+  }
+  if (inWord) words.push(word);
+  return words;
+}
+
+function baseName(word) {
+  return word.slice(word.lastIndexOf('/') + 1);
+}
+
+function isGitBinary(word) {
+  return /^git(\.exe)?$/.test(baseName(word));
+}
+
+// Skips env assignments, shell keywords and wrappers (with their options) and
+// returns the index of the command word.
+function commandIndex(tokens) {
   let i = 0;
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i += 1;
-  while (i < tokens.length && WRAPPERS.has(tokens[i])) i += 1;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || SHELL_KEYWORDS.has(t)) {
+      i += 1;
+    } else if (WRAPPERS.has(baseName(t))) {
+      const valueOptions = WRAPPERS.get(baseName(t));
+      i += 1;
+      while (i < tokens.length && tokens[i].startsWith('-') && tokens[i] !== '--') {
+        i += valueOptions.has(tokens[i]) ? 2 : 1;
+      }
+      if (i < tokens.length && tokens[i] === '--') i += 1;
+      if (baseName(t) === 'timeout') i += 1;
+    } else {
+      break;
+    }
+  }
+  return i;
+}
+
+// Returns the git arguments for a segment, or null when it is not git. A shell
+// run with -c, and eval, carry a script that is judged as a command line of its own.
+function gitArgTokens(segment, depth) {
+  const tokens = shellWords(segment);
+  const i = commandIndex(tokens);
   const binary = tokens[i];
-  if (binary !== 'git' && !(binary ?? '').endsWith('/git')) return null;
-  return tokens.slice(i + 1);
+  if (binary === undefined) return null;
+  if (isGitBinary(binary)) return { args: tokens.slice(i + 1) };
+  if (depth < MAX_DEPTH) {
+    if (binary === 'eval') return { script: tokens.slice(i + 1).join(' ') };
+    if (SHELLS.has(baseName(binary))) {
+      const c = tokens.findIndex((t, j) => j > i && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(t));
+      if (c >= 0 && c + 1 < tokens.length) return { script: tokens[c + 1] };
+    }
+  }
+  return null;
 }
 
 function subcommandAndFlags(args) {
@@ -49,39 +153,61 @@ function hasShortFlag(flags, letter) {
   return flags.some(f => /^-[a-zA-Z]+$/.test(f) && f.slice(1).includes(letter));
 }
 
-function isDestructiveGitSegment(segment) {
-  const args = gitArgTokens(segment);
-  if (!args) return false;
-  const parsed = subcommandAndFlags(args);
+// git accepts any unambiguous prefix of a long option and a trailing =value.
+// An ambiguous prefix makes git refuse, so matching it only adds a harmless
+// false positive. minPrefix keeps a bare --f from matching.
+function hasLongOption(flags, full, minPrefix = 1) {
+  return flags.some(f => {
+    if (!f.startsWith('--')) return false;
+    const name = f.slice(2).split('=')[0];
+    return name.length >= minPrefix && full.slice(2).startsWith(name);
+  });
+}
+
+function isDestructiveGitSegment(segment, depth) {
+  const found = gitArgTokens(segment, depth);
+  if (!found) return false;
+  if (found.script !== undefined) return isDestructive(found.script, depth + 1);
+  const parsed = subcommandAndFlags(found.args);
   if (!parsed) return false;
   const { subcommand, rest } = parsed;
 
   switch (subcommand) {
     case 'reset':
-      return hasFlag(rest, '--hard');
+      return hasLongOption(rest, '--hard');
     case 'push':
       // --force-with-lease included: it is still a force push, and asking is cheap.
-      return hasFlag(rest, '--force', '--force-with-lease') || hasShortFlag(rest, 'f');
+      // A leading + on a refspec forces that ref without any flag.
+      return hasLongOption(rest, '--force', 3) || hasLongOption(rest, '--force-with-lease', 3)
+        || hasLongOption(rest, '--force-if-includes', 3) || hasShortFlag(rest, 'f')
+        || rest.some(a => a.startsWith('+') && a.length > 1);
     case 'clean':
-      return hasFlag(rest, '--force') || hasShortFlag(rest, 'f');
-    case 'branch':
-      return hasFlag(rest, '-D') || (hasFlag(rest, '--delete') && hasFlag(rest, '--force'));
-    case 'checkout': {
-      const dashdash = rest.indexOf('--');
-      return dashdash >= 0 && rest.slice(dashdash + 1).includes('.');
+      return hasLongOption(rest, '--force') || hasShortFlag(rest, 'f');
+    case 'branch': {
+      const deletes = hasShortFlag(rest, 'd') || hasLongOption(rest, '--delete', 2);
+      const forces = hasShortFlag(rest, 'f') || hasLongOption(rest, '--force', 3);
+      return hasShortFlag(rest, 'D') || (deletes && forces);
     }
+    case 'checkout':
+      // git checkout . and git checkout -- . discard the same changes.
+      return rest.some(a => a === '.' || a === './');
     case 'restore': {
-      const dots = rest.filter(f => f === '.' || f === './');
-      if (dots.length === 0) return false;
+      if (!rest.some(a => a === '.' || a === './')) return false;
       // --staged alone restores the index, not the working tree.
-      return !hasFlag(rest, '--staged') || hasFlag(rest, '--worktree');
+      const staged = hasShortFlag(rest, 'S') || hasLongOption(rest, '--staged', 3);
+      const worktree = hasShortFlag(rest, 'W') || hasLongOption(rest, '--worktree', 3);
+      return !staged || worktree;
     }
     default:
       return false;
   }
 }
 
+function isDestructive(cmd, depth) {
+  return segments(cmd).some(segment => isDestructiveGitSegment(segment, depth));
+}
+
 export function isDestructiveGitCommand(cmd) {
   if (typeof cmd !== 'string' || cmd === '') return false;
-  return segments(cmd).some(isDestructiveGitSegment);
+  return isDestructive(cmd, 0);
 }
