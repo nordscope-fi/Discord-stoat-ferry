@@ -2463,6 +2463,36 @@ def _context7_launcher_fixture(fixture: str) -> subprocess.CompletedProcess[str]
     )
 
 
+def test_context7_child_path_keeps_only_safe_search_entries(tmp_path: Path) -> None:
+    """The child receives the key, and its node lookup searches this PATH (#977).
+
+    npx's installed server starts with ``#!/usr/bin/env node``, so a relative, empty,
+    ``.`` or in-checkout entry would let a planted ``node`` receive CONTEXT7_API_KEY.
+    """
+    assert NODE is not None
+    checkout = tmp_path / "checkout"
+    (checkout / "bin").mkdir(parents=True)
+    safe = tmp_path / "safe-bin"
+    safe.mkdir()
+    sep = os.pathsep
+    path_value = sep.join(["", ".", "bin", str(checkout / "bin"), str(checkout), str(safe)])
+    script = (
+        "import { context7Environment } from './scripts/agent-compat/context7-mcp.mjs';"
+        f"process.chdir({json.dumps(str(checkout))});"
+        f"const env = context7Environment({{PATH: {json.dumps(path_value)}}}, 'k');"
+        "console.log(JSON.stringify(env.PATH));"
+    )
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == str(safe.resolve())
+
+
 def test_context7_launcher_passes_only_the_required_environment() -> None:
     result = _context7_launcher_fixture("success")
     assert result.returncode == 0, result.stderr

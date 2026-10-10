@@ -1234,3 +1234,23 @@ def test_markdown_report_masks_a_registered_secret(tmp_path: Path) -> None:
     assert "hunter2horse" not in written
     # the identifier beside it must survive: masking is substring replacement
     assert "1123456789012345678" in written
+
+
+def test_markdown_report_masks_a_secret_split_by_a_control_character(tmp_path: Path) -> None:
+    """Stripping runs before masking, so a control byte inside a secret cannot hide it (#1080).
+
+    Masking first would miss ``hunter2<NUL>horse``, and the display step would then
+    join it back into the registered secret in migration_report.md.
+    """
+    register_secret("proxy_password", "hunter2horse")
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    state.warnings.append(
+        {"type": "role_colour_failed", "phase": "structure", "message": "proxy: hunter2\x00horse"}
+    )
+
+    generate_markdown_report(config, state, [_make_export()])
+
+    text = (tmp_path / "migration_report.md").read_text(encoding="utf-8")
+    assert "hunter2horse" not in text
+    assert "proxy:" in text

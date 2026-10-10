@@ -5,7 +5,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readProtonField } from './proton-credential.mjs';
-import { resolveExecutable } from './resolve-executable.mjs';
+import { resolveExecutable, trustedSearchPath } from './resolve-executable.mjs';
 
 const PASSTHROUGH_ENVIRONMENT = [
   'PATH',
@@ -26,6 +26,7 @@ export function context7Environment(source, key) {
   for (const name of PASSTHROUGH_ENVIRONMENT) {
     if (typeof source[name] === 'string') environment[name] = source[name];
   }
+  if (typeof environment.PATH === 'string') environment.PATH = trustedSearchPath(environment.PATH);
   environment.CONTEXT7_API_KEY = key;
   return environment;
 }

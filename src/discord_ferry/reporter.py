@@ -437,9 +437,11 @@ def generate_markdown_report(
     # document also carries Discord message identifiers, and masking works by
     # substring replacement, so scrubbing the whole string would rewrite them.
     # Issue #140, ADR-014.
-    # The display step runs after the masking, so a secret is matched as written.
+    # The display step runs BEFORE the masking. Masking first would miss a secret split by
+    # a control byte, and stripping would then join it back together in the file. Masked
+    # output never contains a control character, so the order costs nothing.
     def _text(value: str) -> str:
-        return _display_safe(sanitize_secrets(safe_sanitize(config.token_store, value)))
+        return sanitize_secrets(safe_sanitize(config.token_store, _display_safe(value)))
 
     lines.append("## Errors\n")
     if state.failed_messages:
