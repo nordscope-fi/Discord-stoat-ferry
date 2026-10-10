@@ -75,6 +75,7 @@ const CONTEXT7_STATE_VERSION = 2;
 const CONTEXT7_PENDING_AGENT_ID = 'pending';
 export const REVIEWER_RUNTIME_FILES = [
   'review-contract.mjs',
+  'resolve-executable.mjs',
   'proton-credential.mjs',
   'context7-mcp.mjs',
   'vibe-review.mjs',

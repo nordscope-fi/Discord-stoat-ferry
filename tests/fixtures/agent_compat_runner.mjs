@@ -886,7 +886,7 @@ switch (mode) {
     const calls = [];
     const sessions = new Set();
     const run = async (command, args, options) => {
-      if (command !== 'pass-cli') throw new Error('unexpected command');
+      if (command !== '/fixture/pass-cli') throw new Error('unexpected command');
       sessions.add(options.env.PROTON_PASS_SESSION_DIR);
       calls.push({
         args,
@@ -903,12 +903,14 @@ switch (mode) {
       reason: 'Start Context7',
       home,
       run,
+      resolve: () => '/fixture/pass-cli',
     });
     await credential.readReviewerField({
       provider: 'vibe',
       reason: 'Review Ferry code',
       home,
       run,
+      resolve: () => '/fixture/pass-cli',
     });
     let invalidProviderError = null;
     try {
@@ -917,6 +919,7 @@ switch (mode) {
         reason: 'Review Ferry code',
         home,
         run,
+        resolve: () => '/fixture/pass-cli',
       });
     } catch (error) {
       invalidProviderError = error.message;
@@ -970,6 +973,7 @@ switch (mode) {
         provider: 'vibe',
         reason: 'fixture',
         home,
+        resolve: () => '/fixture/pass-cli',
         run: async () => {
           childCalls += 1;
           const error = new Error('FERRY_SECRET_CANARY');
@@ -1017,6 +1021,7 @@ switch (mode) {
         provider: 'vibe',
         reason: 'fixture',
         home,
+        resolve: () => '/fixture/pass-cli',
         run: async (_command, args, options) => {
           if (args[0] === 'login') {
             loginCalls += 1;
@@ -3419,7 +3424,8 @@ switch (mode) {
     const version = option('--version') ?? 'real';
     const files = mode === 'reviewer-runtime-fixture'
       ? Object.fromEntries([
-          'review-contract.mjs', 'proton-credential.mjs', 'context7-mcp.mjs',
+          'review-contract.mjs', 'resolve-executable.mjs', 'proton-credential.mjs',
+          'context7-mcp.mjs',
           'vibe-review.mjs', 'qwen-review.mjs', 'claude-review.mjs',
           'review-ensemble.mjs', 'review-verification.mjs', 'shell-words.mjs',
         ].map((name) => [name, `${name}:${version}\n`]))
