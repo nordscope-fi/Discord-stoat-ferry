@@ -931,7 +931,8 @@ def _archive_threads(
             # Simple ISO parse: "2024-01-15T12:00:00+00:00" -> "2024-01-15 12:00 UTC"
             ts_display = ts.replace("T", " ")[:16] + " UTC"
             author_name = msg.author.nickname or msg.author.name
-            lines.append(f"## {author_name} ({ts_display})")
+            # Posted into the server, not an operator message (#1139).
+            lines.append(f"## {author_name} \u2014 {ts_display}")
             # A forward carries its text in the forwarded block, not in `content`, so
             # archiving it raw would write an empty entry.
             lines.append(_merge_forwarded(msg).content)

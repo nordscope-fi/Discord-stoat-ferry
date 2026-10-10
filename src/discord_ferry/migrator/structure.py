@@ -1648,7 +1648,8 @@ async def run_channels(
                 if posts:
                     lines = [f"**Forum: {forum_name}**\n"]
                     for post_ch_id, _post_name, post_count in posts:
-                        lines.append(f"- <#{post_ch_id}>: {post_count} messages")
+                        # Posted into the server, not an operator message (#1139).
+                        lines.append(f"- <#{post_ch_id}> — {post_count} messages")
                     content = "\n".join(lines)
                     # Truncate to fit Stoat's 2000-char message limit.
                     if len(content) > 2000:

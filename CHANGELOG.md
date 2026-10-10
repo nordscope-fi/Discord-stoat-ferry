@@ -13,8 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   missing attachment skips. It also covers the reaction cap line, the missing guild icon and
   role hoist warnings, the probe voice and webhook results, and the phase-complete lines for
   emoji, pins and reactions. They now use a semicolon, a colon or parentheses. Only the
-  wording changed. A new test fails if an em dash comes back into any string in the migrator
-  modules.
+  wording changed. Text Ferry posts into the migrated server, the forum index lines and the
+  thread archive headings, keeps its wording so servers migrated over several runs stay
+  consistent. A new test fails if an em dash comes back into any other string in the
+  migrator modules.
 
 ## [2.41.28] - 2026-10-10
 
