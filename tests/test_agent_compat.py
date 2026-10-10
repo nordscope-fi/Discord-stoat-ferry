@@ -6139,7 +6139,11 @@ def test_credential_launcher_without_a_client_fails_before_reading_the_token(
     assert not (tmp_path / "poisoned.log").exists()
 
 
-_CODEX_BODY = """out=
+# Read the piped payload as the real client does. A fake that exits without reading it
+# races the parent's write: on a loaded Linux runner the write hits a closed pipe and
+# the launcher reports "codex child failed" (110 of 480 runs in a one-CPU container).
+_CODEX_BODY = """while read -r _; do :; done
+out=
 while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out="$2"; fi; shift; done
 printf '%s' '{"summary":"recorded","confidence":"high","findings":[]}' > "$out"
 """
