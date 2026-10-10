@@ -3702,6 +3702,7 @@ def test_qwen_review_rejects_invalid_stream_completion(
         ("missing-model", "stream-model"),
         ("length", "stream-finish-reason"),
         ("missing-content", "stream-content"),
+        ("stream-runaway", "stream-runaway"),
         ("response-envelope", "response-envelope"),
         ("response-json", "response-json"),
         ("response-findings", "response-findings"),
@@ -3744,11 +3745,49 @@ def test_qwen_schema_failure_fixture_covers_the_declared_enum() -> None:
         "stream-model",
         "stream-finish-reason",
         "stream-content",
+        "stream-runaway",
         "response-envelope",
         "response-json",
         "response-findings",
         "response-unclassified",
     }
+
+
+def _run_qwen_stream_limit(fixture: str) -> dict:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-stream-limit",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_qwen_review_stops_a_stream_that_never_answers_before_the_total_deadline() -> None:
+    report = _run_qwen_stream_limit("runaway")
+    record = report["record"]
+    assert report["stream_deadline_ms"] == 450_000
+    assert report["stream_deadline_ms"] < report["total_deadline_ms"]
+    assert record["status"] == "failed"
+    assert record["failure_class"] == "schema"
+    assert record["failure_reason"] == "stream-runaway"
+    # The stream rule fired, not the total deadline, and the reader was released.
+    assert [timer["ms"] for timer in report["fired"]] == [450_000]
+    assert 450_000 <= report["virtual_ms"] <= 452_000
+    assert report["virtual_ms"] < report["total_deadline_ms"]
+    assert report["cancelled"] is True
+
+
+def test_qwen_review_lets_a_slow_normal_stream_finish() -> None:
+    report = _run_qwen_stream_limit("normal")
+    record = report["record"]
+    assert record["status"] == "valid"
+    assert record["session_id"] == "limit-session"
+    assert report["fired"] == []
+    assert report["virtual_ms"] < report["stream_deadline_ms"]
+    assert report["virtual_ms"] >= 303_000
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,10 @@ export const QWEN_COMPLETION_TOKENS = 32768;
 export const QWEN_DEADLINES = Object.freeze({
   connectionMs: 60000,
   idleMs: 30000,
+  // Longest a response may keep streaming once headers arrive. Two normal runs of one
+  // 97,137-character plan took 285 and 303 seconds in total. A third kept streaming to the
+  // total deadline (#739). ADR-027 section 13 (amended).
+  streamMs: 450000,
   totalMs: 600000,
 });
 export function qwenRequestBody(prompt) {
@@ -149,6 +153,7 @@ function parseQwenEvent(data) {
 export async function readQwenStream(body, {
   signal = null,
   idleTimeoutMs = QWEN_DEADLINES.idleMs,
+  streamTimeoutMs = QWEN_DEADLINES.streamMs,
   schedule = setTimeout,
   cancel = clearTimeout,
 } = {}) {
@@ -165,6 +170,8 @@ export async function readQwenStream(body, {
   let completed = false;
   let idleTimer = null;
   let idleFailure = null;
+  let streamTimer = null;
+  let runaway = false;
   const refreshIdleDeadline = () => {
     if (idleTimer !== null) cancel(idleTimer);
     idleFailure = new Promise((resolve, reject) => {
@@ -176,11 +183,23 @@ export async function readQwenStream(body, {
     });
   };
 
+  // Reasoning events reset the idle deadline, so a stream that never produces its answer is
+  // bounded by this one. The failure names the rejection point and carries no provider text.
+  const streamFailure = new Promise((resolve, reject) => {
+    streamTimer = schedule(() => {
+      runaway = true;
+      reject(reviewError('INVALID_SCHEMA', 'stream-runaway'));
+      void reader.cancel();
+    }, streamTimeoutMs);
+  });
+  streamFailure.catch(() => {});
   refreshIdleDeadline();
   try {
     while (!completed) {
-      const read = Promise.race([reader.read(), idleFailure]);
+      const read = Promise.race([reader.read(), idleFailure, streamFailure]);
       const chunk = await withAbort(read, signal, () => void reader.cancel());
+      // The flag covers a cancelled read that settles ahead of the rejection above.
+      if (runaway) throw reviewError('INVALID_SCHEMA', 'stream-runaway');
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
       const parsed = consumeQwenEvents(buffer);
@@ -208,6 +227,7 @@ export async function readQwenStream(body, {
     }
   } finally {
     if (idleTimer !== null) cancel(idleTimer);
+    if (streamTimer !== null) cancel(streamTimer);
   }
   buffer += decoder.decode();
   if (!completed) throw reviewError('INVALID_SCHEMA', 'stream-completion');
@@ -230,6 +250,7 @@ export async function requestQwen({
   signal = null,
   connectionTimeoutMs = QWEN_DEADLINES.connectionMs,
   idleTimeoutMs = QWEN_DEADLINES.idleMs,
+  streamTimeoutMs = QWEN_DEADLINES.streamMs,
   fetcher = fetch,
   schedule = setTimeout,
   cancel = clearTimeout,
@@ -265,7 +286,13 @@ export async function requestQwen({
     error.httpStatus = response.status;
     throw error;
   }
-  return readQwenStream(response.body, { signal, idleTimeoutMs, schedule, cancel });
+  return readQwenStream(response.body, {
+    signal,
+    idleTimeoutMs,
+    streamTimeoutMs,
+    schedule,
+    cancel,
+  });
 }
 
 export function parseQwenResponse(body) {
@@ -347,6 +374,7 @@ export async function runQwenReview({
         signal: total.signal,
         connectionTimeoutMs: deadlines.connectionMs,
         idleTimeoutMs: deadlines.idleMs,
+        streamTimeoutMs: deadlines.streamMs,
         schedule,
         cancel,
       });
@@ -389,6 +417,8 @@ async function selfTest() {
   const record = (name, ok) => checks.push({ name, ok });
   record('model is qwen3.8-max', QWEN_MODEL === 'qwen3.8-max');
   record('endpoint contains /chat/completions', QWEN_URL.endsWith('/chat/completions'));
+  record('stream limit sits below the total deadline',
+    QWEN_DEADLINES.streamMs > 303000 && QWEN_DEADLINES.streamMs < QWEN_DEADLINES.totalMs);
   record('valid response returns exact model',
     parseQwenResponse(cleanBody()).result.confidence === 'high');
   let wrongModel = false;
