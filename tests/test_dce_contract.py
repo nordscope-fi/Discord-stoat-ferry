@@ -61,3 +61,8 @@ async def test_dce_help_lists_all_flags_ferry_uses() -> None:
         f"Either DCE renamed/removed the flag (update `_build_dce_command`) or "
         f"pin a different DCE_VERSION in `discord_ferry.exporter.manager`."
     )
+    # Ferry passes the token through this variable, not --token (#978).
+    assert "DISCORD_TOKEN" in output, (
+        f"DCE v{DCE_VERSION} no longer names DISCORD_TOKEN for its token option, so "
+        f"run_dce_export would start it with no token."
+    )
