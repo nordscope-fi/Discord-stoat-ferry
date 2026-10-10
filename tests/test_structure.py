@@ -3209,53 +3209,14 @@ async def test_forum_index_failure_nonfatal(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Banner download auth header (S11)
+# Banner download sends no Discord token (#975)
 # ---------------------------------------------------------------------------
 
 
-async def test_banner_download_includes_auth_header(tmp_path: Path) -> None:
-    """SERVER phase sends Authorization header when discord_token is set."""
+async def test_banner_download_sends_no_auth_header_even_with_a_token(tmp_path: Path) -> None:
+    """Discord's CDN needs no token, so the SERVER phase never sends one (#975)."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, discord_token="Bot mytoken123")
-    state = MigrationState(autumn_url=AUTUMN_URL, stoat_server_id="srv1")
-    exports = [_make_export(guild_id="111")]
-
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={},
-        channel_metadata={},
-        banner_hash="testhash",
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    captured_headers: list[dict[str, str]] = []
-
-    def _capture_get(url: str, **kwargs: object) -> None:
-        headers = kwargs.get("headers") or {}
-        captured_headers.append(dict(headers))  # type: ignore[arg-type]
-
-    with aioresponses() as m:
-        m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
-        m.get(
-            f"{BANNER_CDN}/111/testhash.png?size=1024",
-            body=b"FAKEPNG",
-            callback=_capture_get,
-        )
-        m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
-
-        await run_server(config, state, exports, events.append)
-
-    assert captured_headers, "Banner CDN request was not made"
-    assert captured_headers[0].get("Authorization") == "Bot mytoken123"
-
-
-async def test_banner_download_no_auth_header_when_no_token(tmp_path: Path) -> None:
-    """SERVER phase sends no Authorization header when discord_token is absent."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)  # no discord_token
     state = MigrationState(autumn_url=AUTUMN_URL, stoat_server_id="srv1")
     exports = [_make_export(guild_id="111")]
 
@@ -5752,9 +5713,7 @@ BANNER_CAP = 6_000_000
 GOOD_BANNER = b"\x89PNG-previous-good-banner"
 
 
-async def _fetch_banner(
-    tmp_path: Path, cdn_path: str, *, headers: dict[str, str] | None = None
-) -> tuple[str | None, Path, object]:
+async def _fetch_banner(tmp_path: Path, cdn_path: str) -> tuple[str | None, Path, object]:
     """Run _download_banner against the local server; seed a good previous file."""
     banner_dir = tmp_path / "banners"
     banner_dir.mkdir()
@@ -5763,7 +5722,7 @@ async def _fetch_banner(
     async with local_cdn() as cdn, aiohttp.ClientSession() as real:
         session = RewritingSession(real, cdn.url(cdn_path))
         failure = await asyncio.wait_for(
-            _download_banner(session, "https://cdn.discordapp.com/b.png", headers or {}, dest),  # type: ignore[arg-type]
+            _download_banner(session, "https://cdn.discordapp.com/b.png", dest),  # type: ignore[arg-type]
             timeout=10,
         )
         await asyncio.sleep(0.2)  # let the server notice a closed connection
@@ -5855,13 +5814,6 @@ async def test_banner_write_failure_keeps_the_previous_file_and_leaves_no_temp(
 async def test_banner_download_requests_without_following_redirects(tmp_path: Path) -> None:
     _, _, (_, session) = await _fetch_banner(tmp_path, "/body/10")  # type: ignore[misc]
     assert session.calls[0]["allow_redirects"] is False
-
-
-async def test_banner_download_passes_the_headers_through(tmp_path: Path) -> None:
-    _, _, (cdn, _) = await _fetch_banner(  # type: ignore[misc]
-        tmp_path, "/body/10", headers={"Authorization": "Bot dummy-token"}
-    )
-    assert cdn.last_headers.get("Authorization") == "Bot dummy-token"
 
 
 async def test_run_server_warns_and_skips_upload_for_an_oversize_banner(tmp_path: Path) -> None:
