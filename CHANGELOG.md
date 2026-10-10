@@ -41,6 +41,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   After 5 seconds the next caller checks again, so a recovered GitHub reads as ready within that
   time. A delivery failure still forces a fresh check on the next request. The feedback service
   needs a redeploy for this to take effect.
+### Fixed
+
+- `ferry repair` now removes the extra pinned forum index that migrations before v2.41.30 left behind (#1142). Those migrations posted two index messages per forum, and only the second was recorded, so a later `--incremental` run kept the second one current and left the first as a stale copy. For each forum with a recorded index message, repair reads the index channel's pinned messages. It deletes any other message that starts with the same `**Forum: <name>**` heading, was sent by Ferry's own account, and carries the "Discord Ferry" name. It never touches the recorded message, and it removes nothing if the recorded message is not among the pinned messages. A delete that fails is recorded as a warning, which gives repair a non-zero exit code, and repair carries on with the rest. `--dry-run` lists what it would remove and deletes nothing. The JSON output gains `removed_duplicate_indexes` under `actions`. Normal migrations are unchanged.
 
 ## [2.41.30] - 2026-10-10
 

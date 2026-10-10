@@ -520,6 +520,7 @@ or to find a lost message, and it says so rather than guessing.
   header if it was a thread.
 - A **channel's lost last message**, re-sent into the channel that is still there.
 - Anything left in the **dead-letter queue**, the same work `ferry retry` does.
+- The **extra pinned forum index** that migrations before v2.41.30 left in each forum's index channel. Repair deletes the older copy that Ferry sent and never recorded, and keeps the recorded one. It deletes only messages sent by your own Stoat account under the "Discord Ferry" name.
 
 ### What it will not touch
 

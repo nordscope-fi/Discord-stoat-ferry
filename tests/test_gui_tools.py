@@ -36,6 +36,8 @@ def test_repair_failure_set_is_shared_and_exact() -> None:
                 "forum_index_category_missing",
                 # #311: a forum-index rebuild that failed during repair (phase="repair").
                 "forum_index_rebuild_failed",
+                # #1142: an extra pinned forum index repair found but could not remove.
+                "forum_index_duplicate_remove_failed",
                 # #307 emoji repair: could-not-recreate and failed-rewrite both
                 # leave something failing. emoji_in_split_tail is excluded (partial
                 # restore of a recreated emoji), matching the CLI comment.
