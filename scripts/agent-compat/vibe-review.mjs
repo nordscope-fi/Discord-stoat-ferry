@@ -1,224 +1,198 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { readReviewerField } from './proton-credential.mjs';
 import {
   buildReviewPrompt,
+  classifyReviewFailure,
   makeReviewRecord,
   parseJsonText,
   reviewReplyJson,
-  safeChildFailure,
   validateFindings,
 } from './review-contract.mjs';
 
 export const VIBE_MODEL = 'zai-glm-5-2';
-export const VIBE_CONFIG = `active_model = "zai-glm-5-2"
+export const VIBE_URL = 'https://api.mistral.ai/v1/chat/completions';
+export const VIBE_TEMPERATURE = 1.0;
+export const VIBE_MAX_TOKENS = 12000;
+// The mistral-vibe client turns its `thinking = "max"` model setting into
+// reasoning_effort "high" (vibe/core/llm/backend/mistral.py, the
+// _THINKING_TO_REASONING_EFFORT table), so the direct call sends the same value.
+export const VIBE_REASONING_EFFORT = 'high';
+export const VIBE_TIMEOUT_MS = 180000;
 
-[[providers]]
-name = "mistral-eu"
-api_base = "https://api.mistral.ai/v1"
-api_key_env_var = "MISTRAL_API_KEY"
-backend = "mistral"
+// Fixed reasons, so an error message never repeats text the provider sent.
+const SCHEMA_FAILURE_REASONS = new Set([
+  'response-body',
+  'response-envelope',
+  'response-tool-call',
+  'response-finish-reason',
+  'response-content',
+  'response-json',
+  'response-findings',
+]);
 
-[[models]]
-name = "zai-glm-5-2"
-provider = "mistral-eu"
-alias = "zai-glm-5-2"
-temperature = 1.0
-thinking = "max"
-supports_images = false
-`;
-
-export const VIBE_REVIEW_ARGS = [
-  '--prompt',
-  '--max-turns', '1',
-  '--max-tokens', '12000',
-  '--enabled-tools', '__none__',
-  '--disabled-tools', 're:.*',
-  '--output', 'json',
-  '--trust',
-];
-
-const REQUIRED_HELP_FLAGS = [
-  '--prompt',
-  '--max-turns',
-  '--max-tokens',
-  '--enabled-tools',
-  '--disabled-tools',
-  '--output',
-  '--trust',
-];
-
-function stopProcessGroup(child, signal) {
-  if (!child.pid) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    // The process may already have exited.
-  }
+export function vibeRequestBody(prompt) {
+  return {
+    model: VIBE_MODEL,
+    messages: [
+      { role: 'system', content: 'Return only the requested review JSON. Do not call tools.' },
+      { role: 'user', content: prompt },
+    ],
+    temperature: VIBE_TEMPERATURE,
+    max_tokens: VIBE_MAX_TOKENS,
+    reasoning_effort: VIBE_REASONING_EFFORT,
+  };
 }
 
-export function runVibeChild(command, args, { cwd, env, input = null, timeoutMs }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      detached: true,
-      env,
-      stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let timedOut = false;
-    let spawnError = null;
-    let killTimer = null;
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      if (stdout.length > 12_000_000) stopProcessGroup(child, 'SIGTERM');
-    });
-    child.stderr.resume();
-    child.once('error', (error) => { spawnError = error; });
-    if (input !== null) child.stdin.end(input);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      stopProcessGroup(child, 'SIGTERM');
-      killTimer = setTimeout(() => stopProcessGroup(child, 'SIGKILL'), 2000);
-      killTimer.unref();
+function reviewError(code, failureReason = null, message = 'Vibe response was invalid') {
+  const error = new Error(message);
+  error.code = code;
+  error.failureReason = failureReason;
+  return error;
+}
+
+function timeoutError() {
+  const error = new Error('Vibe request timed out');
+  error.code = 'ETIMEDOUT';
+  return error;
+}
+
+export async function requestVibe({
+  apiKey,
+  prompt,
+  timeoutMs = VIBE_TIMEOUT_MS,
+  fetcher = fetch,
+  schedule = setTimeout,
+  cancel = clearTimeout,
+}) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = schedule(() => {
+      const error = timeoutError();
+      controller.abort(error);
+      reject(error);
     }, timeoutMs);
-    child.once('close', (status, signal) => {
-      clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
-      if (spawnError) {
-        reject(spawnError);
-        return;
-      }
-      if (timedOut) {
-        const error = new Error('Vibe timed out');
-        error.name = 'TimeoutError';
-        reject(error);
-        return;
-      }
-      if (status !== 0) {
-        const error = new Error('Vibe child failed');
-        error.status = status;
-        error.signal = signal;
-        reject(error);
-        return;
-      }
-      resolve({ stdout });
-    });
   });
-}
-
-export function requireVibeHelp(stdout) {
-  const missing = REQUIRED_HELP_FLAGS.filter((flag) => !stdout.includes(flag));
-  if (missing.length) throw new Error(`Vibe client is missing required flag ${missing[0]}`);
-}
-
-function contentBlocks(entry) {
-  const value = entry?.message?.content ?? entry?.content;
-  return Array.isArray(value) ? value : [];
-}
-
-function roleOf(entry) {
-  return entry?.message?.role ?? entry?.role;
-}
-
-export function parseVibeHistory(raw) {
-  const envelope = parseJsonText(raw, 'Vibe history');
-  const history = Array.isArray(envelope) ? envelope : envelope?.history;
-  if (!Array.isArray(history)) throw new Error('Vibe returned an invalid history envelope');
-  for (const entry of history) {
-    const toolBlocks = contentBlocks(entry).filter((block) =>
-      ['tool_call', 'tool_use', 'function_call'].includes(block?.type));
-    if (toolBlocks.length || entry?.tool_calls?.length || entry?.message?.tool_calls?.length) {
-      throw new Error('Vibe history contains a tool call');
-    }
-    const reportedModel = entry?.model ?? entry?.message?.model;
-    if (reportedModel && reportedModel !== VIBE_MODEL) {
-      throw new Error('Vibe history reports the wrong model');
-    }
-  }
-  const assistant = [...history].reverse().find((entry) => roleOf(entry) === 'assistant');
-  if (!assistant) throw new Error('Vibe history has no assistant message');
-  const text = contentBlocks(assistant)
-    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text)
-    .join('\n');
-  if (!text) throw new Error('Vibe assistant message has no text');
-  // mistral-vibe serialises history entries by their camelCase alias, so the
-  // client writes sessionId. The snake_case spelling stays for older output.
-  const entryId = (entry) => [entry?.sessionId, entry?.session_id]
-    .find((value) => typeof value === 'string');
-  const sessionId = history.map(entryId).find((value) => value !== undefined)
-    ?? envelope?.sessionId
-    ?? envelope?.session_id
-    ?? null;
-  return { history, text, sessionId };
-}
-
-function childFailure(error) {
-  const wrapped = new Error(safeChildFailure('vibe', error));
-  wrapped.stage = 'vibe-child';
-  return wrapped;
-}
-
-async function withVibeInvocation({ home, credential, run, action }) {
-  const vibeHome = mkdtempSync(join(tmpdir(), 'ferry-vibe-review-'));
-  // Vibe trusts its working directory under --trust and then loads that
-  // directory's .vibe hooks, tools, skills and plugins, and walks up from it
-  // for AGENTS.md. Run every child in an empty directory so none of the
-  // checkout's agent setup reaches the reviewer. The checkout's plain-English
-  // post-agent hook used to inject a rewrite request into the review, which spent
-  // the single allowed turn and made Vibe exit with "Turn limit of 1 reached".
-  const cwd = join(vibeHome, 'workdir');
-  try {
-    writeFileSync(join(vibeHome, 'config.toml'), VIBE_CONFIG, { mode: 0o600 });
-    mkdirSync(cwd, { mode: 0o700 });
-    // HOME too: Vibe reads user-level skills from Path.home()/.agents, which
-    // ignores VIBE_HOME, so without it the reviewer saw the owner's own skills.
-    const baseEnvironment = {
-      PATH: process.env.PATH ?? '',
-      HOME: vibeHome,
-      VIBE_HOME: vibeHome,
-      VIBE_ACTIVE_MODEL: VIBE_MODEL,
-      MISTRAL_API_KEY: '',
-    };
-    let help;
+  const exchange = (async () => {
+    let response;
     try {
-      help = await run('vibe', ['--help'], {
-        cwd,
-        env: baseEnvironment,
-        timeoutMs: 30000,
+      response = await fetcher(VIBE_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(vibeRequestBody(prompt)),
+        signal: controller.signal,
       });
     } catch (error) {
-      throw childFailure(error);
+      if (error?.code === 'ETIMEDOUT') throw error;
+      const wrapped = new Error('Vibe request failed');
+      wrapped.code = error?.name === 'TimeoutError' ? 'ETIMEDOUT' : 'REQUEST_FAILED';
+      throw wrapped;
     }
-    requireVibeHelp(help.stdout);
-    const apiKey = await credential({
-      provider: 'vibe',
-      reason: 'Review Discord Ferry code with the fixed Vibe slot',
-      home,
-    });
-    return await action({
-      cwd,
-      env: { ...baseEnvironment, MISTRAL_API_KEY: apiKey },
-      run,
-    });
+    if (!response.ok) {
+      const error = new Error(`Vibe request failed with HTTP ${response.status}`);
+      error.httpStatus = response.status;
+      throw error;
+    }
+    try {
+      return await response.json();
+    } catch (error) {
+      if (error?.code === 'ETIMEDOUT') throw error;
+      throw reviewError('INVALID_SCHEMA', 'response-body');
+    }
+  })();
+  try {
+    return await Promise.race([exchange, deadline]);
   } finally {
-    rmSync(vibeHome, { recursive: true, force: true });
+    cancel(timer);
   }
+}
+
+function replyText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return null;
+  // A Mistral reasoning model may return its thinking as a chunk ahead of the text.
+  if (content.some((chunk) => !['text', 'thinking'].includes(chunk?.type))) return null;
+  return content
+    .filter((chunk) => chunk.type === 'text' && typeof chunk.text === 'string')
+    .map((chunk) => chunk.text)
+    .join('');
+}
+
+export function parseVibeResponse(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw reviewError('INVALID_SCHEMA', 'response-envelope');
+  }
+  // The model the provider reports is the only proof of what answered, so a
+  // missing or different name fails the review (#990).
+  if (body.model !== VIBE_MODEL) throw reviewError('WRONG_MODEL');
+  const choice = body.choices?.[0];
+  const message = choice?.message;
+  if (!message || typeof message !== 'object') {
+    throw reviewError('INVALID_SCHEMA', 'response-envelope');
+  }
+  const calls = message.tool_calls;
+  const hasToolCalls = calls !== undefined && calls !== null
+    && !(Array.isArray(calls) && calls.length === 0);
+  if (hasToolCalls || choice.finish_reason === 'tool_calls') {
+    throw reviewError('INVALID_SCHEMA', 'response-tool-call');
+  }
+  if (choice.finish_reason !== 'stop') {
+    throw reviewError('INVALID_SCHEMA', 'response-finish-reason');
+  }
+  const text = replyText(message.content);
+  if (!text) throw reviewError('INVALID_SCHEMA', 'response-content');
+  let result;
+  try {
+    result = parseJsonText(reviewReplyJson(text), 'Vibe review');
+  } catch {
+    throw reviewError('INVALID_SCHEMA', 'response-json');
+  }
+  if (!validateFindings(result)) throw reviewError('INVALID_SCHEMA', 'response-findings');
+  return {
+    result,
+    resolvedModel: body.model,
+    sessionId: typeof body.id === 'string' ? body.id : null,
+  };
+}
+
+function responseFailure(error, { durationMs = 0, stage = 'vibe-response' } = {}) {
+  const classification = classifyReviewFailure(error);
+  const schemaReason = SCHEMA_FAILURE_REASONS.has(error?.failureReason)
+    ? error.failureReason
+    : 'response-unclassified';
+  let safeMessage;
+  if (typeof error?.httpStatus === 'number') {
+    safeMessage = `Vibe request failed with HTTP ${error.httpStatus}`;
+  } else if (classification === 'timeout') {
+    safeMessage = 'Vibe request timed out';
+  } else if (classification === 'wrong-model') {
+    safeMessage = 'Vibe response did not name the expected model';
+  } else if (stage === 'vibe-credential') {
+    safeMessage = 'Vibe credential retrieval failed';
+  } else if (classification === 'schema') {
+    safeMessage = `Vibe response was invalid (${schemaReason})`;
+  } else if (error?.code === 'REQUEST_FAILED') {
+    safeMessage = 'Vibe request failed';
+  } else {
+    safeMessage = 'Vibe response was invalid';
+  }
+  const wrapped = new Error(safeMessage);
+  wrapped.stage = stage;
+  wrapped.durationMs = durationMs;
+  wrapped.classification = classification;
+  wrapped.httpStatus = Number.isInteger(error?.httpStatus) ? error.httpStatus : null;
+  wrapped.failureReason = classification === 'schema' ? schemaReason : null;
+  if (classification === 'timeout') wrapped.code = 'ETIMEDOUT';
+  else if (classification === 'schema') wrapped.code = 'INVALID_SCHEMA';
+  else if (classification === 'wrong-model') wrapped.code = 'WRONG_MODEL';
+  else if (classification === 'credential') wrapped.code = 'CREDENTIAL';
+  return wrapped;
 }
 
 export async function runVibeReview({
@@ -226,231 +200,157 @@ export async function runVibeReview({
   home,
   slot = 'mistral-vibe',
   credential = readReviewerField,
-  run = runVibeChild,
+  fetcher = fetch,
+  timeoutMs = VIBE_TIMEOUT_MS,
+  clock = Date,
+  schedule = setTimeout,
+  cancel = clearTimeout,
 }) {
-  return withVibeInvocation({
-    home,
-    credential,
-    run,
-    action: async ({ cwd, env, run: invoke }) => {
-      const started = Date.now();
-      let result;
-      try {
-        result = await invoke('vibe', VIBE_REVIEW_ARGS, {
-          cwd,
-          env,
-          input: prompt,
-          timeoutMs: 180000,
-        });
-      } catch (error) {
-        throw childFailure(error);
-      }
-      const parsed = parseVibeHistory(result.stdout);
-      const review = parseJsonText(reviewReplyJson(parsed.text), 'Vibe review');
-      if (!validateFindings(review)) throw new Error('Vibe returned invalid findings');
-      return makeReviewRecord({
-        adapter: 'vibe',
-        slot,
-        requestedModel: VIBE_MODEL,
-        resolvedModel: VIBE_MODEL,
-        sessionId: parsed.sessionId,
-        durationMs: Date.now() - started,
-        status: 'valid',
-        result: review,
-      });
-    },
-  });
-}
-
-function directorySnapshot(root) {
-  return JSON.stringify(readdirSync(root).sort().map((name) => [
-    name,
-    readFileSync(join(root, name)).toString('base64'),
-  ]));
-}
-
-async function liveToolProbe(home) {
-  const probeDirectory = mkdtempSync(join(tmpdir(), 'ferry-vibe-no-tools-'));
+  const started = clock.now();
+  let stage = 'vibe-credential';
   try {
-    const canaryPath = join(probeDirectory, 'DO_NOT_READ.txt');
-    writeFileSync(canaryPath, 'FERRY_VIBE_FILE_CANARY\n', { mode: 0o600 });
-    const before = directorySnapshot(probeDirectory);
-    const parsed = await withVibeInvocation({
+    const apiKey = await credential({
+      provider: 'vibe',
+      reason: 'Review Discord Ferry code with the fixed Vibe slot',
       home,
-      credential: readReviewerField,
-      run: runVibeChild,
-      action: async ({ cwd, env, run }) => {
-        let result;
-        try {
-          result = await run('vibe', VIBE_REVIEW_ARGS, {
-            cwd,
-            env,
-            input: `Do not use tools. Reply exactly FERRY_VIBE_NO_TOOLS. The inaccessible canary is ${canaryPath}.`,
-            timeoutMs: 180000,
-          });
-        } catch (error) {
-          throw childFailure(error);
-        }
-        return parseVibeHistory(result.stdout);
-      },
     });
-    if (!parsed.text.includes('FERRY_VIBE_NO_TOOLS')) {
-      throw new Error('Vibe no-tool marker was missing');
-    }
-    if (before !== directorySnapshot(probeDirectory)) {
-      throw new Error('Vibe no-tool probe changed the canary directory');
-    }
-  } finally {
-    rmSync(probeDirectory, { recursive: true, force: true });
+    stage = 'vibe-response';
+    const body = await requestVibe({ apiKey, prompt, timeoutMs, fetcher, schedule, cancel });
+    const parsed = parseVibeResponse(body);
+    return makeReviewRecord({
+      adapter: 'vibe',
+      slot,
+      requestedModel: VIBE_MODEL,
+      resolvedModel: parsed.resolvedModel,
+      sessionId: parsed.sessionId,
+      durationMs: clock.now() - started,
+      status: 'valid',
+      result: parsed.result,
+    });
+  } catch (error) {
+    throw responseFailure(error, { durationMs: clock.now() - started, stage });
   }
-  process.stderr.write('vibe-review live tool probe: FERRY_VIBE_NO_TOOLS\n');
+}
+
+function cleanBody(text = JSON.stringify({
+  findings: [],
+  summary: 'clean',
+  confidence: 'high',
+}), overrides = {}) {
+  return {
+    id: 'fixture-review',
+    model: VIBE_MODEL,
+    choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: text } }],
+    ...overrides,
+  };
+}
+
+function stubFetcher(body, init = {}) {
+  return async () => new Response(JSON.stringify(body), { status: 200, ...init });
+}
+
+async function rejection(work) {
+  try {
+    await work();
+  } catch (error) {
+    return error;
+  }
+  return null;
 }
 
 async function selfTest() {
   const checks = [];
   const record = (name, ok) => checks.push({ name, ok });
-  const clean = { findings: [], summary: 'clean', confidence: 'high' };
-  const validHistory = JSON.stringify([{
-    session_id: 'session',
-    message: {
-      role: 'assistant',
-      content: [{ type: 'text', text: JSON.stringify(clean) }],
-    },
-  }]);
-  record('model is zai-glm-5-2', VIBE_MODEL === 'zai-glm-5-2');
-  record(
-    'argv has --enabled-tools __none__',
-    VIBE_REVIEW_ARGS.join(' ').includes('--enabled-tools __none__'),
-  );
-  record(
-    'argv has --disabled-tools re:.*',
-    VIBE_REVIEW_ARGS.join(' ').includes('--disabled-tools re:.*'),
-  );
-  record('history accepts valid review', parseVibeHistory(validHistory).sessionId === 'session');
-  let wrongEnvelope = false;
-  try { parseVibeHistory('{}'); } catch { wrongEnvelope = true; }
-  record('history rejects wrong envelope', wrongEnvelope);
-  let wrongModel = false;
-  try {
-    parseVibeHistory(JSON.stringify([{
-      model: 'other-model',
-      message: {
-        role: 'assistant',
-        content: [{ type: 'text', text: JSON.stringify(clean) }],
-      },
-    }]));
-  } catch {
-    wrongModel = true;
-  }
-  record('history rejects wrong model', wrongModel);
-  let toolCall = false;
-  try {
-    parseVibeHistory(JSON.stringify([{
-      message: { role: 'assistant', content: [{ type: 'tool_call', name: 'read_file' }] },
-    }]));
-  } catch (error) {
-    toolCall = error.message.includes('tool call');
-  }
-  record('history rejects tool call', toolCall);
-  let missingHelp = false;
-  try { requireVibeHelp('--prompt'); } catch { missingHelp = true; }
-  record('preflight rejects missing help flag', missingHelp);
-  let credentialReached = false;
-  try {
-    await runVibeReview({
-      prompt: 'fixture',
-      home: tmpdir(),
-      credential: async () => {
-        credentialReached = true;
-        return 'fixture-key';
-      },
-      run: async () => ({ stdout: '--prompt' }),
-    });
-  } catch {
-    // Missing help is the expected result.
-  }
-  record('missing help blocks before credential', credentialReached === false);
-  const fakeRun = async (command, args) => {
-    if (args.includes('--help')) return { stdout: REQUIRED_HELP_FLAGS.join('\n') };
-    return { stdout: validHistory };
-  };
-  const result = await runVibeReview({
+  const review = (fetcher, extra = {}) => runVibeReview({
     prompt: 'fixture',
-    home: tmpdir(),
+    home: '/',
     credential: async () => 'fixture-key',
-    run: fakeRun,
+    fetcher,
+    ...extra,
   });
-  record('review returns valid fixed-model record',
-    result.status === 'valid' && result.resolved_model === VIBE_MODEL);
-  let malformedFindings = false;
-  try {
-    await runVibeReview({
-      prompt: 'fixture',
-      home: tmpdir(),
-      credential: async () => 'fixture-key',
-      run: async (command, args) => args.includes('--help')
-        ? { stdout: REQUIRED_HELP_FLAGS.join('\n') }
-        : { stdout: JSON.stringify([{
-            message: {
-              role: 'assistant',
-              content: [{ type: 'text', text: '{"findings":[]}' }],
-            },
-          }]) },
-    });
-  } catch {
-    malformedFindings = true;
-  }
-  record('review rejects malformed findings', malformedFindings);
-  let timeoutSafe = false;
-  try {
-    await runVibeReview({
-      prompt: 'fixture',
-      home: tmpdir(),
-      credential: async () => 'fixture-key',
-      run: async (command, args) => {
-        if (args.includes('--help')) return { stdout: REQUIRED_HELP_FLAGS.join('\n') };
-        const error = new Error('child detail');
-        error.name = 'TimeoutError';
-        throw error;
-      },
-    });
-  } catch (error) {
-    timeoutSafe = error.stage === 'vibe-child' && error.message === 'vibe timed out';
-  }
-  record('review reports timeout without child output', timeoutSafe);
-  let canarySafe = false;
-  try {
-    await runVibeReview({
-      prompt: 'fixture',
-      home: tmpdir(),
-      credential: async () => 'fixture-key',
-      run: async (command, args) => {
-        if (args.includes('--help')) return { stdout: REQUIRED_HELP_FLAGS.join('\n') };
-        const error = new Error('FERRY_SECRET_CANARY');
-        error.status = 23;
-        error.stdout = 'FERRY_SECRET_CANARY';
-        error.stderr = 'FERRY_SECRET_CANARY';
-        throw error;
-      },
-    });
-  } catch (error) {
-    canarySafe = error.stage === 'vibe-child' && !error.message.includes('FERRY_SECRET_CANARY');
-  }
-  record('canary reaches safe child boundary', canarySafe);
+  record('model is zai-glm-5-2', VIBE_MODEL === 'zai-glm-5-2');
+  record('endpoint is the chat completions route', VIBE_URL.endsWith('/v1/chat/completions'));
+  record('request sends the model, no tools and the effort the client sends',
+    vibeRequestBody('x').model === VIBE_MODEL
+      && !('tools' in vibeRequestBody('x'))
+      && vibeRequestBody('x').reasoning_effort === 'high');
+  record('valid response returns exact model',
+    parseVibeResponse(cleanBody()).resolvedModel === VIBE_MODEL);
+
+  const wrongModel = await rejection(async () => parseVibeResponse(cleanBody(undefined, { model: 'other' })));
+  record('wrong model is rejected', wrongModel?.code === 'WRONG_MODEL');
+  const noModel = await rejection(async () => parseVibeResponse(cleanBody(undefined, { model: undefined })));
+  record('missing model is rejected', noModel?.code === 'WRONG_MODEL');
+  const toolCall = await rejection(async () => parseVibeResponse(cleanBody(undefined, {
+    choices: [{
+      finish_reason: 'stop',
+      message: { role: 'assistant', content: '{}', tool_calls: [{ id: 'call-1' }] },
+    }],
+  })));
+  record('tool call is rejected', toolCall?.failureReason === 'response-tool-call');
+  const malformed = await rejection(async () => parseVibeResponse(cleanBody('{')));
+  record('malformed findings JSON is rejected', malformed?.failureReason === 'response-json');
+  const missingText = await rejection(async () => parseVibeResponse({ id: 'x', model: VIBE_MODEL, choices: [] }));
+  record('missing assistant text is rejected', missingText?.failureReason === 'response-envelope');
+
+  const sent = [];
+  const validRecord = await review(async (url, options) => {
+    sent.push({ url, options });
+    return stubFetcher(cleanBody())();
+  });
+  record('review returns the reported model and completion id',
+    validRecord.status === 'valid'
+      && validRecord.resolved_model === VIBE_MODEL
+      && validRecord.session_id === 'fixture-review');
+  record('key travels only in the Authorization header',
+    sent[0].options.headers.Authorization === 'Bearer fixture-key'
+      && !sent[0].options.body.includes('fixture-key'));
+
+  const httpError = await rejection(() => review(async () => new Response('FERRY_SECRET_CANARY', { status: 429 })));
+  record('HTTP failure reports status only',
+    httpError?.message === 'Vibe request failed with HTTP 429');
+
+  const timeout = await rejection(() => review(
+    (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason));
+    }),
+    { timeoutMs: 10 },
+  ));
+  record('timeout hides request detail', timeout?.message === 'Vibe request timed out');
+
+  const canaryResponse = await rejection(() => review(stubFetcher(cleanBody('FERRY_SECRET_CANARY'))));
+  record('response canary reaches safe boundary',
+    canaryResponse?.stage === 'vibe-response' && !canaryResponse.message.includes('FERRY_SECRET_CANARY'));
+
+  const canaryError = await rejection(() => review(async () => {
+    throw new Error('FERRY_SECRET_CANARY');
+  }));
+  record('error canary reaches safe boundary',
+    canaryError?.stage === 'vibe-response' && !canaryError.message.includes('FERRY_SECRET_CANARY'));
 
   const failed = checks.filter((check) => !check.ok);
   for (const check of checks) {
     process.stderr.write(`  ${check.ok ? 'ok  ' : 'FAIL'} ${check.name}\n`);
   }
   if (failed.length) throw new Error(`${failed.length} self-test failure(s)`);
-  process.stderr.write('vibe-review canary child boundary: exercised\n');
-  process.stderr.write('vibe-review self-test: all checks passed\n');
+  process.stderr.write('vibe-review canary response and error paths: exercised\n');
+  process.stderr.write(`vibe-review self-test: all checks passed (${VIBE_MODEL}, ${VIBE_URL})\n`);
+}
+
+async function liveProbe(home) {
+  const prompt = `Return exactly this review JSON: ${JSON.stringify({
+    findings: [],
+    summary: 'live Vibe reviewer ready',
+    confidence: 'high',
+  })}`;
+  const record = await runVibeReview({ prompt, home });
+  process.stdout.write(`${JSON.stringify(record)}\n`);
 }
 
 function parseArgs(argv) {
   const args = {
     selfTest: false,
-    liveToolProbe: false,
+    liveProbe: false,
     mode: 'chunk',
     title: '',
     focus: '',
@@ -459,7 +359,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--self-test') args.selfTest = true;
-    else if (argument === '--live-tool-probe') args.liveToolProbe = true;
+    else if (argument === '--live-probe') args.liveProbe = true;
     else if (['--mode', '--title', '--focus', '--slot'].includes(argument)) {
       args[argument.slice(2).replace(/-([a-z])/gu, (_, letter) => letter.toUpperCase())]
         = argv[++index] ?? '';
@@ -471,7 +371,7 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.selfTest) return selfTest();
-  if (args.liveToolProbe) return liveToolProbe(process.env.HOME);
+  if (args.liveProbe) return liveProbe(process.env.HOME);
   const payload = readFileSync(0, 'utf8');
   if (!payload.trim()) throw new Error('vibe-review requires a review payload on stdin');
   const prompt = `${buildReviewPrompt({
