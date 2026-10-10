@@ -5,8 +5,8 @@ import { realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const EXPECTED_PLAIN_ENGLISH_VERSION = '1.0.0';
-export const PLAIN_ENGLISH_RECOVERY = 'npm install -g plain-english@1.0.0';
+export const EXPECTED_PLAIN_ENGLISH_VERSION = '1.7.0';
+export const PLAIN_ENGLISH_RECOVERY = 'npm install -g plain-english@1.7.0';
 export const UPSTREAM_CODEX_CHAT_COMMAND =
   'node "$(git rev-parse --show-toplevel)/.codex/hooks/plain-english.mjs" ' +
   'hook chat --agent codex';
@@ -36,10 +36,13 @@ export function normalizeQwenChatHooks(document, ownerRoot, preToolUse) {
     if (matches.length !== 1) {
       throw new Error(`expected one native Qwen chat hook for ${event}; found ${matches.length}`);
     }
+    // plain-english 1.7.0 writes 60000 ms; 1.0.0 wrote 10000. Like the Codex
+    // check, accept both and settle on the current value.
     if (matches[0].command !== 'node .qwen/hooks/plain-english.mjs hook chat --agent qwen' ||
-        matches[0].timeout !== 10000) {
+        ![10000, 60000].includes(matches[0].timeout)) {
       throw new Error(`unexpected plain-English Qwen chat hook for ${event}`);
     }
+    matches[0].timeout = 60000;
     matches[0].command = qwenChatCommand(ownerRoot);
   }
   return document;

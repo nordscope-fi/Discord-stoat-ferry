@@ -220,6 +220,14 @@ async function main() {
     const vibeHooksPath = join(projectRoot, '.vibe', 'hooks.toml');
     const content = readFileSync(vibeHooksPath, 'utf8');
     writeFileSync(vibeHooksPath, stripVibeIssueChannel(content), { mode: 0o600 });
+    // plain-english 1.7.0 no longer writes the Vibe judge launcher and drops
+    // its hook entries, but init leaves an older copy behind. The staged check
+    // reports it as an unexpected artifact, so remove it here (#1124).
+    const staleJudge = join(projectRoot, '.vibe', 'hooks', 'plain-english-judge.mjs');
+    if (existsSync(staleJudge)) {
+      unlinkSync(staleJudge);
+      console.log('  removed replaced: hooks/plain-english-judge.mjs');
+    }
   }
   if (!codexLinked) {
     const codexHooksPath = join(projectRoot, '.codex', 'hooks.json');

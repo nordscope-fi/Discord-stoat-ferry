@@ -6,7 +6,7 @@ const { spawn } = require('node:child_process');
 
 const args = process.argv.slice(2);
 if (args[0] === '--version') {
-  process.stdout.write(`${process.env.FERRY_PLAIN_ENGLISH_VERSION || '1.0.0'}\n`);
+  process.stdout.write(`${process.env.FERRY_PLAIN_ENGLISH_VERSION || '1.7.0'}\n`);
   process.exit(0);
 }
 
@@ -64,7 +64,7 @@ if (agent === 'codex') {
     const ferry = (document.hooks[event] ?? []).filter((group) =>
       !(group.hooks ?? []).some((hook) => hook.command?.includes('plain-english.mjs')));
     document.hooks[event] = [...ferry, {
-      matcher: '*', hooks: [{ type: 'command', command, timeout: 10 }],
+      matcher: '*', hooks: [{ type: 'command', command, timeout: 60 }],
     }];
   }
   fs.writeFileSync(hooksPath, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
@@ -95,7 +95,7 @@ if (agent === 'codex') {
     document.hooks[event] = [...ferry, { matcher: '*', hooks: [{
       type: 'command', name: 'plain-english-chat',
       command: 'node .qwen/hooks/plain-english.mjs hook chat --agent qwen',
-      timeout: 10000,
+      timeout: 60000,
     }] }];
   }
   fs.writeFileSync(hooksPath, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
@@ -119,9 +119,6 @@ if (agent === 'codex') {
     .filter((block) => !block.includes('plain-english-')).join('').trimEnd();
   fs.writeFileSync(hooksPath, `${ferry}\n\n${blocks}`);
   fs.writeFileSync(path.join(directory, 'plain-english.mjs'), runner, { mode: 0o755 });
-  fs.writeFileSync(path.join(directory, 'plain-english-judge.mjs'), '#!/usr/bin/env node\n', {
-    mode: 0o755,
-  });
   for (const channel of ['docs', 'github', 'issue']) {
     fs.writeFileSync(path.join(directory, `plain-english-${channel}.prompt.md`), `${channel}\n`);
   }
