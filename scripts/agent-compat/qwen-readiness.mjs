@@ -93,7 +93,8 @@ async function checkWorktreeParity(root) {
 }
 
 async function checkReviewerClients() {
-  const clients = ['vibe', 'qwen', 'claude'];
+  // The Vibe reviewer calls Mistral directly, so it needs no Vibe client.
+  const clients = ['qwen', 'claude'];
   const found = {};
   for (const cli of clients) {
     try {

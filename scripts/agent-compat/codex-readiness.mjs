@@ -715,9 +715,10 @@ export async function runStaticReadiness({
     id: 'reviewer-clients',
     className: 'reviewers',
     reason: 'A required cross-host reviewer client is missing',
-    remediation: 'Install or repair the Vibe, Qwen, and Claude clients.',
+    remediation: 'Install or repair the Qwen and Claude clients.',
   }, () => {
-    const clients = ['vibe', 'qwen', 'claude'];
+    // The Vibe reviewer calls Mistral directly, so it needs no Vibe client.
+    const clients = ['qwen', 'claude'];
     if (clients.some((client) => command(client, ['--help'], { cwd: projectRoot }).status !== 0)) {
       throw new Error('reviewer client missing');
     }

@@ -81,7 +81,7 @@ import {
 } from '../../scripts/agent-compat/review-verification.mjs';
 import { shellWords } from '../../scripts/agent-compat/shell-words.mjs';
 import { readReviewerField } from '../../scripts/agent-compat/proton-credential.mjs';
-import { runVibeChild, runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
+import { runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
 import {
   parseQwenResponse,
   requestQwen,
@@ -1075,12 +1075,14 @@ switch (mode) {
       prompt: 'fixture',
       home: process.cwd(),
       credential,
-      run: async (command, args) => args.includes('--help')
-        ? { stdout: '--prompt\n--max-turns\n--max-tokens\n--enabled-tools\n--disabled-tools\n--output\n--trust\n' }
-        : { stdout: JSON.stringify([{
-          session_id: 'fixture-vibe',
-          message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(clean) }] },
-        }]) },
+      fetcher: async () => new Response(JSON.stringify({
+        id: 'fixture-vibe',
+        model: 'zai-glm-5-2',
+        choices: [{
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: JSON.stringify(clean) },
+        }],
+      })),
     });
     await runQwenReview({
       prompt: 'fixture',
@@ -1095,26 +1097,7 @@ switch (mode) {
     writeJson({ providers: calls.map((call) => call.provider) });
     break;
   }
-  case 'vibe-child-cwd': {
-    // The real spawner, not a stand-in: a child must start in the cwd it is given.
-    const target = realpathSync(mkdtempSync(join(tmpdir(), 'ferry-vibe-cwd-')));
-    try {
-      const { stdout } = await runVibeChild(
-        process.execPath,
-        ['-e', 'process.stdout.write(process.cwd())'],
-        { cwd: target, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10000 },
-      );
-      writeJson({ started_in_target: realpathSync(stdout) === target });
-    } finally {
-      rmSync(target, { recursive: true, force: true });
-    }
-    break;
-  }
   case 'vibe-review': {
-    const help = [
-      '--prompt', '--max-turns', '--max-tokens', '--enabled-tools',
-      '--disabled-tools', '--output', '--trust',
-    ].join('\n');
     const clean = {
       findings: [],
       summary: 'clean',
@@ -1165,67 +1148,123 @@ switch (mode) {
       'prose-without-json': 'Looking at this chunk, I found nothing to report.',
       'bare-json-quoting-a-fence': JSON.stringify({ ...clean, summary: 'see ```json``` above' }),
     };
-    const history = [{
-      session_id: 'fixture-session',
-      message: {
-        role: 'assistant',
-        content: [{ type: 'text', text: replies[argument] ?? JSON.stringify(clean) }],
-      },
-    }];
-    if (argument === 'tool-call') {
-      history.unshift({
-        message: { role: 'assistant', content: [{ type: 'tool_call', name: 'read_file' }] },
-      });
-    }
-    let argvContainsCanary = false;
-    let stdinReceivedCanary = false;
-    const workdirs = [];
-    const run = async (command, args, options) => {
-      // Vibe loads .vibe hooks, tools and skills from a trusted working
-      // directory, and walks up from it for AGENTS.md, so every child must
-      // start in an empty directory outside the checkout.
-      const cwd = options.cwd ?? process.cwd();
-      // Vibe also reads user-level skills from Path.home()/.agents, which ignores
-      // VIBE_HOME, so HOME must point away from the real home directory.
-      const childHome = options.env?.HOME;
-      workdirs.push({
-        outside_checkout: !resolve(cwd).startsWith(resolve(process.cwd())),
-        empty: existsSync(cwd) && readdirSync(cwd).length === 0,
-        private_home: typeof childHome === 'string'
-          && childHome === options.env?.VIBE_HOME
-          && resolve(childHome) !== resolve(homedir())
-          && !existsSync(join(childHome, '.agents')),
-      });
-      if (args.includes('--help')) return { stdout: help };
-      argvContainsCanary = args.some((value) => value.includes('FERRY_SECRET_CANARY'));
-      stdinReceivedCanary = options.input?.includes('FERRY_SECRET_CANARY') ?? false;
-      if (argument === 'canary-child-error') {
-        const error = new Error('FERRY_SECRET_CANARY');
-        error.status = 23;
-        error.stdout = 'FERRY_SECRET_CANARY';
-        error.stderr = 'FERRY_SECRET_CANARY';
-        throw error;
+    const keyCanary = 'FERRY_KEY_CANARY_0123456789';
+    const reply = (overrides = {}, init = {}) => new Response(JSON.stringify({
+      id: 'cmpl-fixture-1',
+      model: 'zai-glm-5-2',
+      choices: [{
+        index: 0,
+        finish_reason: 'stop',
+        message: { role: 'assistant', content: replies[argument] ?? JSON.stringify(clean) },
+      }],
+      ...overrides,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' }, ...init });
+    const sent = [];
+    const fetcher = async (url, options) => {
+      sent.push({ url, options });
+      // An undefined member is dropped by JSON.stringify, so the reply has no model.
+      if (argument === 'missing-model') return reply({ model: undefined });
+      if (argument === 'wrong-model') return reply({ model: 'zai-glm-5-1' });
+      if (argument === 'tool-call') {
+        return reply({
+          choices: [{
+            index: 0,
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'call-1', function: { name: 'read_file', arguments: '{}' } }],
+            },
+          }],
+        });
       }
-      return { stdout: JSON.stringify(history) };
+      if (argument === 'tool-call-with-stop') {
+        return reply({
+          choices: [{
+            index: 0,
+            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: JSON.stringify(clean),
+              tool_calls: [{ id: 'call-1', function: { name: 'read_file', arguments: '{}' } }],
+            },
+          }],
+        });
+      }
+      if (argument === 'http-error') {
+        return new Response(`upstream rejected ${keyCanary}`, { status: 503 });
+      }
+      if (argument === 'canary-fetch-error') {
+        throw new Error(`connect failed with ${options.headers.Authorization}`);
+      }
+      if (argument === 'timeout') {
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(options.signal.reason));
+        });
+      }
+      if (argument === 'array-content') {
+        return reply({
+          choices: [{
+            index: 0,
+            finish_reason: 'stop',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: [{ type: 'text', text: 'working' }] },
+                { type: 'text', text: JSON.stringify({ ...clean, summary: 'from chunks' }) },
+              ],
+            },
+          }],
+        });
+      }
+      return reply();
     };
     try {
       const record = await runVibeReview({
         prompt: argument === 'stdin-prompt' ? 'FERRY_SECRET_CANARY' : 'fixture prompt',
         home: process.cwd(),
-        credential: async () => 'fixture-api-key',
-        run,
+        credential: async () => keyCanary,
+        fetcher,
+        ...(argument === 'timeout' ? { timeoutMs: 20 } : {}),
       });
       if (argument in replies) writeJson({ status: record.status, summary: record.summary });
-      if (argument === 'isolated-workdir') writeJson({ workdirs });
-      if (argument === 'stdin-prompt') {
+      if (argument === 'array-content') writeJson({ summary: record.summary });
+      if (argument === 'valid') {
         writeJson({
-          argv_contains_canary: argvContainsCanary,
-          stdin_received_canary: stdinReceivedCanary,
+          status: record.status,
+          requested_model: record.requested_model,
+          resolved_model: record.resolved_model,
+          session_id: record.session_id,
+        });
+      }
+      if (argument === 'request') {
+        const body = JSON.parse(sent[0].options.body);
+        const headers = sent[0].options.headers;
+        writeJson({
+          calls: sent.length,
+          url: sent[0].url,
+          method: sent[0].options.method,
+          model: body.model,
+          temperature: body.temperature,
+          max_tokens: body.max_tokens,
+          reasoning_effort: body.reasoning_effort,
+          has_tools: 'tools' in body,
+          prompt_in_user_message: body.messages.some((message) =>
+            message.role === 'user' && message.content.includes('fixture prompt')),
+          authorization_is_bearer_key: headers.Authorization === `Bearer ${keyCanary}`,
+          key_outside_authorization: JSON.stringify({ ...headers, Authorization: '' }).includes(keyCanary)
+            || sent[0].options.body.includes(keyCanary)
+            || sent[0].url.includes(keyCanary),
         });
       }
     } catch (error) {
-      if (argument === 'canary-child-error') {
-        writeJson({ stage: error.stage ?? 'vibe-child', error: error.message });
+      const safe = {
+        stage: error.stage ?? null,
+        error: error.message,
+        classification: error.classification ?? null,
+      };
+      if (['http-error', 'canary-fetch-error', 'timeout', 'missing-model', 'wrong-model'].includes(argument)) {
+        writeJson(safe);
       } else {
         process.stderr.write(`${error.message}\n`);
       }

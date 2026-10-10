@@ -27,8 +27,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   never reads the derived client address or scheme. Browser and native-window use are unchanged.
 ### Fixed
 
-- The Vibe reviewer record now keeps the review session's id. The Vibe client writes it as
-  `sessionId`, and the reader looked only for `session_id`, so every record stored an empty id.
+- The Vibe reviewer now calls Mistral directly and rejects a reply that does not name
+  `zai-glm-5-2`, so the review record shows the model that actually answered (#990). It used to
+  run the `vibe` command-line program, whose output leaves out the model name, so the record
+  stored the requested model as the resolved one without proof. The record's session id is now
+  the completion id from the reply. The reviewer no longer needs the Vibe client installed, so
+  the Codex and Qwen reviewer readiness checks no longer look for it.
 
 ## [2.41.26] - 2026-10-10
 

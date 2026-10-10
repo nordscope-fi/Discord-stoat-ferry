@@ -3337,12 +3337,11 @@ def test_proton_helper_rejects_a_symbolic_token_before_login(tmp_path: Path) -> 
     }
 
 
-def test_vibe_review_pins_glm_and_disables_tools() -> None:
+def test_vibe_review_uses_direct_api_and_requires_exact_model() -> None:
     result = _run("node", "scripts/agent-compat/vibe-review.mjs", "--self-test")
     assert result.returncode == 0, result.stderr
     assert "zai-glm-5-2" in result.stderr
-    assert "--enabled-tools __none__" in result.stderr
-    assert "--disabled-tools re:.*" in result.stderr
+    assert "https://api.mistral.ai/v1/chat/completions" in result.stderr
 
 
 def test_reviewer_adapters_select_their_exact_provider_locator() -> None:
@@ -3356,51 +3355,84 @@ def test_reviewer_adapters_select_their_exact_provider_locator() -> None:
     assert json.loads(result.stdout) == {"providers": ["vibe", "qwen"]}
 
 
-def test_vibe_review_rejects_a_tool_call_in_the_history() -> None:
-    result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", "tool-call")
-    assert result.returncode == 1
-    assert "tool call" in (result.stdout + result.stderr).lower()
+def _vibe_review(case: str) -> subprocess.CompletedProcess[str]:
+    return _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", case, "--json")
 
 
-def test_vibe_review_reads_the_session_id_the_client_writes() -> None:
-    """mistral-vibe writes history entries with camelCase aliases, so the field is sessionId."""
-    assert NODE is not None
-    clean = {"findings": [], "summary": "clean", "confidence": "high"}
-    history = [
-        {
-            "id": "entry-1",
-            "sessionId": "client-session",
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "text", "text": json.dumps(clean)}],
-        }
-    ]
-    script = (
-        "import { parseVibeHistory } from './scripts/agent-compat/vibe-review.mjs';"
-        f"console.log(JSON.stringify(parseVibeHistory({json.dumps(json.dumps(history))}).sessionId));"
-    )
-    result = subprocess.run(
-        [NODE, "--input-type=module", "-e", script],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def test_vibe_review_records_the_model_and_id_the_provider_reported() -> None:
+    result = _vibe_review("valid")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == "client-session"
+    assert json.loads(result.stdout) == {
+        "status": "valid",
+        "requested_model": "zai-glm-5-2",
+        "resolved_model": "zai-glm-5-2",
+        "session_id": "cmpl-fixture-1",
+    }
 
 
-def test_vibe_review_redacts_an_injected_child_failure() -> None:
-    result = _run(
-        "node",
-        "tests/fixtures/agent_compat_runner.mjs",
-        "vibe-review",
-        "canary-child-error",
-        "--json",
-    )
+def test_vibe_review_rejects_a_reply_with_no_model() -> None:
+    """The Vibe client dropped the model name, which is how #990 recorded an unproven one."""
+    result = _vibe_review("missing-model")
     assert result.returncode == 1
-    assert json.loads(result.stdout)["stage"] == "vibe-child"
-    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["classification"] == "wrong-model"
+    assert report["error"] == "Vibe response did not name the expected model"
+
+
+def test_vibe_review_rejects_a_reply_from_another_model() -> None:
+    result = _vibe_review("wrong-model")
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["classification"] == "wrong-model"
+    assert "zai-glm-5-1" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("case", ["tool-call", "tool-call-with-stop"])
+def test_vibe_review_rejects_a_reply_with_tool_calls(case: str) -> None:
+    result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", case)
+    assert result.returncode == 1
+    assert "response-tool-call" in result.stderr
+
+
+def test_vibe_review_reads_the_text_chunks_of_a_structured_reply() -> None:
+    result = _vibe_review("array-content")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"summary": "from chunks"}
+
+
+def test_vibe_review_sends_one_direct_request_with_the_key_only_in_the_header() -> None:
+    result = _vibe_review("request")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "calls": 1,
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "method": "POST",
+        "model": "zai-glm-5-2",
+        "temperature": 1.0,
+        "max_tokens": 12000,
+        "reasoning_effort": "high",
+        "has_tools": False,
+        "prompt_in_user_message": True,
+        "authorization_is_bearer_key": True,
+        "key_outside_authorization": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("http-error", "Vibe request failed with HTTP 503"),
+        ("canary-fetch-error", "Vibe request failed"),
+        ("timeout", "Vibe request timed out"),
+    ],
+)
+def test_vibe_review_failures_never_carry_the_key(case: str, message: str) -> None:
+    result = _vibe_review(case)
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["stage"] == "vibe-response"
+    assert report["error"] == message
+    assert "FERRY_KEY_CANARY" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -3429,29 +3461,7 @@ def test_vibe_review_still_validates_findings_after_a_prose_preamble() -> None:
         "prose-before-invalid-findings",
     )
     assert result.returncode == 1
-    assert "invalid findings" in result.stderr
-
-
-def test_vibe_review_runs_every_child_in_an_empty_directory_outside_the_checkout() -> None:
-    """A trusted checkout loads its own .vibe hooks; the plain-English one ended reviews (#1088)."""
-    result = _run(
-        "node",
-        "tests/fixtures/agent_compat_runner.mjs",
-        "vibe-review",
-        "isolated-workdir",
-        "--json",
-    )
-    assert result.returncode == 0, result.stderr
-    workdirs = json.loads(result.stdout)["workdirs"]
-    assert len(workdirs) == 2  # the --help probe and the review
-    expected = {"outside_checkout": True, "empty": True, "private_home": True}
-    assert all(w == expected for w in workdirs)
-
-
-def test_vibe_child_starts_in_the_directory_it_is_given() -> None:
-    result = _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-child-cwd", "--json")
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"started_in_target": True}
+    assert "Vibe response was invalid (response-findings)" in result.stderr
 
 
 def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
@@ -3459,20 +3469,7 @@ def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
         "node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", "prose-without-json"
     )
     assert result.returncode == 1
-    assert "invalid JSON" in result.stderr
-
-
-def test_vibe_review_sends_the_prompt_only_through_stdin() -> None:
-    result = _run(
-        "node",
-        "tests/fixtures/agent_compat_runner.mjs",
-        "vibe-review",
-        "stdin-prompt",
-        "--json",
-    )
-    report = json.loads(result.stdout)
-    assert report["argv_contains_canary"] is False
-    assert report["stdin_received_canary"] is True
+    assert "Vibe response was invalid (response-json)" in result.stderr
 
 
 def test_qwen_review_uses_direct_api_and_requires_exact_model() -> None:

@@ -31,4 +31,4 @@ args = ["__DATA_HOME__/discord-ferry/reviewer-runtime/current/context7-mcp.mjs"]
 # for a second opinion from within Mistral is circular.
 # No active_model pin here: the user's ~/.vibe/config.toml owns the model
 # choice (AGENTS.md Cognitive Tiering). The review adapter (vibe-review.mjs)
-# pins its own model in an isolated VIBE_HOME.
+# does not use this client: it calls Mistral directly with its own pinned model.
