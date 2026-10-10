@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { handleBrainstormHook } from './brainstorm-evidence.mjs';
 import { routesFor } from './hook-parity.mjs';
 import { isDestructiveGitCommand } from './destructive-git.mjs';
+import { recentCommitsContext } from './session-context.mjs';
 
 const mode = process.argv[2];
 
@@ -133,12 +134,8 @@ function sessionStart() {
     if (vMatch) contextLines.push(`Discord Ferry v${vMatch[1]}`);
   } catch { /* version file not found */ }
 
-  try {
-    const log = execFileSync('git', ['log', '--oneline', '-5'], {
-      encoding: 'utf8', cwd: projectRoot, timeout: 5000,
-    }).trim();
-    if (log) contextLines.push(log);
-  } catch { /* git not available */ }
+  const commits = recentCommitsContext(projectRoot);
+  if (commits) contextLines.push(commits);
 
   runProjectHook('session-start-nudge.sh', input, true);
 

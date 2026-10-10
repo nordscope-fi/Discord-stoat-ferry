@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Discord Ferry — Qwen SessionStart context hook.
-// Emits the session context (package version, recent git log, and the df-start
-// nudge) as a hookSpecificOutput.additionalContext JSON block, the shape Qwen
-// hooks parse. Claude Code accepts plain stdout for the same hooks; Qwen parses
+// Emits the session context (package version, recent git log as a labelled untrusted-metadata
+// block, and the df-start nudge) as a hookSpecificOutput.additionalContext JSON block, the shape
+// Qwen hooks parse. Claude Code accepts plain stdout for the same hooks; Qwen parses
 // stdout as JSON, so this wrapper exists. The nudge itself stays in
 // .claude/hooks/session-start-nudge.sh and keeps its own gating (it only prints
 // on a fresh startup). See ADR-026.
@@ -10,6 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { recentCommitsContext } from './session-context.mjs';
 
 const projectRoot = resolve(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
 
@@ -28,12 +29,8 @@ try {
   if (match) lines.push(`Discord Ferry v${match[1]}`);
 } catch { /* version file not found */ }
 
-try {
-  const log = execFileSync('git', ['log', '--oneline', '-5'], {
-    encoding: 'utf8', cwd: projectRoot, timeout: 5000,
-  }).trim();
-  if (log) lines.push(log);
-} catch { /* git not available */ }
+const commits = recentCommitsContext(projectRoot);
+if (commits) lines.push(commits);
 
 const nudgeScript = join(projectRoot, '.claude', 'hooks', 'session-start-nudge.sh');
 if (existsSync(nudgeScript)) {
