@@ -1507,6 +1507,11 @@ switch (mode) {
           event({ finishReason: 'stop' }),
           'data: [DONE]\n\n',
         ].join('')));
+      } else if (argument === 'stream-runaway') {
+        await qwenReview.readQwenStream(
+          new ReadableStream({ start() {} }),
+          { streamTimeoutMs: 5, idleTimeoutMs: 1000 },
+        );
       } else if (argument === 'response-envelope') {
         parseQwenResponse(null);
       } else if (argument === 'response-json') {
@@ -1613,6 +1618,102 @@ switch (mode) {
       new Promise((resolve) => setTimeout(() => resolve({ ok: false, stuck: true }), 100)),
     ]);
     writeJson(outcome);
+    break;
+  }
+  case 'qwen-stream-limit': {
+    // Virtual time: no real sleeps. Each stream event advances the clock by one second.
+    const clean = JSON.stringify({ findings: [], summary: 'clean', confidence: 'high' });
+    const event = (delta, finishReason = null) => `data: ${JSON.stringify({
+      id: 'limit-session',
+      model: 'qwen3.8-max',
+      choices: [{ delta, finish_reason: finishReason }],
+    })}\n\n`;
+    let now = 0;
+    let nextId = 0;
+    const timers = new Map();
+    const fired = [];
+    const schedule = (fn, ms) => {
+      nextId += 1;
+      timers.set(nextId, { at: now + ms, ms, fn });
+      return nextId;
+    };
+    const cancel = (id) => { timers.delete(id); };
+    const advance = (ms) => {
+      const target = now + ms;
+      for (;;) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        timers.delete(due[0]);
+        now = due[1].at;
+        fired.push({ ms: due[1].ms, at: now });
+        due[1].fn();
+      }
+      now = target;
+    };
+    const reasoningSeconds = argument === 'normal' ? 303 : Infinity;
+    let events = 0;
+    let cancelled = false;
+    const tail = [
+      event({ content: clean.slice(0, 20) }),
+      event({ content: clean.slice(20) }),
+      event({}, 'stop'),
+      'data: [DONE]\n\n',
+    ];
+    const fetcher = async () => ({
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        pull(controller) {
+          if (cancelled || events > 5000) {
+            controller.close();
+            return;
+          }
+          events += 1;
+          advance(1000);
+          if (events <= reasoningSeconds) {
+            controller.enqueue(new TextEncoder().encode(event({ reasoning_content: 'thinking' })));
+            return;
+          }
+          for (const chunk of tail) controller.enqueue(new TextEncoder().encode(chunk));
+          controller.close();
+        },
+        cancel() { cancelled = true; },
+      }),
+    });
+    const qwen = (options) => runQwenReview({
+      ...options,
+      home: process.cwd(),
+      credential: async () => 'fixture-api-key',
+      request: (inner) => requestQwen({ ...inner, fetcher }),
+      deadlines: { ...qwenReview.QWEN_DEADLINES },
+      schedule,
+      cancel,
+      clock: { now: () => now },
+    });
+    const advisory = await runEnsemble({ prompt: 'fixture' }, {
+      vibe: async ({ slot }) => makeReviewRecord({
+        adapter: 'vibe',
+        slot,
+        requestedModel: 'zai-glm-5-2',
+        resolvedModel: 'zai-glm-5-2',
+        sessionId: 'vibe-session',
+        durationMs: 1,
+        status: 'valid',
+        result: { findings: [], summary: 'clean', confidence: 'high' },
+      }),
+      qwen,
+    });
+    writeJson({
+      record: advisory.slots.qwen,
+      events,
+      virtual_ms: now,
+      cancelled,
+      stream_deadline_ms: qwenReview.QWEN_DEADLINES.streamMs ?? null,
+      total_deadline_ms: qwenReview.QWEN_DEADLINES.totalMs,
+      fired: fired.filter((timer) => timer.ms > 100000),
+    });
     break;
   }
   case 'qwen-failure-record': {
