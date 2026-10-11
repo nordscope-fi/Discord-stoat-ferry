@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -126,6 +127,13 @@ class TestBuildCommand:
         assert "All" in cmd
         assert "--output" in cmd
         assert str(tmp_path / "exports") in cmd
+
+    def test_escapes_percent_in_export_path_for_dce_templates(self, tmp_path: Path) -> None:
+        config = replace(_make_config(tmp_path), export_dir=tmp_path / "100%done")
+
+        command = _build_dce_command(config, tmp_path / "dce")
+
+        assert command[command.index("--output") + 1] == str(tmp_path / "100%%done")
 
 
 class TestDiskSpaceCheck:
