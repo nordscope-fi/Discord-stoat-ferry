@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import ssl
@@ -23,6 +24,7 @@ from discord_ferry.discord.metadata import (
     PermissionPair,
     RoleMeta,
     RoleOverride,
+    load_discord_metadata_for_resume,
     save_discord_metadata,
 )
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
@@ -32,6 +34,7 @@ from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     _apply_role_ordering,
     _download_banner,
+    _ordered_category_channels,
     _resolve_role_icon,
     get_session,
     make_unique_channel_name,
@@ -1545,6 +1548,16 @@ async def test_run_channels_thread_flattening(tmp_path: Path) -> None:
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={"th1": ChannelMeta(nsfw=False, position=0)},
+        ),
+        tmp_path,
+    )
 
     exports = [
         _make_export(
@@ -1592,6 +1605,232 @@ def _category_titles_from_patch(bodies: list[dict[str, object]]) -> list[str]:
     """Extract category titles, in order, from the last categories PATCH body."""
     cats = bodies[-1].get("categories", []) if bodies else []
     return [str(c.get("title", "")) for c in cats]  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_category_positions_require_complete_metadata(missing: bool) -> None:
+    metadata = {
+        "10": ChannelMeta(nsfw=False, position=1),
+        "2": ChannelMeta(nsfw=False, position=1),
+        "30": ChannelMeta(nsfw=False, position=None if missing else 0),
+    }
+    original = ["s10", "thread", "s2", "s30"]
+    inverse = {"s10": "10", "s2": "2", "s30": "30", "thread": "40"}
+    result = _ordered_category_channels(original, metadata, inverse, {"40"})
+    assert result == (original if missing else ["s30", "thread", "s2", "s10"])
+    assert original == ["s10", "thread", "s2", "s30"]
+
+
+@pytest.mark.parametrize(
+    ("channels", "metadata", "inverse"),
+    [
+        ([], {}, {}),
+        (["s10"], {}, {"s10": "10"}),
+        (["s10"], {"10": ChannelMeta(nsfw=False, position=0)}, {}),
+        (["s10"], {"not-a-number": ChannelMeta(nsfw=False, position=0)}, {"s10": "not-a-number"}),
+    ],
+)
+def test_category_position_fallback_preserves_input(
+    channels: list[str], metadata: dict[str, ChannelMeta], inverse: dict[str, str]
+) -> None:
+    original = list(channels)
+    result = _ordered_category_channels(channels, metadata, inverse, set())
+    assert result == original
+    assert channels == original
+
+
+@pytest.mark.parametrize("value", [None, -1, 1.5, True, False, "2", [], {}])
+def test_malformed_saved_position_preserves_category_order(tmp_path: Path, value: object) -> None:
+    raw = {
+        "guild_id": "111",
+        "fetched_at": "t",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {"10": {"nsfw": False, "position": value}},
+    }
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(raw))
+    meta = load_discord_metadata_for_resume(tmp_path, configured_guild_id="111")
+    assert meta is not None
+    original = ["s10"]
+    assert (
+        _ordered_category_channels(original, meta.channel_metadata, {"s10": "10"}, set())
+        == original
+    )
+    assert original == ["s10"]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_final_layout_uses_carried_positions(tmp_path: Path, missing: bool) -> None:
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"100": "cat", "200": "carried-cat"},
+        category_names={"100": "General", "200": "Carried"},
+        channel_map={"10": "s10", "2": "s2", "30": "s30", "50": "s50"},
+        channel_categories={"10": "100", "2": "100", "30": "100", "50": "200"},
+    )
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={
+            "10": ChannelMeta(nsfw=False, position=1),
+            "2": ChannelMeta(nsfw=False, position=1),
+            "30": ChannelMeta(nsfw=False, position=None if missing else 0),
+            "50": ChannelMeta(nsfw=False, position=0),
+        },
+    )
+    save_discord_metadata(meta, tmp_path)
+    exports = [_make_export(channel_id="10", category_id="100")]
+    update = AsyncMock(return_value={})
+    with (
+        aioresponses() as requests,
+        patch.object(structure_module, "api_upsert_categories", update),
+    ):
+        await run_channels(_make_config(tmp_path, incremental=True), state, exports, [].append)
+    assert not requests.requests
+    update.assert_awaited_once()
+    assert update.await_args is not None
+    categories = update.await_args.args[4]
+    by_id = {entry["id"]: entry["channels"] for entry in categories}
+    assert by_id["cat"] == (["s10", "s2", "s30"] if missing else ["s30", "s2", "s10"])
+    assert by_id["carried-cat"] == ["s50"]
+    assert state.channel_map == {"10": "s10", "2": "s2", "30": "s30", "50": "s50"}
+
+
+async def test_final_layout_retry_reuses_saved_channels(tmp_path: Path) -> None:
+    state = MigrationState(
+        stoat_server_id="01J5T000000000000000009000",
+        category_map={"100": "cat"},
+        category_names={"100": "General"},
+        channel_map={
+            "10": "01J5T000000000000000000501",
+            "2": "01J5T000000000000000000502",
+        },
+        channel_categories={"10": "100", "2": "100"},
+    )
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={
+                "10": ChannelMeta(nsfw=False, position=1),
+                "2": ChannelMeta(nsfw=False, position=0),
+            },
+        ),
+        tmp_path,
+    )
+    exports = [_make_export(channel_id="10", category_id="100")]
+    attempted: list[list[dict[str, object]]] = []
+
+    async def update(*args: object) -> dict[str, object]:
+        attempted.append(args[4])  # type: ignore[arg-type]
+        if len(attempted) == 1:
+            raise MigrationError("update failed")
+        return {}
+
+    config = _make_config(tmp_path, incremental=True)
+    with (
+        aioresponses() as requests,
+        patch.object(structure_module, "api_upsert_categories", update),
+    ):
+        with pytest.raises(MigrationError, match="update failed"):
+            await run_channels(config, state, exports, [].append)
+        resumed = load_state(tmp_path)
+        await run_channels(config, resumed, exports, [].append)
+    assert not requests.requests
+    assert attempted[0] == attempted[1]
+    assert attempted[1][0]["channels"] == [
+        "01J5T000000000000000000502",
+        "01J5T000000000000000000501",
+    ]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_final_layout_orders_one_new_channel_with_carried_members(
+    tmp_path: Path, missing: bool
+) -> None:
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"100": "cat"},
+        category_names={"100": "General"},
+        channel_map={"10": "s10", "2": "s2"},
+        channel_categories={"10": "100", "2": "100"},
+    )
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={
+                "10": ChannelMeta(nsfw=False, position=2),
+                "2": ChannelMeta(nsfw=False, position=None if missing else 1),
+                "1": ChannelMeta(nsfw=False, position=0),
+            },
+        ),
+        tmp_path,
+    )
+    exports = [
+        _make_export(channel_id="10", category_id="100"),
+        _make_export(channel_id="1", channel_name="new", category_id="100"),
+    ]
+    create = AsyncMock(return_value={"_id": "s1", "name": "new"})
+    update = AsyncMock(return_value={})
+    with (
+        aioresponses() as requests,
+        patch.object(structure_module, "api_create_channel", create),
+        patch.object(structure_module, "api_upsert_categories", update),
+    ):
+        await run_channels(_make_config(tmp_path, incremental=True), state, exports, [].append)
+    assert not requests.requests
+    create.assert_awaited_once()
+    assert update.await_args is not None
+    assert update.await_args.args[4][0]["channels"] == (
+        ["s10", "s1", "s2"] if missing else ["s1", "s2", "s10"]
+    )
+
+
+@pytest.mark.parametrize("with_metadata", [False, True])
+async def test_channel_selection_stays_in_export_order(tmp_path: Path, with_metadata: bool) -> None:
+    state = MigrationState(stoat_server_id="srv1", category_map={"100": "cat"})
+    if with_metadata:
+        save_discord_metadata(
+            DiscordMetadata(
+                guild_id="111",
+                fetched_at="t",
+                server_default_permissions=0,
+                role_permissions={},
+                channel_metadata={
+                    "1": ChannelMeta(nsfw=False, position=1),
+                    "2": ChannelMeta(nsfw=False, position=0),
+                    "3": ChannelMeta(nsfw=False, position=2),
+                },
+            ),
+            tmp_path,
+        )
+    exports = [
+        _make_export(channel_id="1", channel_name="a", category_id="100"),
+        _make_export(channel_id="2", channel_name="b", category_id="100"),
+        _make_export(channel_id="3", channel_name="c", category_id="100"),
+    ]
+    create = AsyncMock(side_effect=[{"_id": "s-a", "name": "a"}, {"_id": "s-b", "name": "b"}])
+    update = AsyncMock(return_value={})
+    with (
+        aioresponses() as requests,
+        patch.object(structure_module, "api_create_channel", create),
+        patch.object(structure_module, "api_upsert_categories", update),
+    ):
+        await run_channels(_make_config(tmp_path, max_channels=2), state, exports, [].append)
+    assert not requests.requests
+    assert [call.kwargs["name"] for call in create.await_args_list] == ["a", "b"]
+    assert [export.channel.name for export in exports] == ["a", "b", "c"]
+    assert update.await_args is not None
+    assert update.await_args.args[4][0]["channels"] == (
+        ["s-b", "s-a"] if with_metadata else ["s-a", "s-b"]
+    )
 
 
 async def test_run_channels_orders_categories_by_discord_position(tmp_path: Path) -> None:
@@ -3195,6 +3434,19 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={
+                "fp1": ChannelMeta(nsfw=False, position=1),
+                "fp2": ChannelMeta(nsfw=False, position=0),
+            },
+        ),
+        tmp_path,
+    )
 
     # Two forum thread exports from the same parent forum.
     exports = [
@@ -3221,6 +3473,7 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
     ]
 
     sent_messages: list[dict[str, object]] = []
+    category_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
         # Channel creation for the two forum posts.
@@ -3251,13 +3504,22 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
             payload={},
         )
         # Category PATCH.
-        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+        m.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={"_id": "srv1"},
+            repeat=True,
+            callback=lambda url, **kwargs: category_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
 
         await run_channels(config, state, exports, events.append)
 
     # Index channel mapped in state.
     assert "forum-index-forum-my-forum" in state.channel_map
     assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
+    forum_category = category_bodies[-1]["categories"][0]  # type: ignore[index]
+    assert forum_category["channels"] == ["stoat-idx1", "stoat-fp1", "stoat-fp2"]
 
     # The sent message contains channel references and message counts.
     assert len(sent_messages) == 1

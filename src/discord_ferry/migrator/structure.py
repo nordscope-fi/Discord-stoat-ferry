@@ -27,6 +27,7 @@ from discord_ferry.discord.metadata import (
     RoleMeta,
     load_bound_discord_metadata,
 )
+from discord_ferry.discord.models import normalize_channel_position
 from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
 from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
 from discord_ferry.migrator.api import (
@@ -121,6 +122,32 @@ def _stoat_channel_type(channel_type: int) -> str:
             return "Voice"
         case _:
             return "Text"
+
+
+def _ordered_category_channels(
+    channels: list[str],
+    metadata: dict[str, ChannelMeta],
+    inverse_channel_map: dict[str, str],
+    thread_ids: set[str],
+) -> list[str]:
+    ordinary: list[tuple[int, int, str]] = []
+    slots: list[int] = []
+    for index, stoat_id in enumerate(channels):
+        discord_id = inverse_channel_map.get(stoat_id)
+        if discord_id is None:
+            return channels
+        if discord_id in thread_ids:
+            continue
+        cm = metadata.get(discord_id)
+        position = normalize_channel_position(cm.position) if cm else None
+        if position is None or not discord_id.isascii() or not discord_id.isdecimal():
+            return channels
+        slots.append(index)
+        ordinary.append((position, int(discord_id), stoat_id))
+    result = list(channels)
+    for index, entry in zip(slots, sorted(ordinary), strict=True):
+        result[index] = entry[2]
+    return result
 
 
 async def _download_banner(
@@ -1812,6 +1839,23 @@ async def run_channels(
                 stoat_ch = state.channel_map.get(discord_ch_id)
                 if stoat_cat and stoat_ch and stoat_ch not in category_channels.get(stoat_cat, []):
                     category_channels.setdefault(stoat_cat, []).append(stoat_ch)
+
+            if discord_metadata is not None:
+                inverse_channels = {target: source for source, target in state.channel_map.items()}
+                inverse_categories = {
+                    target: source for source, target in state.category_map.items()
+                }
+                thread_ids = {export.channel.id for export in exports if export.is_thread}
+                for category_id, members in category_channels.items():
+                    source_category = inverse_categories.get(category_id)
+                    if source_category is None or source_category.startswith("forum-"):
+                        continue
+                    category_channels[category_id] = _ordered_category_channels(
+                        members,
+                        discord_metadata.channel_metadata,
+                        inverse_channels,
+                        thread_ids,
+                    )
 
             # Build the full categories array.
             all_categories: list[dict[str, Any]] = []

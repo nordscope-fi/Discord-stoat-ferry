@@ -608,7 +608,7 @@ async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
         fetched_at="2024-01-01T00:00:00+00:00",
         server_default_permissions=1024,
         role_permissions={"222222222222222222": PermissionPair(allow=2048, deny=0)},
-        channel_metadata={"333333333333333333": ChannelMeta(nsfw=False)},
+        channel_metadata={"333333333333333333": ChannelMeta(nsfw=False, position=0)},
     )
     save_discord_metadata(existing_meta, tmp_path)
 
@@ -627,6 +627,8 @@ async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
 
     export_events = [e for e in events if e.phase == "export"]
     assert any("cached" in e.message.lower() for e in export_events if e.status == "progress")
+    saved = json.loads((tmp_path / "discord_metadata.json").read_text(encoding="utf-8"))
+    assert saved["channel_metadata"]["333333333333333333"]["position"] == 0
 
 
 # Fixture guild ids: simple_channel.json and friends are 111111111111111111, the
