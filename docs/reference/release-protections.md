@@ -79,6 +79,12 @@ signing certificate names `release.yml@refs/tags/v2.42.0` and the `push` trigger
 shows the last release was published under that identity. It does not prove the publisher
 rejects other identities, so keep the settings page check below.
 
+## Current Python test matrix
+
+The `lint-and-test` workflow runs Python 3.11 through 3.14 on Linux, plus Python 3.12 on
+Windows. The batch 4 release requires its Python 3.14 pull request job to pass before merge. The
+observed required status checks above remain a separate repository setting.
+
 ## What the release path does
 
 1. A version bump lands on `main`. `auto-tag.yml` runs in the `auto-tag` environment,

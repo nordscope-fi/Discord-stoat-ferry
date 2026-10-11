@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
 ]
 
@@ -64,7 +65,7 @@ dev = [
     "pyinstaller>=6.0",
     "PyJWT[crypto]>=2.10",
 ]
-# Mutation testing, kept out of `dev` on purpose: CI installs `dev` on five jobs
+# Mutation testing, kept out of `dev` on purpose: CI installs `dev` on six jobs
 # and never runs a mutation sweep, so putting cosmic-ray there would pay its
 # install cost on every push for a tool only used locally and on demand.
 #   uv sync --extra mutation && bash scripts/mutate.sh
