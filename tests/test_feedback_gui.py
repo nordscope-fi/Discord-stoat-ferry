@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
 import pytest
@@ -51,6 +51,47 @@ class _FakeFeedbackClient:
 
 def _receipt() -> object:
     return SimpleNamespace(url="https://github.com/nordscope-fi/Discord-stoat-ferry/issues/84")
+
+
+async def test_pick_save_path_awaits_native_dialog_and_returns_selection(tmp_path: Path) -> None:
+    from discord_ferry import feedback_gui
+
+    chosen = tmp_path / "feedback.md"
+    window = SimpleNamespace(create_file_dialog=AsyncMock(return_value=(str(chosen),)))
+    app_stub = SimpleNamespace(native=SimpleNamespace(main_window=window))
+    with patch("discord_ferry.feedback_gui.app", app_stub):
+        assert await feedback_gui._pick_save_path() == chosen
+
+    window.create_file_dialog.assert_awaited_once_with(
+        30,
+        save_filename="discord-ferry-feedback.md",
+        file_types=("Markdown files (*.md)", "All files (*.*)"),
+    )
+
+
+async def test_pick_save_path_returns_none_when_native_dialog_is_cancelled() -> None:
+    from discord_ferry import feedback_gui
+
+    window = SimpleNamespace(create_file_dialog=AsyncMock(return_value=None))
+    app_stub = SimpleNamespace(native=SimpleNamespace(main_window=window))
+    with patch("discord_ferry.feedback_gui.app", app_stub):
+        assert await feedback_gui._pick_save_path() is None
+
+    window.create_file_dialog.assert_awaited_once()
+
+
+async def test_pick_save_path_warns_in_browser_mode() -> None:
+    from discord_ferry import feedback_gui
+
+    notify = Mock()
+    app_stub = SimpleNamespace(native=SimpleNamespace(main_window=None))
+    with (
+        patch("discord_ferry.feedback_gui.app", app_stub),
+        patch("discord_ferry.feedback_gui.ui.notify", notify),
+    ):
+        assert await feedback_gui._pick_save_path() is None
+
+    notify.assert_called_once_with("Saving a draft requires the desktop app.", type="warning")
 
 
 def _seed_validate_page(store: dict[str, object], tmp_path: Path) -> None:
@@ -333,7 +374,7 @@ async def test_feedback_recovery_copies_saves_and_retries_only_when_chosen(
     with (
         patch("discord_ferry.feedback_gui.FeedbackClient", return_value=client),
         patch("discord_ferry.feedback_gui.ui.clipboard.write", copied.append),
-        patch("discord_ferry.feedback_gui._pick_save_path", return_value=save_path),
+        patch("discord_ferry.feedback_gui._pick_save_path", AsyncMock(return_value=save_path)),
     ):
         await user.open("/")
         await _open_feedback_report(user)
