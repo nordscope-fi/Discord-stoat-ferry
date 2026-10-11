@@ -190,6 +190,8 @@ async def run_server(
         return
 
     async with get_session(config) as session:
+        discord_meta = load_bound_discord_metadata(config, exports)
+
         # Reuse an explicit --server-id OR a server_id carried from a prior
         # incremental run (FerryConfig is frozen, so reuse is resolved here).
         effective_server_id = config.server_id or state.stoat_server_id
@@ -222,7 +224,11 @@ async def run_server(
                 name = "Ferry Server"
 
             state.stoat_server_id = await api_create_server(
-                session, config.stoat_url, config.token, name
+                session,
+                config.stoat_url,
+                config.token,
+                truncate_name(name),
+                nsfw=discord_meta.guild_nsfw if discord_meta else None,
             )
             # S2: persist immediately so a kill before the post-phase save still records the
             # server id — on --resume the reuse branch fires instead of creating a duplicate.
@@ -340,7 +346,6 @@ async def run_server(
                         )
 
         # Upload and apply server banner if available from Discord metadata.
-        discord_meta = load_bound_discord_metadata(config, exports)
         if discord_meta and discord_meta.banner_hash:
             guild_id = discord_meta.guild_id
             banner_url = (
@@ -393,31 +398,44 @@ async def run_server(
                     }
                 )
 
-        # Apply server description + NSFW flag from Discord metadata (S2).
+        # Stoat's edit route ignores NSFW. New servers get it in the create body;
+        # an existing target cannot be changed, so make that lost fidelity visible.
         if discord_meta is not None:
-            server_kwargs: dict[str, Any] = {"nsfw": discord_meta.guild_nsfw}
+            server_kwargs: dict[str, Any] = {}
             if discord_meta.guild_description:
-                desc = discord_meta.guild_description
-                # S1: preserve the advisory-lock marker the engine wrote (else this PATCH wipes it).
+                description = discord_meta.guild_description
+                # Preserve the advisory-lock marker the engine wrote (else this PATCH wipes it).
                 if state.migration_lock_marker:
-                    desc = f"{desc} {state.migration_lock_marker}"
-                server_kwargs["description"] = desc
-            try:
-                await api_edit_server(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    state.stoat_server_id,
-                    **server_kwargs,
-                )
-            except Exception as exc:  # noqa: BLE001
+                    description = f"{description} {state.migration_lock_marker}"
+                server_kwargs["description"] = description
+            if effective_server_id and discord_meta.guild_nsfw:
                 state.warnings.append(
                     {
                         "phase": "server",
-                        "type": "server_meta_failed",
-                        "message": f"Failed to set server description/NSFW: {exc}",
+                        "type": "server_nsfw_not_migrated",
+                        "message": (
+                            "NSFW cannot be applied to an existing Stoat server; "
+                            "create a new destination server to preserve it."
+                        ),
                     }
                 )
+            if server_kwargs:
+                try:
+                    await api_edit_server(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        state.stoat_server_id,
+                        **server_kwargs,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    state.warnings.append(
+                        {
+                            "phase": "server",
+                            "type": "server_meta_failed",
+                            "message": f"Failed to set server description: {exc}",
+                        }
+                    )
         else:
             on_event(
                 MigrationEvent(
@@ -540,14 +558,14 @@ async def apply_role_attributes(
     if role.color:
         color_str = role.color.lstrip("#")
         try:
-            colour_int = int(color_str, 16)
+            int(color_str, 16)
             await api_edit_role(
                 session,
                 config.stoat_url,
                 config.token,
                 state.stoat_server_id,
                 stoat_role_id,
-                colour=colour_int,
+                colour=f"#{color_str}",
             )
         except (ValueError, MigrationError) as exc:
             state.warnings.append(

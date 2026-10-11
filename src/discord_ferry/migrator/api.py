@@ -487,6 +487,8 @@ async def api_create_server(
     stoat_url: str,
     token: str,
     name: str,
+    *,
+    nsfw: bool | None = None,
 ) -> str:
     """Create a new server on the Stoat instance and return its id.
 
@@ -518,7 +520,10 @@ async def api_create_server(
     version_hint = "The Stoat instance may be running an incompatible API version."
     # ``object`` local: _api_request is declared -> dict[str, Any] but returns whatever
     # JSON arrived, so isinstance narrowing is required rather than optional.
-    raw: object = await _api_request(session, "POST", url, token, {"name": name})
+    data: dict[str, Any] = {"name": name}
+    if nsfw is not None:
+        data["nsfw"] = nsfw
+    raw: object = await _api_request(session, "POST", url, token, data)
     if not isinstance(raw, dict):
         # Never sorted(raw) here: on a list that sorts the elements into the message.
         raise MigrationError(
@@ -754,7 +759,7 @@ async def api_edit_role(
         token: Stoat session token.
         server_id: Target server ID.
         role_id: Target role ID.
-        **kwargs: Fields to update (e.g. ``colour=16711680``, ``hoist=True``).
+        **kwargs: Fields to update (e.g. ``colour="#FF0000"``, ``hoist=True``).
 
     Returns:
         Updated role object dict.

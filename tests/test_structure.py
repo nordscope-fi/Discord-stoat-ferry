@@ -161,8 +161,8 @@ async def test_run_server_creates_server(tmp_path: Path) -> None:
     assert any("srv1" in msg for msg in messages)
 
 
-async def test_run_server_applies_description_and_nsfw(tmp_path: Path) -> None:
-    """SERVER applies guild description + NSFW from Discord metadata."""
+async def test_run_server_creates_with_description_and_nsfw(tmp_path: Path) -> None:
+    """SERVER sends metadata Stoat accepts in the initial create request."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState()
@@ -179,12 +179,16 @@ async def test_run_server_applies_description_and_nsfw(tmp_path: Path) -> None:
     )
     save_discord_metadata(meta, tmp_path)
 
+    create_bodies: list[dict[str, object]] = []
     patch_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
         m.post(
             f"{STOAT_URL}/servers/create",
             payload={"server": {"_id": "srv1", "name": "Test"}, "channels": []},
+            callback=lambda url, **kwargs: create_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
         )
         m.patch(
             f"{STOAT_URL}/servers/srv1",
@@ -197,8 +201,9 @@ async def test_run_server_applies_description_and_nsfw(tmp_path: Path) -> None:
 
         await run_server(config, state, exports, events.append)
 
+    assert create_bodies == [{"name": "Test", "nsfw": True}]
     assert any(b.get("description") == "A cosy server" for b in patch_bodies)
-    assert any(b.get("nsfw") is True for b in patch_bodies)
+    assert all("nsfw" not in body for body in patch_bodies)
 
 
 async def test_run_server_omits_empty_description(tmp_path: Path) -> None:
@@ -275,6 +280,60 @@ async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
     assert state.stoat_server_id == "existing-srv"
     messages = _collect_events(events)
     assert any("existing-srv" in msg for msg in messages)
+
+
+async def test_run_server_warns_nsfw_cannot_apply_to_existing_server(tmp_path: Path) -> None:
+    """SERVER warns when Stoat cannot apply NSFW to a reused server (#1168)."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, server_id="existing-srv")
+    state = MigrationState()
+    exports = [_make_export()]
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        guild_nsfw=True,
+    )
+    save_discord_metadata(meta, tmp_path)
+    patch_bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.get(f"{STOAT_URL}/servers/existing-srv", payload={"_id": "existing-srv"})
+        m.patch(
+            f"{STOAT_URL}/servers/existing-srv",
+            payload={},
+            repeat=True,
+            callback=lambda url, **kwargs: patch_bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+
+        await run_server(config, state, exports, events.append)
+
+    assert any(w.get("type") == "server_nsfw_not_migrated" for w in state.warnings)
+    assert all("nsfw" not in body for body in patch_bodies)
+
+
+async def test_run_server_truncates_long_guild_name(tmp_path: Path) -> None:
+    """SERVER keeps an overlong guild name within Stoat's 32-character limit (#1182)."""
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    long_name = "s" * 33
+    bodies: list[dict[str, object]] = []
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/create",
+            payload={"server": {"_id": "srv1", "name": long_name[:32]}, "channels": []},
+            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        )
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
+
+        await run_server(config, state, [_make_export(guild_name=long_name)], lambda event: None)
+
+    assert bodies[0]["name"] == long_name[:32]
 
 
 async def test_run_server_uploads_icon(tmp_path: Path) -> None:
@@ -687,7 +746,7 @@ async def test_run_roles_deduplicates(tmp_path: Path) -> None:
 
 
 async def test_run_roles_colour_conversion(tmp_path: Path) -> None:
-    """ROLES phase sends the correct integer value for role colour (British spelling)."""
+    """ROLES phase sends a CSS string for role colour (British spelling)."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -709,7 +768,7 @@ async def test_run_roles_colour_conversion(tmp_path: Path) -> None:
 
         await run_roles(config, state, exports, events.append)
 
-    assert patch_body.get("colour") == 0xFF5733  # 16734003
+    assert patch_body.get("colour") == "#FF5733"
 
 
 async def test_run_roles_skips_everyone(tmp_path: Path) -> None:
@@ -1074,7 +1133,7 @@ async def test_run_roles_colour_without_hash(tmp_path: Path) -> None:
 
         await run_roles(config, state, exports, events.append)
 
-    assert patch_body.get("colour") == 0xFF5733
+    assert patch_body.get("colour") == "#FF5733"
 
 
 # ---------------------------------------------------------------------------
@@ -1179,7 +1238,7 @@ async def test_overlap_role_uses_live_name_color(tmp_path: Path) -> None:
         await run_roles(config, state, exports, events.append)
 
     assert created_names == ["NewName"]
-    assert any(body.get("colour") == 0x00FF00 for body in patch_bodies)
+    assert any(body.get("colour") == "#00ff00" for body in patch_bodies)
 
 
 async def test_managed_role_not_created(tmp_path: Path) -> None:
@@ -4051,7 +4110,7 @@ async def test_resume_retries_colour_for_unfinalized_role(tmp_path: Path) -> Non
         )
         await run_roles(config, state, exports, lambda e: None)
     assert creates == []
-    assert patch_body.get("colour") == 0x00FF00
+    assert patch_body.get("colour") == "#00FF00"
     assert "r1" in state.roles_finalized
 
 
@@ -4091,7 +4150,7 @@ async def test_colour_applied_without_discord_metadata(tmp_path: Path) -> None:
             callback=lambda url, **kw: patch_body.update(kw.get("json", {})),  # type: ignore[misc]
         )
         await run_roles(config, state, exports, lambda e: None)
-    assert patch_body.get("colour") == 0x0000FF
+    assert patch_body.get("colour") == "#0000FF"
     assert "r1" in state.roles_finalized
 
 

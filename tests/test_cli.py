@@ -1467,7 +1467,7 @@ def test_build_separates_colour_and_rank(runner: CliRunner, tmp_path: Path) -> N
         )
     assert edit.await_count == 1
     kw = edit.await_args.kwargs
-    assert kw.get("colour") == 0x00FF00
+    assert kw.get("colour") == "#00FF00"
     assert "rank" not in kw
     ranks_mock.assert_awaited_once()
     assert ranks_mock.await_args.args[4] == ["r-a"]

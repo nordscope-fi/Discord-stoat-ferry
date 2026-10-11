@@ -76,6 +76,7 @@ from discord_ferry.migrator.messages import (
 )
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.migrator.reactions import run_reactions
+from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
     _generate_category_id,
@@ -3987,7 +3988,13 @@ async def _build_blueprint_channel(
     """
     try:
         result = await api_create_channel(
-            session, stoat_url, token, server_id, name=ch.name, channel_type=ch.type, nsfw=ch.nsfw
+            session,
+            stoat_url,
+            token,
+            server_id,
+            name=truncate_name(ch.name),
+            channel_type=ch.type,
+            nsfw=ch.nsfw,
         )
     except MigrationError:
         if ch.type == "Voice":
@@ -4003,7 +4010,7 @@ async def _build_blueprint_channel(
                 stoat_url,
                 token,
                 server_id,
-                name=ch.name,
+                name=truncate_name(ch.name),
                 channel_type="Text",
                 nsfw=ch.nsfw,
             )
@@ -4035,7 +4042,7 @@ async def run_build(
     own_session = session is None
     sess = session or new_session()
     try:
-        server_id = await api_create_server(sess, stoat_url, token, blueprint.name)
+        server_id = await api_create_server(sess, stoat_url, token, truncate_name(blueprint.name))
         on_event(
             MigrationEvent(
                 phase="build",
@@ -4046,11 +4053,20 @@ async def run_build(
 
         created_roles: list[tuple[int, str]] = []
         for role in blueprint.roles:
-            role_result = await api_create_role(sess, stoat_url, token, server_id, role.name)
+            role_result = await api_create_role(
+                sess, stoat_url, token, server_id, truncate_name(role.name)
+            )
             role_id = role_result["id"]
             created_roles.append((role.rank, role_id))
             if role.colour:
-                await api_edit_role(sess, stoat_url, token, server_id, role_id, colour=role.colour)
+                await api_edit_role(
+                    sess,
+                    stoat_url,
+                    token,
+                    server_id,
+                    role_id,
+                    colour=f"#{role.colour:06X}",
+                )
             if role.permissions:
                 await api_set_role_permissions(
                     sess, stoat_url, token, server_id, role_id, allow=role.permissions, deny=0
