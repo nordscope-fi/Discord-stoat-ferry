@@ -249,7 +249,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             arch: arm64
           # Last x86_64 image GitHub offers; support ends August 2027, after
           # which Intel Macs need a universal2 cross-build or get dropped.

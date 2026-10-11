@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.9] - 2026-10-11
+
+### Fixed
+
+- Build the Apple Silicon Mac app on `macos-15` before GitHub retires `macos-14` (#1191).
+
 ## [2.43.7] - 2026-10-11
 
 ### Fixed
