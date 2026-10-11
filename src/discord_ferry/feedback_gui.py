@@ -60,7 +60,7 @@ async def _pick_save_path() -> Path | None:
     dialog_type = getattr(webview.FileDialog, "SAVE", None)
     if dialog_type is None:
         dialog_type = webview.SAVE_DIALOG
-    selection = window.create_file_dialog(
+    selection = await window.create_file_dialog(
         dialog_type,
         save_filename="discord-ferry-feedback.md",
         file_types=("Markdown files (*.md)", "All files (*.*)"),
