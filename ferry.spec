@@ -29,11 +29,12 @@ aiohttp_datas, aiohttp_bins, aiohttp_imports = collect_all("aiohttp")
 # if the analysis sees certifi imported; naming it here removes that condition.
 certifi_datas = collect_data_files("certifi")
 
-# pywebview (optional — native desktop window mode)
-try:
-    webview_datas, webview_bins, webview_imports = collect_all("webview")
-except Exception:
-    webview_datas, webview_bins, webview_imports = [], [], []
+# ADR-043: published desktop builds require the native window library. Do not
+# continue with an empty fallback: that would turn a missing pywebview package
+# into a released application without its desktop window.
+webview_datas, webview_bins, webview_imports = collect_all("webview")
+if "webview" not in webview_imports:
+    raise SystemExit("PyInstaller did not collect pywebview for the desktop build")
 
 # Submodules that get missed by automatic analysis
 uvicorn_imports = collect_submodules("uvicorn")
@@ -100,6 +101,12 @@ a = Analysis(
     excludes=["tkinter", "matplotlib", "PIL", "numpy", "pandas"],
     noarchive=False,
 )
+
+# ADR-043: collect_all() describes an intended input. Analysis is the build
+# graph that packaging consumes, so verify pywebview reached that graph on
+# every desktop platform before constructing the executable.
+if not any(name == "webview" for name, _, _ in a.pure):
+    raise SystemExit("PyInstaller analysis is missing pywebview")
 
 pyz = PYZ(a.pure)
 
