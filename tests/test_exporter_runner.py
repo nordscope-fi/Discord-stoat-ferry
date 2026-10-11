@@ -356,6 +356,49 @@ class TestStderrTaskDrainedOnCancel:
             assert process.terminate.called
 
 
+class TestCancelWhenProcessAlreadyExited:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("platform", ["linux", "win32"])
+    async def test_cancel_stays_cancelled_when_second_terminate_finds_no_process(
+        self, tmp_path: Path, platform: str
+    ) -> None:
+        """A process can exit between cancellation's first and second cleanup calls."""
+        import signal as _signal
+
+        process = _make_process([b"general: 25%\n"])
+        if platform == "win32":
+            process.send_signal.side_effect = [None, ProcessLookupError()]
+            process.terminate.side_effect = ProcessLookupError()
+        else:
+            process.terminate.side_effect = [None, ProcessLookupError()]
+
+        config = _make_config(tmp_path)
+        config.cancel_event = asyncio.Event()
+        events_seen = 0
+
+        def cancel_after_start(_event: MigrationEvent) -> None:
+            nonlocal events_seen
+            events_seen += 1
+            if events_seen == 2:
+                config.cancel_event.set()
+
+        with (
+            patch("discord_ferry.exporter.runner.sys.platform", platform),
+            patch.object(
+                _signal,
+                "CTRL_BREAK_EVENT",
+                getattr(_signal, "CTRL_BREAK_EVENT", 1),
+                create=True,
+            ),
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(asyncio.CancelledError, match="Export cancelled by user"),
+        ):
+            await run_dce_export(config, tmp_path / "dce", cancel_after_start)
+
+
 class TestWindowsCreationFlags:
     @pytest.mark.asyncio
     async def test_creation_flags_include_no_window_and_new_process_group_on_windows(

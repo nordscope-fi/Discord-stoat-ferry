@@ -200,6 +200,33 @@ async def test_export_finally_clears_discord_token(
     assert tab_store["token"] == STOAT_TOKEN
 
 
+async def test_export_page_shows_cancellation_instead_of_a_failure(
+    user: User,
+    tmp_path: Path,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """A cancellation from DCE is shown as cancellation, not an export error."""
+    export_dir = tmp_path / "dce_cache"
+    export_dir.mkdir()
+    _seed_orchestrated_session(user_store, export_dir)
+    tab_store["discord_token"] = DISCORD_TOKEN
+    tab_store["token"] = STOAT_TOKEN
+
+    with (
+        patch("discord_ferry.exporter.validate_discord_token", new=AsyncMock()),
+        patch("discord_ferry.exporter.get_dce_path", return_value=tmp_path / "dce"),
+        patch("discord_ferry.exporter.detect_dotnet", return_value=True),
+        patch(
+            "discord_ferry.exporter.run_dce_export",
+            new=AsyncMock(side_effect=asyncio.CancelledError("Export cancelled by user")),
+        ),
+    ):
+        await user.open("/export")
+        await user.should_see("Export cancelled.")
+        await user.should_not_see("Export failed:")
+
+
 async def test_export_config_carries_coerced_advanced_settings(
     user: User,
     tmp_path: Path,

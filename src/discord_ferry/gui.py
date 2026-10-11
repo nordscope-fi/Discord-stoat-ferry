@@ -1016,6 +1016,8 @@ async def export_page() -> None:
                 channel_label.set_text(event.message)
             elif event.status == "error":
                 channel_label.set_text(f"Error: {event.message}")
+            elif event.status == "cancelled":
+                channel_label.set_text(event.message)
             elif event.status == "heartbeat":
                 # Heartbeat events surface in the log only; do not touch
                 # progress_bar or channel_label (which represent real progress
@@ -1113,6 +1115,15 @@ async def export_page() -> None:
             except DiscordAuthError as exc:
                 on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
                 ui.notify(f"Discord auth failed: {exc}", type="negative")
+            except asyncio.CancelledError:
+                on_export_event(
+                    _MigrationEvent(
+                        phase="export",
+                        status="cancelled",
+                        message="Export cancelled.",
+                    )
+                )
+                ui.notify("Export cancelled.", type="warning")
             except Exception as exc:
                 on_export_event(_MigrationEvent(phase="export", status="error", message=str(exc)))
                 ui.notify(f"Export failed: {exc}", type="negative")
