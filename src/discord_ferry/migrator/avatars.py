@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import time
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -27,6 +29,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _AVATAR_MAX_BYTES = TAG_SIZE_LIMITS["avatars"]  # Autumn "avatars" tag limit (stoatchat Revolt.toml)
+
+
+def _avatar_extension(content_type: str, url: str) -> str:
+    """Choose an avatar filename extension from its image type or URL path."""
+    media_type = content_type.partition(";")[0].strip().lower()
+    content_type_extension = mimetypes.guess_extension(media_type)
+    if content_type_extension:
+        return content_type_extension
+
+    url_path = PurePosixPath(urlsplit(url).path)
+    return url_path.suffix or ".webp"
 
 
 def _collect_unique_authors(exports: list[DCEExport]) -> dict[str, DCEAuthor]:
@@ -97,9 +110,9 @@ async def _download_remote_avatar(
                 )
                 return None, f"non-image Content-Type '{content_type}'"
 
-            # Derive extension from URL path, falling back to .webp.
-            url_path = PurePosixPath(url.split("?")[0])
-            ext = url_path.suffix if url_path.suffix else ".webp"
+            # Use the response image type first. If it is not recognised, use the
+            # parsed URL path, which excludes untrusted query strings and fragments.
+            ext = _avatar_extension(content_type, url)
 
             avatar_dir = output_dir / "avatars"
             ensure_output_subdir(avatar_dir, output_dir)
