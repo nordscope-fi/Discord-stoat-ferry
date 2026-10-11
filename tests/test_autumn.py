@@ -75,6 +75,38 @@ async def test_upload_to_autumn_preserves_unicode_filename(tmp_path: Path) -> No
     assert b"gu%C3%A9st%20%E2%98%83%20name.png" not in received_bodies[0]
 
 
+async def test_upload_to_autumn_uses_supplied_unicode_filename(tmp_path: Path) -> None:
+    """Attachment metadata can differ from DCE's hash-suffixed local media path."""
+    file = tmp_path / "report-a1b2c3d4.pdf"
+    file.write_bytes(b"x" * 100)
+    received_bodies: list[bytes] = []
+
+    async def receive_upload(request: web.Request) -> web.Response:
+        received_bodies.append(await request.read())
+        return web.json_response({"id": "file123"})
+
+    app = web.Application()
+    app.router.add_post("/attachments", receive_upload)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            result = await upload_to_autumn(
+                session,
+                str(server.make_url("")),
+                "attachments",
+                file,
+                TOKEN,
+                filename="résumé ☃.pdf",
+            )
+    finally:
+        await server.close()
+
+    assert result == "file123"
+    assert b'filename="r\xc3\xa9sum\xc3\xa9 \xe2\x98\x83.pdf"' in received_bodies[0]
+    assert b"report-a1b2c3d4.pdf" not in received_bodies[0]
+
+
 async def test_upload_to_autumn_file_not_found(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Passing a non-existent file raises AutumnUploadError immediately."""
     missing = tmp_path / "ghost.png"
