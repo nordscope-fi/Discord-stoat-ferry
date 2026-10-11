@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from discord_ferry.config import FerryConfig
+from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.pins import run_pins
 from discord_ferry.state import MigrationState
 from tests.stoat_ids import SERVER_ID, stoat_id
@@ -105,6 +106,52 @@ async def test_run_pins_error_handling(tmp_path: Path) -> None:
     assert len(state.errors) == 1
     assert state.pins_applied == 1
     assert state.pending_pins == [(CH1, MSG1)]
+
+
+async def test_run_pins_already_pinned_counts_as_success(tmp_path: Path) -> None:
+    """A Stoat AlreadyPinned reply confirms the requested pin already exists."""
+    config = _make_config(tmp_path)
+    state = _make_state(pending=[(CH1, MSG1)])
+
+    with (
+        patch(
+            "discord_ferry.migrator.pins.api_pin_message",
+            new=AsyncMock(
+                side_effect=MigrationError(
+                    'API error 400: {"type":"AlreadyPinned","location":"pin.rs:38:20"}'
+                )
+            ),
+        ),
+        patch("discord_ferry.migrator.pins.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_pins(config, state, [], [].append)
+
+    assert state.pins_applied == 1
+    assert state.pending_pins == []
+    assert state.errors == []
+
+
+async def test_run_pins_other_api_error_stays_pending(tmp_path: Path) -> None:
+    """Only the exact AlreadyPinned API reply is treated as a completed pin."""
+    config = _make_config(tmp_path)
+    state = _make_state(pending=[(CH1, MSG1)])
+
+    with (
+        patch(
+            "discord_ferry.migrator.pins.api_pin_message",
+            new=AsyncMock(
+                side_effect=MigrationError(
+                    'API error 400: {"type":"NotPinned","location":"pin.rs:38:20"}'
+                )
+            ),
+        ),
+        patch("discord_ferry.migrator.pins.asyncio.sleep", new=AsyncMock()),
+    ):
+        await run_pins(config, state, [], [].append)
+
+    assert state.pins_applied == 0
+    assert state.pending_pins == [(CH1, MSG1)]
+    assert state.errors[0]["type"] == "pin_failed"
 
 
 async def test_run_pins_counter_increment(tmp_path: Path) -> None:
