@@ -42,6 +42,13 @@ Pick your operating system below to get started.
     | **Chip:** Apple M1 / M2 / M3 / M4 | `Ferry-macos-arm64.zip` |
     | **Processor:** Intel | `Ferry-macos-x86_64.zip` |
 
+    !!! warning "Needs macOS 15 Sequoia or later"
+        Both Mac downloads include libraries built for macOS 15, so they may not start on an
+        older version. **About This Mac** shows your version under the Mac's name. On macOS 14
+        or earlier, install Ferry as a Python package instead: install
+        [Homebrew](https://brew.sh), run `brew install pipx`, then follow steps 2 to 4 of the
+        **Linux** tab.
+
     Then:
 
     1. Go to the [Discord Ferry releases page](https://github.com/nordscope-fi/Discord-stoat-ferry/releases) on GitHub.

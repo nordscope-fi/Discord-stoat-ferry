@@ -21,6 +21,8 @@
 | **macOS**, Intel | [Ferry.zip](https://github.com/nordscope-fi/Discord-stoat-ferry/releases/latest/download/Ferry-macos-x86_64.zip) | ~48 MB |
 | **Linux / pip** | `pipx install discord-ferry` | ~2 MB |
 
+> **macOS:** the Mac downloads need macOS 15 Sequoia or later. On an older Mac, use `pipx install discord-ferry`.
+>
 > **macOS:** the first launch is blocked by Gatekeeper because Ferry is not notarized. Click **Done**, *not* "Move to Bin", then approve it once under **System Settings → Privacy & Security → Open Anyway**. Full walkthrough in the [installation guide](https://nordscope-fi.github.io/Discord-stoat-ferry/getting-started/install/).
 
 ---
