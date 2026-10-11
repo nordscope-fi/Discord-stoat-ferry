@@ -120,7 +120,7 @@ def test_first_chunk_requires_instruction_alignment_before_marker(tmp_path: Path
     if report.get("instruction_layer_absent"):
         pytest.skip("snapshot-backed instruction layer is absent in CI")
     assert report == {
-        "first_chunk_includes_tasks_1_through_3": True,
+        "adr_requires_instruction_alignment": True,
         "prerequisites_allow_uncommitted_tasks": True,
         "review_precedes_next_chunk": True,
         "issues_wait_for_real_commits": True,

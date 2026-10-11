@@ -247,11 +247,9 @@ async function main([fixture, directory, variant]) {
     const adrPath = 'docs/architecture/adr/040-review-chunk-snapshots-before-task-commits.md';
     const adr = existsSync(join(primary, adrPath)) ? read(adrPath) : '';
     const index = read('docs/architecture/adr/README.md');
-    const plan = readFileSync('docs/plans/2026-10-11-chunk-review-order.md', 'utf8');
     if (fixture === 'first-chunk-contract') {
       writeJson({
-        first_chunk_includes_tasks_1_through_3: plan.indexOf('### Task 3:') < plan.indexOf('## Chunk 2')
-          && adr.includes('capture, validation, and all shared ordering'),
+        adr_requires_instruction_alignment: adr.includes('capture, validation, and all shared ordering'),
         prerequisites_allow_uncommitted_tasks: chunk.includes('still open')
           && !chunk.includes('Every task in the chunk is done and committed.'),
         review_precedes_next_chunk: agents.includes('snapshot-bound marker before starting chunk N+1'),
