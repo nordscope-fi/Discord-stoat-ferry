@@ -132,12 +132,15 @@ def _discover_message_emoji(
             emoji.image_url,
         )
 
-    if msg.content:
-        for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(msg.content):
+    forwarded = msg.forwarded_message
+    contents = (msg.content, forwarded.content) if forwarded is not None else (msg.content,)
+    for content in contents:
+        for emoji_id, emoji_name, is_animated in _extract_emoji_from_content(content):
             _record_emoji_use(discovered, emoji_id, emoji_name, is_animated)
 
     embed_inline: list[DCEEmoji] = []
-    for embed in msg.embeds:
+    embeds = [*msg.embeds, *(forwarded.embeds if forwarded is not None else [])]
+    for embed in embeds:
         embed_fields: list[dict[str, object]] = (
             embed.get("fields") if isinstance(embed.get("fields"), list) else []  # type: ignore[assignment]
         )
