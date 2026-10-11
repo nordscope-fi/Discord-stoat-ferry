@@ -293,7 +293,11 @@ def tools_page() -> None:
 
 
 def _tab_token() -> str | None:
-    """The Stoat token from the memory-only tab store, or None when absent."""
+    """The Stoat token from the memory-only tab store, when the tab is connected."""
+    if not ui.context.slot_stack:
+        return None
+    if not ui.context.client.has_socket_connection:
+        return None
     token = app.storage.tab.get("token")
     return token if isinstance(token, str) and token else None
 
@@ -302,9 +306,9 @@ def _tab_token() -> str | None:
 class _TokenSource:
     """The Stoat token for a tool run, resolved at run time.
 
-    When the session store held a token, ``session`` carries it and no field is
-    rendered. When it did not, ``field`` is the password input the user fills in,
-    read inside the run handler (the user types it after the page is built).
+    When the session store is available while a page is built, ``session`` carries
+    its token and no field is rendered. Otherwise ``field`` is the password input
+    the user fills in. A run handler also checks the now-connected tab store.
     """
 
     session: str | None
@@ -316,15 +320,16 @@ class _TokenSource:
         value = self.field.value if self.field is not None else None
         if isinstance(value, str) and value.strip():
             return value.strip()
-        return None
+        return _tab_token()
 
 
 def _token_source() -> _TokenSource:
     """Return the session token, or render a password field for one when absent.
 
-    Call inside the page's layout context: when the session store is empty it
-    renders a ``ui.input``, replacing the old "Session expired" dead end. The
-    entered token stays in this closure for the run and is never persisted to
+    Call inside the page's layout context. NiceGUI renders the page before its
+    tab connection is ready, so an unavailable tab store is treated like an
+    empty one here. The run handler resolves it again after the client connects.
+    An entered token stays in this closure for the run and is never persisted to
     disk (matching the memory-only session token).
     """
     session = _tab_token()

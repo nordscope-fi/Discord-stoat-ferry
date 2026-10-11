@@ -10,7 +10,12 @@ from unittest.mock import patch
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
     from nicegui.testing import User
+
+    from discord_ferry.core.events import MigrationEvent
 
 # The User-fixture tests below need the routes re-registered inside the
 # simulation; nicegui_app.py reloads both gui and gui_tools for that.
@@ -138,6 +143,23 @@ def test_token_source_resolve_none_for_empty_or_whitespace() -> None:
     for bad in ("", "   ", None):
         src = _TokenSource(session=None, field=SimpleNamespace(value=bad))
         assert src.resolve() is None
+
+
+def test_tab_token_returns_none_with_no_nicegui_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A direct resolver call has no client slot from which tab storage can resolve."""
+    from nicegui import core
+    from nicegui.slot import Slot, get_task_id
+
+    from discord_ferry.gui_tools import _tab_token
+
+    task_id = get_task_id()
+    previous_stack = Slot.stacks.pop(task_id, None)
+    monkeypatch.setattr(core, "script_mode", True)
+    try:
+        assert _tab_token() is None
+    finally:
+        if previous_stack is not None:
+            Slot.stacks[task_id] = previous_stack
 
 
 def test_token_source_resolve_strips_surrounding_whitespace() -> None:
@@ -1186,6 +1208,87 @@ async def test_tls_check_page_renders_both_groups(
         await user.should_see("certifi+system")
         await user.should_see("Proxy")
         await user.should_see("proxy-source")
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["/tools/check", "/tools/repair", "/tools/retry", "/tools/probe", "/tools/build"],
+)
+async def test_token_pages_open_with_real_tab_storage(user: User, route: str) -> None:
+    """The five token pages render before NiceGUI's tab store is connected (#1194)."""
+    await user.open(route)
+    await user.should_see("Stoat token")
+
+
+async def test_check_page_uses_real_tab_token_after_connect(user: User, tmp_path: Path) -> None:
+    """An empty field falls back to the connected tab's session token (#1194)."""
+    from nicegui import app
+
+    from discord_ferry.migrator.verify import CheckReport
+
+    seen: dict[str, str] = {}
+
+    async def fake_check(
+        stoat_url: str,
+        token: str,
+        state: object,
+        on_event: Callable[[MigrationEvent], None],
+        *,
+        session: object | None = None,
+    ) -> CheckReport:
+        seen["token"] = token
+        return CheckReport()
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.run_check", new=fake_check),
+    ):
+        await user.open("/tools/check")
+        with user.client:
+            app.storage.tab["token"] = _TOKEN
+        user.find("Output directory").elements.pop().set_value(str(tmp_path))
+        user.find("Run check").click()
+        await user.should_see("Check passed.")
+
+    assert seen["token"] == _TOKEN
+
+
+async def test_check_page_prefers_entered_token_to_real_tab_token(
+    user: User,
+    tmp_path: Path,
+) -> None:
+    """A newly entered token overrides the connected tab's fallback token (#1194)."""
+    from nicegui import app
+
+    from discord_ferry.migrator.verify import CheckReport
+
+    entered = "entered-token"
+    seen: dict[str, str] = {}
+
+    async def fake_check(
+        stoat_url: str,
+        token: str,
+        state: object,
+        on_event: Callable[[MigrationEvent], None],
+        *,
+        session: object | None = None,
+    ) -> CheckReport:
+        seen["token"] = token
+        return CheckReport()
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.run_check", new=fake_check),
+    ):
+        await user.open("/tools/check")
+        with user.client:
+            app.storage.tab["token"] = _TOKEN
+        user.find("Output directory").elements.pop().set_value(str(tmp_path))
+        user.find("Stoat token").elements.pop().set_value(entered)
+        user.find("Run check").click()
+        await user.should_see("Check passed.")
+
+    assert seen["token"] == entered
 
 
 @pytest.mark.parametrize(
