@@ -8,6 +8,7 @@ import {
   classifyReviewFailure,
   FINDINGS_SCHEMA,
   isQwenSchemaFailureReason,
+  makeReviewFailureRecord,
   makeReviewRecord,
   parseJsonText,
   QWEN_SCHEMA_FAILURE_REASONS,
@@ -517,16 +518,6 @@ async function selfTest() {
   process.stderr.write(`qwen-review self-test: all checks passed (${QWEN_MODEL}, ${QWEN_URL})\n`);
 }
 
-async function liveProbe(home) {
-  const prompt = `Return exactly this review JSON: ${JSON.stringify({
-    findings: [],
-    summary: 'live Qwen reviewer ready',
-    confidence: 'high',
-  })}`;
-  const record = await runQwenReview({ prompt, home });
-  process.stdout.write(`${JSON.stringify(record)}\n`);
-}
-
 function parseArgs(argv) {
   const args = {
     selfTest: false,
@@ -548,19 +539,108 @@ function parseArgs(argv) {
   return args;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.selfTest) return selfTest();
-  if (args.liveProbe) return liveProbe(process.env.HOME);
-  const payload = readFileSync(0, 'utf8');
-  if (!payload.trim()) throw new Error('qwen-review requires a review payload on stdin');
-  const prompt = `${buildReviewPrompt({
-    mode: args.mode,
-    title: args.title,
-    focus: args.focus,
-  })}\n\n${payload}`;
-  const record = await runQwenReview({ prompt, home: process.env.HOME, slot: args.slot });
-  process.stdout.write(`${JSON.stringify(record)}\n`);
+const QWEN_OUTPUT_FAILURE = 'Qwen review output failed';
+
+function writeQwenBytes(stdout, bytes) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(QWEN_OUTPUT_FAILURE));
+    };
+    const onError = () => fail();
+    stdout.once('error', onError);
+    try {
+      stdout.write(bytes, (error) => {
+        if (error) {
+          fail();
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        stdout.off('error', onError);
+        resolve();
+      });
+    } catch {
+      stdout.off('error', onError);
+      fail();
+    }
+  });
+}
+
+async function writeQwenRecord(record, { stringify, stdout }) {
+  let bytes;
+  try {
+    bytes = `${stringify(record)}\n`;
+  } catch {
+    throw new Error(QWEN_OUTPUT_FAILURE);
+  }
+  await writeQwenBytes(stdout, bytes);
+}
+
+async function runQwenAttempt(options, dependencies) {
+  let record;
+  try {
+    record = await dependencies.review(options);
+  } catch (error) {
+    const failureClass = classifyReviewFailure(error);
+    await writeQwenRecord(makeReviewFailureRecord({
+      adapter: 'qwen',
+      slot: options.slot ?? 'qwen',
+      requestedModel: QWEN_MODEL,
+      provider: 'qwen',
+      failureClass,
+      failureStage: error?.stage,
+      durationMs: error?.durationMs,
+      httpStatus: error?.httpStatus,
+      failureReason: error?.failureReason,
+      timeoutPhase: error?.deadline,
+    }), dependencies);
+    throw error;
+  }
+  await writeQwenRecord(record, dependencies);
+}
+
+export async function runQwenCommand({
+  argv = process.argv.slice(2),
+  home = process.env.HOME,
+  payload = null,
+  review = runQwenReview,
+  runSelfTest = selfTest,
+  stringify = JSON.stringify,
+  stdout = process.stdout,
+  stderr = (line) => process.stderr.write(line),
+} = {}) {
+  try {
+    const args = parseArgs(argv);
+    if (args.selfTest) {
+      await runSelfTest();
+      return 0;
+    }
+    const dependencies = { review, stringify, stdout };
+    if (args.liveProbe) {
+      const prompt = `Return exactly this review JSON: ${JSON.stringify({
+        findings: [],
+        summary: 'live Qwen reviewer ready',
+        confidence: 'high',
+      })}`;
+      await runQwenAttempt({ prompt, home }, dependencies);
+      return 0;
+    }
+    const source = payload ?? readFileSync(0, 'utf8');
+    if (!source.trim()) throw new Error('qwen-review requires a review payload on stdin');
+    const prompt = `${buildReviewPrompt({
+      mode: args.mode,
+      title: args.title,
+      focus: args.focus,
+    })}\n\n${source}`;
+    await runQwenAttempt({ prompt, home, slot: args.slot }, dependencies);
+    return 0;
+  } catch (error) {
+    stderr(`qwen-review: ${error.message}\n`);
+    return 1;
+  }
 }
 
 let invokedAsMain = false;
@@ -571,9 +651,4 @@ if (process.argv[1]) {
     // An invalid entrypoint cannot be the current module.
   }
 }
-if (invokedAsMain) {
-  main().catch((error) => {
-    process.stderr.write(`qwen-review: ${error.message}\n`);
-    process.exitCode = 1;
-  });
-}
+if (invokedAsMain) process.exitCode = await runQwenCommand();

@@ -90,6 +90,7 @@ import {
 import {
   parseQwenResponse,
   requestQwen,
+  runQwenCommand,
   runQwenReview,
 } from '../../scripts/agent-compat/qwen-review.mjs';
 import * as qwenReview from '../../scripts/agent-compat/qwen-review.mjs';
@@ -268,6 +269,217 @@ async function vibeDirectCommand(argument, brokenStdout) {
     probe_prompt_preserved: observed?.prompt === `Return exactly this review JSON: ${JSON.stringify({
       findings: [],
       summary: 'live Vibe reviewer ready',
+      confidence: 'high',
+    })}`,
+  });
+}
+
+function qwenCommandBody(model = 'qwen3.8-max') {
+  return {
+    id: 'qwen-command-fixture',
+    model,
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: JSON.stringify({ findings: [], summary: 'clean', confidence: 'high' }),
+      },
+    }],
+  };
+}
+
+function qwenIdleResponse() {
+  const event = `data: ${JSON.stringify({
+    id: 'qwen-command-fixture',
+    model: 'qwen3.8-max',
+    choices: [{ delta: { reasoning_content: 'FERRY_SECRET_CANARY' }, finish_reason: null }],
+  })}\n\n`;
+  return {
+    ok: true,
+    status: 200,
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(event));
+      },
+    }),
+  };
+}
+
+function qwenCommandSchemaReason(argument) {
+  const marker = '-schema-';
+  const index = argument.indexOf(marker);
+  if (index === -1) return null;
+  return argument.slice(index + marker.length);
+}
+
+async function qwenDirectCommand(argument, brokenStdout) {
+  const caller = argument.startsWith('probe-') ? 'probe' : 'regular';
+  const delayed = argument.includes('delayed-');
+  const fault = [
+    'serialize-fails',
+    'write-throws',
+    'write-callback-fails',
+    'write-emits-error',
+    'partial-write',
+  ].find(name => argument.endsWith(name)) ?? null;
+  const schemaReason = qwenCommandSchemaReason(argument);
+  const timeoutPhase = ['connection', 'idle', 'total']
+    .find(phase => argument.endsWith(`timeout-${phase}`)) ?? null;
+  const failure = argument.endsWith('-credential')
+    ? 'credential'
+    : argument.endsWith('-wrong-model')
+      ? 'wrong-model'
+      : argument.endsWith('-http')
+        ? 'http'
+        : ['regular-unknown', 'probe-unknown'].includes(argument)
+          || argument.startsWith('failure-')
+          || argument.endsWith('-delayed-failure')
+          ? 'unknown'
+          : null;
+  const writer = vibeCommandWriter(fault);
+  let calls = 0;
+  let selfTests = 0;
+  let stderr = '';
+  let observed = null;
+  let returnedRecord = null;
+  const review = async (options) => {
+    calls += 1;
+    observed = options;
+    const credential = async () => {
+      if (failure === 'credential') {
+        const error = new Error('FERRY_SECRET_CANARY');
+        error.code = 'CREDENTIAL';
+        error.stderr = 'FERRY_SECRET_CANARY';
+        throw error;
+      }
+      return 'FERRY_SECRET_CANARY';
+    };
+    let request;
+    if (timeoutPhase === 'connection') {
+      request = requestOptions => requestQwen({
+        ...requestOptions,
+        fetcher: (_url, fetchOptions) => new Promise((_resolve, reject) => {
+          fetchOptions.signal.addEventListener(
+            'abort',
+            () => reject(fetchOptions.signal.reason),
+            { once: true },
+          );
+        }),
+      });
+    } else if (timeoutPhase === 'idle') {
+      request = requestOptions => requestQwen({
+        ...requestOptions,
+        fetcher: async () => qwenIdleResponse(),
+      });
+    } else if (timeoutPhase === 'total') {
+      request = requestOptions => requestQwen({
+        ...requestOptions,
+        fetcher: async () => qwenIdleResponse(),
+      });
+    } else {
+      request = async () => {
+        if (delayed) await new Promise(resolve => setTimeout(resolve, 50));
+        if (schemaReason !== null) {
+          const error = new Error('FERRY_SECRET_CANARY');
+          error.code = 'INVALID_SCHEMA';
+          if (schemaReason === 'unknown') error.failureReason = 'FERRY_SECRET_CANARY';
+          else if (schemaReason !== 'missing') error.failureReason = schemaReason;
+          throw error;
+        }
+        if (failure === 'wrong-model') return qwenCommandBody('FERRY_SECRET_CANARY');
+        if (failure === 'http') {
+          const error = new Error('FERRY_SECRET_CANARY');
+          error.httpStatus = 503;
+          error.responseBody = 'FERRY_SECRET_CANARY';
+          throw error;
+        }
+        if (failure === 'unknown') {
+          const error = new Error('FERRY_SECRET_CANARY');
+          error.responseBody = 'FERRY_SECRET_CANARY';
+          error.stdout = 'FERRY_SECRET_CANARY';
+          error.stderr = 'FERRY_SECRET_CANARY';
+          throw error;
+        }
+        if (argument.endsWith('-phase-missing')) {
+          const error = new Error('FERRY_SECRET_CANARY');
+          error.code = 'ETIMEDOUT';
+          throw error;
+        }
+        if (argument.endsWith('-phase-unknown')) {
+          const error = new Error('FERRY_SECRET_CANARY');
+          error.code = 'ETIMEDOUT';
+          error.deadline = 'FERRY_SECRET_CANARY';
+          throw error;
+        }
+        if (argument.endsWith('-phase-nontimeout')) {
+          const error = new Error('FERRY_SECRET_CANARY');
+          error.deadline = 'idle';
+          throw error;
+        }
+        return qwenCommandBody();
+      };
+    }
+    returnedRecord = await runQwenReview({
+      ...options,
+      credential,
+      request,
+      deadlines: {
+        ...qwenReview.QWEN_DEADLINES,
+        connectionMs: 5,
+        idleMs: timeoutPhase === 'total' ? 100 : 5,
+        totalMs: timeoutPhase === 'total' ? 5 : 100,
+      },
+    });
+    return returnedRecord;
+  };
+  let argv;
+  let payload = 'FERRY_SECRET_CANARY';
+  if (argument === 'self-test') argv = ['--self-test'];
+  else if (argument === 'unknown-argument') argv = ['--unknown'];
+  else if (argument === 'empty-input') {
+    argv = [];
+    payload = '';
+  } else if (argument === 'final-empty-slot') argv = ['--slot'];
+  else if (caller === 'probe') argv = ['--live-probe'];
+  else argv = ['--mode', 'chunk', '--title', 'Fixture', '--focus', 'Safe failure'];
+  const commandOptions = {
+    argv,
+    home: '/fixture-home',
+    payload,
+    review,
+    runSelfTest: async () => { selfTests += 1; },
+    stringify: fault === 'serialize-fails'
+      ? () => { throw new Error('FERRY_SECRET_CANARY'); }
+      : JSON.stringify,
+    ...(brokenStdout ? {} : {
+      stdout: writer.stream,
+      stderr: line => { stderr += line; },
+    }),
+  };
+  const status = await runQwenCommand(commandOptions);
+  if (brokenStdout) {
+    process.exitCode = status;
+    return;
+  }
+  const output = writer.output();
+  writeJson({
+    status,
+    calls,
+    writes: writer.writes(),
+    stdout_lines: output.split('\n').filter(Boolean),
+    stdout_ends_newline: output.endsWith('\n'),
+    success_bytes_match: returnedRecord === null
+      ? null
+      : output === `${JSON.stringify(returnedRecord)}\n`,
+    stderr,
+    self_tests: selfTests,
+    slot: observed?.slot ?? null,
+    home_is_preserved: observed?.home === '/fixture-home',
+    regular_prompt_preserved: observed?.prompt?.includes('Under review: Fixture') === true
+      && observed.prompt.includes('Review focus: Safe failure')
+      && observed.prompt.endsWith('\n\nFERRY_SECRET_CANARY'),
+    probe_prompt_preserved: observed?.prompt === `Return exactly this review JSON: ${JSON.stringify({
+      findings: [],
+      summary: 'live Qwen reviewer ready',
       confidence: 'high',
     })}`,
   });
@@ -730,6 +942,9 @@ const [mode, argument] = process.argv.slice(2);
 switch (mode) {
   case 'vibe-direct-command':
     await vibeDirectCommand(argument, process.argv.includes('--broken-stdout-child'));
+    break;
+  case 'qwen-direct-command':
+    await qwenDirectCommand(argument, process.argv.includes('--broken-stdout-child'));
     break;
   case 'hook-routes':
     hookRoutes();
