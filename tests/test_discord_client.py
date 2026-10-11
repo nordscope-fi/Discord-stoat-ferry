@@ -11,7 +11,12 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.discord import fetch_and_translate_guild_metadata
-from discord_ferry.discord.client import download_role_icon, fetch_guild_channels, fetch_guild_roles
+from discord_ferry.discord.client import (
+    _parse_channel,
+    download_role_icon,
+    fetch_guild_channels,
+    fetch_guild_roles,
+)
 from discord_ferry.errors import DiscordAuthError
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 
@@ -24,6 +29,43 @@ GUILD_ID = "111222333"
 def mock_discord() -> aioresponses:
     with aioresponses() as m:
         yield m
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ({}, None),
+        ({"position": 0}, 0),
+        ({"position": 4}, 4),
+        ({"position": None}, None),
+        ({"position": -1}, None),
+        ({"position": 1.5}, None),
+        ({"position": True}, None),
+        ({"position": False}, None),
+        ({"position": "2"}, None),
+        ({"position": []}, None),
+        ({"position": {}}, None),
+    ],
+)
+def test_channel_response_position(raw: dict[str, object], expected: int | None) -> None:
+    channel = _parse_channel({"id": "2", "name": "general", "type": 0, **raw})
+    assert channel.position == expected
+
+
+async def test_unknown_category_position_is_not_captured(mock_discord: aioresponses) -> None:
+    mock_discord.get(f"{DISCORD_API}/guilds/{GUILD_ID}", payload={})
+    mock_discord.get(f"{DISCORD_API}/guilds/{GUILD_ID}/roles", payload=[])
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{GUILD_ID}/channels",
+        payload=[
+            {"id": "2", "name": "Known", "type": 4, "position": 0},
+            {"id": "3", "name": "Unknown", "type": 4},
+        ],
+    )
+    async with aiohttp.ClientSession() as session:
+        meta = await fetch_and_translate_guild_metadata(session, TOKEN, GUILD_ID)
+    assert meta.category_positions == {"2": 0}
+    assert sum(len(calls) for calls in mock_discord.requests.values()) == 3
 
 
 async def test_fetch_guild_roles_parses_response(mock_discord: aioresponses) -> None:

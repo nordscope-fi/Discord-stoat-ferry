@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Any, cast
 import aiohttp
 
 from discord_ferry.core.http import proxy_error_is_permanent, proxy_hint, read_bounded, tls_hint
-from discord_ferry.discord.models import DiscordChannel, DiscordRole, PermissionOverwrite
+from discord_ferry.discord.models import (
+    DiscordChannel,
+    DiscordRole,
+    PermissionOverwrite,
+    normalize_channel_position,
+)
 from discord_ferry.errors import DiscordAuthError, MigrationError
 
 if TYPE_CHECKING:
@@ -249,7 +254,7 @@ def _parse_channel(data: dict[str, Any]) -> DiscordChannel:
         name=data["name"],
         type=data["type"],
         nsfw=data.get("nsfw", False),
-        position=data.get("position", 0),
+        position=normalize_channel_position(data.get("position")),
         rate_limit_per_user=data.get("rate_limit_per_user", 0),
         user_limit=data.get("user_limit", 0),
         permission_overwrites=overwrites,

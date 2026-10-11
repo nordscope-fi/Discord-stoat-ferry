@@ -86,7 +86,7 @@ async def fetch_and_translate_guild_metadata(
     category_positions: dict[str, int] = {}
     user_override_channels: list[dict[str, object]] = []
     for channel in channels:
-        if channel.type == 4:  # GUILD_CATEGORY — capture position for ordering
+        if channel.type == 4 and channel.position is not None:
             category_positions[channel.id] = channel.position
         default_override: PermissionPair | None = None
         role_overrides: list[RoleOverride] = []
