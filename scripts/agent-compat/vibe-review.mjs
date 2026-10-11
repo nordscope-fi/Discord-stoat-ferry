@@ -6,6 +6,7 @@ import { readReviewerField } from './proton-credential.mjs';
 import {
   buildReviewPrompt,
   classifyReviewFailure,
+  makeReviewFailureRecord,
   makeReviewRecord,
   parseJsonText,
   reviewReplyJson,
@@ -337,16 +338,6 @@ async function selfTest() {
   process.stderr.write(`vibe-review self-test: all checks passed (${VIBE_MODEL}, ${VIBE_URL})\n`);
 }
 
-async function liveProbe(home) {
-  const prompt = `Return exactly this review JSON: ${JSON.stringify({
-    findings: [],
-    summary: 'live Vibe reviewer ready',
-    confidence: 'high',
-  })}`;
-  const record = await runVibeReview({ prompt, home });
-  process.stdout.write(`${JSON.stringify(record)}\n`);
-}
-
 function parseArgs(argv) {
   const args = {
     selfTest: false,
@@ -368,19 +359,108 @@ function parseArgs(argv) {
   return args;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.selfTest) return selfTest();
-  if (args.liveProbe) return liveProbe(process.env.HOME);
-  const payload = readFileSync(0, 'utf8');
-  if (!payload.trim()) throw new Error('vibe-review requires a review payload on stdin');
-  const prompt = `${buildReviewPrompt({
-    mode: args.mode,
-    title: args.title,
-    focus: args.focus,
-  })}\n\n${payload}`;
-  const record = await runVibeReview({ prompt, home: process.env.HOME, slot: args.slot });
-  process.stdout.write(`${JSON.stringify(record)}\n`);
+const VIBE_OUTPUT_FAILURE = 'Vibe review output failed';
+
+function writeVibeBytes(stdout, bytes) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(VIBE_OUTPUT_FAILURE));
+    };
+    const onError = () => fail();
+    stdout.once('error', onError);
+    try {
+      stdout.write(bytes, (error) => {
+        if (error) {
+          fail();
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        stdout.off('error', onError);
+        resolve();
+      });
+    } catch {
+      stdout.off('error', onError);
+      fail();
+    }
+  });
+}
+
+async function writeVibeRecord(record, { stringify, stdout }) {
+  let bytes;
+  try {
+    bytes = `${stringify(record)}\n`;
+  } catch {
+    throw new Error(VIBE_OUTPUT_FAILURE);
+  }
+  await writeVibeBytes(stdout, bytes);
+}
+
+async function runVibeAttempt(options, dependencies) {
+  let record;
+  try {
+    record = await dependencies.review(options);
+  } catch (error) {
+    const failureClass = classifyReviewFailure(error);
+    await writeVibeRecord(makeReviewFailureRecord({
+      adapter: 'vibe',
+      slot: options.slot ?? 'mistral-vibe',
+      requestedModel: VIBE_MODEL,
+      provider: 'vibe',
+      failureClass,
+      failureStage: error?.stage,
+      durationMs: error?.durationMs,
+      httpStatus: error?.httpStatus,
+      failureReason: error?.failureReason,
+      timeoutPhase: error?.deadline,
+    }), dependencies);
+    throw error;
+  }
+  await writeVibeRecord(record, dependencies);
+}
+
+export async function runVibeCommand({
+  argv = process.argv.slice(2),
+  home = process.env.HOME,
+  payload = null,
+  review = runVibeReview,
+  runSelfTest = selfTest,
+  stringify = JSON.stringify,
+  stdout = process.stdout,
+  stderr = (line) => process.stderr.write(line),
+} = {}) {
+  try {
+    const args = parseArgs(argv);
+    if (args.selfTest) {
+      await runSelfTest();
+      return 0;
+    }
+    const dependencies = { review, stringify, stdout };
+    if (args.liveProbe) {
+      const prompt = `Return exactly this review JSON: ${JSON.stringify({
+        findings: [],
+        summary: 'live Vibe reviewer ready',
+        confidence: 'high',
+      })}`;
+      await runVibeAttempt({ prompt, home }, dependencies);
+      return 0;
+    }
+    const source = payload ?? readFileSync(0, 'utf8');
+    if (!source.trim()) throw new Error('vibe-review requires a review payload on stdin');
+    const prompt = `${buildReviewPrompt({
+      mode: args.mode,
+      title: args.title,
+      focus: args.focus,
+    })}\n\n${source}`;
+    await runVibeAttempt({ prompt, home, slot: args.slot }, dependencies);
+    return 0;
+  } catch (error) {
+    stderr(`vibe-review: ${error.message}\n`);
+    return 1;
+  }
 }
 
 let invokedAsMain = false;
@@ -391,9 +471,4 @@ if (process.argv[1]) {
     // An invalid entrypoint cannot be the current module.
   }
 }
-if (invokedAsMain) {
-  main().catch((error) => {
-    process.stderr.write(`vibe-review: ${error.message}\n`);
-    process.exitCode = 1;
-  });
-}
+if (invokedAsMain) process.exitCode = await runVibeCommand();

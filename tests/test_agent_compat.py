@@ -3480,6 +3480,229 @@ def _vibe_review(case: str) -> subprocess.CompletedProcess[str]:
     return _run("node", "tests/fixtures/agent_compat_runner.mjs", "vibe-review", case, "--json")
 
 
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize(
+    ("failure", "status", "failure_class", "stage", "http_status", "stderr"),
+    [
+        (
+            "credential",
+            "failed",
+            "credential",
+            "vibe-credential",
+            None,
+            "Vibe credential retrieval failed",
+        ),
+        ("timeout", "timed_out", "timeout", "vibe-response", None, "Vibe request timed out"),
+        (
+            "schema",
+            "failed",
+            "schema",
+            "vibe-response",
+            None,
+            "Vibe response was invalid (response-json)",
+        ),
+        (
+            "wrong-model",
+            "failed",
+            "wrong-model",
+            "vibe-response",
+            None,
+            "Vibe response did not name the expected model",
+        ),
+        ("http", "failed", "provider", "vibe-response", 503, "Vibe request failed with HTTP 503"),
+        ("unknown", "failed", "unknown", "vibe-response", None, "Vibe request failed"),
+    ],
+)
+def test_vibe_direct_failure_crosses_adapter_and_command_catch(
+    caller: str,
+    failure: str,
+    status: str,
+    failure_class: str,
+    stage: str,
+    http_status: int | None,
+    stderr: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-direct-command",
+        f"{caller}-{failure}",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    assert report["writes"] == 1
+    assert report["stdout_ends_newline"] is True
+    assert len(report["stdout_lines"]) == 1
+    record = json.loads(report["stdout_lines"][0])
+    assert record["adapter"] == "vibe"
+    assert record["slot"] == "mistral-vibe"
+    assert record["requested_model"] == "zai-glm-5-2"
+    assert record["resolved_model"] is None
+    assert record["session_id"] is None
+    assert record["status"] == status
+    assert record["findings"] == []
+    assert record["summary"] == ""
+    assert record["confidence"] is None
+    assert record["failure_class"] == failure_class
+    assert record["failure_stage"] == stage
+    assert record["http_status"] == http_status
+    assert record["failure_reason"] is None
+    assert "timeout_phase" not in record
+    assert report["stderr"] == f"vibe-review: {stderr}\n"
+    assert report["home_is_preserved"] is True
+    assert report[f"{caller}_prompt_preserved"] is True
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+def test_vibe_direct_success_keeps_record_and_prompt(caller: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-direct-command",
+        f"{caller}-valid",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == 0
+    assert report["calls"] == 1
+    assert report["writes"] == 1
+    assert report["stderr"] == ""
+    assert report["success_bytes_match"] is True
+    assert report["home_is_preserved"] is True
+    assert report[f"{caller}_prompt_preserved"] is True
+    record = json.loads(report["stdout_lines"][0])
+    assert record["status"] == "valid"
+    assert record["resolved_model"] == "zai-glm-5-2"
+    assert record["session_id"] == "vibe-command-fixture"
+    assert "failure_class" not in record
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("fixture", "status", "calls", "self_tests", "stderr"),
+    [
+        ("self-test", 0, 0, 1, ""),
+        ("unknown-argument", 1, 0, 0, "vibe-review: unknown argument: --unknown\n"),
+        ("empty-input", 1, 0, 0, "vibe-review: vibe-review requires a review payload on stdin\n"),
+    ],
+)
+def test_vibe_pre_attempt_paths_emit_no_failure_record(
+    fixture: str,
+    status: int,
+    calls: int,
+    self_tests: int,
+    stderr: str,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-direct-command",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == status
+    assert report["calls"] == calls
+    assert report["self_tests"] == self_tests
+    assert report["writes"] == 0
+    assert report["stdout_lines"] == []
+    assert report["stderr"] == stderr
+
+
+def test_vibe_final_empty_slot_remains_accepted() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-direct-command",
+        "final-empty-slot",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == 0
+    assert report["calls"] == 1
+    assert report["slot"] == ""
+    assert json.loads(report["stdout_lines"][0])["slot"] == ""
+
+
+@pytest.mark.parametrize("outcome", ["valid", "failure"])
+@pytest.mark.parametrize(
+    ("fixture", "expected_writes"),
+    [
+        ("serialize-fails", 0),
+        ("write-throws", 1),
+        ("write-callback-fails", 1),
+        ("write-emits-error", 1),
+        ("partial-write", 1),
+    ],
+)
+def test_vibe_direct_output_failure_is_not_a_provider_retry(
+    outcome: str,
+    fixture: str,
+    expected_writes: int,
+) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "vibe-direct-command",
+        f"{outcome}-{fixture}",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    assert report["writes"] == expected_writes
+    assert report["stderr"] == "vibe-review: Vibe review output failed\n"
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def _run_broken_stdout_child(command_case: str, fixture: str) -> dict[str, object]:
+    assert NODE_EXECUTABLE is not None
+    process = subprocess.Popen(
+        [
+            NODE_EXECUTABLE,
+            str(REPO / "tests/fixtures/agent_compat_runner.mjs"),
+            command_case,
+            fixture,
+            "--broken-stdout-child",
+        ],
+        cwd=REPO,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    process.stdout.close()
+    status = process.wait(timeout=10)
+    stderr = process.stderr.read()
+    process.stderr.close()
+    return {"status": status, "stderr": stderr}
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize("outcome", ["valid", "failure"])
+def test_vibe_default_stdout_broken_pipe_uses_safe_diagnostic(
+    caller: str,
+    outcome: str,
+) -> None:
+    report = _run_broken_stdout_child(
+        "vibe-direct-command",
+        f"{caller}-delayed-{outcome}",
+    )
+    assert report["status"] == 1
+    assert report["stderr"] == "vibe-review: Vibe review output failed\n"
+    assert "EPIPE" not in report["stderr"]
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
 def test_vibe_review_records_the_model_and_id_the_provider_reported() -> None:
     result = _vibe_review("valid")
     assert result.returncode == 0, result.stderr

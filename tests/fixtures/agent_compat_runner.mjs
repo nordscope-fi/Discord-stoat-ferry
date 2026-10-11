@@ -2,6 +2,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
   chmodSync,
   cpSync,
@@ -82,7 +83,10 @@ import {
 } from '../../scripts/agent-compat/review-verification.mjs';
 import { shellWords } from '../../scripts/agent-compat/shell-words.mjs';
 import { readReviewerField } from '../../scripts/agent-compat/proton-credential.mjs';
-import { runVibeReview } from '../../scripts/agent-compat/vibe-review.mjs';
+import {
+  runVibeCommand,
+  runVibeReview,
+} from '../../scripts/agent-compat/vibe-review.mjs';
 import {
   parseQwenResponse,
   requestQwen,
@@ -105,6 +109,168 @@ function uniqueRoutes(groups) {
 
 function writeJson(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function vibeCommandWriter(fault) {
+  const stream = new EventEmitter();
+  let output = '';
+  let writes = 0;
+  stream.write = (bytes, callback) => {
+    writes += 1;
+    if (fault === 'write-throws') throw new Error('FERRY_SECRET_CANARY');
+    if (fault === 'partial-write') {
+      output += bytes.slice(0, 7);
+      queueMicrotask(() => callback(new Error('FERRY_SECRET_CANARY')));
+      return false;
+    }
+    if (fault === 'write-callback-fails') {
+      queueMicrotask(() => callback(new Error('FERRY_SECRET_CANARY')));
+      return false;
+    }
+    if (fault === 'write-emits-error') {
+      queueMicrotask(() => stream.emit('error', new Error('FERRY_SECRET_CANARY')));
+      return false;
+    }
+    output += bytes;
+    queueMicrotask(() => callback());
+    return true;
+  };
+  return {
+    stream,
+    output: () => output,
+    writes: () => writes,
+  };
+}
+
+function vibeCommandFailure(argument) {
+  for (const kind of ['credential', 'timeout', 'schema', 'wrong-model', 'http', 'unknown']) {
+    if (argument.endsWith(`-${kind}`)) return kind;
+  }
+  if (argument.startsWith('failure-') || argument.endsWith('-delayed-failure')) return 'unknown';
+  return null;
+}
+
+function vibeCommandResponse(content = JSON.stringify({
+  findings: [],
+  summary: 'clean',
+  confidence: 'high',
+})) {
+  return new Response(JSON.stringify({
+    id: 'vibe-command-fixture',
+    model: 'zai-glm-5-2',
+    choices: [{
+      index: 0,
+      finish_reason: 'stop',
+      message: { role: 'assistant', content },
+    }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
+async function vibeDirectCommand(argument, brokenStdout) {
+  const failure = vibeCommandFailure(argument);
+  const delayed = argument.includes('delayed-');
+  const fault = [
+    'serialize-fails',
+    'write-throws',
+    'write-callback-fails',
+    'write-emits-error',
+    'partial-write',
+  ].find(name => argument.endsWith(name)) ?? null;
+  const caller = argument.startsWith('probe-') ? 'probe' : 'regular';
+  const writer = vibeCommandWriter(fault);
+  let calls = 0;
+  let selfTests = 0;
+  let stderr = '';
+  let observed = null;
+  let returnedRecord = null;
+  const review = async (options) => {
+    calls += 1;
+    observed = options;
+    const credential = async () => {
+      if (failure === 'credential') {
+        const error = new Error('FERRY_SECRET_CANARY');
+        error.code = 'CREDENTIAL';
+        throw error;
+      }
+      return 'FERRY_SECRET_CANARY';
+    };
+    const fetcher = async () => {
+      if (delayed) await new Promise(resolve => setTimeout(resolve, 50));
+      if (failure === 'schema') return vibeCommandResponse('FERRY_SECRET_CANARY');
+      if (failure === 'wrong-model') {
+        const response = await vibeCommandResponse().json();
+        response.model = 'FERRY_SECRET_CANARY';
+        return new Response(JSON.stringify(response), { status: 200 });
+      }
+      if (failure === 'http') return new Response('FERRY_SECRET_CANARY', { status: 503 });
+      if (failure === 'unknown') throw new Error('FERRY_SECRET_CANARY');
+      return vibeCommandResponse();
+    };
+    const timeout = failure === 'timeout' ? {
+      fetcher: (_url, request) => new Promise((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason));
+      }),
+      schedule: callback => {
+        queueMicrotask(callback);
+        return 1;
+      },
+      cancel: () => {},
+    } : {};
+    returnedRecord = await runVibeReview({ ...options, credential, fetcher, ...timeout });
+    return returnedRecord;
+  };
+  let argv;
+  let payload = 'FERRY_SECRET_CANARY';
+  if (argument === 'self-test') argv = ['--self-test'];
+  else if (argument === 'unknown-argument') argv = ['--unknown'];
+  else if (argument === 'empty-input') {
+    argv = [];
+    payload = '';
+  } else if (argument === 'final-empty-slot') argv = ['--slot'];
+  else if (caller === 'probe') argv = ['--live-probe'];
+  else argv = ['--mode', 'chunk', '--title', 'Fixture', '--focus', 'Safe failure'];
+  const commandOptions = {
+    argv,
+    home: '/fixture-home',
+    payload,
+    review,
+    runSelfTest: async () => { selfTests += 1; },
+    stringify: fault === 'serialize-fails'
+      ? () => { throw new Error('FERRY_SECRET_CANARY'); }
+      : JSON.stringify,
+    ...(brokenStdout ? {} : {
+      stdout: writer.stream,
+      stderr: line => { stderr += line; },
+    }),
+  };
+  const status = await runVibeCommand(commandOptions);
+  if (brokenStdout) {
+    process.exitCode = status;
+    return;
+  }
+  const output = writer.output();
+  writeJson({
+    status,
+    calls,
+    writes: writer.writes(),
+    stdout_lines: output.split('\n').filter(Boolean),
+    stdout_ends_newline: output.endsWith('\n'),
+    success_bytes_match: returnedRecord === null
+      ? null
+      : output === `${JSON.stringify(returnedRecord)}\n`,
+    stderr,
+    self_tests: selfTests,
+    slot: observed?.slot ?? null,
+    home_is_preserved: observed?.home === '/fixture-home',
+    regular_prompt_preserved: observed?.prompt?.includes('Under review: Fixture') === true
+      && observed.prompt.includes('Review focus: Safe failure')
+      && observed.prompt.endsWith('\n\nFERRY_SECRET_CANARY'),
+    probe_prompt_preserved: observed?.prompt === `Return exactly this review JSON: ${JSON.stringify({
+      findings: [],
+      summary: 'live Vibe reviewer ready',
+      confidence: 'high',
+    })}`,
+  });
 }
 
 function hookRoutes() {
@@ -562,6 +728,9 @@ esac
 const [mode, argument] = process.argv.slice(2);
 
 switch (mode) {
+  case 'vibe-direct-command':
+    await vibeDirectCommand(argument, process.argv.includes('--broken-stdout-child'));
+    break;
   case 'hook-routes':
     hookRoutes();
     break;
