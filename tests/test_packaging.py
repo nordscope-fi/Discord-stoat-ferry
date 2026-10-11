@@ -879,6 +879,8 @@ def test_release_asset_preflight_accepts_only_the_three_published_assets(
     tmp_path: Path, assets: list[str], empty_assets: set[str], expected_exit: int
 ) -> None:
     """#1279: the read-only PR guard rejects missing and unexpected downloads."""
+    if sys.platform == "win32":
+        pytest.skip("The Ubuntu release guard requires a POSIX shell")
     asset_dir = tmp_path / "release-assets"
     asset_dir.mkdir()
     for asset in assets:
@@ -893,6 +895,24 @@ def test_release_asset_preflight_accepts_only_the_three_published_assets(
     )
 
     assert result.returncode == expected_exit, result.stderr
+
+
+def test_release_asset_preflight_does_not_launch_windows_linux_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Ubuntu shell fixture must not launch Windows' Linux launcher."""
+    workflow = yaml.safe_load(
+        (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    )
+    assert workflow["jobs"]["verify-release-assets"]["runs-on"] == "ubuntu-latest"
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def unexpected_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("The Ubuntu-only fixture must not start Windows bash")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_run)
+    with pytest.raises(pytest.skip.Exception, match="POSIX shell"):
+        test_release_asset_preflight_accepts_only_the_three_published_assets(tmp_path, [], set(), 0)
 
 
 def _job_permissions(job: str) -> list[str]:
