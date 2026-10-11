@@ -353,6 +353,17 @@ def test_release_job_only_publishes_on_a_tag() -> None:
     )
 
 
+def test_release_job_disables_uv_cache_before_requesting_pypi_oidc() -> None:
+    """#1176. The privileged publishing job must not restore a build-job cache."""
+    release_job = _jobs(_workflow_texts()["release.yml"])["release"]
+
+    assert "id-token: write" in release_job, "test must inspect the PyPI publishing job"
+    setup_uv_step = release_job.split("uses: astral-sh/setup-uv@", 1)[1].split("\n      - ", 1)[0]
+    assert re.search(r"^\s+enable-cache:\s*false\s*$", setup_uv_step, re.MULTILINE), (
+        "the PyPI publishing job must disable setup-uv caching"
+    )
+
+
 def test_release_workflow_asserts_the_union_branch_on_macos() -> None:
     """SC-134-18 companion: macOS must gate on the union branch too.
 
