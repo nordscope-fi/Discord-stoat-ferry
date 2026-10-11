@@ -3831,6 +3831,247 @@ def test_vibe_review_still_rejects_a_reply_with_no_json() -> None:
     assert "Vibe response was invalid (response-json)" in result.stderr
 
 
+def _qwen_direct(fixture: str) -> dict[str, object]:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-direct-command",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize(
+    ("failure", "failure_class", "stage", "http_status", "stderr"),
+    [
+        (
+            "credential",
+            "credential",
+            "qwen-credential",
+            None,
+            "Qwen credential retrieval failed",
+        ),
+        ("wrong-model", "wrong-model", "qwen-response", None, "Qwen response was invalid"),
+        ("http", "provider", "qwen-response", 503, "Qwen request failed with HTTP 503"),
+        ("unknown", "unknown", "qwen-response", None, "Qwen response was invalid"),
+    ],
+)
+def test_qwen_direct_failure_crosses_adapter_and_command_catch(
+    caller: str,
+    failure: str,
+    failure_class: str,
+    stage: str,
+    http_status: int | None,
+    stderr: str,
+) -> None:
+    report = _qwen_direct(f"{caller}-{failure}")
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    assert report["writes"] == 1
+    assert report["stdout_ends_newline"] is True
+    stdout_lines = report["stdout_lines"]
+    assert isinstance(stdout_lines, list)
+    assert len(stdout_lines) == 1
+    record = json.loads(stdout_lines[0])
+    assert record["adapter"] == "qwen"
+    assert record["slot"] == "qwen"
+    assert record["requested_model"] == "qwen3.8-max"
+    assert record["resolved_model"] is None
+    assert record["substitution_for"] is None
+    assert record["substitution_reason"] is None
+    assert record["session_id"] is None
+    assert record["status"] == "failed"
+    assert record["findings"] == []
+    assert record["summary"] == ""
+    assert record["confidence"] is None
+    assert record["failure_class"] == failure_class
+    assert record["failure_stage"] == stage
+    assert record["http_status"] == http_status
+    assert record["failure_reason"] is None
+    assert "timeout_phase" not in record
+    assert report["stderr"] == f"qwen-review: {stderr}\n"
+    assert report["home_is_preserved"] is True
+    assert report[f"{caller}_prompt_preserved"] is True
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize("phase", ["connection", "idle", "total"])
+def test_qwen_direct_timeout_keeps_safe_phase(caller: str, phase: str) -> None:
+    report = _qwen_direct(f"{caller}-timeout-{phase}")
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    assert report["writes"] == 1
+    record = json.loads(report["stdout_lines"][0])
+    assert record["adapter"] == "qwen"
+    assert record["status"] == "timed_out"
+    assert record["failure_class"] == "timeout"
+    assert record["failure_stage"] == "qwen-response"
+    assert record["timeout_phase"] == phase
+    assert record["failure_reason"] is None
+    assert report["stderr"] == "qwen-review: Qwen request timed out\n"
+    assert report[f"{caller}_prompt_preserved"] is True
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
+QWEN_SCHEMA_REASONS = [
+    "stream-body",
+    "stream-event",
+    "stream-completion",
+    "stream-trailing-data",
+    "stream-model",
+    "stream-finish-reason",
+    "stream-content",
+    "stream-runaway",
+    "response-envelope",
+    "response-json",
+    "response-findings",
+    "response-unclassified",
+]
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize(
+    ("fixture", "reason"),
+    [(f"schema-{reason}", reason) for reason in QWEN_SCHEMA_REASONS]
+    + [
+        ("schema-missing", "response-unclassified"),
+        ("schema-unknown", "response-unclassified"),
+    ],
+)
+def test_qwen_direct_schema_reason_is_allowlisted(
+    caller: str,
+    fixture: str,
+    reason: str,
+) -> None:
+    report = _qwen_direct(f"{caller}-{fixture}")
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    assert report["writes"] == 1
+    record = json.loads(report["stdout_lines"][0])
+    assert record["status"] == "failed"
+    assert record["failure_class"] == "schema"
+    assert record["failure_stage"] == "qwen-response"
+    assert record["failure_reason"] == reason
+    assert "timeout_phase" not in record
+    assert report["stderr"] == "qwen-review: Qwen response was invalid\n"
+    assert report[f"{caller}_prompt_preserved"] is True
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize("phase_case", ["missing", "unknown", "nontimeout"])
+def test_qwen_direct_omits_untrusted_or_inapplicable_phase(
+    caller: str,
+    phase_case: str,
+) -> None:
+    report = _qwen_direct(f"{caller}-phase-{phase_case}")
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    record = json.loads(report["stdout_lines"][0])
+    assert "timeout_phase" not in record
+    if phase_case == "nontimeout":
+        assert record["status"] == "failed"
+        assert record["failure_class"] == "unknown"
+    else:
+        assert record["status"] == "timed_out"
+        assert record["failure_class"] == "timeout"
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+def test_qwen_direct_success_keeps_record_and_prompt(caller: str) -> None:
+    report = _qwen_direct(f"{caller}-valid")
+    assert report["status"] == 0
+    assert report["calls"] == 1
+    assert report["writes"] == 1
+    assert report["stderr"] == ""
+    assert report["success_bytes_match"] is True
+    assert report["home_is_preserved"] is True
+    assert report[f"{caller}_prompt_preserved"] is True
+    record = json.loads(report["stdout_lines"][0])
+    assert record["status"] == "valid"
+    assert record["resolved_model"] == "qwen3.8-max"
+    assert record["session_id"] == "qwen-command-fixture"
+    assert "failure_class" not in record
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "status", "calls", "self_tests", "stderr"),
+    [
+        ("self-test", 0, 0, 1, ""),
+        ("unknown-argument", 1, 0, 0, "qwen-review: unknown argument: --unknown\n"),
+        ("empty-input", 1, 0, 0, "qwen-review: qwen-review requires a review payload on stdin\n"),
+    ],
+)
+def test_qwen_pre_attempt_paths_emit_no_failure_record(
+    fixture: str,
+    status: int,
+    calls: int,
+    self_tests: int,
+    stderr: str,
+) -> None:
+    report = _qwen_direct(fixture)
+    assert report["status"] == status
+    assert report["calls"] == calls
+    assert report["self_tests"] == self_tests
+    assert report["writes"] == 0
+    assert report["stdout_lines"] == []
+    assert report["stderr"] == stderr
+
+
+def test_qwen_final_empty_slot_remains_accepted() -> None:
+    report = _qwen_direct("final-empty-slot")
+    assert report["status"] == 0
+    assert report["calls"] == 1
+    assert report["slot"] == ""
+    assert json.loads(report["stdout_lines"][0])["slot"] == ""
+
+
+@pytest.mark.parametrize("outcome", ["valid", "failure"])
+@pytest.mark.parametrize(
+    ("fixture", "expected_writes"),
+    [
+        ("serialize-fails", 0),
+        ("write-throws", 1),
+        ("write-callback-fails", 1),
+        ("write-emits-error", 1),
+        ("partial-write", 1),
+    ],
+)
+def test_qwen_direct_output_failure_is_not_a_provider_retry(
+    outcome: str,
+    fixture: str,
+    expected_writes: int,
+) -> None:
+    report = _qwen_direct(f"{outcome}-{fixture}")
+    assert report["status"] == 1
+    assert report["calls"] == 1
+    assert report["writes"] == expected_writes
+    assert report["stderr"] == "qwen-review: Qwen review output failed\n"
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("caller", ["regular", "probe"])
+@pytest.mark.parametrize("outcome", ["valid", "failure"])
+def test_qwen_default_stdout_broken_pipe_uses_safe_diagnostic(
+    caller: str,
+    outcome: str,
+) -> None:
+    report = _run_broken_stdout_child(
+        "qwen-direct-command",
+        f"{caller}-delayed-{outcome}",
+    )
+    assert report["status"] == 1
+    assert report["stderr"] == "qwen-review: Qwen review output failed\n"
+    assert "EPIPE" not in report["stderr"]
+    assert "FERRY_SECRET_CANARY" not in json.dumps(report)
+
+
 def test_qwen_review_uses_direct_api_and_requires_exact_model() -> None:
     result = _run("node", "scripts/agent-compat/qwen-review.mjs", "--self-test")
     assert result.returncode == 0, result.stderr
