@@ -21,6 +21,7 @@ from discord_ferry.parser.models import (
     DCEChannel,
     DCEEmoji,
     DCEExport,
+    DCEForwardedMessage,
     DCEGuild,
     DCEMessage,
     DCEReaction,
@@ -739,6 +740,34 @@ async def test_embed_inline_emoji_supplies_the_local_asset(tmp_path: Path) -> No
         await run_emoji(_make_config(tmp_path), state, [_make_export([msg])], [].append)
 
     assert state.emoji_map == {"456": "autumn_id"}
+
+
+async def test_forwarded_embed_emoji_supplies_the_local_asset(tmp_path: Path) -> None:
+    """Emoji metadata inside a forwarded payload remains available to migration."""
+    (tmp_path / "wave.png").write_bytes(b"PNG")
+    message = _make_message()
+    message.forwarded_message = DCEForwardedMessage(
+        content="hello <:wave:789>",
+        embeds=[
+            {
+                "inlineEmojis": [
+                    {
+                        "id": "789",
+                        "name": "wave",
+                        "isAnimated": False,
+                        "imageUrl": "wave.png",
+                    }
+                ]
+            }
+        ],
+    )
+    state = _make_state()
+    up, cr, sl = _emoji_patches()
+
+    with up, cr, sl:
+        await run_emoji(_make_config(tmp_path), state, [_make_export([message])], [].append)
+
+    assert state.emoji_map == {"789": "autumn_id"}
 
 
 async def test_embed_inline_emoji_ignores_malformed_entries(tmp_path: Path) -> None:

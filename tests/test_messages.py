@@ -3618,6 +3618,88 @@ async def test_forwarded_payload_is_recovered_not_skipped(tmp_path: Path) -> Non
     assert "the original text" in content
 
 
+async def test_forwarded_message_uses_the_original_timestamp(tmp_path: Path) -> None:
+    """The recovered payload keeps the time at which its source was written."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    message = _make_message(
+        id="fwd_timestamp",
+        content="",
+        timestamp="2024-03-01T09:00:00+00:00",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(timestamp="2024-02-01T09:00:00+00:00"),
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [_make_export(messages=[message])], lambda event: None)
+
+    assert sent[0]["content"].startswith("*[2024-02-01 09:00 UTC]*")
+
+
+async def test_forwarded_message_without_source_timestamp_keeps_wrapper_timestamp(
+    tmp_path: Path,
+) -> None:
+    """A partial forwarded payload does not remove the carrier message's time."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    message = _make_message(
+        id="fwd_missing_timestamp",
+        content="",
+        timestamp="2024-03-01T09:00:00+00:00",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(timestamp=""),
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [_make_export(messages=[message])], lambda event: None)
+
+    assert sent[0]["content"].startswith("*[2024-03-01 09:00 UTC]*")
+
+
+async def test_forwarded_message_without_source_timestamp_keeps_wrapper_edited_marker(
+    tmp_path: Path,
+) -> None:
+    """A partial forwarded payload retains the carrier message's edited marker."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    message = _make_message(
+        id="fwd_missing_timestamp_edited",
+        content="",
+        timestamp="2024-03-01T09:00:00+00:00",
+        timestamp_edited="2024-03-02T09:00:00+00:00",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(timestamp=""),
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [_make_export(messages=[message])], lambda event: None)
+
+    assert sent[0]["content"].endswith("*(edited)*")
+
+
+async def test_forwarded_source_timestamp_keeps_explicit_unedited_state(tmp_path: Path) -> None:
+    """A dated source without an edit time does not inherit the carrier's marker."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    message = _make_message(
+        id="fwd_source_unedited",
+        content="",
+        timestamp="2024-03-01T09:00:00+00:00",
+        timestamp_edited="2024-03-02T09:00:00+00:00",
+        reference=DCEReference(message_id="orig1", type="Forward"),
+        forwarded_message=_forwarded(timestamp="2024-02-01T09:00:00+00:00", timestamp_edited=None),
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [_make_export(messages=[message])], lambda event: None)
+
+    assert "*(edited)*" not in sent[0]["content"]
+
+
 async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """SC-19: an attachment inside the forwarded block goes through the normal upload path.
 
