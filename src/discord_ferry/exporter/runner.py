@@ -166,7 +166,7 @@ def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
         "--include-threads",
         "All",
         "--output",
-        str(config.export_dir),
+        str(config.export_dir).replace("%", "%%"),
     ]
 
 
