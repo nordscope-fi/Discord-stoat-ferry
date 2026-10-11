@@ -7,9 +7,10 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   bindBackup,
@@ -49,6 +50,16 @@ const FIXTURE_RULE = 'A confirmed current contract failure always blocks.';
 
 function git(root, ...args) {
   const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr.trim());
+  return result.stdout.trim();
+}
+
+function gitStatus(root) {
+  const result = spawnSync('git', ['status', '--porcelain=v1'], {
+    cwd: root,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    encoding: 'utf8',
+  });
   if (result.status !== 0) throw new Error(result.stderr.trim());
   return result.stdout.trim();
 }
@@ -113,6 +124,7 @@ async function buildChain(root) {
   git(root, 'commit', '-qm', 'fixture baseline');
   const first = optionsFor(root, ['shared.txt']);
   const tasks = [];
+  let partialChunk1 = null;
   let priorTaskRecords = [];
   for (const [taskIssue, content] of [[1002, 'B1\n'], [1003, 'B2\n'], [1004, 'B3\n']]) {
     const options = { ...first, taskIssue, priorTaskRecords };
@@ -120,6 +132,13 @@ async function buildChain(root) {
     writeFileSync(join(root, 'shared.txt'), content);
     const task = await captureTask({ ...options, baselinePath: baseline.path });
     tasks.push(task);
+    if (tasks.length === 1) {
+      partialChunk1 = await captureChunk({
+        ...first,
+        taskRecords: [task.path],
+        outputPath: `${first.evidenceRoot}/chunks/1001/partial.json`,
+      });
+    }
     priorTaskRecords = tasks.map(item => item.path);
   }
   const chunk1 = await captureChunk({
@@ -146,7 +165,7 @@ async function buildChain(root) {
     taskRecords: [fourth.path],
     outputPath: `${first.evidenceRoot}/chunks/1010/snapshot.json`,
   });
-  return { options: first, tasks, chunk1, chunk2 };
+  return { options: first, tasks, partialChunk1, chunk1, chunk2 };
 }
 
 function rewriteRecord(root, localPath, transform) {
@@ -213,6 +232,50 @@ function bindChunkReview(
 }
 
 async function main([fixture, directory, variant]) {
+  if (fixture === 'first-chunk-contract' || fixture === 'shared-contracts') {
+    const primary = dirname(git(process.cwd(), 'rev-parse', '--path-format=absolute', '--git-common-dir'));
+    const sharedPaths = ['AGENTS.md', '.claude/skills/df-chunk-review/SKILL.md',
+      '.claude/skills/df-ship/SKILL.md', 'docs/architecture/adr/README.md'];
+    if (sharedPaths.every(path => !existsSync(join(primary, path)))) {
+      writeJson({ instruction_layer_absent: true });
+      return;
+    }
+    const read = path => readFileSync(join(primary, path), 'utf8');
+    const agents = read('AGENTS.md');
+    const chunk = read('.claude/skills/df-chunk-review/SKILL.md');
+    const ship = read('.claude/skills/df-ship/SKILL.md');
+    const adrPath = 'docs/architecture/adr/040-review-chunk-snapshots-before-task-commits.md';
+    const adr = existsSync(join(primary, adrPath)) ? read(adrPath) : '';
+    const index = read('docs/architecture/adr/README.md');
+    const plan = readFileSync('docs/plans/2026-10-11-chunk-review-order.md', 'utf8');
+    if (fixture === 'first-chunk-contract') {
+      writeJson({
+        first_chunk_includes_tasks_1_through_3: plan.indexOf('### Task 3:') < plan.indexOf('## Chunk 2')
+          && adr.includes('capture, validation, and all shared ordering'),
+        prerequisites_allow_uncommitted_tasks: chunk.includes('still open')
+          && !chunk.includes('Every task in the chunk is done and committed.'),
+        review_precedes_next_chunk: agents.includes('snapshot-bound marker before starting chunk N+1'),
+        issues_wait_for_real_commits: agents.includes('issues open until `/df-ship` creates and verifies the real task commits'),
+      });
+    } else {
+      writeJson({
+        marker_bound: chunk.includes('snapshot:<64-hex>') && chunk.includes('bind-marker'),
+        review_validation: chunk.includes('validate-chain --phase review'),
+        shipping_validation: ship.includes('validate-chain --phase shipping'),
+        committed_validation: ship.includes('validate-chain --phase committed'),
+        atomic_task_commits: ship.includes('exactly one primary commit per attached task')
+          && ship.includes('GIT_INDEX_FILE') && ship.includes('git read-tree'),
+        single_chunk_final_only: agents.includes('Single-chunk Full work skips multipart chunk')
+          && chunk.includes('Single-chunk Full work receives final Full reviews')
+          && ship.includes('A single-chunk Full plan has no multipart marker'),
+        provider_policy_preserved: [chunk, ship].every(text =>
+          ['zai-glm-5-2', 'qwen3.8-max', 'require_escalated', 'Provider availability does not block',
+            'all four', 'previously confirmed findings', 'fix diff'].every(term => text.includes(term))),
+        adr_indexed: adr.includes('ADR-013') && index.includes('(040-review-chunk-snapshots-before-task-commits.md)'),
+      });
+    }
+    return;
+  }
   const root = resolve(directory, 'repo');
   mkdirSync(root, { recursive: true });
   git(root, 'init', '-q');
@@ -477,7 +540,7 @@ async function main([fixture, directory, variant]) {
   if (fixture === 'temporary-index') {
     const chain = await buildChain(root);
     const indexBefore = git(root, 'hash-object', git(root, 'rev-parse', '--git-path', 'index'));
-    const worktreeBefore = git(root, 'status', '--porcelain=v1');
+    const worktreeBefore = gitStatus(root);
     const rebuilt = reconstructChain({
       root,
       snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
@@ -494,7 +557,7 @@ async function main([fixture, directory, variant]) {
         evidenceRoot: chain.options.evidenceRoot,
       });
     } catch {
-      failurePreserved = git(root, 'status', '--porcelain=v1') === worktreeBefore;
+      failurePreserved = gitStatus(root) === worktreeBefore;
     }
     writeJson({
       reconstructed_tree: rebuilt.finalTree,
@@ -502,8 +565,27 @@ async function main([fixture, directory, variant]) {
       active_index_before: indexBefore,
       active_index_after: git(root, 'hash-object', git(root, 'rev-parse', '--git-path', 'index')),
       worktree_before: worktreeBefore,
-      worktree_after: git(root, 'status', '--porcelain=v1'),
+      worktree_after: gitStatus(root),
       failure_preserved_state: failurePreserved,
+    });
+    return;
+  }
+  if (fixture === 'temporary-index-stale-stat') {
+    const chain = await buildChain(root);
+    const unchangedPath = join(root, 'docs/plans/fixture-plan.md');
+    utimesSync(unchangedPath, new Date(1_000_000), new Date(1_000_000));
+    const indexPath = git(root, 'rev-parse', '--git-path', 'index');
+    const indexBefore = sha256(readFileSync(join(root, indexPath)));
+    const rebuilt = reconstructChain({
+      root,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    writeJson({
+      reconstructed_tree: rebuilt.finalTree,
+      expected_tree: chain.chunk2.record.ending_git_tree,
+      active_index_before: indexBefore,
+      active_index_after: sha256(readFileSync(join(root, indexPath))),
     });
     return;
   }
@@ -661,13 +743,94 @@ async function main([fixture, directory, variant]) {
       evidenceRoot: chain.options.evidenceRoot,
     });
     let cross = false; let changed = false; let missing = false;
-    try { bindMarker({ root, snapshotPath: chain.chunk2.path, reviewBindingPath: bound.review.path, postedCommentReadbackPath: bound.readbackPath, evidenceRoot: chain.options.evidenceRoot }); } catch { cross = true; }
+    try { bindMarker({ root, planPath: chain.options.planPath, approvedPlanDigestPath: chain.options.approvedPlanDigestPath, snapshotPath: chain.chunk2.path, reviewBindingPath: bound.review.path, postedCommentReadbackPath: bound.readbackPath, evidenceRoot: chain.options.evidenceRoot }); } catch { cross = true; }
     writeFileSync(join(root, bound.ensemblePath), 'changed');
     try { validateChain({ root, planPath: chain.options.planPath, approvedPlanDigestPath: chain.options.approvedPlanDigestPath, snapshotPaths: [chain.chunk1.path, chain.chunk2.path], phase: 'review', reviewBindingPaths: [bound.review.path], markerBindingPaths: [bound.marker.path], parentCommentsReadbackPaths: [bound.readbackPath], evidenceRoot: chain.options.evidenceRoot }); } catch { changed = true; }
     writeFileSync(join(root, bound.ensemblePath), '{"slots":[]}');
     writeFileSync(join(root, bound.readbackPath), '[]');
     try { validateChain({ root, planPath: chain.options.planPath, approvedPlanDigestPath: chain.options.approvedPlanDigestPath, snapshotPaths: [chain.chunk1.path, chain.chunk2.path], phase: 'review', reviewBindingPaths: [bound.review.path], markerBindingPaths: [bound.marker.path], parentCommentsReadbackPaths: [bound.readbackPath], evidenceRoot: chain.options.evidenceRoot }); } catch { missing = true; }
     writeJson({ valid_binding: true, cross_snapshot_rejected: cross, changed_bytes_rejected: changed, missing_readback_rejected: missing });
+    return;
+  }
+  if (fixture === 'marker-completeness') {
+    const chain = await buildChain(root);
+    if (variant === 'complete') {
+      const bound = bindChunkReview(root, chain, chain.chunk1, { label: 'complete' });
+      writeJson({
+        review_snapshot: bound.review.record.snapshot_digest,
+        marker_snapshot: bound.marker.record.snapshot_digest,
+      });
+      return;
+    }
+    const [boundary, fault] = variant.split(':');
+    let snapshotPath = chain.partialChunk1.path;
+    if (fault !== 'incomplete') {
+      snapshotPath = `${chain.options.evidenceRoot}/chunks/1001/binding-${fault}.json`;
+      const record = structuredClone(chain.chunk1.record);
+      if (fault === 'missing') delete record.task_issues;
+      if (fault === 'mismatched') record.task_issues.reverse();
+      if (fault === 'plan-identity') record.approved_plan_sha256 = '0'.repeat(64);
+      const { digest_sha256: ignored, ...body } = record;
+      record.digest_sha256 = sha256(Buffer.from(stableJson(body)));
+      writeFileSync(join(root, snapshotPath), stableJson(record));
+    }
+    const snapshot = JSON.parse(readFileSync(join(root, snapshotPath), 'utf8'));
+    const artifactDirectory = join(root, chain.options.evidenceRoot, 'fixtures');
+    mkdirSync(artifactDirectory, { recursive: true });
+    const ensemblePath = `${chain.options.evidenceRoot}/fixtures/marker-completeness.json`;
+    writeFileSync(join(root, ensemblePath), '{"slots":[]}');
+    let rejected = false;
+    try {
+      if (boundary === 'review') {
+        bindReview({
+          root,
+          planPath: chain.options.planPath,
+          approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+          snapshotPath,
+          ensembleArtifactPath: ensemblePath,
+          evidenceRoot: chain.options.evidenceRoot,
+          outputPath: `${chain.options.evidenceRoot}/chunks/1001/review-${fault}.json`,
+        });
+      } else {
+        const reviewPath = `${chain.options.evidenceRoot}/chunks/1001/manual-review-${fault}.json`;
+        const review = {
+          schema: 'ferry.chunk-snapshot/v1',
+          kind: 'review-binding',
+          chunk_issue: 1001,
+          snapshot_digest: snapshot.digest_sha256,
+          ensemble_artifact: {
+            path: ensemblePath,
+            sha256: sha256(readFileSync(join(root, ensemblePath))),
+          },
+          finding_artifacts: [],
+          verdict_artifacts: [],
+        };
+        review.digest_sha256 = sha256(Buffer.from(stableJson(review)));
+        writeFileSync(join(root, reviewPath), stableJson(review));
+        const commentPath = `${chain.options.evidenceRoot}/fixtures/comment-${fault}.json`;
+        writeFileSync(join(root, commentPath), JSON.stringify({
+          id: 88,
+          html_url: 'https://github.test/repo/issues/1001#issuecomment-88',
+          body: `<!-- review:chunk:1 snapshot:${snapshot.digest_sha256} review:${review.digest_sha256} findings:0 critical:0 confirmed:0 -->`,
+          created_at: '2026-10-11T00:00:00Z',
+        }));
+        bindMarker({
+          root,
+          planPath: chain.options.planPath,
+          approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+          snapshotPath,
+          reviewBindingPath: reviewPath,
+          postedCommentReadbackPath: commentPath,
+          evidenceRoot: chain.options.evidenceRoot,
+          outputPath: `${chain.options.evidenceRoot}/chunks/1001/marker-${fault}.json`,
+        });
+      }
+    } catch (error) {
+      rejected = fault === 'plan-identity'
+        ? error.message.includes('plan identity')
+        : error.message.includes('complete approved chunk task list');
+    }
+    writeJson({ boundary, fault, rejected });
     return;
   }
   if (fixture === 'provider-status') {
@@ -865,6 +1028,40 @@ async function main([fixture, directory, variant]) {
     writeJson({ accepted: report.ok, marker_count: 0 });
     return;
   }
+  if (fixture === 'validate-chain-stale-stat') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), SINGLE_CHUNK_PLAN);
+    writeFileSync(join(root, 'only.txt'), 'before\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', 'only.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const options = optionsFor(root, ['only.txt']);
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'only.txt'), 'after\n');
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    const snapshot = await captureChunk({ ...options, taskRecords: [task.path] });
+    utimesSync(
+      join(root, 'docs/plans/fixture-plan.md'),
+      new Date(1_000_000),
+      new Date(1_000_000),
+    );
+    const indexPath = git(root, 'rev-parse', '--git-path', 'index');
+    const indexBefore = sha256(readFileSync(join(root, indexPath)));
+    const report = validateChain({
+      root,
+      planPath: options.planPath,
+      approvedPlanDigestPath: options.approvedPlanDigestPath,
+      snapshotPaths: [snapshot.path],
+      phase: variant,
+      evidenceRoot: options.evidenceRoot,
+    });
+    writeJson({
+      accepted: report.ok,
+      phase: variant,
+      active_index_before: indexBefore,
+      active_index_after: sha256(readFileSync(join(root, indexPath))),
+    });
+    return;
+  }
   if (fixture === 'head-mismatch') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
     writeFileSync(join(root, 'docs/plans/fixture-plan.md'), SINGLE_CHUNK_PLAN);
@@ -1017,9 +1214,148 @@ async function main([fixture, directory, variant]) {
       writeFileSync(join(root, damagedPath), stableJson(record));
       try { validate(damagedPath); } catch { rejected.push(damage); }
     }
+    const forgedBindingRejected = (label, mutate, expectedMessage) => {
+      const path = `${options.evidenceRoot}/tasks/1002/backup-forged-${label}.json`;
+      const record = structuredClone(backup.record);
+      mutate(record);
+      const { digest_sha256: ignored, ...body } = record;
+      record.digest_sha256 = sha256(Buffer.from(stableJson(body)));
+      writeFileSync(join(root, path), stableJson(record));
+      try {
+        validate(path);
+        return false;
+      } catch (error) {
+        return error.message.includes(expectedMessage);
+      }
+    };
+    const forgedIdentityRejected = {
+      wrong_issue: forgedBindingRejected(
+        'wrong-issue', record => { record.task_issue = 9999; }, 'task identity changed',
+      ),
+      wrong_digest: forgedBindingRejected(
+        'wrong-digest', record => { record.task_patch_digest = '0'.repeat(64); },
+        'task digest changed',
+      ),
+      wrong_instruction_states: forgedBindingRejected(
+        'wrong-instruction-states', record => { record.instruction_states = []; },
+        'task instruction states changed',
+      ),
+    };
+    const rewrittenRecord = (label, commit, parent, changedPaths) => {
+      const path = `${options.evidenceRoot}/tasks/1002/backup-recomputed-${label}.json`;
+      const record = structuredClone(backup.record);
+      record.backup_commit = commit;
+      record.backup_parent = parent;
+      record.changed_paths = changedPaths;
+      const { digest_sha256: ignored, ...body } = record;
+      record.digest_sha256 = sha256(Buffer.from(stableJson(body)));
+      writeFileSync(join(root, path), stableJson(record));
+      return path;
+    };
+    const validCommit = backup.record.backup_commit;
+    writeFileSync(join(backupRoot, 'README.md'), 'outside change\n');
+    git(backupRoot, 'add', 'README.md');
+    git(backupRoot, 'commit', '-qm', 'outside backup change');
+    const outsideCommit = git(backupRoot, 'rev-parse', 'HEAD');
+    let recomputedOutsideRejected = false;
+    try {
+      validate(rewrittenRecord('outside', outsideCommit, validCommit, ['README.md']));
+    } catch (error) {
+      recomputedOutsideRejected = error.message.includes('outside the Ferry scope');
+    }
+    git(backupRoot, 'commit', '--allow-empty', '-qm', 'empty backup change');
+    const emptyCommit = git(backupRoot, 'rev-parse', 'HEAD');
+    let recomputedEmptyRejected = false;
+    try {
+      validate(rewrittenRecord('empty', emptyCommit, outsideCommit, []));
+    } catch (error) {
+      recomputedEmptyRejected = error.message.includes('outside the Ferry scope');
+    }
     writeFileSync(join(root, snapshotLogPath), 'changed after binding\n');
     try { validate(backup.path); } catch { rejected.push('snapshot-log'); }
-    writeJson({ valid: true, rejected });
+    writeJson({
+      valid: true,
+      rejected,
+      forged_identity_rejected: forgedIdentityRejected,
+      recomputed_outside_rejected: recomputedOutsideRejected,
+      recomputed_empty_rejected: recomputedEmptyRejected,
+    });
+    return;
+  }
+  if (fixture === 'incremental-backup') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    mkdirSync(join(root, '.claude/skills/df-ship'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
+    writeFileSync(join(root, '.gitignore'), 'AGENTS.md\n.claude/\n');
+    writeFileSync(join(root, 'tracked.txt'), 'before\n');
+    writeFileSync(join(root, 'AGENTS.md'), 'before instruction\n');
+    writeFileSync(join(root, '.claude/skills/df-ship/SKILL.md'), 'before ship skill\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', '.gitignore', 'tracked.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const options = {
+      ...optionsFor(root, ['tracked.txt']),
+      instructionPaths: ['AGENTS.md', '.claude/skills/df-ship/SKILL.md'],
+    };
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'tracked.txt'), 'after\n');
+    writeFileSync(join(root, 'AGENTS.md'), 'after instruction\n');
+    writeFileSync(join(root, '.claude/skills/df-ship/SKILL.md'), 'after ship skill\n');
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    const snapshotLogPath = `${options.evidenceRoot}/fixtures/incremental-backup.log`;
+    mkdirSync(join(root, options.evidenceRoot, 'fixtures'), { recursive: true });
+    writeFileSync(join(root, snapshotLogPath), 'incremental backup complete\n');
+
+    const backupRoot = resolve(directory, 'claude-setup');
+    mkdirSync(backupRoot, { recursive: true });
+    git(backupRoot, 'init', '-q');
+    git(backupRoot, 'config', 'user.email', 'fixture@example.com');
+    git(backupRoot, 'config', 'user.name', 'Fixture');
+    const agentDestination = join(backupRoot, 'projects/Discord-stoat-ferry/AGENTS.md');
+    const projectShipDestination = join(
+      backupRoot,
+      'projects/Discord-stoat-ferry/claude-dir/skills/df-ship/SKILL.md',
+    );
+    const libraryShipDestination = join(
+      backupRoot,
+      'skills-library/discord-stoat-ferry/df-ship/SKILL.md',
+    );
+    mkdirSync(dirname(agentDestination), { recursive: true });
+    mkdirSync(dirname(projectShipDestination), { recursive: true });
+    mkdirSync(dirname(libraryShipDestination), { recursive: true });
+    writeFileSync(agentDestination, 'stale instruction\n');
+    writeFileSync(projectShipDestination, 'after ship skill\n');
+    writeFileSync(libraryShipDestination, 'after ship skill\n');
+    writeFileSync(join(backupRoot, 'README.md'), 'backup fixture\n');
+    git(backupRoot, 'add', '.');
+    git(backupRoot, 'commit', '-qm', 'backup baseline');
+
+    writeFileSync(agentDestination, 'after instruction\n');
+    if (variant === 'wrong-bytes') {
+      writeFileSync(projectShipDestination, 'wrong ship skill\n');
+      writeFileSync(libraryShipDestination, 'after ship skill\nchanged\n');
+    }
+    if (variant === 'wrong-mode') {
+      chmodSync(projectShipDestination, 0o755);
+      chmodSync(libraryShipDestination, 0o755);
+    }
+    if (variant === 'missing') rmSync(projectShipDestination);
+    if (variant === 'outside') writeFileSync(join(backupRoot, 'README.md'), 'outside change\n');
+    git(backupRoot, 'add', '-A');
+    git(backupRoot, 'commit', '-qm', 'incremental Ferry backup');
+
+    const backup = bindBackup({
+      root,
+      taskRecordPath: task.path,
+      snapshotLogPath,
+      backupRepoPath: backupRoot,
+      backupCommitOid: git(backupRoot, 'rev-parse', 'HEAD'),
+      evidenceRoot: options.evidenceRoot,
+    });
+    writeJson({
+      accepted: true,
+      changed_paths: backup.record.changed_paths,
+      instruction_paths: backup.record.instruction_states.map(state => state.path),
+    });
     return;
   }
   if (fixture === 'post-snapshot-candidate') {
