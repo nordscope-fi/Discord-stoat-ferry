@@ -24,7 +24,7 @@ from discord_ferry.core.engine import (
     run_retry_failed,
 )
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.errors import CheckError, DuplicateSendError, MigrationError
+from discord_ferry.errors import CheckError, DuplicateSendError, ExportError, MigrationError
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
 from discord_ferry.migrator.verify import CheckReport, RepairOutcome
@@ -1050,6 +1050,22 @@ def _dce_msg_dict(msg_id: str, content: str = "hello") -> dict[str, Any]:
         "reactions": [],
         "mentions": [],
     }
+
+
+async def test_run_migration_stops_cleanly_for_a_malformed_streamed_message(tmp_path: Path) -> None:
+    """The validation phase exposes the damaged file through ExportError."""
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    message = _dce_msg_dict("message-1")
+    del message["author"]
+    _write_dce_json(export_dir, "channel-1", [message])
+
+    with pytest.raises(ExportError, match="channel-channel-1"):
+        await run_migration(
+            _make_config(tmp_path, export_dir=export_dir),
+            lambda _event: None,
+            phase_overrides=_NOOP_OVERRIDES,
+        )
 
 
 def _make_exports_from_dir(export_dir: Path) -> list[DCEExport]:

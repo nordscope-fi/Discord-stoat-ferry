@@ -1,6 +1,5 @@
 """Parse DiscordChatExporter JSON export files."""
 
-import json
 import logging
 import re
 import time
@@ -210,10 +209,11 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
 
     Returns:
         List of DCEExport objects sorted by channel name, one per valid file.
-        Files that cannot be parsed as valid DCE JSON are skipped with a warning.
+        Every channel file must be readable. An invalid file stops parsing so a
+        migration cannot complete with a channel omitted.
 
     Raises:
-        ExportError: If a file is refused for its size or nesting depth.
+        ExportError: If any channel file cannot be read as a DCE export.
     """
     exports: list[DCEExport] = []
     for json_path in sorted(export_dir.glob("*.json")):
@@ -227,8 +227,11 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
             raise ExportError(
                 f"{exc}. Ferry stopped so that no channel is left out without notice."
             ) from exc
-        except (ValueError, json.JSONDecodeError, KeyError) as exc:
-            logger.warning("Skipping %s: not a valid DCE export (%s)", json_path.name, exc)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ExportError(
+                f"Could not parse '{json_path.name}' as a DCE export: {exc}. "
+                "Ferry stopped so that no channel is left out without notice."
+            ) from exc
     exports.sort(key=lambda e: e.channel.name)
     return exports
 
@@ -247,16 +250,23 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         Parsed DCEExport dataclass.
 
     Raises:
+        ExportError: If an eager message parse fails after its file and message
+            reference have been identified.
         ValueError: If the file is not a valid DCE export (missing required keys), is
             larger than ``MAX_EXPORT_JSON_BYTES``, or is nested too deeply.
-        json.JSONDecodeError: If the file is not valid JSON.
     """
     raw: Any = load_bounded_json(json_path, MAX_EXPORT_JSON_BYTES)
+
+    if not isinstance(raw, dict):
+        raise ValueError("The top-level JSON value must be an object")
 
     # Validate required top-level keys
     for key in ("guild", "channel", "messages", "messageCount"):
         if key not in raw:
             raise ValueError(f"Missing required key '{key}' in {json_path.name}")
+
+    if not isinstance(raw["messages"], list):
+        raise ValueError("The 'messages' value must be a list")
 
     guild = _parse_guild(raw["guild"])
     channel = _parse_channel(raw["channel"])
@@ -264,7 +274,10 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
     if metadata_only:
         messages = []
     else:
-        messages = [_parse_message(m) for m in raw["messages"]]
+        messages = [
+            _parse_message_with_context(message, json_path, index)
+            for index, message in enumerate(raw["messages"], start=1)
+        ]
         messages.sort(key=lambda m: m.timestamp)
 
     is_thread, parent_channel_name = _infer_thread_info(json_path.stem, channel.type)
@@ -292,9 +305,15 @@ def stream_messages(json_path: Path) -> Iterator[DCEMessage]:
     Yields:
         Parsed DCEMessage objects in file order.
     """
-    with open(json_path, "rb") as f:
-        for raw_msg in ijson.items(f, "messages.item"):
-            yield _parse_message(raw_msg)
+    try:
+        with open(json_path, "rb") as f:
+            for index, raw_msg in enumerate(ijson.items(f, "messages.item"), start=1):
+                yield _parse_message_with_context(raw_msg, json_path, index)
+    except (ijson.common.JSONError, OSError, UnicodeError) as exc:
+        raise ExportError(
+            f"Could not parse '{json_path.name}' as a DCE export: {exc}. "
+            "Ferry stopped so that no channel is left out without notice."
+        ) from exc
 
 
 def check_cdn_url_expiry(url: str) -> bool | None:
@@ -551,6 +570,19 @@ def _as_list(value: Any) -> list[Any]:
     rather than a loud failure.
     """
     return value if isinstance(value, list) else []
+
+
+def _parse_message_with_context(raw: Any, json_path: Path, index: int) -> DCEMessage:
+    """Parse one message and turn damaged input into a file-aware ExportError."""
+    try:
+        return _parse_message(raw)
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        message_id = raw.get("id") if isinstance(raw, dict) else None
+        message_ref = f"message '{message_id}'" if message_id else f"message {index}"
+        raise ExportError(
+            f"Could not parse {message_ref} in '{json_path.name}': {exc}. "
+            "Ferry stopped so that no channel is left out without notice."
+        ) from exc
 
 
 def _parse_message(raw: Any) -> DCEMessage:
