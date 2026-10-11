@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         include:
           - os: windows-latest
             python-version: "3.12"
@@ -50,7 +50,7 @@ jobs:
 
       - name: Pull Docker Hub images through Google's mirror
         # The feedback container test builds from a Docker Hub base image, and all
-        # three Linux jobs pull it at once. Anonymous pulls from shared runner
+        # four Linux jobs pull it at once. Anonymous pulls from shared runner
         # addresses hit Docker Hub's 429 rate limit (PR #1122 failed three times).
         # mirror.gcr.io serves the same digest-pinned image without a login. The
         # existing daemon settings are kept, and the last line fails the job if
@@ -66,7 +66,7 @@ jobs:
       - name: Tests
         # Exclude the DCE contract test from the version matrix: it downloads the
         # real DCE binary from GitHub's unauthenticated API, so running it across
-        # 3 Python versions concurrently trips the API rate limit (intermittent
+        # 4 Python versions concurrently trips the API rate limit (intermittent
         # 403 flake). The dedicated cached `contract-test` job below is its sole
         # owner; the matrix only needs the pure-Python suite.
         run: uv run pytest -n 4 --dist=load --ignore=tests/test_dce_contract.py --durations=20
@@ -107,8 +107,8 @@ jobs:
     name: Instruction-layer gates
     runs-on: ubuntu-latest
     # A SEPARATE job, deliberately not a step inside lint-and-test: that job runs a
-    # three-version Python matrix, so a step there would run the sweep three times
-    # per pull request and make three gh calls for one answer.
+    # five-job Python matrix, so a step there would run the sweep five times
+    # per pull request and make five gh calls for one answer.
     permissions:
       contents: read
       pull-requests: read
