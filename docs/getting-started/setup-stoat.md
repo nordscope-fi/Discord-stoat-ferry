@@ -18,7 +18,7 @@ The API URL is the web address that Ferry sends data to. It is different from th
     https://api.stoat.chat
     ```
 
-    You can copy this exactly as written — no changes needed.
+    You can copy this exactly as written; no changes needed.
 
 === "Self-hosted Stoat"
 
@@ -26,7 +26,7 @@ The API URL is the web address that Ferry sends data to. It is different from th
 
     2. If you are not sure, check the configuration file you used during setup. In a Docker Compose setup, look for the service labelled `api` or `backend` and the domain assigned to it in your reverse proxy config (Caddy, Nginx, Traefik, etc.).
 
-    3. To confirm the URL is correct, paste it into your browser's address bar and press Enter. A working API endpoint returns a short block of text (JSON — machine-readable data) rather than a blank page or error. It should look something like:
+    3. To confirm the URL is correct, paste it into your browser's address bar and press Enter. A working API endpoint returns a short block of text (JSON, machine-readable data) rather than a blank page or error. It should look something like:
 
         ```json
         {"revolt":"0.7.x","features":{...},"ws":"...","app":"..."}
@@ -41,23 +41,26 @@ The API URL is the web address that Ferry sends data to. It is different from th
 
 ## 2. Get your Stoat user token
 
-Your user token is a secret key that Stoat stores in your browser when you log in. It works like a temporary password — Ferry uses it to create channels, send messages, and build your server on your behalf.
+Your user token is a secret key that Stoat stores in your browser when you log in. It works like a temporary password; Ferry uses it to create channels, send messages, and build your server on your behalf.
 
 **You do NOT need to create a bot or register an application.** You are copying a value that already exists in your browser right now (assuming you are logged in to Stoat).
 
 !!! warning "Keep your token private"
     Anyone with your token can act as your Stoat account. Do not paste it into chat messages, screenshots, or text files you share with others. Treat it like a password.
 
-!!! warning "Use your regular Stoat login — not a bot"
-    Ferry needs a normal user account (the one you use to chat). Bot tokens cannot create servers and will fail with a "403 Forbidden" error.
+!!! warning "Use your regular Stoat login, not a bot"
+    Ferry needs a normal user account (the one you use to chat). Bot tokens cannot create servers
+    and will fail with a `400 Bad Request` error. Stoat v0.15.7 maps
+    `ErrorType::IsBot` to
+    [`Status::BadRequest`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/result/src/rocket.rs#L61-L68).
 
 ### How to find your token
 
-You will be opening a hidden panel in your browser called "developer tools." This sounds technical, but you just need to click a few things — no coding involved.
+You will be opening a hidden panel in your browser called "developer tools." This sounds technical, but you just need to click a few things; no coding involved.
 
 1. Open your Stoat instance in a **web browser** (Chrome, Edge, or Firefox) and **make sure you are logged in**. You should see your channels and messages.
 
-2. Press **F12** on your keyboard. A panel will split open along the side or bottom of the browser window — this is the developer tools panel. On macOS, press **Option + Command + I** instead.
+2. Press **F12** on your keyboard. A panel will split open along the side or bottom of the browser window; this is the developer tools panel. On macOS, press **Option + Command + I** instead.
 
     <!-- screenshot: browser-devtools-open -->
 
@@ -67,7 +70,7 @@ You will be opening a hidden panel in your browser called "developer tools." Thi
 3. At the top of the developer tools panel, you will see a row of tabs. Click the one labelled **Application** (in Chrome or Edge). In Firefox, it is called **Storage** instead.
 
     !!! tip "Can't see the Application tab?"
-        If the panel is narrow, some tabs may be hidden. Look for a **>>** button at the end of the tab row — click it to reveal the hidden tabs.
+        If the panel is narrow, some tabs may be hidden. Look for a **>>** button at the end of the tab row; click it to reveal the hidden tabs.
 
 4. In the left sidebar of the Application panel, find the **Storage** section. Your browser keeps a small database for each website there, listed as **IndexedDB**. Click the small arrow next to it. Under it, open **localforage**, then click **keyvaluepairs**. In Firefox, the same database is listed under **Indexed DB** in the Storage tab.
 
@@ -97,17 +100,21 @@ You will be opening a hidden panel in your browser called "developer tools." Thi
 
 ## 3. Should I create the Stoat server first?
 
-You have two options. Neither is wrong — choose whichever fits your situation.
+You have two options. Neither is wrong; choose whichever fits your situation.
 
-**Option A — Let Ferry create the server for you (recommended)**
+**Option A: Let Ferry create the server for you (recommended)**
 
 Ferry will create a brand-new Stoat server, set up all the channels and roles, and migrate your Discord content into it. You do not need to do anything in Stoat beforehand. This is the simplest path for most admins.
 
-**Option B — Use a server you already created (`--server-id` flag)**
+**Option B: Use a server you already created (`--server-id` flag)**
 
-If you have already created an empty server in Stoat and want Ferry to populate it — for example, because you set a custom name and icon manually, or because your migration account is not the one you want to own the server — you can tell Ferry which server to use.
+If you have already created an empty server in Stoat and want Ferry to populate it (for example, because you set a custom name and icon manually, or because your migration account is not the one you want to own the server), you can tell Ferry which server to use.
 
-To find your server's ID, open it in Stoat, go to **Server Settings**, and look for a field labelled **Server ID** (it is a short string of letters and numbers, for example `01ABCDEF123`). In the GUI, enter this in the **Existing Server ID** field under Advanced Options. On the command line, pass it with the `--server-id` option.
+To find your server's ID, enable **Advanced** settings in Stoat, right-click the server name, and
+choose **Copy server ID**. Ferry's 2026-10-11 gap analysis records the Stoat UI source as
+`<Trans>Copy server ID</Trans>`. The analysis confirms that it is inside this context menu after
+Advanced is enabled. In the GUI, enter this in the **Existing Server ID** field under Advanced
+Options. On the command line, pass it with the `--server-id` option.
 
 !!! info "Using `--server-id` with a non-owner account"
     If the account running Ferry did not create the server, make sure it has been given a role with all required permissions before you start. See the next section for the list. Ferry will verify the server is accessible during the CONNECT phase and warn you if it cannot reach it.
