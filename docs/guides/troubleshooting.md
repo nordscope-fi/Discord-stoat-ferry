@@ -14,13 +14,15 @@ This page covers the most common problems encountered during migration, their ca
 | **Cause** | The token you provided is wrong, expired, or was copied incorrectly |
 | **Solution** | Get a fresh token. Open Stoat in your browser, make sure you are logged in, then follow the [step-by-step token guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token) to copy a new one. Tokens expire when you log out or change your password, so you may need to do this again if it has been a while. |
 
-### 403 Forbidden on server create
+### 400 Bad Request on server create
 
 | | |
 |---|---|
-| **Symptom** | Ferry reports `403 Forbidden` when attempting to create the server |
+| **Symptom** | Ferry reports `400 Bad Request` when attempting to create the server |
 | **Cause** | You may be using a bot token instead of a regular user token. Bot accounts cannot create servers on Stoat. |
 | **Solution** | Make sure you are using the token from a **regular Stoat account**, the same account you log in to when you chat. Ferry does not use bots. See the [token guide](../getting-started/setup-stoat.md#2-get-your-stoat-user-token) for how to find the right token. |
+
+Stoat v0.15.7 maps `ErrorType::IsBot` to [`Status::BadRequest`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/result/src/rocket.rs#L61-L68).
 
 ---
 
