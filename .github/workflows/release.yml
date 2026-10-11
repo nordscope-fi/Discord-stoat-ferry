@@ -86,7 +86,13 @@ jobs:
           }
 
           # Kill the whole tree: native mode runs the pywebview window in a child.
-          taskkill /T /F /PID $proc.Id 2>&1 | Out-Null
+          $cleanupOutput = taskkill /T /F /PID $proc.Id 2>&1
+          $cleanupExit = $LASTEXITCODE
+          if ($cleanupExit -ne 0) {
+            Write-Host "GUI process tree cleanup returned $cleanupExit"
+            $cleanupOutput | ForEach-Object { Write-Host $_ }
+          }
+          $global:LASTEXITCODE = 0
 
           if (-not $served) {
             Write-Host "::error::Ferry.exe never served on 127.0.0.1:8765"

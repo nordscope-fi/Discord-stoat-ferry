@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.5] - 2026-10-11
+
+### Fixed
+
+- Keep a best-effort Windows process-tree cleanup from turning a passed packaged-app smoke test into a failed release job. The workflow now reports cleanup failures but clears that native status before the existing application assertions decide the job result.
+
 ## [2.43.4] - 2026-10-11
 
 ### Fixed
