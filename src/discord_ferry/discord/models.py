@@ -3,6 +3,12 @@
 from dataclasses import dataclass, field
 
 
+def normalize_channel_position(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 @dataclass
 class PermissionOverwrite:
     """A single permission overwrite entry from a Discord channel."""

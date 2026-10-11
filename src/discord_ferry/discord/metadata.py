@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.discord.models import normalize_channel_position
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
 from discord_ferry.errors import MigrationError
 
@@ -57,6 +58,7 @@ class ChannelMeta:
     role_overrides: list[RoleOverride] = field(default_factory=list)
     slowmode: int = 0
     user_limit: int = 0
+    position: int | None = None
 
 
 @dataclass
@@ -137,6 +139,9 @@ def _channel_meta_to_dict(cm: ChannelMeta) -> dict[str, Any]:
     ]
     d["slowmode"] = cm.slowmode
     d["user_limit"] = cm.user_limit
+    position = normalize_channel_position(cm.position)
+    if position is not None:
+        d["position"] = position
     return d
 
 
@@ -205,6 +210,7 @@ def _dict_to_channel_meta(data: dict[str, Any]) -> ChannelMeta:
         ],
         slowmode=data.get("slowmode", 0),
         user_limit=data.get("user_limit", 0),
+        position=normalize_channel_position(data.get("position")),
     )
 
 

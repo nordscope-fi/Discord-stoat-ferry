@@ -878,3 +878,38 @@ def test_read_cached_metadata_rejects_a_malformed_user_override_entry(
     assert cached.meta is None
     assert cached.problem is not None
     assert "user_override_channels" in cached.problem
+
+
+@pytest.mark.parametrize("position", [0, 5, None])
+def test_channel_position_roundtrip(tmp_path: Path, position: int | None) -> None:
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={"2": ChannelMeta(nsfw=False, position=position)},
+    )
+    save_discord_metadata(meta, tmp_path)
+    loaded = load_discord_metadata_for_resume(tmp_path, configured_guild_id="111")
+    assert loaded == meta
+    record = json.loads((tmp_path / "discord_metadata.json").read_text())["channel_metadata"]["2"]
+    assert ("position" in record) is (position is not None)
+
+
+@pytest.mark.parametrize("value", [None, -1, 1.5, True, False, "2", [], {}])
+def test_bad_channel_positions_load_as_unknown(tmp_path: Path, value: object) -> None:
+    raw: dict[str, Any] = {
+        "guild_id": "111",
+        "fetched_at": "t",
+        "server_default_permissions": 0,
+        "role_permissions": {},
+        "channel_metadata": {"2": {"nsfw": False, "position": value}},
+    }
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(raw))
+    meta = load_discord_metadata_for_resume(tmp_path, configured_guild_id="111")
+    assert meta is not None
+    assert meta.channel_metadata["2"].position is None
+    del raw["channel_metadata"]["2"]["position"]
+    (tmp_path / "discord_metadata.json").write_text(json.dumps(raw))
+    legacy = load_discord_metadata_for_resume(tmp_path, configured_guild_id="111")
+    assert legacy == meta
