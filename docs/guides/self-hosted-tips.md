@@ -11,8 +11,8 @@ This guide is for community admins who are migrating to a Stoat instance they op
 
 Self-hosted Stoat uses two configuration files:
 
-- **`Revolt.toml`** — the main configuration file. Edit with care; most settings have sensible defaults.
-- **`Revolt.overrides.toml`** — place your customizations here. Values in this file take precedence over `Revolt.toml`. Use this file so your changes survive updates.
+- **`Revolt.toml`**: the main configuration file. Edit with care; most settings have sensible defaults.
+- **`Revolt.overrides.toml`**: place your customizations here. Values in this file take precedence over `Revolt.toml`. Use this file so your changes survive updates.
 
 !!! tip "Use overrides, not the main config"
     Always make your changes in `Revolt.overrides.toml`. If you edit `Revolt.toml` directly, your changes may be overwritten when you update Stoat.
@@ -21,27 +21,30 @@ Self-hosted Stoat uses two configuration files:
 
 ## Raising Limits for Migration
 
-The default limits in Stoat are designed for general community use. When importing a large Discord server, you will likely need to raise several of them.
+The default limits in Stoat are designed for general community use. For large imports, you may
+need to raise the channel, emoji, or upload-body limits.
 
 | Setting | Default | Suggested for large migrations | Description |
 |---------|---------|-------------------------------|-------------|
 | `server_channels` | 200 | 500 | Maximum channels per server |
 | `server_emoji` | 100 | 200 | Maximum custom emoji per server |
-| `message_length` | 2000 | 4000 | Maximum characters per message |
-| `attachment_size` | 20 MB | 50 MB or higher | Maximum file upload size |
+| `body_limit_size` | 20 MB | 50 MB | Maximum request body size for uploads |
 
 Add these to your `Revolt.overrides.toml`:
 
 ```toml
 # Revolt.overrides.toml
-[limits.global]
+[features.limits.global]
 server_channels = 500
 server_emoji = 200
-message_length = 4000
-attachment_size = 52428800  # 50 MB in bytes
+body_limit_size = 50_000_000  # 50 MB in bytes
 ```
 
 Restart your Stoat instance after editing the file.
+
+Stoat v0.15.7 defines this table as
+[`[features.limits.global]`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/config/Revolt.toml#L233-L255),
+including `server_channels`, `server_emoji`, and `body_limit_size`.
 
 !!! warning "Restart required"
     Configuration changes do not take effect until you restart the Stoat services. Do this before starting the Ferry migration.
@@ -60,8 +63,8 @@ Autumn is Stoat's file storage service. Uploaded attachments, avatars, and emoji
 
 Autumn supports two storage backends:
 
-- **Local filesystem** — files stored directly on the server. Simple to set up, limited by disk space.
-- **S3-compatible storage** (Minio, AWS S3, Backblaze B2, etc.) — better for large migrations with many GB of media.
+- **Local filesystem**: files stored directly on the server. Simple to set up, limited by disk space.
+- **S3-compatible storage** (Minio, AWS S3, Backblaze B2, etc.): better for large migrations with many GB of media.
 
 For migrations with 10+ GB of media, an S3-compatible backend is recommended. Check the Stoat self-hosting documentation for Autumn configuration details.
 
@@ -78,7 +81,7 @@ For powerful self-hosted instances, you can increase concurrency to speed up mig
 | `max_concurrent_channels` | 3 | Channels processed in parallel during the message phase |
 | `max_concurrent_requests` | 5 | Total concurrent API calls across all channel workers |
 
-These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both are adjustable since v2.7.0 — try 6 concurrent channels and 12 concurrent requests on a powerful self-hosted instance:
+These two settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent calls. Both are adjustable since v2.7.0; try 6 concurrent channels and 12 concurrent requests on a powerful self-hosted instance:
 
 ```bash
 ferry migrate --export-dir ./export \
@@ -94,7 +97,7 @@ In the GUI, the same settings live under Advanced Options → **Speed**. Monitor
 
 ## Ferry GUI Storage Secret
 
-The Ferry GUI uses a storage secret to persist non-sensitive session settings (such as your Stoat API URL) between page navigations. Tokens are never part of this — they are held in memory only and are never written to disk. By default, a random secret is generated each time Ferry starts.
+The Ferry GUI uses a storage secret to persist non-sensitive session settings (such as your Stoat API URL) between page navigations. Tokens are never part of this; they are held in memory only and are never written to disk. By default, a random secret is generated each time Ferry starts.
 
 To persist settings across restarts, set the `FERRY_STORAGE_SECRET` environment variable:
 
@@ -108,7 +111,7 @@ This is optional. If not set, Ferry will work fine but you will need to re-enter
 
 ## Account Age
 
-Stoat may apply stricter rate limits to accounts that were created less than 72 hours ago. Use an established account — your own personal account that you have been using for a while — rather than a brand-new account created just for the migration.
+Stoat may apply stricter rate limits to accounts that were created less than 72 hours ago. Use an established account (your own personal account that you have been using for a while) rather than a brand-new account created just for the migration.
 
 !!! tip "Server owner is best"
     Running Ferry with the server owner's token avoids nearly all permission-related issues. The owner automatically has all permissions on all channels. Remember: Ferry uses your regular user token, not a bot token.
@@ -121,7 +124,7 @@ Stoat does not have an "Administrator" permission that grants everything at once
 
 If you are running Ferry with an account that is not the server owner, that account's role must have the following permissions on the server and on each channel.
 
-**Core set** — always required on the Ferry account's own role (`FERRY_MIN_PERMISSIONS = 1,022,361,624`, see the [pre-flight checklist](pre-flight-checklist.md#4-grant-the-required-permissions) for the authoritative bitmap). Older Ferry versions also wrote these bits to the server default; since 2.41.6 they belong to the account alone (#957):
+**Core set**: always required on the Ferry account's own role (`FERRY_MIN_PERMISSIONS = 1,022,361,624`, see the [pre-flight checklist](pre-flight-checklist.md#4-grant-the-required-permissions) for the authoritative bitmap). Older Ferry versions also wrote these bits to the server default; since 2.41.6 they belong to the account alone (#957):
 
 | Permission | Required for |
 |------------|-------------|
@@ -136,7 +139,7 @@ If you are running Ferry with an account that is not the server owner, that acco
 | Masquerade | Showing each message under its original Discord author's name and avatar |
 | React | Adding reactions |
 
-**Existing-server extras** — needed when Ferry migrates into a server it did not create (`--server-id`), so the Ferry account has to construct the structure the server owner would otherwise already own:
+**Existing-server extras**: needed when Ferry migrates into a server it did not create (`--server-id`), so the Ferry account has to construct the structure the server owner would otherwise already own:
 
 | Permission | Required for |
 |------------|-------------|
@@ -144,7 +147,7 @@ If you are running Ferry with an account that is not the server owner, that acco
 | ManageServer | Editing server settings and categories on a server Ferry does not own |
 | ManagePermissions | Setting channel permission overrides on a server Ferry does not own |
 
-The simplest approach is to use the server owner's token and avoid this list entirely — the owner has every permission automatically, in both cases.
+The simplest approach is to use the server owner's token and avoid this list entirely; the owner has every permission automatically, in both cases.
 
 ---
 
@@ -159,4 +162,4 @@ Voice channels require the Vortex (or LiveKit) service to function. Creating voi
 
 ## See Also
 
-- [Timestamp Preservation](timestamps.md) — understanding how message timestamps work after migration, and an advanced workaround for self-hosted instances.
+- [Timestamp Preservation](timestamps.md): understanding how message timestamps work after migration, and an advanced workaround for self-hosted instances.
