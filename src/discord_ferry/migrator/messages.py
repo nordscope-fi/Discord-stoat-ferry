@@ -153,6 +153,12 @@ _SKIP_TYPES = frozenset(
         "ThreadCreated",
         "Call",
         "ChannelIconChange",
+        # DCE 2.48 defines ThreadStarterMessage as 21. Older DCE output wrote that
+        # obsolete empty placeholder numerically, so skip its legacy form too.
+        "21",
+        # Discord's boost event is value 8. DCE 2.48 has no enum member for it, so
+        # MessageKind.ToString() writes the number rather than the descriptive name.
+        "8",
     }
 )
 
