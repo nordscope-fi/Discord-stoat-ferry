@@ -141,6 +141,16 @@ const FAILURE_CLASSES = new Set([
   'provider',
   'request',
 ]);
+const FAILURE_STAGES = new Set([
+  'vibe-credential',
+  'vibe-response',
+  'qwen-credential',
+  'qwen-response',
+  'claude-client',
+  'claude-child',
+  'claude-response',
+]);
+const TIMEOUT_PHASES = new Set(['connection', 'idle', 'total']);
 const PLAN_MODELS = new Map([
   ['plan-qwen', 'qwen3.8-max'],
   ['plan-sonnet', 'claude-sonnet-5'],
@@ -367,6 +377,44 @@ export function makeReviewRecord({
     summary: status === 'valid' ? result.summary : '',
     confidence: status === 'valid' ? result.confidence : null,
   };
+}
+
+export function makeReviewFailureRecord({
+  adapter,
+  slot,
+  requestedModel,
+  provider,
+  failureClass,
+  failureStage,
+  durationMs,
+  httpStatus,
+  failureReason = null,
+  timeoutPhase = null,
+}) {
+  const safeClass = FAILURE_CLASSES.has(failureClass) ? failureClass : 'unknown';
+  const safeReason = provider === 'qwen' && safeClass === 'schema'
+    ? isQwenSchemaFailureReason(failureReason)
+      ? failureReason
+      : 'response-unclassified'
+    : null;
+  const record = {
+    ...makeReviewRecord({
+      adapter,
+      slot,
+      requestedModel,
+      sessionId: null,
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+      status: safeClass === 'timeout' ? 'timed_out' : 'failed',
+    }),
+    failure_class: safeClass,
+    failure_stage: FAILURE_STAGES.has(failureStage) ? failureStage : null,
+    http_status: Number.isInteger(httpStatus) ? httpStatus : null,
+    failure_reason: safeReason,
+  };
+  if (provider === 'qwen' && safeClass === 'timeout' && TIMEOUT_PHASES.has(timeoutPhase)) {
+    record.timeout_phase = timeoutPhase;
+  }
+  return record;
 }
 
 export function reviewInputDigest(input) {
