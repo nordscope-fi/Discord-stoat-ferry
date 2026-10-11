@@ -3700,6 +3700,25 @@ async def test_forwarded_source_timestamp_keeps_explicit_unedited_state(tmp_path
     assert "*(edited)*" not in sent[0]["content"]
 
 
+async def test_numeric_system_message_aliases_are_skipped(tmp_path: Path) -> None:
+    """Historic numeric boost and thread-starter system events do not become empty posts."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    export = _make_export(
+        messages=[
+            _make_message(id="boost", content="", msg_type="8"),
+            _make_message(id="starter", content="", msg_type="21"),
+        ]
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda event: None)
+
+    assert sent == []
+    assert state.message_map == {}
+
+
 async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """SC-19: an attachment inside the forwarded block goes through the normal upload path.
 

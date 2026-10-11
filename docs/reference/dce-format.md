@@ -123,25 +123,36 @@ forum, preserving the organisational structure.
 
 ## Message Types
 
-DCE uses **string names** for message types, not the numeric IDs that the Discord API returns. Ferry
-matches on these strings:
+DCE 2.48 writes the named values in its `MessageKind` enum through
+`message.Kind.ToString()`. Ferry matches those strings:
 
 | Type string | Ferry action |
 |-------------|-------------|
 | `"Default"` | Import normally |
 | `"Reply"` | Import with reply reference to the target message |
+| `"PollResult"` | Import its exported content normally |
 | `"RecipientAdd"` | Skip |
 | `"RecipientRemove"` | Skip |
 | `"ChannelNameChange"` | Skip |
 | `"ChannelPinnedMessage"` | Import and mark for re-pinning in the PINS phase |
 | `"GuildMemberJoin"` | Skip (system noise, no useful content) |
-| `"UserPremiumGuildSubscription"` | Skip (boost notification) |
 | `"ThreadCreated"` | Skip (thread header injected by Ferry instead) |
 | `"ThreadStarterMessage"` | Import as the first message in the thread |
 | `"Call"` | Skip |
 | `"ChannelIconChange"` | Skip |
 
-Unknown type strings are logged as warnings and the message is skipped.
+Ferry also skips the legacy descriptive alias `"UserPremiumGuildSubscription"` for boost
+notifications. DCE 2.48 does not define or emit that name.
+
+Ferry skips two numeric system-message forms:
+
+| Type string | Source meaning | Ferry action |
+|-------------|----------------|--------------|
+| `"8"` | Boost notification. DCE 2.48 has no `MessageKind` name for this Discord value, so `ToString()` keeps the number. | Skip |
+| `"21"` | `ThreadStarterMessage`. Older DCE output wrote its empty placeholder as a number. | Skip |
+
+Other numeric values are not mapped as known system events. Named `"ThreadStarterMessage"` remains
+supported for exports that contain its message content.
 
 ---
 
