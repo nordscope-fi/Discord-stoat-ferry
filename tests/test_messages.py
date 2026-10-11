@@ -734,6 +734,27 @@ async def test_reply_reference_found_in_map(tmp_path: Path, mock_aiohttp: aiores
     assert "reply1" in state.message_map
 
 
+async def test_reply_reference_allows_deleted_stoat_target(tmp_path: Path) -> None:
+    """A reply is still sent when its target disappeared after Ferry mapped it."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(message_map={"discord_deleted": "stoat_deleted"})
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="reply1",
+        msg_type="Reply",
+        content="replying to a deleted message",
+        reference=DCEReference(message_id="discord_deleted"),
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert sent[0]["replies"] == [
+        {"id": "stoat_deleted", "mention": False, "fail_if_not_exists": False}
+    ]
+
+
 async def test_reply_reference_not_in_map_is_silently_skipped(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -2356,7 +2377,9 @@ async def test_cross_channel_reply_found_in_map_uses_reply(tmp_path: Path) -> No
         await run_messages(config, state, [export], lambda e: None)
 
     # Should use the proper stoat reply, not text fallback.
-    assert sent_kwargs[0]["replies"] == [{"id": "stoat_orig", "mention": False}]
+    assert sent_kwargs[0]["replies"] == [
+        {"id": "stoat_orig", "mention": False, "fail_if_not_exists": False}
+    ]
     assert "[Replying to message in #" not in sent_kwargs[0]["content"]
 
 
@@ -4120,7 +4143,7 @@ async def test_a_reply_resolves_against_the_channel_local_map_first(tmp_path: Pa
                 channel_result=result,
             )
 
-    assert sent[0]["replies"] == [{"id": "LOCAL", "mention": False}], (
+    assert sent[0]["replies"] == [{"id": "LOCAL", "mention": False, "fail_if_not_exists": False}], (
         f"the reply resolved against the shared map, not the channel's own. "
         f"got {sent[0]['replies']}"
     )
@@ -4182,7 +4205,7 @@ async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> N
                 channel_result=None,
             )
 
-    assert sent[0]["replies"] == [{"id": "SHARED", "mention": False}]
+    assert sent[0]["replies"] == [{"id": "SHARED", "mention": False, "fail_if_not_exists": False}]
 
 
 # ---------------------------------------------------------------------------

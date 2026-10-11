@@ -1568,7 +1568,7 @@ async def _process_message(
         if ref_stoat_id is None:
             ref_stoat_id = state.message_map.get(msg.reference.message_id)
         if ref_stoat_id:
-            replies.append({"id": ref_stoat_id, "mention": False})
+            replies.append({"id": ref_stoat_id, "mention": False, "fail_if_not_exists": False})
             if channel_result is not None:
                 channel_result.replies_linked += 1
             else:
