@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,20 @@ _APP_JWT_CLOCK_SKEW = timedelta(minutes=1)
 _INSTALLATION_REFRESH = timedelta(minutes=1)
 _TITLE_LIMIT = 200
 _SPACE = re.compile(r"\s+")
+logger = logging.getLogger(__name__)
+
+
+def _log_github_failure(failure_class: str, status_code: int | None) -> None:
+    """Record bounded GitHub readiness metadata without exception details."""
+
+    logger.warning(
+        "github_readiness_failure",
+        extra={
+            "event": "github_readiness_failure",
+            "failure_class": failure_class,
+            "status_code": status_code,
+        },
+    )
 
 
 class GitHubAuthenticationError(RuntimeError):
@@ -232,6 +247,7 @@ class FeedbackGitHub:
                 algorithm="RS256",
             )
         except (jwt.PyJWTError, TypeError, ValueError):
+            _log_github_failure("GitHubAuthenticationError", None)
             raise GitHubAuthenticationError("GitHub App signing failed") from None
         register_secret("github_app_jwt", encoded, fully_mask=True)
         return encoded
@@ -241,10 +257,12 @@ class FeedbackGitHub:
         try:
             value = await response.json(content_type=None)
         except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            _log_github_failure("GitHubAuthenticationError", response.status)
             raise GitHubAuthenticationError(
                 "GitHub returned an invalid credential response"
             ) from exc
         if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+            _log_github_failure("GitHubAuthenticationError", response.status)
             raise GitHubAuthenticationError("GitHub returned an invalid credential response")
         return cast("dict[str, object]", value)
 
@@ -299,6 +317,7 @@ class FeedbackGitHub:
                 allow_redirects=False,
             ) as response:
                 if not 200 <= response.status < 300:
+                    _log_github_failure("GitHubReadinessError", response.status)
                     raise GitHubReadinessError(f"GitHub {subject} check failed")
                 try:
                     return await self._json_object(response)
@@ -308,7 +327,8 @@ class FeedbackGitHub:
                     ) from None
         except GitHubReadinessError:
             raise
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            _log_github_failure(type(exc).__name__, None)
             raise GitHubReadinessError(f"GitHub {subject} check is unavailable") from None
 
     async def _check_installation_permissions(self) -> None:
@@ -356,13 +376,15 @@ class FeedbackGitHub:
                 headers=self._authorization(self._app_jwt(now)),
             ) as response:
                 if not 200 <= response.status < 300:
+                    _log_github_failure("GitHubAuthenticationError", response.status)
                     raise GitHubAuthenticationError(
                         f"GitHub installation authentication returned HTTP {response.status}"
                     )
                 data = await self._json_object(response)
         except GitHubAuthenticationError:
             raise
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            _log_github_failure(type(exc).__name__, None)
             raise GitHubAuthenticationError(
                 "GitHub installation authentication is unavailable"
             ) from None
@@ -517,6 +539,7 @@ class FeedbackGitHub:
                 allow_redirects=False,
             ) as response:
                 if not 200 <= response.status < 300:
+                    _log_github_failure("GitHubReadinessError", response.status)
                     raise GitHubReadinessError(
                         f"GitHub category lookup returned HTTP {response.status}"
                     )
@@ -528,7 +551,8 @@ class FeedbackGitHub:
                     ) from None
         except GitHubReadinessError:
             raise
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            _log_github_failure(type(exc).__name__, None)
             raise GitHubReadinessError("GitHub category lookup is unavailable") from None
         if page.get("errors"):
             raise GitHubReadinessError("GitHub category lookup returned GraphQL errors")

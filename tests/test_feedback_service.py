@@ -46,6 +46,7 @@ from discord_ferry.feedback_service.challenge import (
 )
 from discord_ferry.feedback_service.config import ConfigError, ServiceConfig
 from discord_ferry.feedback_service.github import (
+    GitHubAuthenticationError,
     GitHubDeliveryError,
     GitHubDeliveryUncertainError,
     GitHubReadinessError,
@@ -549,6 +550,55 @@ async def test_ready_maps_every_dependency_failure_to_private_503(
         assert "credential-marker" not in body
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "failure_class"),
+    [
+        (
+            GitHubReadinessError(
+                "HTTP 503 response body token=ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+            ),
+            "GitHubReadinessError",
+        ),
+        (
+            GitHubAuthenticationError(
+                "connection failure token=ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+            ),
+            "GitHubAuthenticationError",
+        ),
+    ],
+    ids=["readiness-http", "authentication-non-http"],
+)
+async def test_ready_logs_only_failure_class_and_status(
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+    failure: Exception,
+    failure_class: str,
+) -> None:
+    from discord_ferry.feedback_service.app import ServiceJSONFormatter, create_app
+
+    token_marker = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    github = _ReadyGitHub(failure)
+    client = TestClient(TestServer(create_app(_service_config(tmp_path), github=github)))
+    caplog.set_level(logging.WARNING, logger="discord_ferry.feedback_service.app")
+    await client.start_server()
+    try:
+        response = await client.get("/ready")
+        assert response.status == 503
+    finally:
+        await client.close()
+
+    record = next(
+        record for record in caplog.records if getattr(record, "event", None) == "github_unready"
+    )
+    rendered = ServiceJSONFormatter().format(record)
+    audited = "\n".join((str(record.__dict__), record.getMessage(), rendered, caplog.text))
+    assert record.failure_class == failure_class
+    assert record.status_code == 503
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert token_marker not in audited
 
 
 async def test_ready_refreshes_expired_success(tmp_path: object) -> None:
@@ -1577,6 +1627,8 @@ def test_log_privacy_formatter_emits_only_bounded_metadata() -> None:
         "state": None,
         "destination_kind": None,
         "status_class": "2xx",
+        "failure_class": None,
+        "status_code": None,
         "duration_ms": 12,
     }
     assert "198.51.100.200" not in output.getvalue()
