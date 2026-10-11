@@ -1,7 +1,7 @@
 # Export Your Discord Server
 
 !!! tip "Using 1-Click Migration?"
-    If you're using Ferry's 1-Click Migration mode, you don't need to manually run DiscordChatExporter — Ferry handles it automatically. This guide is for **offline mode** only.
+    If you're using Ferry's 1-Click Migration mode, you don't need to manually run DiscordChatExporter; Ferry handles it automatically. This guide is for **offline mode** only.
 
 This page walks you through exporting your Discord server's content using DiscordChatExporter (DCE).
 The export is the raw material that Discord Ferry uses to migrate your server. If the export is
@@ -21,7 +21,7 @@ correctly.
 
 ---
 
-## Step 1 — Download DiscordChatExporter
+## Step 1: Download DiscordChatExporter
 
 DiscordChatExporter (DCE) is a free, open-source tool that reads Discord's API and saves your
 server content to data files (in JSON format, which Ferry can read). Check the [releases page](https://github.com/Tyrrrz/DiscordChatExporter/releases) for the latest version.
@@ -30,10 +30,12 @@ server content to data files (in JSON format, which Ferry can read). Check the [
 2. Click **Releases** in the right sidebar.
 3. Download the version for your platform:
 
-| Platform | File to download |
-|----------|-----------------|
-| Windows (recommended) | `DiscordChatExporter.zip` — includes a GUI (graphical) app |
-| macOS / Linux | `DiscordChatExporter.Cli.zip` — command-line only |
+| Platform | Command-line file to download |
+|----------|--------------------------------|
+| Windows x64 | `DiscordChatExporter.Cli.win-x64.zip` |
+| macOS, Apple silicon | `DiscordChatExporter.Cli.osx-arm64.zip` |
+| macOS, Intel | `DiscordChatExporter.Cli.osx-x64.zip` |
+| Linux x64 | `DiscordChatExporter.Cli.linux-x64.zip` |
 
 4. Unzip the downloaded file to a folder you can easily find, such as `C:\Tools\DCE` on Windows
    or `~/Tools/DCE` on macOS/Linux.
@@ -42,13 +44,15 @@ server content to data files (in JSON format, which Ferry can read). Check the [
 
 !!! info "GUI vs CLI"
     The Windows GUI app is easier to use for one-time exports, but Discord Ferry's instructions
-    use the CLI (command-line interface — where you type commands into a text window) version because it gives you the exact flags needed.
+    use the CLI (command-line interface, where you type commands into a text window) version because it gives you the exact flags needed.
     The CLI is available on all platforms. If you are on Windows and prefer a graphical app,
     ensure you still apply the settings described in Step 3.
 
+These file names are from the [DiscordChatExporter 2.48 release assets](https://github.com/Tyrrrz/DiscordChatExporter/releases/tag/2.48).
+
 ---
 
-## Step 2 — Get Your Discord User Token
+## Step 2: Get Your Discord User Token
 
 Your Discord user token (a long string of letters, numbers, and symbols) acts like a temporary
 password that lets DCE read your server on your behalf. This is different from a bot token.
@@ -58,7 +62,7 @@ password that lets DCE read your server on your behalf. This is different from a
     or missing entirely if you use a bot token. You must use your **user** token.
 
 !!! warning "Never share your token with anyone"
-    Your user token gives complete access to your Discord account — the same as your email and
+    Your user token gives complete access to your Discord account, the same as your email and
     password combined. Do not paste it into chat, DMs, screenshots, or support tickets. Treat it
     like your bank password. If you accidentally share it, go to Discord Settings and change your
     password immediately; this invalidates the old token.
@@ -103,7 +107,7 @@ These steps use a web browser. Chrome, Firefox, and Edge all work.
 
 ---
 
-## Step 3 — Find Your Server ID
+## Step 3: Find Your Server ID
 
 1. Open Discord (browser or desktop app).
 2. Go to **User Settings** (gear icon near the bottom-left) → **Advanced**.
@@ -118,9 +122,9 @@ The server ID is a long number, such as `987654321012345678`.
 
 ---
 
-## Step 4 — Run the Export
+## Step 4: Run the Export
 
-!!! warning "You MUST include `--markdown false` and `--media` — read this before running anything"
+!!! warning "You MUST include `--markdown false` and `--media`; read this before running anything"
     - **`--markdown false`**: Without this flag, DCE replaces raw mention data like `<@123456>`
       with plain text like `@Username`. Discord Ferry uses the raw IDs to remap mentions to Stoat
       users. If the IDs are gone, all mentions will appear as plain text in the migrated server.
@@ -128,7 +132,7 @@ The server ID is a long number, such as `987654321012345678`.
       the actual files. Discord CDN links expire within approximately 24 hours. Any attachment
       link that was not downloaded will be permanently broken in the migrated server.
 
-Open a terminal — the text command window (on Windows: Command Prompt or PowerShell; on macOS/Linux: the Terminal app). Navigate to the folder where you unzipped DCE.
+Open a terminal, the text command window (on Windows: Command Prompt or PowerShell; on macOS/Linux: the Terminal app). Navigate to the folder where you unzipped DCE.
 
 Run the following command, replacing the two placeholders:
 
@@ -166,13 +170,13 @@ DiscordChatExporter.Cli exportguild --token YOUR_TOKEN_HERE -g YOUR_SERVER_ID --
 ```
 
 !!! info "What each flag does"
-    - `exportguild` — exports every channel in the server
-    - `--media` — downloads all attachments, images, and files locally
-    - `--reuse-media` — skips re-downloading files already saved (useful if you resume a failed export)
-    - `--markdown false` — preserves raw mention syntax needed for migration
-    - `--format Json` — saves data as JSON (a standard data format), which Discord Ferry reads
-    - `--include-threads All` — includes public and private thread history
-    - `--output ./export/` — saves everything into a folder called `export` in the current directory
+    - `exportguild`: exports every channel in the server
+    - `--media`: downloads all attachments, images, and files locally
+    - `--reuse-media`: skips re-downloading files already saved (useful if you resume a failed export)
+    - `--markdown false`: preserves raw mention syntax needed for migration
+    - `--format Json`: saves data as JSON (a standard data format), which Discord Ferry reads
+    - `--include-threads All`: includes public and private thread history
+    - `--output ./export/`: saves everything into a folder called `export` in the current directory
 
 The export will print progress to the terminal. Let it run until it prints a completion message.
 
@@ -180,7 +184,7 @@ The export will print progress to the terminal. Let it run until it prints a com
 
 ---
 
-## Step 5 — Verify the Export
+## Step 5: Verify the Export
 
 When the export finishes, open the `export` folder. You should see:
 
@@ -224,15 +228,17 @@ It depends on your server's size and activity level.
 - Large or media-heavy servers: potentially many hours
 
 DCE exports one channel at a time. If you stop it partway through, run it again with the same
-`--output` folder — the `--reuse-media` flag means already-downloaded files will not be
+`--output` folder; the `--reuse-media` flag means already-downloaded files will not be
 re-fetched.
 
 ### Can I export just some channels?
 
-Yes. Use `exportchannel` instead of `exportguild` and provide specific channel IDs:
+Yes. Use `export` instead of `exportguild` and provide specific channel IDs. The DCE 2.48 source
+declares this command as `[Command("export", Description = "Exports one or multiple channels.")]` in
+[`ExportChannelsCommand`](https://github.com/Tyrrrz/DiscordChatExporter/blob/905489b01b5523719082275c34c232fc47f827c6/DiscordChatExporter.Cli/Commands/ExportChannelsCommand.cs#L12-L25).
 
 ```
-DiscordChatExporter.Cli exportchannel \
+DiscordChatExporter.Cli export \
   --token YOUR_TOKEN_HERE \
   -c CHANNEL_ID_1 CHANNEL_ID_2 CHANNEL_ID_3 \
   --media \
@@ -247,7 +253,7 @@ channel name and choose **Copy Channel ID**.
 
 ### What about direct messages (DMs)?
 
-Discord Ferry migrates server content only — channels, messages, roles, and emoji. DMs are
+Discord Ferry migrates server content only: channels, messages, roles, and emoji. DMs are
 account-specific and are not migrated. Stoat does not have an equivalent import feature for DMs.
 
 ### I get an error about rate limits. What do I do?
@@ -260,7 +266,7 @@ rate limits or HTTP 429:
 3. Re-run the same command. The `--reuse-media` flag ensures already-downloaded content is not
    re-fetched.
 
-For very large servers, consider exporting in smaller batches using `exportchannel` with a subset
+For very large servers, consider exporting in smaller batches using `export` with a subset
 of channel IDs at a time.
 
 ### The export finished but some channels are missing.
