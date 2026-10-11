@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.8] - 2026-10-11
+
+### Fixed
+
+- Open all five tool pages before tab storage connects. Saved tokens remain available after connection, and entered tokens take priority (#1194).
+- Move Apple silicon release builds to macOS 15. Inspect minimum-version fields and executable deployment targets in the built and extracted application without changing the promised operating-system minimum (#1191).
+- Apply age restriction when creating a server, preserve reused-server diagnostics, and bound server, role and channel names (#1168, #1182).
+- Send role colours as CSS strings during build, migration and repair, while keeping stored blueprint colours as integers (#1183).
+- Split message content, markers and reactions within Stoat's UTF-8 byte limit. Bound embed descriptions by bytes and URL fields by characters (#1185, #1186).
+- Stop on malformed channel exports or message containers. Report eager and streamed message errors with their source filename and message identifier or ordinal (#1170, #1198).
+- Escape literal percent signs in exporter output paths and download the pinned asset directly, retaining existing checksum, size and archive checks (#1189, #1190).
+- Store desktop output and interface settings in writable per-user directories, preserving saved output choices (#1195).
+- Keep the local interface available after native startup failure and request one browser fallback after readiness. Preserve ordinary window closure, explicit shutdown and browser-only mode (#1196).
+
 ## [2.43.7] - 2026-10-11
 
 ### Fixed
