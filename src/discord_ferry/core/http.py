@@ -457,7 +457,7 @@ def _scheme_map() -> tuple[dict[str, str], dict[str, str]]:
     return _proxy_scan
 
 
-def _is_bypassed(host: str, source: str, env: dict[str, str]) -> bool:
+def _is_bypassed(host: str, authority: str, source: str, env: dict[str, str]) -> bool:
     """The two bypass lists UNION, they do not alternate.
 
     Alternation discards an explicitly-set NO_PROXY whenever the proxy came
@@ -465,10 +465,14 @@ def _is_bypassed(host: str, source: str, env: dict[str, str]) -> bool:
     proxied anyway. proxy_bypass_environment is safe to call unconditionally:
     it returns False when the 'no' key is absent (urllib/request.py:2567-2570).
 
-    Memoised by (host, source), and MISSES are memoised too, or every request to
-    a bypassed host pays the syscall.
+    The environment list receives the host plus an explicit URL port, preserving
+    a port-qualified NO_PROXY entry without passing target userinfo. The OS list
+    keeps the bare host, which is the input its platform getters already receive.
+
+    Memoised by (authority, source), and MISSES are memoised too, or every
+    request to a bypassed host pays the syscall.
     """
-    key = (host, source)
+    key = (authority, source)
     if key not in _bypass_memo:
         # Silenced for typing only: typeshed does not stub
         # proxy_bypass_environment. Neither it nor getproxies_environment is in
@@ -477,7 +481,7 @@ def _is_bypassed(host: str, source: str, env: dict[str, str]) -> bool:
         # urllib/request.py:2557 on 3.12.12), unlike the platform getters
         # _os_proxies reaches by getattr, so no fallback is needed here.
         _bypass_memo[key] = bool(
-            urllib.request.proxy_bypass_environment(host, env)  # type: ignore[attr-defined]
+            urllib.request.proxy_bypass_environment(authority, env)  # type: ignore[attr-defined]
         ) or (source == "os" and _os_proxy_bypass(host))
     return _bypass_memo[key]
 
@@ -536,7 +540,11 @@ def resolve_proxy_or_raise(url: str | URL) -> ProxyChoice | None:
     except (ValueError, TypeError):
         return None
 
-    if _is_bypassed(target.host or "", source, env):
+    host = target.host or ""
+    authority = f"[{host}]" if ":" in host else host
+    if target.explicit_port is not None:
+        authority = f"{authority}:{target.explicit_port}"
+    if _is_bypassed(host, authority, source, env):
         return None
     return ProxyChoice(url=stripped, authorization=authorization, source=source)
 
