@@ -5,6 +5,8 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from aioresponses import aioresponses
 
 from discord_ferry.core.http import new_session
@@ -43,6 +45,34 @@ async def test_upload_to_autumn_success(tmp_path: Path, mock_aiohttp: aiorespons
         result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
 
     assert result == "file123"
+
+
+async def test_upload_to_autumn_preserves_unicode_filename(tmp_path: Path) -> None:
+    """Autumn receives the original Unicode filename in its multipart metadata."""
+    filename = "guést ☃ name.png"
+    file = tmp_path / filename
+    file.write_bytes(b"x" * 100)
+    received_bodies: list[bytes] = []
+
+    async def receive_upload(request: web.Request) -> web.Response:
+        received_bodies.append(await request.read())
+        return web.json_response({"id": "file123"})
+
+    app = web.Application()
+    app.router.add_post("/attachments", receive_upload)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            result = await upload_to_autumn(
+                session, str(server.make_url("")), "attachments", file, TOKEN
+            )
+    finally:
+        await server.close()
+
+    assert result == "file123"
+    assert b'filename="gu\xc3\xa9st \xe2\x98\x83 name.png"' in received_bodies[0]
+    assert b"gu%C3%A9st%20%E2%98%83%20name.png" not in received_bodies[0]
 
 
 async def test_upload_to_autumn_file_not_found(tmp_path: Path, mock_aiohttp: aioresponses) -> None:

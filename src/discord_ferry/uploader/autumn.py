@@ -194,7 +194,9 @@ async def upload_to_autumn(
     headers = {"x-session-token": token}
 
     for attempt in range(MAX_RETRIES):
-        form = aiohttp.FormData()
+        # Autumn stores the multipart filename verbatim. aiohttp's default quotes Unicode as
+        # percent escapes, so use raw UTF-8 to preserve names from Discord exports.
+        form = aiohttp.FormData(quote_fields=False)
         fh = file_path.open("rb")
         try:
             form.add_field("file", fh, filename=file_path.name)
