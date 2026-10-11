@@ -400,10 +400,10 @@ def _python_matrix_job() -> str:
     return "\n".join(line for line in lines[start:end] if not line.strip().startswith("#"))
 
 
-def test_python_matrix_keeps_required_contract_and_runs_four_workers() -> None:
+def test_python_matrix_supports_python_314_and_runs_four_workers() -> None:
     job = _python_matrix_job()
     for required in (
-        'python-version: ["3.11", "3.12", "3.13"]',
+        'python-version: ["3.11", "3.12", "3.13", "3.14"]',
         "runs-on: ${{ matrix.os }}",
         "os: [ubuntu-latest]",
         'include:\n          - os: windows-latest\n            python-version: "3.12"',
@@ -442,10 +442,10 @@ def test_ci_gates_job_fetches_full_history() -> None:
 
 
 def test_ci_gates_job_is_not_in_the_python_matrix() -> None:
-    """One run per pull request, not three.
+    """One run per pull request, rather than one run for every matrix job.
 
-    lint-and-test runs a three-version matrix. A step there would run the sweep
-    three times and make three gh calls for one answer.
+    lint-and-test has five jobs, four Linux interpreter versions and one Windows
+    job. A step there would run the sweep five times and make five GitHub calls.
     """
     job = _gates_job()
     assert "strategy:" not in job
