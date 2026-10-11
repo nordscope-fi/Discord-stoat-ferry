@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,7 +25,6 @@ from discord_ferry.exporter.runner import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
 
 # ---------- Helpers ----------
 
@@ -326,6 +326,91 @@ class TestSuccessCountWarning:
                 ),
             )
         ]
+
+
+class TestDceFailureOutput:
+    @pytest.mark.asyncio
+    async def test_partial_channel_failure_names_channel_and_reason(self, tmp_path: Path) -> None:
+        """DCE 2.48 writes partial failures to stderr while exiting successfully."""
+        fixture = Path(__file__).parent / "fixtures" / "dce_2_48" / "failed-channel.stderr.txt"
+        process = _make_process(
+            [b"Exporting 2 channel(s)...\n", b"Successfully exported 1 channel(s).\n"],
+            stderr_lines=fixture.read_bytes().splitlines(keepends=True),
+        )
+        events: list[MigrationEvent] = []
+
+        with patch(
+            "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ):
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+        failures = [event for event in events if event.status == "error"]
+        assert len(failures) == 1
+        assert "restricted" in failures[0].message
+        assert "failed: forbidden" in failures[0].message
+        assert failures[0].channel_name == "Discord Ferry Test / restricted"
+
+    @pytest.mark.asyncio
+    async def test_partial_channel_failure_prints_without_verbose(self, tmp_path: Path) -> None:
+        """The real runner event reaches the non-verbose CLI error path."""
+        from io import StringIO
+
+        from rich.console import Console
+
+        from discord_ferry.cli import _ProgressTracker
+
+        fixture = Path(__file__).parent / "fixtures" / "dce_2_48" / "failed-channel.stderr.txt"
+        process = _make_process(
+            [b"Exporting 2 channel(s)...\n", b"Successfully exported 1 channel(s).\n"],
+            stderr_lines=fixture.read_bytes().splitlines(keepends=True),
+        )
+        output = StringIO()
+        fake_console = Console(file=output, force_terminal=False, color_system=None)
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("discord_ferry.cli.console", fake_console),
+        ):
+            tracker = _ProgressTracker(verbose=False)
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", tracker.on_event)
+
+        assert tracker.error_count == 1
+        assert "restricted" in output.getvalue()
+        assert "failed: forbidden" in output.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_fatal_export_reports_exception_message_not_last_stack_frame(
+        self, tmp_path: Path
+    ) -> None:
+        """DCE 2.48 prints the cause before the trailing CliFx stack frame."""
+        from discord_ferry.errors import ExportError
+
+        fixture = Path(__file__).parent / "fixtures" / "dce_2_48" / "fatal-export.stderr.txt"
+        process = _make_process(
+            [],
+            returncode=1,
+            stderr_lines=fixture.read_bytes().splitlines(keepends=True),
+        )
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            pytest.raises(ExportError) as excinfo,
+        ):
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", lambda _event: None)
+
+        message = str(excinfo.value)
+        assert (
+            "Request to 'https://discord.com/api/v10/guilds/42/channels' failed: forbidden."
+            in message
+        )
+        assert "CliFx.CommandLineApplication.RunAsync" not in message
 
 
 class TestStderrTaskDrainedOnCancel:
@@ -906,8 +991,8 @@ class TestStderrOverlongLine:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
     @pytest.mark.asyncio
-    async def test_many_stderr_lines_surface_only_the_last(self, tmp_path: Path) -> None:
-        """#987: with thousands of stderr lines the error carries the last, not an earlier one."""
+    async def test_many_stderr_lines_surface_the_first_error(self, tmp_path: Path) -> None:
+        """The leading DCE error is useful; its trailing stack frames are not."""
         from discord_ferry.errors import ExportError
 
         lines = [f"error line {i}\n".encode() for i in range(10_000)]
@@ -924,15 +1009,13 @@ class TestStderrOverlongLine:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         message = str(excinfo.value)
-        assert message.endswith("error line 9999")
-        assert "error line 9998" not in message
-        assert "error line 0" not in message
+        assert message.endswith("error line 0")
+        assert "error line 1" not in message
+        assert "error line 9999" not in message
 
     @pytest.mark.asyncio
-    async def test_overlong_marker_surfaces_when_it_is_the_last_stderr_line(
-        self, tmp_path: Path
-    ) -> None:
-        """#987: a normal line followed by an over-long one reports the truncation marker."""
+    async def test_overlong_line_does_not_replace_an_earlier_error(self, tmp_path: Path) -> None:
+        """A stack-frame-sized line cannot replace the useful error that preceded it."""
         from discord_ferry.errors import ExportError
 
         process = _make_process([], returncode=1)
@@ -953,8 +1036,8 @@ class TestStderrOverlongLine:
             await run_dce_export(cfg, tmp_path / "dce", lambda _e: None)
 
         message = str(excinfo.value)
-        assert "exceeded 64 KiB" in message
-        assert "an earlier error" not in message
+        assert "an earlier error" in message
+        assert "exceeded 64 KiB" not in message
 
     @pytest.mark.asyncio
     async def test_stderr_memory_does_not_grow_with_line_count(self, tmp_path: Path) -> None:
@@ -1000,7 +1083,7 @@ class TestStderrOverlongLine:
             tracemalloc.stop()
 
         assert produced == total  # the reader really consumed every line
-        assert "error line 100000" in str(excinfo.value)
+        assert "error line 000001" in str(excinfo.value)
         assert peak - baseline < 2_000_000
 
 
