@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.4] - 2026-10-11
+
+### Fixed
+
+- Refuse public plain HTTP and redirects before sending Stoat credentials through shared API requests, token verification, Autumn uploads, deep upload probes, or rate-limit probes. HTTP remains available for localhost names and private or loopback IP literals (#974).
+
 ## [2.43.3] - 2026-10-11
 
 ### Fixed
