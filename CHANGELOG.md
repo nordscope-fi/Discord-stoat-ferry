@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- Correct the CI dependency-install count in the project configuration comment (#1273).
+
 ## [2.43.12] - 2026-10-11
 
 ### Fixed
