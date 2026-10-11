@@ -109,7 +109,6 @@ These limitations relate to platform-level features that either work differently
 | Welcome Screen | Not migrated | None |
 | Soundboard | Not supported by Stoat | None |
 | Role icons | Image icons are migrated (since v2.5.0, requires a Discord token). Emoji-only role icons cannot be migrated. | None for emoji icons — Stoat only supports image icons |
-| Animated emoji | Static fallback uploaded where possible; some animated emoji may be skipped | None — Stoat does not support animated emoji |
 | Server boosts | Not applicable — Stoat uses a different model | None |
 
 ---
