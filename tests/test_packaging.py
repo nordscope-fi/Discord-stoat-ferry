@@ -439,7 +439,7 @@ def test_release_workflow_checks_built_and_extracted_macos_manifests(
         (extracted_plist, extracted_value),
     ):
         plist.parent.mkdir(parents=True, exist_ok=True)
-        plist.write_text(f"{value}\n", encoding="utf-8")
+        plist.write_text(f"{value}\n", encoding="utf-8", newline="\n")
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -451,6 +451,7 @@ def test_release_workflow_checks_built_and_extracted_macos_manifests(
         'if [ "$value" = "__ABSENT__" ]; then exit 1; fi\n'
         "printf '%s\\n' \"$value\"\n",
         encoding="utf-8",
+        newline="\n",
     )
     plutil.chmod(0o755)
     calls = tmp_path / "plutil-calls.log"
@@ -477,6 +478,37 @@ def test_release_workflow_checks_built_and_extracted_macos_manifests(
         "dist/Ferry.app/Contents/Info.plist",
         "_verify/Ferry.app/Contents/Info.plist",
     ]
+
+
+def test_macos_manifest_fixture_works_with_windows_default_newlines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plist fixture data must not inherit Windows text-file line endings."""
+    write_text = Path.write_text
+
+    def windows_write_text(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        return write_text(
+            path,
+            data,
+            encoding=encoding,
+            errors=errors,
+            newline="\r\n" if newline is None and path.suffix == ".plist" else newline,
+        )
+
+    monkeypatch.setattr(Path, "write_text", windows_write_text)
+    test_release_workflow_checks_built_and_extracted_macos_manifests(
+        tmp_path,
+        "__ABSENT__",
+        "__ABSENT__",
+        0,
+        "LSMinimumSystemVersion: built not declared, extracted not declared",
+    )
 
 
 def test_release_workflow_extracts_modern_and_legacy_macos_minimums() -> None:
