@@ -1972,6 +1972,8 @@ def _merge_forwarded(msg: DCEMessage) -> DCEMessage:
         attachments=[*msg.attachments, *fwd.attachments],
         embeds=[*msg.embeds, *fwd.embeds],
         stickers=[*msg.stickers, *fwd.stickers],
+        timestamp=fwd.timestamp or msg.timestamp,
+        timestamp_edited=fwd.timestamp_edited if fwd.timestamp else msg.timestamp_edited,
         # A forward's reference points at its SOURCE; that is not a reply relationship,
         # and the reply step downstream treats any reference as one. Left set, it counts
         # the forward toward reply fidelity, makes Stoat render a reply-quote whenever
