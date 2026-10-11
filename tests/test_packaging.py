@@ -8,9 +8,16 @@ full build-and-inspect smoke test exists.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
+import sys
+import textwrap
 import tomllib
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -194,6 +201,102 @@ def test_release_workflow_can_be_dispatched_manually() -> None:
         "release.yml must build on PRs that touch the packaging path"
     )
     assert "ferry.spec" in triggers, "the PR trigger must watch ferry.spec"
+
+
+def _windows_smoke_step() -> str:
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    marker = "- name: Smoke-test the built binary"
+    assert marker in workflow, "Windows binary smoke step not found"
+    return workflow.split(marker, 1)[1].split("\n      - name:", 1)[0]
+
+
+def _run_with_actions_runner_pwsh_wrapper(
+    pwsh: str, tmp_path: Path, name: str, body: str
+) -> subprocess.CompletedProcess[str]:
+    script = tmp_path / f"{name}.ps1"
+    script.write_text(
+        "$ErrorActionPreference = 'stop'\n"
+        f"{body}\n"
+        "if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }\n",
+        encoding="utf-8",
+    )
+    quoted_path = str(script).replace("'", "''")
+    return subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", f". '{quoted_path}'"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_windows_smoke_cleanup_status_is_diagnostic_not_authoritative() -> None:
+    """A best-effort process-tree cleanup must not override passed smoke assertions."""
+    smoke_step = _windows_smoke_step()
+    cleanup = smoke_step.split("# Kill the whole tree:", 1)[1].split("if (-not $served)", 1)[0]
+
+    expected_in_order = (
+        "$cleanupOutput = taskkill /T /F /PID $proc.Id 2>&1",
+        "$cleanupExit = $LASTEXITCODE",
+        "if ($cleanupExit -ne 0)",
+        'Write-Host "GUI process tree cleanup returned $cleanupExit"',
+        "$cleanupOutput | ForEach-Object { Write-Host $_ }",
+        "$global:LASTEXITCODE = 0",
+    )
+    positions = [cleanup.find(fragment) for fragment in expected_in_order]
+    assert all(position >= 0 for position in positions), (
+        "Windows cleanup must capture taskkill output/status, report a nonzero cleanup, "
+        "then clear the non-authoritative native exit status"
+    )
+    assert positions == sorted(positions), "Windows cleanup status handling is out of order"
+
+
+def test_windows_smoke_cleanup_reset_preserves_real_assertion_failures(tmp_path: Path) -> None:
+    """Exercise the workflow reset through PowerShell and the runner's exact exit wrapper."""
+    pwsh = os.environ.get("FERRY_TEST_PWSH") or shutil.which("pwsh")
+    if pwsh is None and sys.platform != "win32":
+        pytest.skip("PowerShell is required on Windows CI and unavailable on this host")
+    assert pwsh is not None, "Windows CI must provide pwsh for the release workflow contract test"
+
+    smoke_step = _windows_smoke_step()
+    cleanup = textwrap.dedent(
+        "$cleanupOutput = taskkill"
+        + smoke_step.split("$cleanupOutput = taskkill", 1)[1].split("if (-not $served)", 1)[0]
+    )
+    taskkill = "$cleanupOutput = taskkill /T /F /PID $proc.Id 2>&1"
+    fake_cleanup = (
+        "$cleanupOutput = & $pwsh -NoLogo -NoProfile -NonInteractive "
+        "-Command '\"mock cleanup diagnostic\"; exit 5' 2>&1"
+    )
+    assert taskkill in cleanup, "cleanup capture command not found in the Windows smoke step"
+    cleanup = cleanup.replace(taskkill, fake_cleanup, 1)
+    setup = "$pwsh = (Get-Process -Id $PID).Path\n"
+
+    stale = _run_with_actions_runner_pwsh_wrapper(
+        pwsh,
+        tmp_path,
+        "stale-cleanup-status",
+        setup + "$served = $true\n& $pwsh -NoLogo -NoProfile -NonInteractive -Command 'exit 5'\n",
+    )
+    assert stale.returncode != 0, stale.stdout + stale.stderr
+
+    fixed = _run_with_actions_runner_pwsh_wrapper(
+        pwsh,
+        tmp_path,
+        "cleanup-status-reset",
+        setup + "$served = $true\n" + cleanup + "if (-not $served) { exit 1 }\n",
+    )
+    assert fixed.returncode == 0, fixed.stdout + fixed.stderr
+    assert "GUI process tree cleanup returned 5" in fixed.stdout
+    assert "mock cleanup diagnostic" in fixed.stdout
+
+    real_failure = _run_with_actions_runner_pwsh_wrapper(
+        pwsh,
+        tmp_path,
+        "real-smoke-failure",
+        setup + "$served = $false\n" + cleanup + "if (-not $served) { exit 1 }\n",
+    )
+    assert real_failure.returncode == 1, real_failure.stdout + real_failure.stderr
 
 
 def test_ferry_spec_keeps_onefile_off_darwin() -> None:
