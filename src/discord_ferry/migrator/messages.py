@@ -2186,6 +2186,7 @@ async def _upload_attachments(
                 config.token,
                 state.upload_cache,
                 config.upload_delay,
+                filename=att.file_name,
                 verify_size=config.verify_uploads,
                 skip_cache=True,
             )

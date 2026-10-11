@@ -1609,6 +1609,38 @@ async def test_file_size_zero_falls_through_to_upload(
     assert state.attachments_skipped == 0
 
 
+async def test_attachment_upload_uses_original_unicode_dce_filename(tmp_path: Path) -> None:
+    """Autumn receives fileName, rather than DCE's hash-suffixed media path name."""
+    stored_path = tmp_path / "report-a1b2c3d4.pdf"
+    stored_path.write_bytes(b"data")
+    state = _make_state()
+    config = _make_config(tmp_path)
+    message = _make_message(
+        attachments=[
+            DCEAttachment(
+                id="att1",
+                url=stored_path.name,
+                file_name="résumé ☃.pdf",
+            )
+        ]
+    )
+    received_filenames: list[str] = []
+
+    async def capture_upload(*args: Any, **kwargs: Any) -> str:
+        received_filenames.append(kwargs["filename"])
+        return "autumn-id"
+
+    with patch("discord_ferry.migrator.messages.upload_with_cache", capture_upload):
+        async with aiohttp.ClientSession() as session:
+            autumn_ids, placeholders = await _upload_attachments(
+                message, config, state, session, lambda event: None
+            )
+
+    assert autumn_ids == ["autumn-id"]
+    assert placeholders == []
+    assert received_filenames == ["résumé ☃.pdf"]
+
+
 async def test_attachment_exactly_at_limit_proceeds(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:

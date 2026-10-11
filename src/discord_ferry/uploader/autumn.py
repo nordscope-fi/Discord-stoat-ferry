@@ -143,6 +143,7 @@ async def upload_to_autumn(
     file_path: Path,
     token: str,
     *,
+    filename: str | None = None,
     verify_size: bool = False,
 ) -> str:
     """Upload a file to Autumn and return the file ID.
@@ -155,6 +156,8 @@ async def upload_to_autumn(
         tag: Upload tag determining the bucket (attachments, avatars, icons, banners, emojis, etc.).
         file_path: Local path to the file to upload.
         token: Stoat session token for the x-session-token header.
+        filename: Optional name to send in multipart metadata. When omitted, use the local
+            filename.
         verify_size: When True, compare the ``size`` field in the Autumn response (if present)
             against the local file size. On a present-and-mismatched size, raises
             ``AutumnUploadError`` — the upload is treated as failed and is never cached. This is
@@ -199,7 +202,8 @@ async def upload_to_autumn(
         form = aiohttp.FormData(quote_fields=False)
         fh = file_path.open("rb")
         try:
-            form.add_field("file", fh, filename=file_path.name)
+            multipart_filename = filename if filename is not None else file_path.name
+            form.add_field("file", fh, filename=multipart_filename)
 
             async with session.post(
                 url, data=form, headers=headers, allow_redirects=False
@@ -316,6 +320,7 @@ async def upload_with_cache(
     cache: dict[str, str],
     delay: float = 0.5,
     *,
+    filename: str | None = None,
     verify_size: bool = False,
     skip_cache: bool = False,
 ) -> str:
@@ -329,6 +334,8 @@ async def upload_with_cache(
         token: Stoat session token.
         cache: Mutable dict mapping ``upload_cache_key(tag, file_path)`` -> Autumn file ID.
         delay: Seconds to sleep before uploading (rate-limit courtesy). Default 0.5s.
+        filename: Optional name to send in multipart metadata. When omitted, use the local
+            filename.
         verify_size: When True, pass size verification to the upload call. On a
             present-and-mismatched size the upload raises ``AutumnUploadError`` and is never
             cached. Best-effort — not all Autumn responses include ``size``.
@@ -358,6 +365,7 @@ async def upload_with_cache(
             tag,
             file_path,
             token,
+            filename=filename,
             verify_size=verify_size,
         )
         cache[key] = file_id
