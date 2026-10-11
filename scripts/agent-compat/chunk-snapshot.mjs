@@ -431,6 +431,7 @@ function parseWorktreeChanges(root) {
   const output = runGit(
     root,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=no'],
+    { env: { GIT_OPTIONAL_LOCKS: '0' } },
   );
   const entries = output.split('\0').filter(value => value.length > 0);
   const paths = [];
@@ -1104,7 +1105,11 @@ export function reconstructChain({ root: requestedRoot, snapshotPaths, evidenceR
     throw new SnapshotError('chunk snapshot chain is empty');
   }
   const indexBefore = activeIndexIdentity(root);
-  const worktreeBefore = runGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  const worktreeBefore = runGit(
+    root,
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { env: { GIT_OPTIONAL_LOCKS: '0' } },
+  );
   const snapshots = snapshotPaths.map(path => readRecord(
     root, evidenceRoot, path, 'chunk-snapshot',
   ));
@@ -1179,22 +1184,78 @@ export function reconstructChain({ root: requestedRoot, snapshotPaths, evidenceR
       activeIndexBefore: indexBefore,
       activeIndexAfter: activeIndexIdentity(root),
       worktreeBefore,
-      worktreeAfter: runGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+      worktreeAfter: runGit(
+        root,
+        ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+        { env: { GIT_OPTIONAL_LOCKS: '0' } },
+      ),
     };
   } finally {
     if (
       activeIndexIdentity(root) !== indexBefore
-      || runGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']) !== worktreeBefore
+      || runGit(
+        root,
+        ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+        { env: { GIT_OPTIONAL_LOCKS: '0' } },
+      ) !== worktreeBefore
     ) {
       throw new SnapshotError('chain reconstruction changed the active checkout');
     }
   }
 }
 
+function completeSnapshotForBinding(root, evidenceRoot, options) {
+  const snapshot = readRecord(root, evidenceRoot, options.snapshotPath, 'chunk-snapshot');
+  const plan = verifiedPlan(
+    root,
+    options.planPath ?? snapshot.plan_path,
+    options.approvedPlanDigestPath ?? `${evidenceRoot}/approved-plan.sha256`,
+    evidenceRoot,
+  );
+  if (
+    snapshot.plan_path !== plan.path
+    || snapshot.approved_plan_sha256 !== plan.sha256
+    || !plan.chunkOrder.includes(snapshot.chunk_issue)
+  ) {
+    throw new SnapshotError('snapshot plan identity changed');
+  }
+  const expectedTasks = plan.taskOrder.filter(
+    taskIssue => plan.taskToChunk.get(taskIssue) === snapshot.chunk_issue,
+  );
+  if (
+    !Array.isArray(snapshot.task_issues)
+    || !Array.isArray(snapshot.task_record_paths)
+    || !Array.isArray(snapshot.task_patch_digests)
+    || stableJson(snapshot.task_issues) !== stableJson(expectedTasks)
+    || snapshot.task_record_paths.length !== expectedTasks.length
+    || snapshot.task_patch_digests.length !== expectedTasks.length
+  ) {
+    throw new SnapshotError('snapshot does not contain the complete approved chunk task list');
+  }
+  for (let index = 0; index < expectedTasks.length; index += 1) {
+    const task = readRecord(
+      root,
+      evidenceRoot,
+      snapshot.task_record_paths[index],
+      'task-patch',
+    );
+    if (
+      task.task_issue !== expectedTasks[index]
+      || task.chunk_issue !== snapshot.chunk_issue
+      || task.plan_path !== plan.path
+      || task.approved_plan_sha256 !== plan.sha256
+      || task.digest_sha256 !== snapshot.task_patch_digests[index]
+    ) {
+      throw new SnapshotError('snapshot does not contain the complete approved chunk task list');
+    }
+  }
+  return snapshot;
+}
+
 export function bindReview(options) {
   const root = canonicalRoot(options.root);
   const evidenceRoot = normalizeEvidenceRoot(options.evidenceRoot ?? DEFAULT_EVIDENCE_ROOT);
-  const snapshot = readRecord(root, evidenceRoot, options.snapshotPath, 'chunk-snapshot');
+  const snapshot = completeSnapshotForBinding(root, evidenceRoot, options);
   const ensemble = readArtifact(
     root, evidenceRoot, options.ensembleArtifactPath, 'ensemble artifact',
   );
@@ -1222,7 +1283,7 @@ export function bindReview(options) {
 export function bindMarker(options) {
   const root = canonicalRoot(options.root);
   const evidenceRoot = normalizeEvidenceRoot(options.evidenceRoot ?? DEFAULT_EVIDENCE_ROOT);
-  const snapshot = readRecord(root, evidenceRoot, options.snapshotPath, 'chunk-snapshot');
+  const snapshot = completeSnapshotForBinding(root, evidenceRoot, options);
   const review = readRecord(root, evidenceRoot, options.reviewBindingPath, 'review-binding');
   const commentArtifact = readArtifact(
     root, evidenceRoot, options.postedCommentReadbackPath, 'posted comment readback',
@@ -1282,6 +1343,46 @@ const BACKUP_DESTINATIONS = new Map([
   ['docs/architecture/adr/README.md', ['projects/Discord-stoat-ferry/adr/README.md']],
 ]);
 
+function assertBackupChangedPaths(instructions, changedPaths) {
+  const allowed = new Set(instructions.flatMap(
+    state => BACKUP_DESTINATIONS.get(state.path) ?? [],
+  ));
+  if (changedPaths.length === 0 || changedPaths.some(path => !allowed.has(path))) {
+    throw new SnapshotError('backup commit changed paths outside the Ferry scope');
+  }
+}
+
+function verifyBackupInstructionStates(root, evidenceRoot, backupRoot, commit, instructions) {
+  for (const state of instructions) {
+    const expected = checkedBlob(root, evidenceRoot, state);
+    const destinations = BACKUP_DESTINATIONS.get(state.path) ?? [];
+    if (destinations.length === 0) {
+      throw new SnapshotError(`backup destination mapping is missing: ${state.path}`);
+    }
+    for (const destination of destinations) {
+      const entry = runGit(
+        backupRoot, ['ls-tree', '-z', commit, '--', destination], { encoding: null },
+      );
+      if (entry.length === 0) {
+        throw new SnapshotError(`backup destination is missing: ${destination}`);
+      }
+      const match = /^(100644|100755) blob ([a-f0-9]{40,64})\t(.+)\0$/u.exec(
+        entry.toString('utf8'),
+      );
+      if (!match || match[3] !== destination) {
+        throw new SnapshotError(`backup destination is invalid: ${destination}`);
+      }
+      if (match[1] !== state.mode) {
+        throw new SnapshotError(`backup mode changed: ${destination}`);
+      }
+      const actual = runGit(backupRoot, ['cat-file', 'blob', match[2]], { encoding: null });
+      if (!actual.equals(expected)) {
+        throw new SnapshotError(`backup bytes changed: ${destination}`);
+      }
+    }
+  }
+}
+
 export function bindBackup(options) {
   const root = canonicalRoot(options.root);
   const evidenceRoot = normalizeEvidenceRoot(options.evidenceRoot ?? DEFAULT_EVIDENCE_ROOT);
@@ -1300,19 +1401,8 @@ export function bindBackup(options) {
   const changedPaths = runGit(
     backupRoot, ['diff-tree', '--no-commit-id', '--name-only', '-r', parents[1], commit],
   ).trim().split('\n').filter(Boolean);
-  const allowed = new Set(instructions.flatMap(state => BACKUP_DESTINATIONS.get(state.path) ?? []));
-  if (
-    changedPaths.length === 0
-    || changedPaths.some(path => !allowed.has(path))
-    || [...allowed].some(path => !changedPaths.includes(path))
-  ) throw new SnapshotError('backup commit changed paths outside the Ferry scope');
-  for (const state of instructions) {
-    const expected = checkedBlob(root, evidenceRoot, state);
-    for (const destination of BACKUP_DESTINATIONS.get(state.path) ?? []) {
-      const actual = runGit(backupRoot, ['show', `${commit}:${destination}`], { encoding: null });
-      if (!actual.equals(expected)) throw new SnapshotError(`backup bytes changed: ${destination}`);
-    }
-  }
+  assertBackupChangedPaths(instructions, changedPaths);
+  verifyBackupInstructionStates(root, evidenceRoot, backupRoot, commit, instructions);
   const snapshotLog = readArtifact(
     root, evidenceRoot, options.snapshotLogPath, 'backup snapshot log',
   );
@@ -1547,19 +1637,41 @@ function revalidateBackupBinding(root, evidenceRoot, backup) {
   const changedPaths = runGit(
     backupRoot, ['diff-tree', '--no-commit-id', '--name-only', '-r', ancestry[1], commit],
   ).trim().split('\n').filter(Boolean);
+  assertBackupChangedPaths(backup.instruction_states, changedPaths);
   if (stableJson(changedPaths) !== stableJson(backup.changed_paths)) {
     throw new SnapshotError('backup changed-path evidence changed');
   }
   verifyArtifactReferences(root, evidenceRoot, [backup.snapshot_log]);
-  for (const state of backup.instruction_states) {
-    const expected = checkedBlob(root, evidenceRoot, state);
-    for (const destination of BACKUP_DESTINATIONS.get(state.path) ?? []) {
-      const actual = runGit(backupRoot, ['show', `${commit}:${destination}`], { encoding: null });
-      const treeEntry = runGit(backupRoot, ['ls-tree', commit, '--', destination]).trim();
-      if (!actual.equals(expected) || !treeEntry.startsWith(`${state.mode} blob `)) {
-        throw new SnapshotError(`backup content changed: ${destination}`);
+  verifyBackupInstructionStates(
+    root, evidenceRoot, backupRoot, commit, backup.instruction_states,
+  );
+}
+
+function validateBackupTaskBinding(root, evidenceRoot, snapshots, backup) {
+  const matchingTasks = [];
+  for (const snapshot of snapshots) {
+    for (let index = 0; index < snapshot.task_record_paths.length; index += 1) {
+      const task = readRecord(
+        root, evidenceRoot, snapshot.task_record_paths[index], 'task-patch',
+      );
+      if (task.digest_sha256 !== snapshot.task_patch_digests[index]) {
+        throw new SnapshotError('snapshot task digest changed');
       }
+      if (task.task_issue === backup.task_issue) matchingTasks.push(task);
     }
+  }
+  if (matchingTasks.length !== 1) {
+    throw new SnapshotError('instruction backup task identity changed');
+  }
+  const [task] = matchingTasks;
+  if (task.digest_sha256 !== backup.task_patch_digest) {
+    throw new SnapshotError('instruction backup task digest changed');
+  }
+  const instructionStates = task.operations
+    .filter(operation => operation.after.domain === 'instruction')
+    .map(operation => operation.after);
+  if (stableJson(instructionStates) !== stableJson(backup.instruction_states)) {
+    throw new SnapshotError('instruction backup task instruction states changed');
   }
 }
 
@@ -1662,6 +1774,7 @@ export function validateChain(options) {
     const backup = readRecord(
       root, evidenceRoot, options.backupEvidencePath, 'backup-binding',
     );
+    validateBackupTaskBinding(root, evidenceRoot, snapshots, backup);
     revalidateBackupBinding(root, evidenceRoot, backup);
     if (stableJson(backup.instruction_states) !== stableJson(reconstruction.instructionStates)) {
       throw new SnapshotError('instruction backup identity changed');

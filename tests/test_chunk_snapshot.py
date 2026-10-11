@@ -115,6 +115,34 @@ def assert_fixture_ok(tmp_path: Path, case: str, *arguments: str) -> dict[str, o
     return json.loads(result.stdout)
 
 
+def test_first_chunk_requires_instruction_alignment_before_marker(tmp_path: Path) -> None:
+    report = assert_fixture_ok(tmp_path, "first-chunk-contract")
+    if report.get("instruction_layer_absent"):
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+    assert report == {
+        "first_chunk_includes_tasks_1_through_3": True,
+        "prerequisites_allow_uncommitted_tasks": True,
+        "review_precedes_next_chunk": True,
+        "issues_wait_for_real_commits": True,
+    }
+
+
+def test_shared_contracts_and_adr_agree(tmp_path: Path) -> None:
+    report = assert_fixture_ok(tmp_path, "shared-contracts")
+    if report.get("instruction_layer_absent"):
+        pytest.skip("snapshot-backed instruction layer is absent in CI")
+    assert report == {
+        "marker_bound": True,
+        "review_validation": True,
+        "shipping_validation": True,
+        "committed_validation": True,
+        "atomic_task_commits": True,
+        "single_chunk_final_only": True,
+        "provider_policy_preserved": True,
+        "adr_indexed": True,
+    }
+
+
 def test_two_chunks_reach_shipping_before_task_commits(tmp_path: Path) -> None:
     report = assert_fixture_ok(tmp_path, "two-chunks")
     assert report["task_trees"] == 4
@@ -192,6 +220,12 @@ def test_temporary_index_reconstruction_preserves_active_state(tmp_path: Path) -
     assert report["failure_preserved_state"] is True
 
 
+def test_reconstruction_does_not_refresh_stale_index_metadata(tmp_path: Path) -> None:
+    report = assert_fixture_ok(tmp_path, "temporary-index-stale-stat")
+    assert report["reconstructed_tree"] == report["expected_tree"]
+    assert report["active_index_before"] == report["active_index_after"]
+
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -225,6 +259,20 @@ def test_provider_artifacts_and_posted_markers_belong_to_snapshot(
     assert report["cross_snapshot_rejected"] is True
     assert report["changed_bytes_rejected"] is True
     assert report["missing_readback_rejected"] is True
+
+
+@pytest.mark.parametrize("boundary", ["review", "marker"])
+@pytest.mark.parametrize("fault", ["incomplete", "missing", "mismatched", "plan-identity"])
+def test_review_and_marker_binding_require_complete_approved_chunk(
+    tmp_path: Path, boundary: str, fault: str
+) -> None:
+    report = assert_fixture_ok(tmp_path, "marker-completeness", f"{boundary}:{fault}")
+    assert report == {"boundary": boundary, "fault": fault, "rejected": True}
+
+
+def test_review_and_marker_binding_accept_complete_approved_chunk(tmp_path: Path) -> None:
+    report = assert_fixture_ok(tmp_path, "marker-completeness", "complete")
+    assert report["review_snapshot"] == report["marker_snapshot"]
 
 
 @pytest.mark.parametrize("status", ["valid", "failed", "timed_out", "interrupted"])
@@ -267,6 +315,14 @@ def test_single_chunk_shipping_requires_no_chunk_marker(tmp_path: Path) -> None:
     assert report == {"accepted": True, "marker_count": 0}
 
 
+@pytest.mark.parametrize("phase", ["review", "shipping"])
+def test_validate_chain_preserves_stale_index_metadata(tmp_path: Path, phase: str) -> None:
+    report = assert_fixture_ok(tmp_path, "validate-chain-stale-stat", phase)
+    assert report["accepted"] is True
+    assert report["phase"] == phase
+    assert report["active_index_before"] == report["active_index_after"]
+
+
 def test_validation_rejects_changed_head_before_and_after_commits(tmp_path: Path) -> None:
     report = assert_fixture_ok(tmp_path, "head-mismatch")
     assert report == {"shipping_rejected": True, "committed_rejected": True}
@@ -275,6 +331,13 @@ def test_validation_rejects_changed_head_before_and_after_commits(tmp_path: Path
 def test_instruction_backup_evidence_is_revalidated(tmp_path: Path) -> None:
     report = assert_fixture_ok(tmp_path, "backup-revalidation")
     assert report["valid"] is True
+    assert report["forged_identity_rejected"] == {
+        "wrong_issue": True,
+        "wrong_digest": True,
+        "wrong_instruction_states": True,
+    }
+    assert report["recomputed_outside_rejected"] is True
+    assert report["recomputed_empty_rejected"] is True
     assert report["rejected"] == [
         "commit",
         "parent",
@@ -283,6 +346,32 @@ def test_instruction_backup_evidence_is_revalidated(tmp_path: Path) -> None:
         "mode",
         "snapshot-log",
     ]
+
+
+def test_incremental_backup_accepts_changed_subset_with_complete_tree(tmp_path: Path) -> None:
+    report = assert_fixture_ok(tmp_path, "incremental-backup")
+    assert report == {
+        "accepted": True,
+        "changed_paths": ["projects/Discord-stoat-ferry/AGENTS.md"],
+        "instruction_paths": ["AGENTS.md", ".claude/skills/df-ship/SKILL.md"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        ("wrong-bytes", "backup bytes changed"),
+        ("wrong-mode", "backup mode changed"),
+        ("missing", "backup destination is missing"),
+        ("outside", "outside the Ferry scope"),
+    ],
+)
+def test_incremental_backup_rejects_invalid_commit_tree(
+    tmp_path: Path, fault: str, message: str
+) -> None:
+    result = run_fixture(tmp_path, "incremental-backup", fault)
+    assert result.returncode == 1
+    assert message in result.stderr
 
 
 @pytest.mark.parametrize("change", ["content", "mode", "deletion", "unreadable", "extra"])
