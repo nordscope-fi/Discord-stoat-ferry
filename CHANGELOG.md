@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.11] - 2026-10-11
+
+### Fixed
+
+- Preserve Discord channel order inside categories when all ordinary-channel positions are available, retaining the existing order for incomplete or older metadata (#1226).
+- Use numeric Discord IDs to break equal-position category ties while preserving saved migration compatibility (#1226).
+
 ## [2.43.10] - 2026-10-11
 
 ### Fixed
