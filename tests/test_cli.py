@@ -2214,18 +2214,18 @@ def test_build_parses_the_real_create_response(runner: CliRunner, tmp_path: Path
         # raise a connection error, which _api_request retries three times with backoff:
         # seconds of runtime, ending in a MigrationError resembling the bug under test.
         m.post(
-            "http://x/servers/create",
+            "https://x/servers/create",
             payload={"server": {"_id": "srv1", "name": "Rebuilt"}, "channels": []},
             repeat=True,
         )
         m.post(
-            "http://x/servers/srv1/roles",
+            "https://x/servers/srv1/roles",
             payload={"id": "role1", "role": {"name": "Mod"}},
             repeat=True,
         )
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
+            ["build", "--blueprint", str(p), "--stoat-url", "https://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
 
@@ -2319,10 +2319,10 @@ def test_build_reports_an_unrecognised_create_response(runner: CliRunner, tmp_pa
     p = _write_bp(tmp_path, bp)
 
     with aioresponses() as m:
-        m.post("http://x/servers/create", payload={"id": "srv1"}, repeat=True)
+        m.post("https://x/servers/create", payload={"id": "srv1"}, repeat=True)
         result = runner.invoke(
             main,
-            ["build", "--blueprint", str(p), "--stoat-url", "http://x", "--token", _BUILD_TOKEN],
+            ["build", "--blueprint", str(p), "--stoat-url", "https://x", "--token", _BUILD_TOKEN],
             catch_exceptions=False,
         )
 
