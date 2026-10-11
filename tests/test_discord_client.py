@@ -68,6 +68,27 @@ async def test_unknown_category_position_is_not_captured(mock_discord: aiorespon
     assert sum(len(calls) for calls in mock_discord.requests.values()) == 3
 
 
+async def test_fetch_retains_channel_positions(mock_discord: aioresponses) -> None:
+    mock_discord.get(f"{DISCORD_API}/guilds/{GUILD_ID}", payload={})
+    mock_discord.get(f"{DISCORD_API}/guilds/{GUILD_ID}/roles", payload=[])
+    mock_discord.get(
+        f"{DISCORD_API}/guilds/{GUILD_ID}/channels",
+        payload=[
+            {"id": "2", "name": "zero", "type": 0, "position": 0},
+            {"id": "10", "name": "four", "type": 0, "position": 4},
+            {"id": "30", "name": "unknown", "type": 0},
+        ],
+    )
+    async with aiohttp.ClientSession() as session:
+        meta = await fetch_and_translate_guild_metadata(session, TOKEN, GUILD_ID)
+    assert {cid: cm.position for cid, cm in meta.channel_metadata.items()} == {
+        "2": 0,
+        "10": 4,
+        "30": None,
+    }
+    assert sum(len(calls) for calls in mock_discord.requests.values()) == 3
+
+
 async def test_fetch_guild_roles_parses_response(mock_discord: aioresponses) -> None:
     mock_discord.get(
         f"{DISCORD_API}/guilds/{GUILD_ID}/roles",
