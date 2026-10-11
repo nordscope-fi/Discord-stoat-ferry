@@ -1155,6 +1155,10 @@ async def run_categories(
     seen_cat_ids: set[str] = set()
     unique_categories: list[tuple[str, str]] = []  # (discord_cat_id, category_name)
     for export in exports:
+        # DiscordChatExporter uses categoryId for a thread's parent channel.
+        # It is not a server category and must never enter the Stoat category map.
+        if export.is_thread:
+            continue
         cat_id = export.channel.category_id
         cat_name = export.channel.category
         if cat_id and cat_id not in seen_cat_ids:
