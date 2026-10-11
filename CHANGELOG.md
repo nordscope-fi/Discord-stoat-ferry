@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- Remove the historical plan dependency from two chunk-snapshot tests while retaining instruction and architecture decision checks and their CI skips (#1320).
+
 ## [2.43.8] - 2026-10-11
 
 ### Fixed
