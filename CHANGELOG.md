@@ -10,6 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.13] - 2026-10-12
+
+### Fixed
+
+- Upload attachments with their original Discord filenames while preserving readable Unicode names (#1219).
+- Discover custom emoji in forwarded content and embeds, and retain the forwarded message's original timestamp (#1221).
+- Skip numeric boost notifications and legacy empty thread-starter events instead of posting empty-message placeholders (#1220).
+- Exclude thread parent channels from server category creation (#1256).
+- Remove the false animation-loss warning when repair recreates an animated emoji (#1322).
+- Resolve user mentions from the export's mention records, including users who authored no exported messages (#1213).
+- Await the native save dialog when saving a feedback draft, retaining cancellation and browser-only handling (#1236).
+- Use the real DCE 2.48 thread capture in current regression tests and correct unresolved-starter and stdout evidence notes (#1286, #1287, #1290).
+
 ## [2.43.12] - 2026-10-11
 
 ### Fixed
