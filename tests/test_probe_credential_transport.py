@@ -11,7 +11,7 @@ from aioresponses import aioresponses
 from yarl import URL
 
 from discord_ferry.errors import AutumnUploadError
-from discord_ferry.migrator.probe import _raw_autumn_upload
+from discord_ferry.migrator.probe import ProbeReport, _check_rate_limit, _raw_autumn_upload
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,4 +98,66 @@ async def test_raw_upload_explicitly_disables_redirects(tmp_path: Path) -> None:
             )
 
     request = mocked.requests[("POST", URL(url))][0]
+    assert request.kwargs["allow_redirects"] is False
+
+
+async def test_public_http_rate_limit_check_records_a_failure_before_request() -> None:
+    session = AsyncMock(spec=aiohttp.ClientSession)
+    report = ProbeReport()
+
+    await _check_rate_limit(session, "http://public.example", "session-token", "server-1", report)
+
+    session.get.assert_not_called()
+    assert report.checks[0].name == "rate_limit"
+    assert report.checks[0].status == "fail"
+    assert "Credential-bearing API requests require HTTPS" in report.checks[0].detail
+
+
+async def test_private_http_rate_limit_check_remains_available() -> None:
+    url = "http://127.0.0.1:8765/servers/server-1"
+    report = ProbeReport()
+
+    with aioresponses() as mocked:
+        mocked.get(url, headers={"X-RateLimit-Limit": "5"})
+        async with aiohttp.ClientSession() as session:
+            await _check_rate_limit(
+                session,
+                "http://127.0.0.1:8765",
+                "session-token",
+                "server-1",
+                report,
+            )
+
+    assert report.checks[0].status == "ok"
+    assert len(mocked.requests[("GET", URL(url))]) == 1
+
+
+async def test_rate_limit_redirect_records_a_failure() -> None:
+    url = "https://api.test/servers/server-1"
+    report = ProbeReport()
+
+    with aioresponses() as mocked:
+        mocked.get(url, status=302, headers={"Location": "http://public.example/leak"})
+        async with aiohttp.ClientSession() as session:
+            await _check_rate_limit(
+                session, "https://api.test", "session-token", "server-1", report
+            )
+
+    assert report.checks[0].status == "fail"
+    assert "refused a redirect" in report.checks[0].detail
+    assert len(mocked.requests[("GET", URL(url))]) == 1
+
+
+async def test_rate_limit_check_explicitly_disables_redirects() -> None:
+    url = "https://api.test/servers/server-1"
+    report = ProbeReport()
+
+    with aioresponses() as mocked:
+        mocked.get(url, headers={"X-RateLimit-Limit": "5"})
+        async with aiohttp.ClientSession() as session:
+            await _check_rate_limit(
+                session, "https://api.test", "session-token", "server-1", report
+            )
+
+    request = mocked.requests[("GET", URL(url))][0]
     assert request.kwargs["allow_redirects"] is False
