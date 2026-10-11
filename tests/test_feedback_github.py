@@ -456,6 +456,92 @@ async def test_auth_rejects_github_errors_without_exposing_credentials(
     assert service_config.github_private_key not in output
 
 
+@pytest.mark.parametrize(
+    ("url", "method", "status", "error_type", "failure_class"),
+    [
+        (
+            INSTALLATION_URL,
+            "post",
+            401,
+            GitHubAuthenticationError,
+            "GitHubAuthenticationError",
+        ),
+        (
+            INSTALLATION_DETAILS_URL,
+            "get",
+            403,
+            GitHubReadinessError,
+            "GitHubReadinessError",
+        ),
+    ],
+    ids=["authentication-401", "readiness-403"],
+)
+async def test_github_http_failures_log_only_class_and_status(
+    service_config: ServiceConfig,
+    mock_github: aioresponses,
+    caplog: pytest.LogCaptureFixture,
+    url: str,
+    method: str,
+    status: int,
+    error_type: type[RuntimeError],
+    failure_class: str,
+) -> None:
+    from discord_ferry.feedback_service.app import ServiceJSONFormatter
+
+    token_marker = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    getattr(mock_github, method)(url, status=status, body=token_marker)
+    caplog.set_level("WARNING", logger="discord_ferry.feedback_service.github")
+
+    async with FeedbackGitHub(service_config, now=lambda: NOW) as github:
+        with pytest.raises(error_type):
+            if method == "post":
+                await github.installation_token()
+            else:
+                await github.check_readiness()
+
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "github_readiness_failure"
+    )
+    rendered = ServiceJSONFormatter().format(record)
+    audited = "\n".join((str(record.__dict__), record.getMessage(), rendered, caplog.text))
+    assert record.failure_class == failure_class
+    assert record.status_code == status
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert token_marker not in audited
+
+
+async def test_github_connection_failure_logs_only_class_and_no_status(
+    service_config: ServiceConfig,
+    mock_github: aioresponses,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from discord_ferry.feedback_service.app import ServiceJSONFormatter
+
+    token_marker = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    mock_github.post(INSTALLATION_URL, exception=aiohttp.ClientConnectionError(token_marker))
+    caplog.set_level("WARNING", logger="discord_ferry.feedback_service.github")
+
+    async with FeedbackGitHub(service_config, now=lambda: NOW) as github:
+        with pytest.raises(GitHubAuthenticationError):
+            await github.installation_token()
+
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "github_readiness_failure"
+    )
+    rendered = ServiceJSONFormatter().format(record)
+    audited = "\n".join((str(record.__dict__), record.getMessage(), rendered, caplog.text))
+    assert record.failure_class == "ClientConnectionError"
+    assert record.status_code is None
+    assert record.exc_info is None
+    assert record.exc_text is None
+    assert token_marker not in audited
+
+
 async def test_auth_timeout_is_redacted_and_not_retried(
     service_config: ServiceConfig,
     mock_github: aioresponses,
