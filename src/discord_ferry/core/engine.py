@@ -2722,11 +2722,6 @@ async def _run_emoji_repair_pass(
         state.pending_emoji_rewrites[discord_id] = {"old": old_id, "new": new_id}
         save_state(state, config.output_dir)
 
-        if record["is_animated"]:
-            warning = f"Emoji :{name}: is animated — animation is lost on Stoat."
-            state.warnings.append({"phase": "repair", "type": "animated_emoji", "message": warning})
-            on_event(MigrationEvent(phase="repair", status="warning", message=warning))
-
         row: dict[str, Any] = {
             "discord_id": discord_id,
             "name": name,

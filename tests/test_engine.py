@@ -27,10 +27,11 @@ from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import CheckError, DuplicateSendError, ExportError, MigrationError
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
-from discord_ferry.migrator.verify import CheckReport, RepairOutcome
+from discord_ferry.migrator.verify import CheckReport, CheckResult, RepairOutcome
 from discord_ferry.parser.models import (
     DCEAuthor,
     DCEChannel,
+    DCEEmoji,
     DCEExport,
     DCEGuild,
     DCEMessage,
@@ -3055,6 +3056,56 @@ def _make_repair_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
     }
     defaults.update(overrides)
     return FerryConfig(**defaults)
+
+
+async def test_repair_recreated_animated_emoji_has_no_animation_loss_warning(
+    tmp_path: Path,
+) -> None:
+    """Stoat preserves GIF emoji animation when repair recreates the emoji."""
+    config = _make_repair_config(tmp_path)
+    (config.export_dir / "dance.gif").write_bytes(b"GIF89a")
+    message = DCEMessage(
+        id="message1",
+        type="Default",
+        timestamp="2026-10-11T00:00:00Z",
+        content="<a:dance:123>",
+        author=DCEAuthor(id="author1", name="Author"),
+        inline_emojis=[DCEEmoji(id="123", name="dance", is_animated=True, image_url="dance.gif")],
+    )
+    export = DCEExport(
+        guild=DCEGuild(id="guild1", name="Guild"),
+        channel=DCEChannel(id="channel1", type=0, name="general"),
+        messages=[message],
+    )
+    state = MigrationState(stoat_server_id="server1")
+    outcome = RepairOutcome()
+    events: list[MigrationEvent] = []
+    missing = CheckResult(
+        name="dance",
+        status="fail",
+        kind="emoji_missing",
+        detail="missing",
+        discord_id="123",
+        stoat_id="old-emoji",
+    )
+
+    with (
+        patch(
+            "discord_ferry.core.engine.upload_and_create_emoji",
+            AsyncMock(return_value=("new-emoji", "dance")),
+        ),
+        patch(
+            "discord_ferry.core.engine._rewrite_emoji_references",
+            AsyncMock(return_value=(0, 0, 0)),
+        ),
+    ):
+        await engine_module._run_emoji_repair_pass(
+            AsyncMock(), config, state, [missing], [export], outcome, events.append
+        )
+
+    assert state.emoji_map == {"123": "new-emoji"}
+    assert not any(w.get("type") == "animated_emoji" for w in state.warnings)
+    assert not any(event.status == "warning" for event in events)
 
 
 async def test_repair_refuses_a_rolled_back_state_without_a_single_request(
