@@ -1,14 +1,14 @@
-# Hybrid DCE 2.47.1 stdout fixture for Ferry parser tests.
+# Hybrid DCE 2.48 stdout fixture for Ferry parser tests.
 #
-# Lines 1-13 (before the [HYBRID BOUNDARY] comment): captured 2026-05-15
-# from real DCE 2.47.1 invocation (macOS-arm64, stdout piped, intentionally
-# invalid token to keep the capture short). Original at /tmp/dce-stdout-piped.log.
+# Lines before the [HYBRID BOUNDARY] comment are confirmed for DCE 2.48. The
+# short, piped macOS-arm64 invocation used an invalid token to keep the capture short.
 #
-# Lines after the boundary: derived from DCE source at tag 2.47.1 --
+# Lines after the boundary: derived from DCE source at tag 2.48 --
 # specifically ExportGuildCommand.cs, ExportCommandBase.cs, and Spectre's
-# FallbackProgressRenderer.cs. The post-auth path is not yet captured because
-# we don't have a test Discord server. See #35 for the plan to replace the
-# suffix with a real capture.
+# FallbackProgressRenderer.cs. The post-auth path remains source-derived in this
+# fixture.
+# It is a short pre-auth transcript, so milestone values and the Error variant remain
+# source-derived.
 #
 # Comment lines (this header) start with '#' and are stripped by tests that
 # read this file; the parser itself never sees them.

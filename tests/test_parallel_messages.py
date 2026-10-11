@@ -1027,13 +1027,12 @@ def test_a_forum_post_already_has_key_equal_to_its_channel_id_today() -> None:
 #
 # test_the_guard_is_active_in_the_post_bump_shape above pins parent-wins against
 # hand-constructed ChannelResult objects. That proves the merge function, not the path
-# that reaches it. This drives the REAL parent capture, which already contains message
-# 1506019505778987190, together with the synthetic 2.47.3 thread export, through
-# run_messages under `flatten`.
+# that reaches it. This drives the captured 2.48 parent and thread exports through
+# `run_messages` under `flatten`.
 
-_REAL_PARENT_NAME = "Discord Ferry Test - general [1506019498094891120].json"
-_POST_BUMP_THREAD_NAME = "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
-_ORIGIN = "1506019505778987190"
+_CAPTURED_2_48_PARENT_NAME = "Discord Ferry Test - general [1543572361285083187].json"
+_CAPTURED_2_48_THREAD_NAME = "Discord Ferry Test - general - Cool Thread [1543572368977428611].json"
+_ORIGIN = "1543572368977428611"
 
 
 @pytest.mark.parametrize("slow_channel", ["stoat-parent", "stoat-thread"])
@@ -1062,9 +1061,9 @@ async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
 
     from discord_ferry.parser.dce_parser import parse_single_export
 
-    fixtures = pathlib.Path(__file__).parent / "fixtures"
-    parent = parse_single_export(fixtures / _REAL_PARENT_NAME)
-    thread = parse_single_export(fixtures / "dce_2_47_3" / _POST_BUMP_THREAD_NAME)
+    captured = pathlib.Path(__file__).parent / "fixtures" / "dce_2_48" / "captured"
+    parent = parse_single_export(captured / _CAPTURED_2_48_PARENT_NAME)
+    thread = parse_single_export(captured / _CAPTURED_2_48_THREAD_NAME)
 
     assert thread.channel.id == thread.messages[0].id == _ORIGIN, (
         "premise: the post-bump fixture carries the collision"

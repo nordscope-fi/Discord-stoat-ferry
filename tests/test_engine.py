@@ -5105,10 +5105,10 @@ async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
 async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) -> None:
     """The parent is resent FIRST, so the thread's duplicate of it is suppressed.
 
-    After DCE 2.47.3 a thread's first message is the parent's own origin message.
-    _merge_threads drops it when the id is already in message_map, and that is
-    true here only because the parent's resend ran before the merge. A repair
-    that merged first would send it twice.
+    A resolved thread starter can be the parent's origin message. `_merge_threads`
+    drops it when the id is already in message_map, and that is true here only because
+    the parent's resend ran before the merge. A repair that merged first would send it
+    twice.
     """
     exports = _merge_fixture()
     exports[1].messages.append(

@@ -1566,37 +1566,32 @@ def test_parse_forwarded_fixture_end_to_end(fixtures_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The DCE 2.47.3 thread-starter shape (#110 batch 8, chunk #219, task #228)
+# The captured DCE 2.48 thread-starter shape (#110 batch 8, chunk #219, task #228)
 # ---------------------------------------------------------------------------
-#
-# Lives in fixtures/dce_2_47_3/ rather than fixtures/ on purpose. parse_export_directory
-# globs "*.json" at the top level only, so a valid export added beside the others would
-# change the count test_parse_export_directory asserts.
 
-_2_47_3_DIR = FIXTURES_DIR / "dce_2_47_3"
-_2_47_3_THREAD = (
-    _2_47_3_DIR / "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
+_CAPTURED_2_48_DIR = FIXTURES_DIR / "dce_2_48" / "captured"
+_CAPTURED_2_48_THREAD = (
+    _CAPTURED_2_48_DIR / "Discord Ferry Test - general - Cool Thread [1543572368977428611].json"
 )
 
 
-def test_the_2_47_3_fixture_has_the_collision_shape() -> None:
+def test_the_captured_2_48_thread_has_the_collision_shape() -> None:
     """SC-4.1: post-bump the thread's channel id and its first message id are the same.
 
-    DCE 2.47.3 replaces the empty ThreadStarterMessage placeholder with the real
-    parent-channel message and keeps that message's Discord id (upstream PR #1557), and
-    a thread's channel id IS its origin message id. That equality is the whole reason
-    batch 7's parent-wins guard and batch 8's merge suppression exist.
+    The captured export resolves this thread's starter to the origin message. A thread's
+    channel id is the origin message id, so the equality is the reason batch 7's
+    parent-wins guard and batch 8's merge suppression exist. DCE can still emit an
+    unresolved ThreadStarterMessage when the origin is unavailable.
     """
-    export = parse_single_export(_2_47_3_THREAD)
+    export = parse_single_export(_CAPTURED_2_48_THREAD)
 
-    assert export.channel.id == export.messages[0].id == "1506019505778987190"
+    assert export.channel.id == export.messages[0].id == "1543572368977428611"
     assert export.messages[0].content, (
         "the resolved starter carries the origin's real content, where the 2.47.1 "
         "placeholder carried an empty string"
     )
     assert export.messages[0].type not in ("21", "ThreadStarterMessage"), (
-        "2.47.3 resolves or drops the placeholder before serialising, so kind 21 stops "
-        "being emitted rather than changing spelling"
+        "this captured thread resolved its starter rather than serialising a ThreadStarterMessage"
     )
     assert export.messages[0].reference is None, (
         "the resolved starter is the parent's own message, which is not a reply; the "
@@ -1604,41 +1599,20 @@ def test_the_2_47_3_fixture_has_the_collision_shape() -> None:
     )
 
 
-def test_the_2_47_3_fixture_starter_precedes_the_reply() -> None:
-    """SC-4.1: upstream places the resolved starter in its correct chronological position.
+def test_the_captured_2_48_thread_starter_precedes_the_reply() -> None:
+    """SC-4.1: the captured export places the resolved starter first.
 
-    The placeholder sat at 22:43:55.692, after the origin was actually posted. The
-    resolved starter carries the origin's own 22:43:50.667, so it sorts before the
-    thread's first reply. `_merge_threads` sorts by timestamp, so this ordering is what
-    a merged thread will actually look like.
+    `_merge_threads` sorts by timestamp, so the captured ordering is what a merged
+    thread will look like.
     """
-    export = parse_single_export(_2_47_3_THREAD)
+    export = parse_single_export(_CAPTURED_2_48_THREAD)
     assert export.messages[0].timestamp < export.messages[1].timestamp
 
 
-def test_the_2_47_3_fixture_declares_it_is_synthetic() -> None:
-    """SC-4.2: a synthetic fixture that does not say so gets cited as ground truth.
-
-    Same contract as forwarded_message_synthetic.json, which carries its provenance in
-    the same field for the same reason.
-    """
-    export = parse_single_export(_2_47_3_THREAD)
-    topic = export.channel.topic or ""
-
-    assert "SYNTHETIC" in topic
-    assert "2.47.3" in topic
-    assert "DiscordClient.cs" in topic
-    assert "MessageKind.cs" in topic
-    assert "NOT produced by running DCE" in topic
-    assert "re-derive this from source" in topic
-
-
-def test_the_2_47_3_fixture_did_not_disturb_the_2_47_1_captures() -> None:
+def test_the_captured_2_48_thread_did_not_disturb_the_2_47_1_captures() -> None:
     """SC-4.4: the pre-bump shape must stay covered, and stay countable.
 
-    The synthetic lives in a subdirectory because parse_export_directory globs the top
-    level only. Adding a valid export beside the real ones would change this count and
-    force an edit to a pre-existing test.
+    The historical 2.47.1 fixture keeps the unresolved-placeholder behaviour covered.
     """
     assert len(parse_export_directory(FIXTURES_DIR)) == 7
 
