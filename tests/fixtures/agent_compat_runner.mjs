@@ -59,6 +59,7 @@ import {
 } from '../../scripts/agent-compat/plain-english-contract.mjs';
 import {
   evaluatePlanGate,
+  makeReviewFailureRecord,
   makeReviewRecord,
   planFindingDigest,
   reviewInputDigest,
@@ -609,6 +610,70 @@ switch (mode) {
     };
     writeJson({ stage: 'child-exit', error: safeChildFailure('fixture', error) });
     process.exitCode = 1;
+    break;
+  }
+  case 'review-failure-record': {
+    if (argument !== 'matrix') throw new Error('unknown review failure record fixture');
+    writeJson({
+      vibe: makeReviewFailureRecord({
+        adapter: 'vibe',
+        slot: 'mistral-vibe',
+        requestedModel: 'zai-glm-5-2',
+        provider: 'vibe',
+        failureClass: 'provider',
+        failureStage: 'vibe-response',
+        durationMs: 12.5,
+        httpStatus: 503,
+        failureReason: 'FERRY_SECRET_CANARY',
+        timeoutPhase: 'total',
+      }),
+      qwen_schema: makeReviewFailureRecord({
+        adapter: 'qwen',
+        slot: 'qwen',
+        requestedModel: 'qwen3.8-max',
+        provider: 'qwen',
+        failureClass: 'schema',
+        failureStage: 'qwen-response',
+        durationMs: 20,
+        httpStatus: 422,
+        failureReason: 'FERRY_SECRET_CANARY',
+      }),
+      qwen_timeout: makeReviewFailureRecord({
+        adapter: 'qwen',
+        slot: 'qwen',
+        requestedModel: 'qwen3.8-max',
+        provider: 'qwen',
+        failureClass: 'timeout',
+        failureStage: 'qwen-response',
+        durationMs: 25,
+        httpStatus: null,
+        timeoutPhase: 'idle',
+      }),
+      unknown: makeReviewFailureRecord({
+        adapter: 'claude',
+        slot: 'plan-sonnet',
+        requestedModel: 'sonnet',
+        provider: 'sonnet',
+        failureClass: 'unknown',
+        failureStage: 'claude-child',
+        durationMs: 30,
+        httpStatus: null,
+        failureReason: 'FERRY_SECRET_CANARY',
+        timeoutPhase: 'connection',
+      }),
+      invalid: makeReviewFailureRecord({
+        adapter: 'qwen',
+        slot: 'qwen',
+        requestedModel: 'qwen3.8-max',
+        provider: 'qwen',
+        failureClass: 'FERRY_SECRET_CANARY',
+        failureStage: 'FERRY_SECRET_CANARY',
+        durationMs: Number.POSITIVE_INFINITY,
+        httpStatus: 200.5,
+        failureReason: 'FERRY_SECRET_CANARY',
+        timeoutPhase: 'FERRY_SECRET_CANARY',
+      }),
+    });
     break;
   }
   case 'review-schema': {

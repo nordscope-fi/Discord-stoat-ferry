@@ -3093,6 +3093,63 @@ def test_review_contract_redacts_an_injected_child_failure() -> None:
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
+def test_review_failure_record_validates_only_safe_flat_metadata() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "review-failure-record",
+        "matrix",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    base_keys = {
+        "adapter",
+        "slot",
+        "requested_model",
+        "resolved_model",
+        "substitution_for",
+        "substitution_reason",
+        "session_id",
+        "duration_ms",
+        "status",
+        "findings",
+        "summary",
+        "confidence",
+        "failure_class",
+        "failure_stage",
+        "http_status",
+        "failure_reason",
+    }
+    for name, record in report.items():
+        assert set(record) == base_keys | ({"timeout_phase"} if name == "qwen_timeout" else set())
+        assert record["resolved_model"] is None
+        assert record["substitution_for"] is None
+        assert record["substitution_reason"] is None
+        assert record["session_id"] is None
+        assert record["findings"] == []
+        assert record["summary"] == ""
+        assert record["confidence"] is None
+
+    assert report["vibe"]["status"] == "failed"
+    assert report["vibe"]["failure_class"] == "provider"
+    assert report["vibe"]["failure_stage"] == "vibe-response"
+    assert report["vibe"]["duration_ms"] == 12.5
+    assert report["vibe"]["http_status"] == 503
+    assert report["vibe"]["failure_reason"] is None
+    assert report["qwen_schema"]["failure_reason"] == "response-unclassified"
+    assert report["qwen_timeout"]["status"] == "timed_out"
+    assert report["qwen_timeout"]["timeout_phase"] == "idle"
+    assert report["unknown"]["failure_class"] == "unknown"
+    assert report["unknown"]["failure_stage"] == "claude-child"
+    assert report["invalid"]["failure_class"] == "unknown"
+    assert report["invalid"]["failure_stage"] is None
+    assert report["invalid"]["duration_ms"] == 0
+    assert report["invalid"]["http_status"] is None
+    assert report["invalid"]["failure_reason"] is None
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
 def test_review_contract_entrypoint_runs_through_a_symlink(tmp_path: Path) -> None:
     link = tmp_path / "review-contract.mjs"
     link.symlink_to(REPO / "scripts/agent-compat/review-contract.mjs")
