@@ -531,6 +531,28 @@ def test_no_proxy_still_exempts_an_env_supplied_proxy(proxy_env, os_proxy) -> No
         assert http.resolve_proxy(TARGET) is None
 
 
+def test_port_qualified_no_proxy_matches_only_its_port(proxy_env, os_proxy) -> None:
+    """An authority cache key keeps a bypass for 8443 from affecting 9443."""
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="stoat.internal:8443"):
+        assert http.resolve_proxy("https://stoat.internal:8443/x") is None
+        assert http.resolve_proxy("https://stoat.internal:9443/x") is not None
+
+
+def test_bare_no_proxy_host_matches_a_port_qualified_target(proxy_env, os_proxy) -> None:
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="stoat.internal"):
+        assert http.resolve_proxy("https://stoat.internal:8443/x") is None
+
+
+def test_bare_no_proxy_host_ignores_target_userinfo(proxy_env, os_proxy) -> None:
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="stoat.internal"):
+        assert http.resolve_proxy("https://user:pw@stoat.internal:8443/x") is None
+
+
+def test_unicode_no_proxy_host_matches_a_unicode_target(proxy_env, os_proxy) -> None:
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="пример.рф"):
+        assert http.resolve_proxy("https://пример.рф/x") is None
+
+
 def test_emptied_scheme_stays_off(proxy_env, os_proxy) -> None:
     """SC-135-16. Killing: a merge that treats 'emptied' as 'unmentioned' and
     lets the OS half restore it, making the documented off switch do nothing."""
