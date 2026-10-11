@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.12] - 2026-10-11
+
+### Fixed
+
+- Name failed Discord exports in run output and report warnings, and show the exporter's error instead of its final stack frame (#1222, #1231).
+- Require all three desktop downloads and the native window module before release, and correct the Intel runner comment (#1279, #1281, #1280).
+- Correct the guides' self-hosting limits, rate-limit headers and delay, exporter commands and downloads, bot-token status, and server ID location with source quotations (#1262, #1264, #1267, #1282, #1285).
+- Choose avatar filename extensions from the response image type or parsed URL path (#1292).
+- Declare Python 3.14 support and add it to the CI matrix (#1273).
+- Record GitHub feedback dependency failure classes and HTTP statuses without exception text or credential values (#1297).
+
 ## [2.43.10] - 2026-10-11
 
 ### Fixed
