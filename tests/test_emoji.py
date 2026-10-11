@@ -458,12 +458,12 @@ async def test_run_emoji_full_happy_path(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bug 6: Animated emoji warning
+# Animated emoji preservation
 # ---------------------------------------------------------------------------
 
 
-async def test_run_emoji_animated_warning(tmp_path: Path) -> None:
-    """Animated emoji triggers a warning event and state.warnings entry."""
+async def test_run_emoji_animated_does_not_warn_about_lost_animation(tmp_path: Path) -> None:
+    """Animated emoji migrates without an animation-loss warning."""
     emoji_file = tmp_path / "spin.gif"
     emoji_file.write_bytes(b"GIF89a")
 
@@ -496,17 +496,10 @@ async def test_run_emoji_animated_warning(tmp_path: Path) -> None:
     assert state.emoji_map == {"555": "autumn_id"}
     mock_create.assert_awaited_once()
 
-    # Warning about animation loss should be emitted.
-    warning_message = "Emoji :spin: is animated; animation will be lost"
-    assert state.warnings == [
-        {
-            "phase": "emoji",
-            "type": "animated_emoji",
-            "message": f"{warning_message} on Stoat",
-        }
-    ]
-    warning_events = [e for e in events if e.status == "warning"]
-    assert [(e.phase, e.message) for e in warning_events] == [("emoji", warning_message)]
+    assert not any(warning["type"] == "animated_emoji" for warning in state.warnings)
+    assert not any(
+        event.status == "warning" and "animation" in event.message.lower() for event in events
+    )
 
 
 # ---------------------------------------------------------------------------
