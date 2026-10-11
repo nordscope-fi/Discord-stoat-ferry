@@ -11,6 +11,22 @@ from discord_ferry.parser.media_paths import contained_media_path
 
 logger = logging.getLogger(__name__)
 
+
+def _truncate_utf8(value: str, max_bytes: int, suffix: str = "") -> str:
+    """Truncate text on a character boundary while reserving an optional suffix."""
+    if len(value.encode()) <= max_bytes:
+        return value
+
+    available = max_bytes - len(suffix.encode())
+    used = 0
+    for index, char in enumerate(value):
+        char_bytes = len(char.encode())
+        if used + char_bytes > available:
+            return value[:index] + suffix
+        used += char_bytes
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -247,7 +263,7 @@ def flatten_embed(
 
     url = embed.get("url")
     if url is not None:
-        result["url"] = url
+        result["url"] = str(url)[:256]
 
     # Colour — Discord uses "color" (American); Stoat uses "colour" (British)
     color = embed.get("color")
@@ -258,13 +274,12 @@ def flatten_embed(
     if isinstance(author, dict):
         icon_url = author.get("iconUrl")
         if icon_url is not None:
-            result["icon_url"] = icon_url
+            result["icon_url"] = str(icon_url)[:256]
 
     # Flattened description
     if parts:
         desc = "\n\n".join(parts)
-        if len(desc) > 2000:
-            desc = desc[:1994] + " [...]"
+        desc = _truncate_utf8(desc, 2000, " [...]")
         result["description"] = desc
 
     # Extract media path from thumbnail or image (local files from --media export).
