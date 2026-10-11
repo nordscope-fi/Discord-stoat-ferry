@@ -18,6 +18,7 @@ import aiohttp
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session, proxy_hint, resolve_proxy_or_raise, tls_hint
+from discord_ferry.core.security import safe_sanitize, strip_control
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -210,6 +211,25 @@ class _RunState:
 
     total_channels: int | None = None
     channels_completed: set[str] = field(default_factory=set)
+
+
+_DCE_CHANNEL_FAILURE_HEADER = "Failed to export the following channel(s):"
+
+
+def _summarize_dce_error(line: str) -> str:
+    """Return DCE's exception message without its implementation type."""
+    prefix, separator, message = line.partition(": ")
+    if separator and "exception" in prefix.lower():
+        return message
+    return line
+
+
+def _dce_channel_failure(line: str) -> tuple[str, str] | None:
+    """Split one DCE 2.48 partial-export failure line into channel and reason."""
+    channel, separator, reason = line.partition(": ")
+    if not separator or not channel or not reason:
+        return None
+    return channel, reason
 
 
 def _emit_for_parsed(
@@ -545,15 +565,19 @@ async def run_dce_export(
     )
 
     state = _RunState()
-    # Only the last non-empty stderr line is ever reported, so keep just that one.
-    last_err: str | None = None
+    # Keep only the first general stderr error. In a .NET exception this holds the
+    # useful cause, while subsequent lines are stack frames. DCE's partial channel
+    # failures are emitted as they arrive instead of being buffered here.
+    first_err: str | None = None
+    process_finished = False
 
     assert process.stdout is not None
     assert process.stderr is not None
 
     async def _read_stderr() -> None:
-        nonlocal last_err
+        nonlocal first_err
         assert process.stderr is not None
+        reading_channel_failures = False
         # Mirror the stdout loop: an explicit readuntil loop so a >64 KiB stderr
         # line is drained (not crashed via `async for`'s readline → ValueError).
         while True:
@@ -565,11 +589,35 @@ async def run_dce_export(
                     break
             except asyncio.LimitOverrunError:
                 consumed = await _drain_overlong_line(process.stderr)
-                last_err = f"<truncated {consumed} bytes; stderr line exceeded 64 KiB>"
+                if first_err is None:
+                    first_err = f"<truncated {consumed} bytes; stderr line exceeded 64 KiB>"
                 continue
             line = raw_line.decode("utf-8", errors="replace").strip()
-            if line:
-                last_err = line
+            line = strip_control(safe_sanitize(config.token_store, line))
+            if not line:
+                reading_channel_failures = False
+                continue
+            if line == _DCE_CHANNEL_FAILURE_HEADER:
+                reading_channel_failures = True
+                continue
+            if reading_channel_failures:
+                failure = _dce_channel_failure(line)
+                if failure is not None:
+                    channel_name, reason = failure
+                    on_event(
+                        MigrationEvent(
+                            phase="export",
+                            status="error",
+                            message=f"DCE failed to export {channel_name}: {reason}",
+                            channel_name=channel_name,
+                            detail={"dce_channel_failure": True},
+                        )
+                    )
+                    _record_activity()
+                    continue
+                reading_channel_failures = False
+            if first_err is None:
+                first_err = _summarize_dce_error(line)
 
     stderr_task = asyncio.create_task(_read_stderr())
     heartbeat_task = asyncio.create_task(
@@ -619,6 +667,7 @@ async def run_dce_export(
                 _record_activity()
 
         await process.wait()
+        process_finished = True
 
     except asyncio.CancelledError:
         await _terminate_process(process)
@@ -626,18 +675,22 @@ async def run_dce_export(
     finally:
         # IMPORTANT: cancel heartbeat_task FIRST so it cannot fire a false
         # "Still working" event after stdout drains but before process.wait()
-        # records returncode. Then drain stderr.
+        # records returncode. Once the child exits, drain stderr so a final DCE
+        # error block cannot be discarded. Cancellation still cancels the reader.
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
         if not stderr_task.done():
-            stderr_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            if process_finished:
                 await stderr_task
+            else:
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stderr_task
 
     if process.returncode != 0:
         raise ExportError(
-            f"DCE export failed (exit code {process.returncode}): {last_err or 'Unknown error'}"
+            f"DCE export failed (exit code {process.returncode}): {first_err or 'Unknown error'}"
         )
 
     return config.export_dir

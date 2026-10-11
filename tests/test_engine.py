@@ -493,6 +493,52 @@ async def test_export_does_not_probe_for_external_dotnet(tmp_path: Path) -> None
     assert any(event.phase == "export" and event.status == "completed" for event in events)
 
 
+async def test_partial_dce_failure_is_recorded_in_migration_report(
+    tmp_path: Path, proxy_env: Any
+) -> None:
+    """A DCE partial failure must reach both the user event stream and report."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path, skip_export=False, discord_token="discord-token")
+
+    async def emit_partial_failure(
+        _config: FerryConfig, _dce_path: Path, emit: EventCallback
+    ) -> Path:
+        emit(
+            MigrationEvent(
+                phase="export",
+                status="error",
+                message=(
+                    "DCE failed to export Discord Ferry Test / restricted: "
+                    "forbidden (discord-token)."
+                ),
+                channel_name="Discord Ferry Test / restricted",
+                detail={"dce_channel_failure": True},
+            )
+        )
+        return _config.export_dir
+
+    with (
+        proxy_env(),
+        patch("discord_ferry.core.engine.validate_discord_token", new=AsyncMock()),
+        patch("discord_ferry.core.engine.get_dce_path", return_value=tmp_path / "dce"),
+        patch("discord_ferry.core.engine.run_dce_export", new=emit_partial_failure),
+    ):
+        state = await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
+
+    warnings = [warning for warning in state.warnings if warning["type"] == "dce_channel_failed"]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning["phase"] == "export"
+    assert warning["channel_name"] == "Discord Ferry Test / restricted"
+    assert "forbidden" in warning["message"]
+    assert "discord-token" not in warning["message"]
+    assert "****" in warning["message"]
+    report = json.loads((tmp_path / "migration_report.json").read_text())
+    assert report["warnings"] == state.warnings
+    assert "discord-token" not in json.dumps(report)
+    assert any(event.status == "error" and "restricted" in event.message for event in events)
+
+
 _DISCORD_API = "https://discord.com/api/v10"
 
 _MOCK_ROLES = [
