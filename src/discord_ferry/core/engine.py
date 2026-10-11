@@ -16,7 +16,12 @@ import aiohttp  # noqa: TCH002
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.core.http import format_proxy_notices, new_session
-from discord_ferry.core.security import SecureTokenStore, register_secret, safe_sanitize
+from discord_ferry.core.security import (
+    SecureTokenStore,
+    register_secret,
+    safe_sanitize,
+    strip_control,
+)
 from discord_ferry.discord import (
     fetch_and_translate_guild_metadata,
     load_bound_discord_metadata,
@@ -433,7 +438,24 @@ async def run_migration(
                 message="Launching DiscordChatExporter...",
             )
         )
-        await run_dce_export(config, dce_path, on_event)
+
+        def record_export_event(event: MigrationEvent) -> None:
+            """Persist DCE's partial channel failures through the existing warnings list."""
+            message = strip_control(_safe(config, event.message))
+            channel_name = strip_control(_safe(config, event.channel_name))
+            event = dataclasses.replace(event, message=message, channel_name=channel_name)
+            if event.detail and event.detail.get("dce_channel_failure") is True:
+                state.warnings.append(
+                    {
+                        "phase": "export",
+                        "type": "dce_channel_failed",
+                        "channel_name": event.channel_name,
+                        "message": event.message,
+                    }
+                )
+            on_event(event)
+
+        await run_dce_export(config, dce_path, record_export_event)
         state.export_completed = True
         save_state(state, config.output_dir)
         on_event(MigrationEvent(phase="export", status="completed", message="Export complete."))

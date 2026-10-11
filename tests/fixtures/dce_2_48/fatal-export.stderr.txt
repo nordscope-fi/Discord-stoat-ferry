@@ -1,0 +1,3 @@
+Unhandled exception. DiscordChatExporter.Core.Exceptions.DiscordChatExporterException: Request to 'https://discord.com/api/v10/guilds/42/channels' failed: forbidden.
+   at DiscordChatExporter.Core.Discord.DiscordClient.GetGuildChannelsAsync()
+   at CliFx.CommandLineApplication.RunAsync()
