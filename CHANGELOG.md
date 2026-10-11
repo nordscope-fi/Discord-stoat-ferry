@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.6] - 2026-10-11
+
+### Fixed
+
+- Review multipart Full-route chunks from content-addressed snapshots before shipping creates one
+  commit per atomic task. Shipping now rejects missing, changed, reordered, or unrelated evidence,
+  binds real provider artifacts and posted markers to the reviewed bytes, and keeps final Full
+  reviews and existing provider-failure and finding-verification rules.
+
 ## [2.43.5] - 2026-10-11
 
 ### Fixed
