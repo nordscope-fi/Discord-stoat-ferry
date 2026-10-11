@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
+from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.api import api_pin_message, get_session
 from discord_ferry.state import save_state
 
@@ -19,6 +21,23 @@ if TYPE_CHECKING:
     from discord_ferry.state import MigrationState
 
 logger = logging.getLogger(__name__)
+
+
+def _is_already_pinned_error(exc: Exception) -> bool:
+    """Return whether Stoat's pin route reports its structured duplicate response."""
+    if not isinstance(exc, MigrationError):
+        return False
+
+    prefix = "API error 400: "
+    message = str(exc)
+    if not message.startswith(prefix):
+        return False
+
+    try:
+        body = json.loads(message.removeprefix(prefix))
+    except json.JSONDecodeError:
+        return False
+    return isinstance(body, dict) and body.get("type") == "AlreadyPinned"
 
 
 async def run_pins(
@@ -102,26 +121,43 @@ async def run_pins(
                     )
                 )
             except Exception as exc:  # noqa: BLE001
-                remaining.append((channel_id, message_id))
-                state.errors.append(
-                    {
-                        "phase": "pins",
-                        "type": "pin_failed",
-                        "message": safe_sanitize(
-                            config.token_store,
-                            f"Failed to pin message {message_id} in channel {channel_id}: {exc}",
-                        ),
-                    }
-                )
-                on_event(
-                    MigrationEvent(
-                        phase="pins",
-                        status="error",
-                        message=f"Failed to pin message {message_id}: {exc}",
-                        current=pos,
-                        total=total,
+                if _is_already_pinned_error(exc):
+                    state.pins_applied += 1
+                    on_event(
+                        MigrationEvent(
+                            phase="pins",
+                            status="progress",
+                            message=(
+                                f"Message {message_id} was already pinned in channel {channel_id}"
+                            ),
+                            current=pos,
+                            total=total,
+                        )
                     )
-                )
+                else:
+                    remaining.append((channel_id, message_id))
+                    state.errors.append(
+                        {
+                            "phase": "pins",
+                            "type": "pin_failed",
+                            "message": safe_sanitize(
+                                config.token_store,
+                                (
+                                    f"Failed to pin message {message_id} in channel "
+                                    f"{channel_id}: {exc}"
+                                ),
+                            ),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="pins",
+                            status="error",
+                            message=f"Failed to pin message {message_id}: {exc}",
+                            current=pos,
+                            total=total,
+                        )
+                    )
 
             now = time.monotonic()
             if pos % checkpoint_interval == 0 and now - last_save >= 5.0:
