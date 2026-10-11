@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from nicegui import app, background_tasks, ui
 from nicegui.client import ClientConnectionTimeout
+from nicegui.storage import Storage
 
 from discord_ferry import gui_tools  # noqa: F401 -- registers the /tools routes as a side effect
 from discord_ferry.config import FerryConfig
@@ -99,10 +100,35 @@ _HEAD_HTML = (
 
 _STEP_LABELS: list[str] = ["Configure", "Export", "Validate", "Migrate", "Done"]
 
+_GUI_DATA_DIR_NAME = ".discord-ferry"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _gui_data_dir() -> Path:
+    """Return Ferry's existing per-user data directory."""
+    return Path.home() / _GUI_DATA_DIR_NAME
+
+
+def _default_gui_output_dir() -> Path:
+    """Return the GUI output default without relying on its launch directory."""
+    return _gui_data_dir() / "ferry-output"
+
+
+def _configure_gui_storage() -> Path:
+    """Point NiceGUI's disk-backed user storage at Ferry's writable data directory."""
+    storage_dir = _gui_data_dir() / "nicegui"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    Storage.path = storage_dir
+    return storage_dir
+
+
+def _selected_output_dir(storage: Mapping[str, Any]) -> Path:
+    """Use a completed migration's stored location, or the writable GUI default."""
+    return Path(str(storage.get("output_dir") or _default_gui_output_dir()))
 
 
 def _read_previous_state(output_dir: Path) -> tuple[MigrationState | None, str | None]:
@@ -789,7 +815,7 @@ def setup_page() -> None:
                     if mode == "offline":
                         storage["export_dir"] = export_dir_input.value.strip()
                     else:
-                        output_dir = str(storage.get("output_dir", "./ferry-output"))
+                        output_dir = _selected_output_dir(storage)
                         storage["export_dir"] = str(Path(output_dir) / "dce_cache" / discord_server)
                     storage["stoat_url"] = stoat_url
                     storage["server_toggle"] = toggle_val
@@ -1252,7 +1278,7 @@ async def migrate_page() -> None:
         return
 
     # Check for a previous migration state — offer resume or fresh start.
-    output_dir = Path("./ferry-output")
+    output_dir = _selected_output_dir(storage)
     previous_state, load_problem = _read_previous_state(output_dir)
 
     # Flag to gate migration start behind the resume/fresh choice.
@@ -1270,7 +1296,7 @@ async def migrate_page() -> None:
             ui.label("Saved progress could not be read").classes("text-lg font-bold text-red-800")
             ui.label(load_problem).classes("text-red-700")
             ui.label(
-                "Starting fresh replaces the saved progress in ferry-output/state.json. "
+                f"Starting fresh replaces the saved progress in {output_dir / 'state.json'}. "
                 "Copy that file somewhere safe first if you may need it."
             ).classes("text-red-700")
 
@@ -2227,6 +2253,7 @@ def main() -> None:
     # spawn child never reaches main() at all, so the ordering is merely inert
     # there, not wrong.)
     configure_logging()
+    _configure_gui_storage()
 
     try:
         _run_gui()

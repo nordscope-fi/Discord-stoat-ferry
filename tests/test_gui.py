@@ -343,6 +343,32 @@ def test_stash_output_dir_writes_string_path() -> None:
     assert storage["output_dir"] == "ferry-output"
 
 
+def test_default_gui_output_dir_uses_the_user_data_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Finder launches from /, which is not an application data directory (#1195)."""
+    from discord_ferry import gui
+
+    monkeypatch.setattr(gui.Path, "home", lambda: tmp_path)
+
+    assert gui._default_gui_output_dir() == tmp_path / ".discord-ferry" / "ferry-output"
+
+
+def test_configure_gui_storage_uses_the_user_data_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """NiceGUI's disk-backed user store must not resolve from the launch directory (#1195)."""
+    from nicegui.storage import Storage
+
+    from discord_ferry import gui
+
+    monkeypatch.setattr(gui.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(Storage, "path", Storage.path)
+
+    assert gui._configure_gui_storage() == tmp_path / ".discord-ferry" / "nicegui"
+    assert Storage.path == tmp_path / ".discord-ferry" / "nicegui"
+
+
 # ---------------------------------------------------------------------------
 # Batch 8 — S1 cached-export gating
 # ---------------------------------------------------------------------------
@@ -617,4 +643,6 @@ async def test_completion_card_deep_links_to_tool_page(
     # The User sim performs the navigation for real, so the target tool page renders.
     await user.should_see(landing_title)
     # The output dir was stashed for the tool page to default from.
-    assert user_store["output_dir"] == "ferry-output"  # config.output_dir is ./ferry-output
+    from discord_ferry import gui
+
+    assert user_store["output_dir"] == str(gui._default_gui_output_dir())
