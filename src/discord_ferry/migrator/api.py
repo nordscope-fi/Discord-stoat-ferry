@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
+from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.http import (
     new_session,
     proxy_error_is_permanent,
@@ -292,6 +293,11 @@ async def _api_request_inner(
 ) -> dict[str, Any]:
     """Core request logic with exponential backoff and circuit breaker."""
     global _rate_multiplier  # noqa: PLW0603
+    if not credential_transport_allowed(url):
+        raise MigrationError(
+            "Credential-bearing API requests require HTTPS except for localhost "
+            "and private or loopback IP addresses."
+        )
     headers = _headers(token)
     if extra_headers:
         headers.update(extra_headers)
@@ -338,7 +344,13 @@ async def _api_request_inner(
                 state.remaining = max(state.remaining - 1, 0)
 
         try:
-            async with session.request(method, url, json=body, headers=headers) as resp:
+            async with session.request(
+                method,
+                url,
+                json=body,
+                headers=headers,
+                allow_redirects=False,
+            ) as resp:
                 if resp.status in (200, 201):
                     _circuit_state.consecutive_failures = 0
                     _update_pacer_state(url, resp.headers)
