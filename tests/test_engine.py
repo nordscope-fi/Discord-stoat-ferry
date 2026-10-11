@@ -5793,7 +5793,7 @@ async def test_repair_restores_colour_and_hoist_when_metadata_present(tmp_path: 
         role_meta=RoleMeta(hoist=True, color="#3498db", name="moderator"),
         capture_edits=edits,
     )
-    assert any(e.get("colour") == 0x3498DB for e in edits), edits
+    assert any(e.get("colour") == "#3498db" for e in edits), edits
     assert any(e.get("hoist") is True for e in edits), edits
     assert not any(w.get("type") == "role_attributes_not_restored" for w in state.warnings), (
         state.warnings
@@ -5898,6 +5898,35 @@ async def test_run_build_returns_server_id_and_emits_progress() -> None:
     assert server_id == "srv"
     assert any(e.status == "started" for e in events)
     assert any("Created role 'A'" in e.message for e in events)
+
+
+async def test_run_build_truncates_server_role_and_channel_names() -> None:
+    """BUILD sends only names that meet Stoat's 32-character limit (#1182)."""
+    from discord_ferry.blueprint import BlueprintChannel, BlueprintRole, ServerBlueprint
+    from discord_ferry.core.engine import run_build
+
+    long_server = "s" * 33
+    long_role = "r" * 33
+    long_channel = "c" * 33
+    bp = ServerBlueprint(
+        name=long_server,
+        roles=[BlueprintRole(name=long_role)],
+        uncategorized_channels=[BlueprintChannel(name=long_channel)],
+    )
+    create_server = AsyncMock(return_value="srv")
+    create_role = AsyncMock(return_value={"id": "role"})
+    create_channel = AsyncMock(return_value={"_id": "channel"})
+    with (
+        patch("discord_ferry.core.engine.api_create_server", create_server),
+        patch("discord_ferry.core.engine.api_create_role", create_role),
+        patch("discord_ferry.core.engine.api_create_channel", create_channel),
+        patch("discord_ferry.core.engine.new_session", lambda: AsyncMock()),
+    ):
+        await run_build("http://x", "t", bp, lambda event: None)
+
+    assert create_server.await_args.args[3] == long_server[:32]
+    assert create_role.await_args.args[4] == long_role[:32]
+    assert create_channel.await_args.kwargs["name"] == long_channel[:32]
 
 
 async def test_run_build_role_ordering_failure_is_a_warning_not_a_raise() -> None:

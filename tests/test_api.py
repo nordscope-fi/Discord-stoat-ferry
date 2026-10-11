@@ -235,6 +235,19 @@ async def test_api_create_server_wrapped_response(mock_aiohttp: aioresponses) ->
     assert server_id == "srv123"
 
 
+async def test_api_create_server_sends_nsfw_in_create_body(mock_aiohttp: aioresponses) -> None:
+    """POST /servers/create carries the NSFW flag, which edits cannot apply (#1168)."""
+    bodies: list[dict[str, object]] = []
+    mock_aiohttp.post(
+        f"{BASE_URL}/servers/create",
+        payload={"server": {"_id": "srv123", "name": "Test"}, "channels": []},
+        callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+    )
+    async with aiohttp.ClientSession() as session:
+        await api_create_server(session, BASE_URL, TOKEN, "Test", nsfw=True)
+    assert bodies == [{"name": "Test", "nsfw": True}]
+
+
 async def test_api_create_server_array_body(mock_aiohttp: aioresponses) -> None:
     """SC-2.1. A JSON array is named by type, and its elements never reach the message.
 
