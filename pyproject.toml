@@ -65,7 +65,7 @@ dev = [
     "pyinstaller>=6.0",
     "PyJWT[crypto]>=2.10",
 ]
-# Mutation testing, kept out of `dev` on purpose: CI installs `dev` on six jobs
+# Mutation testing, kept out of `dev` on purpose: CI installs `dev` on seven jobs
 # and never runs a mutation sweep, so putting cosmic-ray there would pay its
 # install cost on every push for a tool only used locally and on demand.
 #   uv sync --extra mutation && bash scripts/mutate.sh
