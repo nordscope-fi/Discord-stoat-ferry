@@ -382,19 +382,24 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     not Ferry). DCE's .NET CancelKeyPress handler runs a graceful shutdown.
     Falls back to hard kill after 3s if the child does not exit.
     """
-    if sys.platform == "win32":
-        try:
-            process.send_signal(signal.CTRL_BREAK_EVENT)
-        except (ValueError, OSError):
-            process.terminate()  # fallback: hard kill
-        try:
-            await asyncio.wait_for(process.wait(), timeout=3.0)
-        except TimeoutError:
-            process.kill()
+    try:
+        if sys.platform == "win32":
+            try:
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+            except (ValueError, OSError):
+                process.terminate()  # fallback: hard kill
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3.0)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        else:
+            process.terminate()
             await process.wait()
-    else:
-        process.terminate()
-        await process.wait()
+    except ProcessLookupError:
+        # Cancellation can race with DCE exiting. The intended end state, no
+        # child process, has already been reached.
+        return
 
 
 async def _drain_overlong_line(
