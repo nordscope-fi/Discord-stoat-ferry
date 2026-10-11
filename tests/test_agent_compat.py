@@ -4444,6 +4444,141 @@ def test_qwen_failure_record_keeps_safe_diagnostics(
     assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("phase", ["connection", "idle", "total"])
+def test_qwen_failure_record_keeps_timeout_phase_in_both_routes(phase: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-failure-record",
+        f"timeout-{phase}",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    for route, slot in ((report["advisory"], "qwen"), (report["plan"], "plan-qwen")):
+        assert route["adapter"] == "qwen-api"
+        assert route["slot"] == slot
+        assert route["requested_model"] == "qwen3.8-max"
+        assert route["status"] == "timed_out"
+        assert route["failure_class"] == "timeout"
+        assert route["failure_stage"] == "qwen-response"
+        assert route["duration_ms"] == 25
+        assert route["http_status"] is None
+        assert route["failure_reason"] is None
+        assert route["timeout_phase"] == phase
+    assert report["advisory_route"] == {
+        "policy": "ferry-two-provider-advisory-v2",
+        "valid_slots": 1,
+        "automatic_sonnet_calls": 0,
+        "availability_blocks": False,
+    }
+    assert report["plan_route"] == {
+        "policy": "ferry-selected-plan-v3",
+        "selected_provider": "qwen",
+        "automatic_sonnet_calls": 0,
+        "owner_selected_sonnet_calls": 0,
+        "accepted": False,
+    }
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["timeout-missing", "timeout-unknown", "non-timeout-with-phase"],
+)
+def test_qwen_failure_record_omits_unusable_timeout_phase(fixture: str) -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "qwen-failure-record",
+        fixture,
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    for route in (report["advisory"], report["plan"]):
+        assert "timeout_phase" not in route
+        if fixture == "non-timeout-with-phase":
+            assert route["status"] == "failed"
+            assert route["failure_class"] == "unknown"
+        else:
+            assert route["status"] == "timed_out"
+            assert route["failure_class"] == "timeout"
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
+def test_provider_failure_reason_shared_builder_preserves_unaffected_record_shapes() -> None:
+    result = _run(
+        "node",
+        "tests/fixtures/agent_compat_runner.mjs",
+        "collection-record-shapes",
+        "matrix",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    valid_keys = {
+        "adapter",
+        "slot",
+        "requested_model",
+        "resolved_model",
+        "substitution_for",
+        "substitution_reason",
+        "session_id",
+        "duration_ms",
+        "status",
+        "findings",
+        "summary",
+        "confidence",
+    }
+    failure_keys = valid_keys | {
+        "failure_class",
+        "failure_stage",
+        "http_status",
+        "failure_reason",
+    }
+    for name in ("valid_qwen", "valid_vibe", "plan_qwen", "valid_sonnet"):
+        assert set(report[name]) == valid_keys
+        assert report[name]["status"] == "valid"
+    for name in ("failed_vibe", "failed_sonnet"):
+        assert set(report[name]) == failure_keys
+        assert report[name]["status"] == "failed"
+        assert "timeout_phase" not in report[name]
+    assert report["failed_vibe"]["failure_class"] == "credential"
+    assert report["failed_vibe"]["failure_stage"] == "vibe-credential"
+    assert report["failed_sonnet"]["failure_class"] == "provider"
+    assert report["failed_sonnet"]["failure_stage"] == "claude-child"
+    assert report["ensemble"] == {
+        "policy": "ferry-two-provider-advisory-v2",
+        "valid_slots": 2,
+        "automatic_sonnet_calls": 0,
+        "availability_blocks": False,
+    }
+    assert report["qwen_plan"] == {
+        "policy": "ferry-selected-plan-v3",
+        "selected_provider": "qwen",
+        "automatic_sonnet_calls": 0,
+        "owner_selected_sonnet_calls": 0,
+        "accepted": True,
+    }
+    assert report["sonnet_plan"] == {
+        "policy": "ferry-selected-plan-v3",
+        "selected_provider": "sonnet",
+        "automatic_sonnet_calls": 0,
+        "owner_selected_sonnet_calls": 1,
+        "accepted": True,
+    }
+    assert report["failed_sonnet_plan"] == {
+        "policy": "ferry-selected-plan-v3",
+        "selected_provider": "sonnet",
+        "automatic_sonnet_calls": 0,
+        "owner_selected_sonnet_calls": 1,
+        "accepted": False,
+    }
+    assert report["calls"] == {"qwen": 1, "sonnet": 1, "failed_sonnet": 1}
+    assert "FERRY_SECRET_CANARY" not in result.stdout + result.stderr
+
+
 def test_failure_reason_is_null_outside_qwen_schema_failures() -> None:
     result = _run(
         "node",
