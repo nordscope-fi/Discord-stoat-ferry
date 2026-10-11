@@ -138,6 +138,21 @@ def test_validate_empty_dir(runner: CliRunner, tmp_path: Path) -> None:
     assert result.output.index("No valid DCE JSON files") < result.output.index("ferry feedback")
 
 
+def test_validate_reports_a_malformed_message_without_a_traceback(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Validation must report the damaged file instead of leaking a parser exception."""
+    data = json.loads((Path(FIXTURES_DIR) / "simple_channel.json").read_text(encoding="utf-8"))
+    del data["messages"][0]["author"]
+    (tmp_path / "damaged-channel.json").write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(main, ["validate", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "damaged-channel.json" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 # ---------------------------------------------------------------------------
 # Migrate — argument validation
 # ---------------------------------------------------------------------------
@@ -562,7 +577,7 @@ def test_confirm_event_handled() -> None:
 
 def _write_rollback_state(tmp_path: Path) -> None:
     """Copy the rollback_state.json fixture into tmp_path."""
-    fixture = Path(__file__).parent / "fixtures" / "rollback_state.json"
+    fixture = Path(__file__).parent / "fixtures" / "state" / "rollback_state.json"
     (tmp_path / "state.json").write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "message_map.json").write_text("{}", encoding="utf-8")
 

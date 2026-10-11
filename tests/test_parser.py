@@ -1,10 +1,13 @@
 """Tests for DCE JSON parser."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from discord_ferry.errors import ExportError
 from discord_ferry.parser.dce_parser import (
     RENDERED_MENTION_CONSEQUENCE,
     _coerce_channel_type,
@@ -19,6 +22,7 @@ from discord_ferry.parser.dce_parser import (
     message_has_rendered_mention,
     parse_export_directory,
     parse_single_export,
+    stream_messages,
     validate_export,
 )
 from discord_ferry.parser.models import DCEExport, DCEMessage, DCEReaction
@@ -28,6 +32,101 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # ---------------------------------------------------------------------------
 # Parsing — parse_single_export
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("truncated.json", '{"guild":'),
+        ("null.json", "null"),
+    ],
+)
+def test_parse_export_directory_refuses_every_invalid_channel_file(
+    tmp_path: Path, filename: str, contents: str
+) -> None:
+    """A malformed channel must stop the run instead of being omitted."""
+    (tmp_path / filename).write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ExportError, match=filename):
+        parse_export_directory(tmp_path, metadata_only=True)
+
+
+@pytest.mark.parametrize(
+    ("filename", "mutation"),
+    [
+        ("missing-author.json", lambda message: message.pop("author")),
+        ("bad-author.json", lambda message: message.__setitem__("author", "not-an-author")),
+        (
+            "bad-attachment-size.json",
+            lambda message: message.__setitem__(
+                "attachments",
+                [
+                    {
+                        "id": "attachment",
+                        "url": "https://cdn.example.test/file.txt",
+                        "fileName": "file.txt",
+                        "fileSizeBytes": "12 KB",
+                    }
+                ],
+            ),
+        ),
+    ],
+)
+def test_validate_export_names_the_file_when_a_message_is_malformed(
+    tmp_path: Path, filename: str, mutation: Callable[[dict[str, Any]], object]
+) -> None:
+    """Streaming validation reports damaged message data through ExportError."""
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    message = data["messages"][0]
+    mutation(message)
+    (tmp_path / filename).write_text(json.dumps(data), encoding="utf-8")
+
+    exports = parse_export_directory(tmp_path, metadata_only=True)
+
+    with pytest.raises(ExportError, match=filename):
+        validate_export(exports, tmp_path)
+
+
+@pytest.mark.parametrize("metadata_only", [True, False])
+@pytest.mark.parametrize(
+    "messages",
+    [{}, None, "not-a-message-list", 1],
+    ids=["object", "null", "string", "integer"],
+)
+def test_parse_export_directory_rejects_a_non_list_messages_value(
+    tmp_path: Path, metadata_only: bool, messages: object
+) -> None:
+    """Metadata-only parsing must not hide a malformed message container."""
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    data["messages"] = messages
+    data["messageCount"] = 1
+    json_path = tmp_path / "bad-messages.json"
+    json_path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ExportError, match="bad-messages.json"):
+        exports = parse_export_directory(tmp_path, metadata_only=metadata_only)
+        validate_export(exports, tmp_path)
+
+
+def test_parse_single_export_names_the_malformed_message(tmp_path: Path) -> None:
+    """The eager parser identifies the file and message instead of leaking KeyError."""
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    del data["messages"][0]["author"]
+    json_path = tmp_path / "eager-malformed.json"
+    json_path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ExportError, match="900000000000000001.*eager-malformed.json"):
+        parse_single_export(json_path)
+
+
+def test_stream_messages_converts_invalid_json_to_an_export_error(tmp_path: Path) -> None:
+    """A damaged stream reports its file through the same public error path."""
+    json_path = tmp_path / "stream-truncated.json"
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    json_path.write_text(json.dumps(data)[:-1], encoding="utf-8")
+
+    with pytest.raises(ExportError, match="stream-truncated.json"):
+        list(stream_messages(json_path))
 
 
 def test_parse_single_export_basic(fixtures_dir: Path) -> None:
@@ -248,7 +347,6 @@ def test_parse_export_directory(fixtures_dir: Path) -> None:
     # 7 valid DCE JSON files: simple_channel, edge_cases, markdown_rendered,
     # forwarded_message_synthetic, plus the three real DCE captures (general,
     # Cool Thread, Bug Report).
-    # rollback_state.json is JSON but not DCE-shaped and is silently skipped.
     assert len(exports) == 7
     assert all(isinstance(e, DCEExport) for e in exports)
 
@@ -260,8 +358,8 @@ def test_parse_export_directory_sorted(fixtures_dir: Path) -> None:
     assert names == sorted(names)
 
 
-def test_parse_export_directory_skips_invalid(fixtures_dir: Path, tmp_path: Path) -> None:
-    """Non-DCE JSON files in the directory are skipped without raising."""
+def test_parse_export_directory_refuses_invalid_files(fixtures_dir: Path, tmp_path: Path) -> None:
+    """An invalid JSON file must stop parsing before a channel is omitted."""
     import shutil
 
     # Copy fixtures to a temp dir and add a bad file
@@ -270,11 +368,8 @@ def test_parse_export_directory_skips_invalid(fixtures_dir: Path, tmp_path: Path
     (temp_dir / "not_dce.json").write_text('{"foo": "bar"}')
     (temp_dir / "also_bad.json").write_text("this is not json at all{{{")
 
-    exports = parse_export_directory(temp_dir)
-    # The assertion is "the bad files changed nothing", so compare against the clean
-    # directory rather than a hardcoded count — otherwise every new fixture breaks this
-    # test for a reason unrelated to what it checks.
-    assert len(exports) == len(parse_export_directory(fixtures_dir))
+    with pytest.raises(ExportError, match="also_bad.json"):
+        parse_export_directory(temp_dir)
 
 
 # ---------------------------------------------------------------------------

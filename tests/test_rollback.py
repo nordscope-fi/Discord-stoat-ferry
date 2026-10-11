@@ -49,7 +49,7 @@ def mock_aiohttp() -> aioresponses:
 
 def _make_state_from_fixture(tmp_path: Path) -> MigrationState:
     """Copy the rollback_state.json fixture into ``tmp_path`` and load it."""
-    fixture = FIXTURES_DIR / "rollback_state.json"
+    fixture = FIXTURES_DIR / "state" / "rollback_state.json"
     (tmp_path / "state.json").write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "message_map.json").write_text("{}", encoding="utf-8")
     return load_state(tmp_path)

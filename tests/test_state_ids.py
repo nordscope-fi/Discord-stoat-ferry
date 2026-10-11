@@ -229,8 +229,9 @@ def test_a_saved_state_round_trips(tmp_path: Path) -> None:
 
 def test_an_older_state_from_the_fixtures_loads_unchanged(tmp_path: Path) -> None:
     """rollback_state.json is a v1.7.0-shaped file: no thread_strategy, no name maps."""
-    raw = json.loads((FIXTURES_DIR / "rollback_state.json").read_text(encoding="utf-8"))
-    shutil.copy(FIXTURES_DIR / "rollback_state.json", tmp_path / "state.json")
+    fixture = FIXTURES_DIR / "state" / "rollback_state.json"
+    raw = json.loads(fixture.read_text(encoding="utf-8"))
+    shutil.copy(fixture, tmp_path / "state.json")
     loaded = load_state(tmp_path)
     assert loaded.stoat_server_id == raw["stoat_server_id"]
     assert loaded.channel_map == raw["channel_map"]
