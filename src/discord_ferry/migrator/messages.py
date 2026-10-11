@@ -56,7 +56,7 @@ _VALID_REACTION_MODES = frozenset({"text", "native", "skip"})
 # guard so the two stay byte-identical. Changing this changes migrated content.
 _EDITED_MARKER = " *(edited)*"
 # Stoat has no native forward, so a recovered forward is marked inline. Kept on its own
-# line so it survives the 2000-char split and reads correctly when a forward also
+# line so it survives the 2000-byte split and reads correctly when a forward also
 # carries a comment of its own.
 _FORWARD_MARKER = "[forwarded]"
 
@@ -64,7 +64,40 @@ _FORWARD_MARKER = "[forwarded]"
 # Message splitting
 # ---------------------------------------------------------------------------
 
-_SPLIT_MARKER_RESERVE = 20  # chars reserved for "[continued K/N]" markers
+
+def _utf8_len(content: str) -> int:
+    """Return the UTF-8 byte length used by Stoat's message validators."""
+    return len(content.encode())
+
+
+def _utf8_prefix(content: str, max_bytes: int) -> str:
+    """Return the longest character-aligned prefix that fits in ``max_bytes``."""
+    used = 0
+    for index, char in enumerate(content):
+        char_bytes = _utf8_len(char)
+        if used + char_bytes > max_bytes:
+            return content[:index]
+        used += char_bytes
+    return content
+
+
+def _split_raw_chunks(content: str, max_bytes: int) -> list[str]:
+    """Split text by UTF-8 bytes, preferring the last fitting word boundary."""
+    raw_chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if _utf8_len(remaining) <= max_bytes:
+            raw_chunks.append(remaining)
+            break
+        fitting = _utf8_prefix(remaining, max_bytes)
+        space_idx = fitting.rfind(" ")
+        if space_idx > 0:
+            raw_chunks.append(remaining[:space_idx])
+            remaining = remaining[space_idx + 1 :]
+        else:
+            raw_chunks.append(fitting)
+            remaining = remaining[len(fitting) :]
+    return raw_chunks
 
 
 def _split_message(content: str, max_len: int = 2000) -> list[str]:
@@ -75,34 +108,27 @@ def _split_message(content: str, max_len: int = 2000) -> list[str]:
 
     Args:
         content: Message content to split (all transforms already applied).
-        max_len: Maximum length per chunk (default: 2000).
+        max_len: Maximum UTF-8 byte length per chunk (default: 2000).
 
     Returns:
-        List of content chunks, each ≤ max_len characters.
+        List of content chunks, each ≤ max_len UTF-8 bytes.
     """
-    if len(content) <= max_len:
+    if _utf8_len(content) <= max_len:
         return [content]
 
-    # Two-pass: first collect raw chunks, then apply markers.
-    effective_max = max_len - _SPLIT_MARKER_RESERVE
-    raw_chunks: list[str] = []
-    remaining = content
-    while remaining:
-        if len(remaining) <= effective_max:
-            raw_chunks.append(remaining)
+    # The marker width depends on the final number of parts. Re-split until the
+    # calculated count agrees with its own marker reservation.
+    n = 2
+    while True:
+        marker_reserve = max(
+            _utf8_len(f"\n[continued 1/{n}]"),
+            _utf8_len(f"[continued {n}/{n}] "),
+        )
+        raw_chunks = _split_raw_chunks(content, max_len - marker_reserve)
+        if len(raw_chunks) == n:
             break
-        # Try to split at last space within effective_max.
-        cut = remaining[:effective_max]
-        space_idx = cut.rfind(" ")
-        if space_idx > 0:
-            raw_chunks.append(remaining[:space_idx])
-            remaining = remaining[space_idx + 1 :]
-        else:
-            # Hard split — no space found.
-            raw_chunks.append(remaining[:effective_max])
-            remaining = remaining[effective_max:]
+        n = len(raw_chunks)
 
-    n = len(raw_chunks)
     if n == 1:
         # Shouldn't happen after the guard above, but be safe.
         return raw_chunks
@@ -251,21 +277,21 @@ def _reaction_emoji_display(emoji: DCEEmoji, emoji_map: dict[str, str]) -> str:
 
 def _build_reaction_text(
     reactions: list[DCEReaction],
-    max_chars: int,
+    max_bytes: int,
     emoji_map: dict[str, str] | None = None,
 ) -> str:
-    """Build a text summary of reactions within a character budget.
+    """Build a text summary of reactions within a UTF-8 byte budget.
 
     Args:
         reactions: Parsed reactions with emoji name and count.
-        max_chars: Maximum characters available.
+        max_bytes: Maximum UTF-8 bytes available.
         emoji_map: Discord emoji ID to Stoat emoji ID mapping.
 
     Returns:
         Formatted string like ``\\n[Reactions: thumbsup 12 · tada 5]``
         or empty string if no reactions or no budget.
     """
-    if not reactions or max_chars <= 0:
+    if not reactions or max_bytes <= 0:
         return ""
     emap = emoji_map or {}
     valid = [(_reaction_emoji_display(r.emoji, emap), r.count) for r in reactions if r.count > 0]
@@ -273,22 +299,23 @@ def _build_reaction_text(
         return ""
     parts = [f"{name} {count}" for name, count in valid]
     full = "\n[Reactions: " + " · ".join(parts) + "]"
-    if len(full) <= max_chars:
+    if _utf8_len(full) <= max_bytes:
         return full
     # Truncate: include as many reactions as fit
     prefix = "\n[Reactions: "
     suffix = "...]"
-    budget = max_chars - len(prefix) - len(suffix)
+    budget = max_bytes - _utf8_len(prefix) - _utf8_len(suffix)
     if budget <= 0:
         return ""
     truncated: list[str] = []
     used = 0
     for part in parts:
         addition = (" · " + part) if truncated else part
-        if used + len(addition) > budget:
+        addition_bytes = _utf8_len(addition)
+        if used + addition_bytes > budget:
             break
         truncated.append(part)
-        used += len(addition)
+        used += addition_bytes
     if not truncated:
         return ""
     return prefix + " · ".join(truncated) + suffix
@@ -1579,8 +1606,8 @@ async def _process_message(
     )
     if msg.reactions and _effective_mode == "text":
         # Budget is best-effort — overflow text may be appended after this.
-        # Step 7 truncation (2000 chars) is the true safety net.
-        remaining = 2000 - len(content)
+        # Step 7 splitting is the true safety net.
+        remaining = 2000 - _utf8_len(content)
         reaction_text = _build_reaction_text(msg.reactions, remaining, state.emoji_map)
         content += reaction_text
 
@@ -1593,15 +1620,15 @@ async def _process_message(
         ]
         if count_annotations:
             annotation = f"\n[Original counts: {', '.join(count_annotations)}]"
-            remaining = 2000 - len(content)
-            if remaining >= len(annotation):
+            remaining = 2000 - _utf8_len(content)
+            if remaining >= _utf8_len(annotation):
                 content += annotation
 
     # Step 6c: Append overflow text for attachments beyond the 5-file limit.
     if overflow_text:
         content += overflow_text
 
-    # Step 7: Split content into ≤2000-char chunks (replaces hard truncation).
+    # Step 7: Split content into ≤2000-byte chunks (replaces hard truncation).
     parts = _split_message(content)
     if len(parts) > 1:
         acc_warnings.append(
@@ -1617,12 +1644,12 @@ async def _process_message(
 
     # Step 7b: Budget total embed description length against first-part content.
     if stoat_embeds:
-        budget = max(0, 2000 - len(parts[0]) - 40)
+        budget = max(0, 2000 - _utf8_len(parts[0]) - 40)
         used = 0
         kept: list[dict[str, Any]] = []
         budget_dropped = 0
         for emb in stoat_embeds:
-            emb_desc_len = len(emb.get("description", "") or "")
+            emb_desc_len = _utf8_len(str(emb.get("description", "") or ""))
             if used + emb_desc_len <= budget:
                 used += emb_desc_len
                 kept.append(emb)
@@ -1631,7 +1658,7 @@ async def _process_message(
         if budget_dropped > 0:
             stoat_embeds = kept
             note = f"\n[{budget_dropped} embed(s) could not be migrated]"
-            if len(parts[0]) + len(note) <= 2000:
+            if _utf8_len(parts[0]) + _utf8_len(note) <= 2000:
                 parts[0] = parts[0] + note
             if channel_result is not None:
                 channel_result.embeds_dropped += budget_dropped
@@ -1643,7 +1670,7 @@ async def _process_message(
                     "type": "embed_budget_exceeded",
                     "message": (
                         f"Message {msg.id}: dropped {budget_dropped} embed(s) "
-                        f"exceeding description budget ({budget} chars)"
+                        f"exceeding description budget ({budget} bytes)"
                     ),
                 }
             )

@@ -4215,6 +4215,26 @@ async def test_embed_budget_drops_excess_embeds(tmp_path: Path) -> None:
     assert state.embeds_dropped >= 1
 
 
+async def test_embed_budget_counts_utf8_bytes(tmp_path: Path) -> None:
+    """A multibyte content body leaves only its remaining byte budget for embeds."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state()
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="byte-budget",
+        content="é" * 900,
+        embeds=[{"title": "A", "description": "é" * 101}],
+    )
+    export = _make_export(messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [export], lambda e: None)
+
+    assert sent[0].get("embeds") is None
+    assert "embed(s) could not be migrated" in sent[0]["content"]
+    assert state.embeds_dropped == 1
+
+
 async def test_embed_budget_all_fit_when_short(tmp_path: Path) -> None:
     """Short content with small embeds: all embeds survive the budget check."""
     sent: list[dict[str, Any]] = []

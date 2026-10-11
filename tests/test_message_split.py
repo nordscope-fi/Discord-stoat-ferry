@@ -31,6 +31,16 @@ def test_split_at_2001() -> None:
     assert len(parts) == 2
 
 
+def test_split_uses_utf8_byte_limit_for_non_ascii_content() -> None:
+    """A sub-2000-character body still splits when it exceeds Stoat's byte limit."""
+    content = "é" * 1100
+
+    parts = _split_message(content)
+
+    assert len(parts) == 2
+    assert all(len(part.encode()) <= 2000 for part in parts)
+
+
 def test_split_5000_chars() -> None:
     """5000-char content splits into 3 parts."""
     # Force a definite 3-part split by using a long string with no spaces.

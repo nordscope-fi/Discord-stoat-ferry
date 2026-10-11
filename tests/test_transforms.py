@@ -341,6 +341,16 @@ def test_flatten_embed_long_description_truncated() -> None:
     assert desc[:1994] == "A" * 1994
 
 
+def test_flatten_embed_truncates_description_to_utf8_byte_limit() -> None:
+    """A multibyte description remains within Stoat's 2000-byte validator limit."""
+    result, _, _ = flatten_embed({"description": "é" * 1001})
+
+    description = result["description"]
+    assert isinstance(description, str)
+    assert len(description.encode()) <= 2000
+    assert description.endswith(" [...]")
+
+
 def test_flatten_embed_exact_2000_description_unchanged() -> None:
     """A description of exactly 2000 chars is not truncated (S2)."""
     text = "B" * 2000
@@ -383,6 +393,15 @@ def test_flatten_embed_short_title_unchanged() -> None:
     embed: dict[str, object] = {"title": title}
     result, _, _ = flatten_embed(embed)
     assert result["title"] == title
+
+
+def test_flatten_embed_truncates_url_and_icon_url_to_256_characters() -> None:
+    """Stoat rejects embed URL fields longer than its 256-character validator limit."""
+    url = "https://example.com/" + "x" * 300
+    result, _, _ = flatten_embed({"url": url, "author": {"iconUrl": url}})
+
+    assert result["url"] == url[:256]
+    assert result["icon_url"] == url[:256]
 
 
 def test_all_inline_fields_in_rows() -> None:
