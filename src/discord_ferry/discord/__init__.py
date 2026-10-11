@@ -122,6 +122,7 @@ async def fetch_and_translate_guild_metadata(
             role_overrides=role_overrides,
             slowmode=channel.rate_limit_per_user,
             user_limit=channel.user_limit,
+            position=channel.position,
         )
 
     return DiscordMetadata(
