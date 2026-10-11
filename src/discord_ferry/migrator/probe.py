@@ -14,7 +14,7 @@ import aiohttp  # noqa: TCH002
 
 from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.http import new_session
-from discord_ferry.errors import AutumnUploadError
+from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_emoji,
@@ -361,7 +361,14 @@ async def _check_rate_limit(
         from discord_ferry.migrator.api import _headers
 
         url = f"{stoat_url.rstrip('/')}/servers/{server_id}"
-        async with sess.get(url, headers=_headers(token)) as resp:
+        if not credential_transport_allowed(url):
+            raise MigrationError(
+                "Credential-bearing API requests require HTTPS except for localhost "
+                "and private or loopback IP addresses."
+            )
+        async with sess.get(url, headers=_headers(token), allow_redirects=False) as resp:
+            if 300 <= resp.status < 400:
+                raise MigrationError("Rate-limit probe refused a redirect.")
             rl = {k: v for k, v in resp.headers.items() if k.lower().startswith("x-ratelimit")}
         report.add("rate_limit", "ok", f"headers={rl or 'none observed'}")
     except Exception as exc:  # noqa: BLE001
