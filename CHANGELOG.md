@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.7] - 2026-10-11
+
+### Fixed
+
+- Retain a safe structured record when a direct Vibe or Qwen review attempt fails, and preserve
+  Qwen's classified timeout phase through advisory and selected-plan collection (#1148).
+
 ## [2.43.6] - 2026-10-11
 
 ### Fixed
