@@ -1477,6 +1477,30 @@ async def test_run_categories_skips_empty(tmp_path: Path) -> None:
     assert state.category_map == {}
 
 
+async def test_run_categories_skips_a_thread_parent_as_a_category(tmp_path: Path) -> None:
+    """A thread's categoryId names its parent channel, not a Discord category."""
+    events: list[MigrationEvent] = []
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [
+        _make_export(channel_id="ch1", category_id="cat1", category="General"),
+        _make_export(
+            channel_id="thread1",
+            category_id="ch1",
+            category="general",
+            is_thread=True,
+            parent_channel_name="general",
+        ),
+    ]
+
+    with aioresponses() as m:
+        m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1", "categories": []})
+        await run_categories(config, state, exports, events.append)
+
+    assert set(state.category_map) == {"cat1"}
+    assert state.category_names == {"cat1": "General"}
+
+
 # ---------------------------------------------------------------------------
 # Phase 6: CHANNELS
 # ---------------------------------------------------------------------------
