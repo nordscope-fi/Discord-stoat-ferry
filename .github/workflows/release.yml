@@ -417,7 +417,10 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.11"
-          enable-cache: true
+          # ADR-042: this job holds the PyPI OIDC identity. Disable caching for every
+          # trigger, including a manual dispatch started from a tag, so it never
+          # restores a cache written by an earlier build job.
+          enable-cache: false
 
       - name: Download Windows artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
