@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.43.10] - 2026-10-11
+
+### Fixed
+
+- Read media paths from Windows exports on macOS and Linux while preserving containment checks and refusing absolute Windows paths (#1218).
+- Count Stoat's already-pinned response as success in the pins phase, while retaining other failed pins for retry (#1257).
+- Restore voice channel user caps during repair with the same payload used by migration (#1229).
+- Honor port-qualified proxy bypass entries, with separate cache entries per port and preserved Unicode hostname matching (#1235).
+- Remove the false animation-loss warning for migrated emoji and the corresponding limitation in the guide (#1268).
+
 ## [2.43.9] - 2026-10-11
 
 ### Fixed
