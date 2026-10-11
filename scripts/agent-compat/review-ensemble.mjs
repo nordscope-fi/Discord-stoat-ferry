@@ -16,7 +16,7 @@ import { pathToFileURL } from 'node:url';
 import {
   buildReviewPrompt,
   classifyReviewFailure,
-  isQwenSchemaFailureReason,
+  makeReviewFailureRecord,
   makeReviewRecord,
   reviewInputDigest,
   reviewRecordDigest,
@@ -244,25 +244,18 @@ function fulfilledFailure(record, provider) {
 
 function failedProviderRecord(provider, error) {
   const failureClass = classifyReviewFailure(error);
-  const failureReason = provider.call === 'qwen' && failureClass === 'schema'
-    ? isQwenSchemaFailureReason(error?.failureReason)
-      ? error.failureReason
-      : 'response-unclassified'
-    : null;
-  return {
-    ...makeReviewRecord({
-      adapter: provider.adapter,
-      slot: provider.slot,
-      requestedModel: provider.requestedModel,
-      sessionId: null,
-      durationMs: Number.isFinite(error?.durationMs) ? error.durationMs : 0,
-      status: failureClass === 'timeout' ? 'timed_out' : 'failed',
-    }),
-    failure_class: failureClass,
-    failure_stage: typeof error?.stage === 'string' ? error.stage : null,
-    http_status: Number.isInteger(error?.httpStatus) ? error.httpStatus : null,
-    failure_reason: failureReason,
-  };
+  return makeReviewFailureRecord({
+    adapter: provider.adapter,
+    slot: provider.slot,
+    requestedModel: provider.requestedModel,
+    provider: provider.call,
+    failureClass,
+    failureStage: error?.stage,
+    durationMs: error?.durationMs,
+    httpStatus: error?.httpStatus,
+    failureReason: error?.failureReason,
+    timeoutPhase: error?.deadline,
+  });
 }
 
 export async function runEnsemble(request, adapters) {

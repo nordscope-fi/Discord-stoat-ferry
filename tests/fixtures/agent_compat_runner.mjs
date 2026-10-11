@@ -2198,8 +2198,13 @@ switch (mode) {
       error.responseBody = 'FERRY_SECRET_CANARY';
       error.stdout = 'FERRY_SECRET_CANARY';
       error.stderr = 'FERRY_SECRET_CANARY';
-      if (argument === 'timeout') {
+      if (argument === 'timeout' || argument.startsWith('timeout-')) {
         error.code = 'ETIMEDOUT';
+        const phase = argument.slice('timeout-'.length);
+        if (argument === 'timeout') error.deadline = 'idle';
+        else if (['connection', 'idle', 'total'].includes(phase)) error.deadline = phase;
+        else if (phase === 'unknown') error.deadline = 'FERRY_SECRET_CANARY';
+      } else if (argument === 'non-timeout-with-phase') {
         error.deadline = 'idle';
       } else if (argument.startsWith('http-')) {
         error.httpStatus = Number(argument.slice(5));
@@ -2229,7 +2234,138 @@ switch (mode) {
       adapters: { qwen },
       inputSha256: reviewInputDigest('fixture'),
     });
-    writeJson({ advisory: advisory.slots.qwen, plan: plan.attempts[0] });
+    writeJson({
+      advisory: advisory.slots.qwen,
+      plan: plan.attempts[0],
+      advisory_route: {
+        policy: advisory.policy,
+        valid_slots: advisory.valid_slots,
+        automatic_sonnet_calls: advisory.automatic_sonnet_calls,
+        availability_blocks: advisory.availability_blocks,
+      },
+      plan_route: {
+        policy: plan.policy,
+        selected_provider: plan.selected_provider,
+        automatic_sonnet_calls: plan.automatic_sonnet_calls,
+        owner_selected_sonnet_calls: plan.owner_selected_sonnet_calls,
+        accepted: plan.accepted !== null,
+      },
+    });
+    break;
+  }
+  case 'collection-record-shapes': {
+    if (argument !== 'matrix') throw new Error('invalid collection record-shape fixture');
+    const result = { findings: [], summary: 'clean', confidence: 'high' };
+    const valid = ({ adapter, slot, requestedModel, resolvedModel = requestedModel }) =>
+      makeReviewRecord({
+        adapter,
+        slot,
+        requestedModel,
+        resolvedModel,
+        sessionId: `${slot}-session`,
+        durationMs: 7,
+        status: 'valid',
+        result,
+      });
+    const validVibe = ({ slot }) => valid({
+      adapter: 'vibe',
+      slot,
+      requestedModel: 'zai-glm-5-2',
+    });
+    const validQwen = ({ slot }) => valid({
+      adapter: 'qwen-api',
+      slot,
+      requestedModel: 'qwen3.8-max',
+    });
+    const validSonnet = ({ slot }) => valid({
+      adapter: 'claude',
+      slot,
+      requestedModel: 'sonnet',
+      resolvedModel: 'claude-sonnet-5',
+    });
+    const cleanEnsemble = await runEnsemble({ prompt: 'fixture' }, {
+      vibe: validVibe,
+      qwen: validQwen,
+    });
+    const failedVibeEnsemble = await runEnsemble({ prompt: 'fixture' }, {
+      vibe: async () => {
+        const error = new Error('FERRY_SECRET_CANARY');
+        error.code = 'CREDENTIAL';
+        error.stage = 'vibe-credential';
+        error.durationMs = 11;
+        throw error;
+      },
+      qwen: validQwen,
+    });
+    let qwenCalls = 0;
+    const qwenPlan = await runPlanReview({
+      request: { prompt: 'fixture' },
+      adapters: { qwen: (options) => {
+        qwenCalls += 1;
+        return validQwen(options);
+      } },
+      inputSha256: reviewInputDigest('fixture'),
+    });
+    let sonnetCalls = 0;
+    const sonnetPlan = await runPlanReview({
+      request: { prompt: 'fixture' },
+      adapters: { sonnet: (options) => {
+        sonnetCalls += 1;
+        return validSonnet(options);
+      } },
+      inputSha256: reviewInputDigest('fixture'),
+      selectedProvider: 'sonnet',
+    });
+    let failedSonnetCalls = 0;
+    const failedSonnetPlan = await runPlanReview({
+      request: { prompt: 'fixture' },
+      adapters: { sonnet: async () => {
+        failedSonnetCalls += 1;
+        const error = new Error('FERRY_SECRET_CANARY');
+        error.httpStatus = 503;
+        error.stage = 'claude-child';
+        error.durationMs = 13;
+        throw error;
+      } },
+      inputSha256: reviewInputDigest('fixture'),
+      selectedProvider: 'sonnet',
+    });
+    writeJson({
+      valid_qwen: cleanEnsemble.slots.qwen,
+      valid_vibe: cleanEnsemble.slots['mistral-vibe'],
+      failed_vibe: failedVibeEnsemble.slots['mistral-vibe'],
+      plan_qwen: qwenPlan.attempts[0],
+      valid_sonnet: sonnetPlan.attempts[0],
+      failed_sonnet: failedSonnetPlan.attempts[0],
+      ensemble: {
+        policy: cleanEnsemble.policy,
+        valid_slots: cleanEnsemble.valid_slots,
+        automatic_sonnet_calls: cleanEnsemble.automatic_sonnet_calls,
+        availability_blocks: cleanEnsemble.availability_blocks,
+      },
+      qwen_plan: {
+        policy: qwenPlan.policy,
+        selected_provider: qwenPlan.selected_provider,
+        automatic_sonnet_calls: qwenPlan.automatic_sonnet_calls,
+        owner_selected_sonnet_calls: qwenPlan.owner_selected_sonnet_calls,
+        accepted: qwenPlan.accepted !== null,
+      },
+      sonnet_plan: {
+        policy: sonnetPlan.policy,
+        selected_provider: sonnetPlan.selected_provider,
+        automatic_sonnet_calls: sonnetPlan.automatic_sonnet_calls,
+        owner_selected_sonnet_calls: sonnetPlan.owner_selected_sonnet_calls,
+        accepted: sonnetPlan.accepted !== null,
+      },
+      failed_sonnet_plan: {
+        policy: failedSonnetPlan.policy,
+        selected_provider: failedSonnetPlan.selected_provider,
+        automatic_sonnet_calls: failedSonnetPlan.automatic_sonnet_calls,
+        owner_selected_sonnet_calls: failedSonnetPlan.owner_selected_sonnet_calls,
+        accepted: failedSonnetPlan.accepted !== null,
+      },
+      calls: { qwen: qwenCalls, sonnet: sonnetCalls, failed_sonnet: failedSonnetCalls },
+    });
     break;
   }
   case 'provider-failure-reasons': {
