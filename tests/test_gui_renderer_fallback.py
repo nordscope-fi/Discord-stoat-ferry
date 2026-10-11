@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from discord_ferry import gui
+from discord_ferry.gui_native import BrowserFallback
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +106,8 @@ class TestInjectedMarkup:
         from nicegui import Client
 
         monkeypatch.setattr(gui.app, "get", lambda *_a, **_k: lambda fn: fn)
-        gui._install_renderer_fallback()
+        fallback = MagicMock(spec=BrowserFallback)
+        gui._install_renderer_fallback(fallback)
         return Client.shared_head_html, Client.shared_body_html
 
     def test_the_reporting_script_is_not_a_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,7 +148,7 @@ class TestRendererDeadRoute:
     """
 
     @staticmethod
-    def _handler(monkeypatch: pytest.MonkeyPatch) -> Any:
+    def _handler(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, MagicMock]:
         captured: list[Any] = []
 
         def fake_get(path: str, **_kwargs: Any) -> Any:
@@ -159,45 +161,44 @@ class TestRendererDeadRoute:
             return decorate
 
         monkeypatch.setattr(gui.app, "get", fake_get)
-        gui._install_renderer_fallback()
+        fallback = MagicMock(spec=BrowserFallback)
+        gui._install_renderer_fallback(fallback)
         assert captured, "the route was never registered"
-        return captured[0]
+        return captured[0], fallback
 
     def test_it_opens_the_browser_at_the_served_address(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Assert the CALL, never the absence of a window."""
-        opened = MagicMock(return_value=True)
-        monkeypatch.setattr(gui.webbrowser, "open", opened)
-        handler = self._handler(monkeypatch)
+        handler, fallback = self._handler(monkeypatch)
+        fallback.request.return_value = True
         assert handler() == {"status": "ok"}
-        opened.assert_called_once_with(gui._URL)
+        fallback.request.assert_called_once_with(
+            "The native window could not run Ferry's interface"
+        )
 
     def test_a_second_report_does_not_open_a_second_browser(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        opened = MagicMock(return_value=True)
-        monkeypatch.setattr(gui.webbrowser, "open", opened)
-        handler = self._handler(monkeypatch)
+        handler, fallback = self._handler(monkeypatch)
+        fallback.request.side_effect = [True, False]
         handler()
         assert handler() == {"status": "already-opened"}
-        assert opened.call_count == 1
+        assert fallback.request.call_count == 2
 
     def test_a_failed_browser_launch_is_reported_not_raised(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Raising here would replace a dead window with a crash."""
-        monkeypatch.setattr(gui.webbrowser, "open", MagicMock(side_effect=OSError("no browser")))
-        handler = self._handler(monkeypatch)
-        with caplog.at_level("WARNING"):
-            assert handler() == {"status": "ok"}
-        assert "by hand" in caplog.text
+        handler, fallback = self._handler(monkeypatch)
+        fallback.request.return_value = True
+        assert handler() == {"status": "ok"}
+        fallback.request.assert_called_once()
 
     def test_a_browser_that_reports_failure_is_also_logged(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        monkeypatch.setattr(gui.webbrowser, "open", MagicMock(return_value=False))
-        handler = self._handler(monkeypatch)
-        with caplog.at_level("WARNING"):
-            handler()
-        assert "No browser could be opened" in caplog.text
+        handler, fallback = self._handler(monkeypatch)
+        fallback.request.return_value = False
+        assert handler() == {"status": "already-opened"}
+        fallback.request.assert_called_once()

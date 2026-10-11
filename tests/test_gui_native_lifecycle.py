@@ -238,7 +238,8 @@ class TestMainLifecycle:
         monkeypatch.setattr(gui, "_teardown_native_window", lambda: None)
         monkeypatch.setattr(gui.app, "on_shutdown", on_shutdown)
         gui._run_gui()
-        on_shutdown.assert_called_once_with(gui._teardown_native_window_async)
+        assert on_shutdown.call_count == 3
+        assert on_shutdown.call_args_list[-1].args == (gui._teardown_native_window_async,)
 
     def test_no_handler_and_no_teardown_in_browser_mode(
         self, monkeypatch: pytest.MonkeyPatch

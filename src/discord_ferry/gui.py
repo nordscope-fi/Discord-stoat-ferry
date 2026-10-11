@@ -30,6 +30,7 @@ from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.feedback import FeedbackInterface
 from discord_ferry.feedback_gui import FeedbackGuiContext, render_feedback_action
+from discord_ferry.gui_native import BrowserFallback, ScopedNativeLauncher
 from discord_ferry.parser.dce_parser import (
     _ACKNOWLEDGEABLE_TYPES,
     acknowledgement_required,
@@ -617,7 +618,7 @@ def setup_page() -> None:
                             browse_btn = ui.button(icon="folder_open", on_click=_on_browse).props(
                                 "flat dense"
                             )
-                            if not _native_enabled():
+                            if not _native_controls_available():
                                 browse_btn.disable()
                                 browse_btn.tooltip("Install pywebview for folder picker")
 
@@ -2073,7 +2074,7 @@ _FALLBACK_HEAD = f"""
 </script>
 """
 
-_browser_opened = False
+_active_native_launcher: ScopedNativeLauncher | None = None
 
 
 def _native_enabled() -> bool:
@@ -2086,34 +2087,21 @@ def _native_enabled() -> bool:
     return _HAS_WEBVIEW and not os.environ.get("FERRY_NO_NATIVE")
 
 
-def _install_renderer_fallback() -> None:
+def _native_controls_available() -> bool:
+    """Whether a live native window still accepts folder-picker calls."""
+    return _native_enabled() and (
+        _active_native_launcher is None or _active_native_launcher.native_controls_available
+    )
+
+
+def _install_renderer_fallback(fallback: BrowserFallback) -> None:
     """Teach every page to report a renderer that cannot run the interface."""
 
     @app.get(_RENDERER_DEAD_ROUTE)
     def _renderer_dead() -> dict[str, str]:
-        global _browser_opened
-        if _browser_opened:
-            return {"status": "already-opened"}
-        _browser_opened = True
-        logger.warning(
-            "The native window could not run Ferry's interface, so it was opened in "
-            "your browser at %s instead. Set FERRY_NO_NATIVE=1 to skip the window "
-            "next time.",
-            _URL,
-        )
-        try:
-            if not webbrowser.open(_URL):
-                logger.warning(
-                    "No browser could be opened either. Ferry is still running: go to %s by hand.",
-                    _URL,
-                )
-        except OSError:
-            logger.warning(
-                "Opening a browser failed. Ferry is still running: go to %s by hand.",
-                _URL,
-                exc_info=True,
-            )
-        return {"status": "ok"}
+        if fallback.request("The native window could not run Ferry's interface"):
+            return {"status": "ok"}
+        return {"status": "already-opened"}
 
     ui.add_body_html(_FALLBACK_BODY, shared=True)
     ui.add_head_html(_FALLBACK_HEAD, shared=True)
@@ -2190,45 +2178,55 @@ def _install_host_guard() -> None:
 
 
 def _run_gui() -> None:
-    """Start the UI and guarantee the native window child dies with the server."""
-    native = _native_enabled()
+    """Start the UI and guarantee native cleanup and scoped launcher restoration."""
+    global _active_native_launcher
+    native_requested = _native_enabled()
     _install_host_guard()
+    fallback: BrowserFallback | None = None
+    launcher: ScopedNativeLauncher | None = None
+    native = native_requested
+    show = True
 
-    if native:
-        _install_renderer_fallback()
-        # Fires on every path that reaches the ASGI lifespan shutdown: window close,
-        # Cmd-Q, Dock quit, force quit (SIGTERM) and a single Ctrl-C.
+    if native_requested:
+        fallback = BrowserFallback(_URL, app, webbrowser.open)
+        launcher = ScopedNativeLauncher(app, _URL, fallback)
+        _active_native_launcher = launcher
+        native = launcher.native_requested
+        show = False
+        _install_renderer_fallback(fallback)
+        app.on_startup(fallback.on_startup)
+        app.on_startup(launcher.on_startup)
+        app.on_shutdown(fallback.on_shutdown)
+        app.on_shutdown(launcher.on_shutdown)
         app.on_shutdown(_teardown_native_window_async)
 
+    activation = launcher.activation() if launcher is not None else contextlib.nullcontext()
     try:
-        ui.run(
-            title="Discord Ferry",
-            host=_HOST,
-            port=_PORT,
-            native=native,
-            reload=False,
-            storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
-            # NiceGUI derives ping_interval = max(rt * 0.8, 4) and
-            # ping_timeout = max(rt * 0.4, 2) from this, so the 3.0 default leaves the
-            # browser only ~6s of tolerance before it shows "Connection lost".
-            # 10.0 -> 8s/4s = 12s, still prompt about a genuinely dead server.
-            reconnect_timeout=10.0,
-            # uvicorn's graceful drain is unbounded by default and runs BEFORE the
-            # shutdown hook. The only connection is the local websocket, which closes
-            # immediately, so keep this short: a force-quit SIGKILL landing mid-drain
-            # would orphan the window, which is the whole failure this prevents.
-            timeout_graceful_shutdown=1,
-            # uvicorn trusts X-Forwarded-For/-Proto from 127.0.0.1 by default. Ferry
-            # sits behind no proxy and never reads the derived client address or scheme.
-            proxy_headers=False,
-        )
+        with activation:
+            ui.run(
+                title="Discord Ferry",
+                host=_HOST,
+                port=_PORT,
+                native=native,
+                show=show,
+                reload=False,
+                storage_secret=os.environ.get("FERRY_STORAGE_SECRET", secrets.token_hex(32)),
+                reconnect_timeout=10.0,
+                timeout_graceful_shutdown=1,
+                proxy_headers=False,
+            )
     finally:
         # Covers what the lifespan hook cannot: uvicorn's force_exit path (double
         # Ctrl-C) and a failure during startup. Without it a surviving daemon child
         # would hang the interpreter in multiprocessing's atexit join, which has no
         # timeout -- a hung Ferry still holding port 8765, worse than an orphan.
-        if native:
+        if native_requested:
+            if fallback is not None:
+                fallback.stop()
             _teardown_native_window()
+        if launcher is not None:
+            launcher.close()
+        _active_native_launcher = None
 
 
 def main() -> None:
