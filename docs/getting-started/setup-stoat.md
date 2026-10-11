@@ -142,7 +142,7 @@ If you are using an existing server (Option B), create a role with these permiss
 
 ## 5. Raising limits on self-hosted instances
 
-If your Discord server is large — many channels, lots of custom emoji, or long messages — the default Stoat limits may be too low. You can raise them before running the migration.
+If your Discord server is large (many channels, lots of custom emoji, or long messages), the default Stoat limits may be too low. You can raise them before running the migration.
 
 !!! info "This only applies to self-hosted Stoat"
     If you are using the official stoat.chat service, you cannot change these limits yourself. Contact Stoat support if you hit a limit.
@@ -150,13 +150,16 @@ If your Discord server is large — many channels, lots of custom emoji, or long
 Open your `Revolt.overrides.toml` file (yes, it is still named after the old project name) and add or adjust the following values:
 
 ```toml
-[limits.global]
+[features.limits.global]
 server_channels = 500   # default is 200; raise if your Discord has many threads
 server_emoji = 200      # default is 100; raise if you have lots of custom emoji
-message_length = 4000   # default is 2000; raise if you have very long messages
+body_limit_size = 50_000_000  # default is 20 MB; raise for larger upload requests
 ```
 
 Restart your Stoat instance after saving the file for the changes to take effect.
+
+Stoat v0.15.7 defines these names under
+[`[features.limits.global]`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/config/Revolt.toml#L233-L255).
 
 !!! tip "Not sure where `Revolt.overrides.toml` is?"
     It is typically in the same directory as your `docker-compose.yml` file, or in the config volume mounted into the `api` container. Check the documentation for your specific Stoat setup guide.
