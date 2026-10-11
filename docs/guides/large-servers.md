@@ -20,13 +20,13 @@ Ferry sends one message per second by default (the 1.0s rate limit). v2.0.0 adds
     Actual speedup depends on how evenly messages are distributed across channels. Servers where one channel holds 90% of messages will see less benefit from parallelism.
 
 !!! warning "Run overnight or over a weekend"
-    Large migrations are not something you watch in real time. Start the migration before you go to sleep or before the weekend. Use the CLI for unattended runs — it keeps running even if you close your terminal (use `nohup` or `screen`/`tmux`).
+    Large migrations are not something you watch in real time. Start the migration before you go to sleep or before the weekend. Use the CLI for unattended runs; it keeps running even if you close your terminal (use `nohup` or `screen`/`tmux`).
 
 ---
 
 ## Resume Support
 
-Ferry saves its progress after finishing each channel. If the migration is interrupted — by a crash, a network error, or a deliberate Ctrl+C — you can pick up where it left off.
+Ferry saves its progress after finishing each channel. If the migration is interrupted (by a crash, a network error, or a deliberate Ctrl+C), you can pick up where it left off.
 
 === "GUI"
     On the Setup screen, expand **Advanced Options** and enter the same export folder path. Ferry will detect the existing state file and offer to resume.
@@ -52,11 +52,15 @@ The default 1.0s inter-message delay is conservative and suitable for the offici
 | Delay | Effect |
 |-------|--------|
 | 1.0s (default) | Safe for official hosted service |
-| 0.5s | Twice as fast; acceptable on self-hosted instances with relaxed limits |
+| 0.5s | Too fast for Stoat's default messaging limit; expect 429 errors |
 | 2.0–3.0s | Use if you are seeing frequent 429 errors |
 
-!!! warning "Do not go below 0.5s on the official service"
-    The official Stoat service enforces 10 messages per 10 seconds. Going below 0.5s per message will reliably trigger rate limit errors and slow your migration down overall due to backoff delays.
+!!! warning "Do not go below 1.0s per channel by default"
+    Stoat v0.15.7 maps the messaging bucket to `10` requests and uses a 10-second window. That
+    makes 1.0 second per message the safe default per channel. Only lower the delay after you have
+    verified that your self-hosted instance uses a higher messaging limit. See the upstream
+    [`"messaging" => 10`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/delta/src/util/ratelimits.rs#L57-L65)
+    mapping and [`Duration::from_secs(10)`](https://github.com/revoltchat/backend/blob/5fb97ec4e7fd2f37fab38c834d3c354914ef4589/crates/core/ratelimits/src/ratelimiter.rs#L53-L68) window.
 
 ---
 
@@ -69,7 +73,7 @@ v2.0.0 processes multiple channels concurrently, dramatically reducing migration
 | `max_concurrent_channels` | 3 | Channels processed simultaneously |
 | `max_concurrent_requests` | 5 | Total concurrent API calls across all workers |
 
-These settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent API calls. Since v2.7.0 both are adjustable — `--max-concurrent-channels` and `--max-concurrent-requests` on the CLI, or the **Speed** group in the GUI's Advanced Options:
+These settings interact: with 3 channels and 5 API slots, each channel averages ~1.7 concurrent API calls. Since v2.7.0 both are adjustable; `--max-concurrent-channels` and `--max-concurrent-requests` on the CLI, or the **Speed** group in the GUI's Advanced Options:
 
 ```bash
 ferry migrate --export-dir ./export \
@@ -78,7 +82,7 @@ ferry migrate --export-dir ./export \
 ```
 
 !!! warning "Self-hosted only"
-    Raising these against the official `api.stoat.chat` usually makes runs **slower** — its rate limits trigger 429 backoff, and Ferry warns when you try. Monitor your own server's load and dial back if you see frequent 429 errors.
+    Raising these against the official `api.stoat.chat` usually makes runs **slower**; its rate limits trigger 429 backoff, and Ferry warns when you try. Monitor your own server's load and dial back if you see frequent 429 errors.
 
 ---
 
@@ -99,7 +103,7 @@ Incremental mode:
 
 **Requirements:** A prior completed migration in the same output directory.
 
-**Cannot be combined with `--resume`** — these are mutually exclusive. Use `--resume` for crashed migrations; use `--incremental` for delta updates of a successfully completed migration.
+**Cannot be combined with `--resume`**; these are mutually exclusive. Use `--resume` for crashed migrations; use `--incremental` for delta updates of a successfully completed migration.
 
 !!! info "message_map.json"
     As of v2.0.0, the message ID map is stored as a separate `message_map.json` file alongside `state.json`. Both files must be present in the output directory for `--incremental` or `--resume` to work correctly. Do not delete either file until you are satisfied the migration is complete.
@@ -128,8 +132,8 @@ Stoat allows a maximum of 200 channels per server by default. Discord servers wi
 
 **Options:**
 
-- **Skip threads** — use `--skip-threads` (CLI) or the **Skip threads** checkbox (GUI) to omit all thread and forum content. This keeps you within the channel limit but loses threaded conversations.
-- **Raise the limit** — on a self-hosted instance, increase `server_channels` in your configuration. See [Self-Hosted Stoat Tips](self-hosted-tips.md). If your self-hosted instance has a raised limit, pass `--max-channels N` to Ferry so it respects the higher ceiling.
+- **Skip threads**: use `--skip-threads` (CLI) or the **Skip threads** checkbox (GUI) to omit all thread and forum content. This keeps you within the channel limit but loses threaded conversations.
+- **Raise the limit**: on a self-hosted instance, increase `server_channels` in your configuration. See [Self-Hosted Stoat Tips](self-hosted-tips.md). If your self-hosted instance has a raised limit, pass `--max-channels N` to Ferry so it respects the higher ceiling.
 
 !!! tip "Check before you start"
     Run `ferry validate` on your export first. The counts table will show the total channel and thread count so you can decide before migration begins.
@@ -150,7 +154,7 @@ If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted insta
     The Migrate screen shows a live phase indicator, per-channel progress bar, running totals, and a scrolling log. Leave the browser tab open and check back periodically.
 
 === "CLI"
-    The CLI shows a live Rich dashboard with a phase progress bar, a per-channel message progress bar with ETA, and running stats (messages sent, errors, warnings, current channel). Add `--verbose` for a line per message — useful for debugging but very noisy on large servers. For truly unattended runs, redirect output to a log file:
+    The CLI shows a live Rich dashboard with a phase progress bar, a per-channel message progress bar with ETA, and running stats (messages sent, errors, warnings, current channel). Add `--verbose` for a line per message; useful for debugging but very noisy on large servers. For truly unattended runs, redirect output to a log file:
 
     ```bash
     ferry migrate --export-dir ~/exports/my-discord-server/ \
@@ -168,14 +172,14 @@ If emoji fidelity matters, raise the `server_emoji` limit on a self-hosted insta
 
 ## Keeping Thread Channels Under Control
 
-With the default `flatten` strategy, every thread becomes its own channel — a busy server with hundreds of threads can blow past Stoat's 200-channel limit. Three options avoid that:
+With the default `flatten` strategy, every thread becomes its own channel; a busy server with hundreds of threads can blow past Stoat's 200-channel limit. Three options avoid that:
 
-- `--min-thread-messages 5` (since v2.7.0) skips threads with fewer than 5 messages — most "dead" threads disappear while active ones survive. Works with every thread strategy. In the GUI: **Min thread messages** under Advanced Options → Content.
+- `--min-thread-messages 5` (since v2.7.0) skips threads with fewer than 5 messages; most "dead" threads disappear while active ones survive. Works with every thread strategy. In the GUI: **Min thread messages** under Advanced Options → Content.
 - `--thread-strategy merge` appends thread messages into the parent channel instead of creating new channels.
 - `--skip-threads` omits threads entirely.
 
 !!! tip "Check first"
-    Run `ferry validate` on your export — the counts table shows how many threads it contains, so you can see whether the channel limit is a risk before migrating.
+    Run `ferry validate` on your export; the counts table shows how many threads it contains, so you can see whether the channel limit is a risk before migrating.
 
 ---
 
@@ -185,9 +189,9 @@ By default, Ferry uses `reaction_mode='text'`, which appends reaction counts to 
 
 | Mode | Behavior | Speed |
 |------|----------|-------|
-| `text` (default) | Reactions shown as text at end of message (e.g., "Reactions: :thumbsup: 3, :heart: 1") | Fastest — no extra API calls |
-| `native` | Reactions added via Stoat API (without per-user attribution) | Slow — one API call per unique reaction per message |
-| `skip` | Reactions not migrated at all | Fastest — no processing |
+| `text` (default) | Reactions shown as text at end of message (e.g., "Reactions: :thumbsup: 3, :heart: 1") | Fastest; no extra API calls |
+| `native` | Reactions added via Stoat API (without per-user attribution) | Slow; one API call per unique reaction per message |
+| `skip` | Reactions not migrated at all | Fastest; no processing |
 
 For a 10,000-message server with 20,000 reactions, `text` mode saves roughly 5 hours compared to `native` mode.
 
@@ -197,7 +201,7 @@ Since v2.7.0 the mode is selectable: `--reaction-mode text|native|skip` on the C
 
 ## Checkpoint Tuning
 
-Ferry saves migration state every 50 messages. If a migration is interrupted, resuming replays at most that many messages — nothing else is lost. For very large servers (100,000+ messages) you can raise the interval to reduce disk I/O: `--checkpoint-interval 200` on the CLI, or **Checkpoint interval** in the GUI's Advanced Options (since v2.7.0).
+Ferry saves migration state every 50 messages. If a migration is interrupted, resuming replays at most that many messages; nothing else is lost. For very large servers (100,000+ messages) you can raise the interval to reduce disk I/O: `--checkpoint-interval 200` on the CLI, or **Checkpoint interval** in the GUI's Advanced Options (since v2.7.0).
 
 !!! info "Trade-off"
-    A higher interval means slightly faster throughput but more re-sent messages if the migration is interrupted — Ferry replays up to one interval on resume. 200 is a good balance for large migrations; the default 50 is fine for everything else.
+    A higher interval means slightly faster throughput but more re-sent messages if the migration is interrupted; Ferry replays up to one interval on resume. 200 is a good balance for large migrations; the default 50 is fine for everything else.
