@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp  # noqa: TCH002
 
+from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.http import new_session
+from discord_ferry.errors import AutumnUploadError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_emoji,
@@ -85,12 +87,19 @@ async def _raw_autumn_upload(
     whether the server enforces its advertised limit.
     """
     url = f"{autumn_url.rstrip('/')}/{tag}"
+    if not credential_transport_allowed(url):
+        raise AutumnUploadError(
+            "Credential-bearing Autumn requests require HTTPS except for localhost and private "
+            "or loopback IP addresses."
+        )
     headers = {"x-session-token": token}
     form = aiohttp.FormData()
     fh = file_path.open("rb")
     try:
         form.add_field("file", fh, filename=file_path.name)
-        async with session.post(url, data=form, headers=headers) as resp:
+        async with session.post(url, data=form, headers=headers, allow_redirects=False) as resp:
+            if 300 <= resp.status < 400:
+                raise AutumnUploadError("Deep-probe Autumn request refused a redirect.")
             return resp.status
     finally:
         fh.close()
