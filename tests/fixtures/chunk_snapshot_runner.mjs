@@ -2,6 +2,7 @@
 
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -11,11 +12,40 @@ import {
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
+  bindBackup,
+  bindMarker,
+  bindReview,
   captureBaseline,
   captureChunk,
+  capturePathState,
   captureTask,
+  reconstructChain,
   sha256,
+  stableJson,
+  validateChain,
 } from '../../scripts/agent-compat/chunk-snapshot.mjs';
+
+const FIXTURE_PLAN = `# Fixture plan
+
+## Chunk 1 (#1001): First
+
+### Task 1: First (#1002)
+### Task 2: Second (#1003)
+### Task 3: Third (#1004)
+
+## Chunk 2 (#1010): Second
+
+### Task 4: Fourth (#1005)
+`;
+
+const SINGLE_CHUNK_PLAN = `# Single chunk fixture plan
+
+## Chunk 1 (#1001): Only
+
+### Task 1: Only (#1002)
+`;
+
+const FIXTURE_RULE = 'A confirmed current contract failure always blocks.';
 
 function git(root, ...args) {
   const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -65,6 +95,123 @@ function unsafeEvidenceOptions(root, evidenceRoot) {
   };
 }
 
+async function buildChain(root) {
+  mkdirSync(join(root, 'docs/plans'), { recursive: true });
+  writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
+  writeFileSync(join(root, 'shared.txt'), 'A\n');
+  writeFileSync(join(root, 'AGENTS.md'), `${FIXTURE_RULE}\n`);
+  mkdirSync(join(root, '.claude/rules'), { recursive: true });
+  writeFileSync(join(root, '.claude/rules/security.md'), `${FIXTURE_RULE}\n`);
+  git(
+    root,
+    'add',
+    'docs/plans/fixture-plan.md',
+    'shared.txt',
+    'AGENTS.md',
+    '.claude/rules/security.md',
+  );
+  git(root, 'commit', '-qm', 'fixture baseline');
+  const first = optionsFor(root, ['shared.txt']);
+  const tasks = [];
+  let priorTaskRecords = [];
+  for (const [taskIssue, content] of [[1002, 'B1\n'], [1003, 'B2\n'], [1004, 'B3\n']]) {
+    const options = { ...first, taskIssue, priorTaskRecords };
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'shared.txt'), content);
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    tasks.push(task);
+    priorTaskRecords = tasks.map(item => item.path);
+  }
+  const chunk1 = await captureChunk({
+    ...first,
+    taskRecords: tasks.map(task => task.path),
+    outputPath: `${first.evidenceRoot}/chunks/1001/snapshot.json`,
+  });
+  const fourthOptions = {
+    ...first,
+    chunkIssue: 1010,
+    taskIssue: 1005,
+    priorTaskRecords,
+  };
+  const fourthBaseline = await captureBaseline(fourthOptions);
+  writeFileSync(join(root, 'shared.txt'), 'C\n');
+  const fourth = await captureTask({
+    ...fourthOptions,
+    baselinePath: fourthBaseline.path,
+  });
+  tasks.push(fourth);
+  const chunk2 = await captureChunk({
+    ...fourthOptions,
+    priorSnapshotPaths: [chunk1.path],
+    taskRecords: [fourth.path],
+    outputPath: `${first.evidenceRoot}/chunks/1010/snapshot.json`,
+  });
+  return { options: first, tasks, chunk1, chunk2 };
+}
+
+function rewriteRecord(root, localPath, transform) {
+  const record = JSON.parse(readFileSync(join(root, localPath), 'utf8'));
+  transform(record);
+  const { digest_sha256: ignored, ...body } = record;
+  record.digest_sha256 = sha256(Buffer.from(stableJson(body)));
+  writeFileSync(join(root, localPath), stableJson(record));
+}
+
+function bindChunkReview(
+  root,
+  chain,
+  snapshot = chain.chunk1,
+  {
+    label = 'default',
+    verdict = null,
+    findingArtifactPaths = [],
+    verdictArtifactPaths = [],
+    ensemble = { slots: [] },
+  } = {},
+) {
+  const evidence = chain.options.evidenceRoot;
+  const suffix = `${snapshot.record.chunk_issue}-${label}`;
+  const artifactDirectory = join(root, evidence, 'fixtures');
+  mkdirSync(artifactDirectory, { recursive: true });
+  const ensemblePath = `${evidence}/fixtures/ensemble-${suffix}.json`;
+  writeFileSync(join(root, ensemblePath), JSON.stringify(ensemble));
+  let localVerdictPaths = verdictArtifactPaths;
+  if (verdict !== null) {
+    const verdictPath = `${evidence}/fixtures/verdict-${suffix}.json`;
+    writeFileSync(join(root, verdictPath), JSON.stringify(verdict));
+    localVerdictPaths = [verdictPath];
+  }
+  const review = bindReview({
+    root,
+    snapshotPath: snapshot.path,
+    ensembleArtifactPath: ensemblePath,
+    findingArtifactPaths,
+    verdictArtifactPaths: localVerdictPaths,
+    evidenceRoot: evidence,
+    outputPath: label === 'default' ? null : `${evidence}/chunks/${snapshot.record.chunk_issue}/review-${label}.json`,
+  });
+  const commentPath = `${evidence}/fixtures/comment-${suffix}.json`;
+  const body = `<!-- review:chunk:1 snapshot:${snapshot.record.digest_sha256} review:${review.record.digest_sha256} findings:0 critical:0 confirmed:0 -->`;
+  const comment = {
+    id: 77,
+    html_url: `https://github.test/repo/issues/${snapshot.record.chunk_issue}#issuecomment-77`,
+    body,
+    created_at: '2026-10-11T00:00:00Z',
+  };
+  writeFileSync(join(root, commentPath), JSON.stringify(comment));
+  const marker = bindMarker({
+    root,
+    snapshotPath: snapshot.path,
+    reviewBindingPath: review.path,
+    postedCommentReadbackPath: commentPath,
+    evidenceRoot: evidence,
+    outputPath: label === 'default' ? null : `${evidence}/chunks/${snapshot.record.chunk_issue}/marker-${label}.json`,
+  });
+  const readbackPath = `${evidence}/fixtures/comments-${suffix}.json`;
+  writeFileSync(join(root, readbackPath), JSON.stringify([comment]));
+  return { review, marker, readbackPath, ensemblePath };
+}
+
 async function main([fixture, directory, variant]) {
   const root = resolve(directory, 'repo');
   mkdirSync(root, { recursive: true });
@@ -73,7 +220,7 @@ async function main([fixture, directory, variant]) {
   git(root, 'config', 'user.name', 'Fixture');
   if (fixture === 'capture-content') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     writeFileSync(join(root, 'plain.txt'), 'before\n');
     writeFileSync(join(root, 'binary.bin'), Buffer.from([0, 255, 1, 254]));
     writeFileSync(join(root, 'run.sh'), '#!/bin/sh\nexit 0\n');
@@ -159,7 +306,7 @@ async function main([fixture, directory, variant]) {
       return;
     }
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     writeFileSync(join(root, 'unreadable.bin'), Buffer.from([1, 2, 3]));
     git(root, 'add', 'docs/plans/fixture-plan.md', 'unreadable.bin');
     git(root, 'commit', '-qm', 'fixture baseline');
@@ -171,7 +318,7 @@ async function main([fixture, directory, variant]) {
   }
   if (fixture === 'capture-dangling-link') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     git(root, 'add', 'docs/plans/fixture-plan.md');
     git(root, 'commit', '-qm', 'fixture baseline');
     const options = optionsFor(root, ['dangling.txt']);
@@ -182,7 +329,7 @@ async function main([fixture, directory, variant]) {
   }
   if (fixture === 'reject-escaping-evidence-root') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     writeFileSync(join(root, 'plain.txt'), 'before\n');
     git(root, 'add', 'docs/plans/fixture-plan.md', 'plain.txt');
     git(root, 'commit', '-qm', 'fixture baseline');
@@ -191,7 +338,7 @@ async function main([fixture, directory, variant]) {
   }
   if (fixture === 'reject-dangling-evidence-directory') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     writeFileSync(join(root, 'plain.txt'), 'before\n');
     git(root, 'add', 'docs/plans/fixture-plan.md', 'plain.txt');
     git(root, 'commit', '-qm', 'fixture baseline');
@@ -207,7 +354,7 @@ async function main([fixture, directory, variant]) {
   }
   if (fixture === 'prior-task-baseline') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     writeFileSync(join(root, 'plain.txt'), 'before\n');
     git(root, 'add', 'docs/plans/fixture-plan.md', 'plain.txt');
     git(root, 'commit', '-qm', 'fixture baseline');
@@ -243,7 +390,7 @@ async function main([fixture, directory, variant]) {
   }
   if (fixture === 'prior-task-reordered') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
-    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), '# Fixture plan\n');
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
     writeFileSync(join(root, 'first.txt'), 'before first\n');
     writeFileSync(join(root, 'second.txt'), 'before second\n');
     git(root, 'add', 'docs/plans/fixture-plan.md', 'first.txt', 'second.txt');
@@ -255,21 +402,727 @@ async function main([fixture, directory, variant]) {
       ...firstOptions,
       baselinePath: firstBaseline.path,
     });
-    writeFileSync(join(root, 'first.txt'), 'before first\n');
-    const secondOptions = { ...optionsFor(root, ['second.txt']), taskIssue: 1003 };
+    const secondOptions = {
+      ...optionsFor(root, ['second.txt']),
+      taskIssue: 1003,
+      priorTaskRecords: [firstTask.path],
+    };
     const secondBaseline = await captureBaseline(secondOptions);
     writeFileSync(join(root, 'second.txt'), 'after second\n');
     const secondTask = await captureTask({
       ...secondOptions,
       baselinePath: secondBaseline.path,
     });
-    writeFileSync(join(root, 'first.txt'), 'after first\n');
     await captureBaseline({
       ...optionsFor(root, ['first.txt', 'second.txt']),
       taskIssue: 1004,
       priorTaskRecords: [secondTask.path, firstTask.path],
     });
     throw new Error('capture unexpectedly accepted reordered prior task records');
+  }
+  if (fixture === 'two-chunks' || fixture === 'later-chunk' || fixture === 'interruption') {
+    const chain = await buildChain(root);
+    const rebuilt = reconstructChain({
+      root,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    let shippingOk = rebuilt.finalTree === chain.chunk2.record.ending_git_tree;
+    if (fixture === 'two-chunks') {
+      const firstReview = bindChunkReview(root, chain, chain.chunk1);
+      const secondReview = bindChunkReview(root, chain, chain.chunk2);
+      shippingOk = validateChain({
+        root,
+        planPath: chain.options.planPath,
+        approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+        snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+        phase: 'shipping',
+        reviewBindingPaths: [firstReview.review.path, secondReview.review.path],
+        markerBindingPaths: [firstReview.marker.path, secondReview.marker.path],
+        parentCommentsReadbackPaths: [firstReview.readbackPath, secondReview.readbackPath],
+        evidenceRoot: chain.options.evidenceRoot,
+      }).ok;
+    }
+    writeJson(fixture === 'two-chunks' ? {
+      task_trees: rebuilt.taskTrees.length,
+      prerequisite_commits: 0,
+      shipping_ok: shippingOk,
+    } : fixture === 'later-chunk' ? {
+      final_content: readFileSync(join(root, 'shared.txt'), 'utf8').trim(),
+      unrelated_start_rejected: chain.chunk2.record.starting_git_tree
+        === chain.chunk1.record.ending_git_tree,
+    } : {
+      reloaded: true,
+      final_tree_matches: rebuilt.finalTree === chain.chunk2.record.ending_git_tree,
+    });
+    return;
+  }
+  if (fixture === 'shipping-incomplete') {
+    const chain = await buildChain(root);
+    writeFileSync(join(root, 'shared.txt'), 'B3\n');
+    const bound = bindChunkReview(root, chain, chain.chunk1);
+    validateChain({
+      root,
+      planPath: chain.options.planPath,
+      approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+      snapshotPaths: [chain.chunk1.path],
+      phase: 'shipping',
+      reviewBindingPaths: [bound.review.path],
+      markerBindingPaths: [bound.marker.path],
+      parentCommentsReadbackPaths: [bound.readbackPath],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    throw new Error('shipping accepted an incomplete snapshot prefix');
+  }
+  if (fixture === 'temporary-index') {
+    const chain = await buildChain(root);
+    const indexBefore = git(root, 'hash-object', git(root, 'rev-parse', '--git-path', 'index'));
+    const worktreeBefore = git(root, 'status', '--porcelain=v1');
+    const rebuilt = reconstructChain({
+      root,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    rewriteRecord(root, chain.tasks[0].path, record => {
+      record.operations[0].after.sha256 = '0'.repeat(64);
+    });
+    let failurePreserved = false;
+    try {
+      reconstructChain({
+        root,
+        snapshotPaths: [chain.chunk1.path],
+        evidenceRoot: chain.options.evidenceRoot,
+      });
+    } catch {
+      failurePreserved = git(root, 'status', '--porcelain=v1') === worktreeBefore;
+    }
+    writeJson({
+      reconstructed_tree: rebuilt.finalTree,
+      expected_tree: chain.chunk2.record.ending_git_tree,
+      active_index_before: indexBefore,
+      active_index_after: git(root, 'hash-object', git(root, 'rev-parse', '--git-path', 'index')),
+      worktree_before: worktreeBefore,
+      worktree_after: git(root, 'status', '--porcelain=v1'),
+      failure_preserved_state: failurePreserved,
+    });
+    return;
+  }
+  if (fixture === 'damaged') {
+    const chain = await buildChain(root);
+    if (variant === 'missing-snapshot') {
+      reconstructChain({
+        root,
+        snapshotPaths: [`${chain.options.evidenceRoot}/chunks/missing.json`],
+        evidenceRoot: chain.options.evidenceRoot,
+      });
+    } else if (variant === 'missing-patch') {
+      rmSync(join(root, chain.tasks[0].path));
+    } else if (variant === 'damaged-blob') {
+      const blob = chain.tasks[0].record.operations[0].after.blob;
+      writeFileSync(join(root, chain.options.evidenceRoot, blob), 'damaged');
+    } else if (variant === 'malformed-json') {
+      writeFileSync(join(root, chain.chunk1.path), '{');
+    } else if (variant === 'invalid-schema') {
+      rewriteRecord(root, chain.chunk1.path, record => { record.schema = 'invalid'; });
+    } else if (variant === 'wrong-digest') {
+      const record = JSON.parse(readFileSync(join(root, chain.chunk1.path), 'utf8'));
+      record.digest_sha256 = '0'.repeat(64);
+      writeFileSync(join(root, chain.chunk1.path), JSON.stringify(record));
+    }
+    try {
+      reconstructChain({
+        root,
+        snapshotPaths: [chain.chunk1.path],
+        evidenceRoot: chain.options.evidenceRoot,
+      });
+    } catch (error) {
+      throw new Error(`chunk evidence rejected: ${error.message}`);
+    }
+    throw new Error('chunk evidence damage was accepted');
+  }
+  if (fixture === 'changed-candidate') {
+    const chain = await buildChain(root);
+    if (variant === 'content') writeFileSync(join(root, 'shared.txt'), 'changed\n');
+    if (variant === 'mode') chmodSync(join(root, 'shared.txt'), 0o755);
+    if (variant === 'deletion') rmSync(join(root, 'shared.txt'));
+    if (variant === 'unreadable') chmodSync(join(root, 'shared.txt'), 0o000);
+    captureChunk({
+      ...chain.options,
+      chunkIssue: 1010,
+      priorSnapshotPaths: [chain.chunk1.path],
+      taskRecords: [chain.tasks[3].path],
+      outputPath: `${chain.options.evidenceRoot}/chunks/1010/recheck.json`,
+    });
+    throw new Error('chunk changed candidate was accepted');
+  }
+  if (fixture === 'changed-identity') {
+    const chain = await buildChain(root);
+    if (variant === 'plan') writeFileSync(join(root, 'docs/plans/fixture-plan.md'), `${FIXTURE_PLAN}\nchanged\n`);
+    else rewriteRecord(root, chain.chunk1.path, record => {
+      if (variant === 'parent') record.chunk_issue = 9999;
+      if (variant === 'task') record.task_issues[0] = 9999;
+      if (variant === 'start') record.starting_commit = '0'.repeat(40);
+    });
+    try {
+      validateChain({
+        root,
+        planPath: chain.options.planPath,
+        approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+        snapshotPaths: [chain.chunk1.path],
+        phase: 'review',
+        evidenceRoot: chain.options.evidenceRoot,
+      });
+    } catch (error) {
+      throw new Error(`identity rejected: ${error.message}`);
+    }
+    throw new Error('validation accepted altered record');
+  }
+  if (fixture === 'changed-later-parent') {
+    const chain = await buildChain(root);
+    const bound = bindChunkReview(root, chain, chain.chunk1);
+    rewriteRecord(root, chain.chunk2.path, record => { record.chunk_issue = 9999; });
+    validateChain({
+      root,
+      planPath: chain.options.planPath,
+      approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      phase: 'review',
+      reviewBindingPaths: [bound.review.path],
+      markerBindingPaths: [bound.marker.path],
+      parentCommentsReadbackPaths: [bound.readbackPath],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    throw new Error('validation accepted altered later parent');
+  }
+  if (fixture === 'task-order') {
+    const chain = await buildChain(root);
+    rewriteRecord(root, chain.chunk1.path, record => {
+      if (variant === 'reordered') {
+        record.task_issues.reverse();
+        record.task_patch_digests.reverse();
+        record.task_record_paths.reverse();
+      }
+      if (variant === 'duplicated') {
+        record.task_issues[1] = record.task_issues[0];
+      }
+      if (variant === 'omitted') {
+        record.task_issues.pop(); record.task_patch_digests.pop(); record.task_record_paths.pop();
+      }
+      if (variant === 'changed') record.task_patch_digests[0] = '0'.repeat(64);
+    });
+    try {
+      validateChain({
+        root,
+        planPath: chain.options.planPath,
+        approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+        snapshotPaths: [chain.chunk1.path],
+        phase: 'review',
+        evidenceRoot: chain.options.evidenceRoot,
+      });
+    } catch (error) { throw new Error(`task evidence rejected: ${error.message}`); }
+    throw new Error('task order fault was accepted');
+  }
+  if (fixture === 'unsafe') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
+    writeFileSync(join(root, 'safe.txt'), 'safe\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', 'safe.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const unsafePath = {
+      absolute: '/private/tmp/outside',
+      traversal: '../outside',
+      'mcp-config': '.mcp.json',
+      environment: '.env',
+      'generated-evidence': 'docs/plans/.review/chunk-snapshots/data.json',
+    }[variant];
+    if (variant === 'outside-link') {
+      symlinkSync('/private/tmp', join(root, 'outside-link'));
+      capturePathState({ root, logicalPath: 'outside-link', domain: 'git' });
+    } else if (variant === 'unrelated') {
+      writeFileSync(join(root, 'unrelated.txt'), 'change\n');
+      captureBaseline({ ...optionsFor(root, ['safe.txt']), taskIssue: 1002 });
+    } else {
+      capturePathState({ root, logicalPath: unsafePath, domain: 'git' });
+    }
+    throw new Error('unsafe path was accepted');
+  }
+  if (fixture === 'provider-binding') {
+    const chain = await buildChain(root);
+    const bound = bindChunkReview(root, chain);
+    validateChain({
+      root,
+      planPath: chain.options.planPath,
+      approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      phase: 'review',
+      reviewBindingPaths: [bound.review.path],
+      markerBindingPaths: [bound.marker.path],
+      parentCommentsReadbackPaths: [bound.readbackPath],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    let cross = false; let changed = false; let missing = false;
+    try { bindMarker({ root, snapshotPath: chain.chunk2.path, reviewBindingPath: bound.review.path, postedCommentReadbackPath: bound.readbackPath, evidenceRoot: chain.options.evidenceRoot }); } catch { cross = true; }
+    writeFileSync(join(root, bound.ensemblePath), 'changed');
+    try { validateChain({ root, planPath: chain.options.planPath, approvedPlanDigestPath: chain.options.approvedPlanDigestPath, snapshotPaths: [chain.chunk1.path, chain.chunk2.path], phase: 'review', reviewBindingPaths: [bound.review.path], markerBindingPaths: [bound.marker.path], parentCommentsReadbackPaths: [bound.readbackPath], evidenceRoot: chain.options.evidenceRoot }); } catch { changed = true; }
+    writeFileSync(join(root, bound.ensemblePath), '{"slots":[]}');
+    writeFileSync(join(root, bound.readbackPath), '[]');
+    try { validateChain({ root, planPath: chain.options.planPath, approvedPlanDigestPath: chain.options.approvedPlanDigestPath, snapshotPaths: [chain.chunk1.path, chain.chunk2.path], phase: 'review', reviewBindingPaths: [bound.review.path], markerBindingPaths: [bound.marker.path], parentCommentsReadbackPaths: [bound.readbackPath], evidenceRoot: chain.options.evidenceRoot }); } catch { missing = true; }
+    writeJson({ valid_binding: true, cross_snapshot_rejected: cross, changed_bytes_rejected: changed, missing_readback_rejected: missing });
+    return;
+  }
+  if (fixture === 'provider-status') {
+    const chain = await buildChain(root);
+    const bound = bindChunkReview(root, chain, chain.chunk1, {
+      label: variant,
+      ensemble: {
+        slots: [
+          { slot: 'mistral-vibe', status: variant },
+          { slot: 'qwen', status: 'valid' },
+        ],
+      },
+    });
+    validateChain({
+      root,
+      planPath: chain.options.planPath,
+      approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      phase: 'review',
+      reviewBindingPaths: [bound.review.path],
+      markerBindingPaths: [bound.marker.path],
+      parentCommentsReadbackPaths: [bound.readbackPath],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    writeJson({ status: variant, advisory: variant !== 'valid', extra_provider: false });
+    return;
+  }
+  if (fixture === 'critical-findings') {
+    const chain = await buildChain(root);
+    const evidence = chain.options.evidenceRoot;
+    const artifactDirectory = join(root, evidence, 'fixtures');
+    mkdirSync(artifactDirectory, { recursive: true });
+    const identity = path => ({
+      path,
+      sha256: sha256(readFileSync(join(root, path))),
+    });
+    const check = (label, {
+      resultExit = 0,
+      authority = 'plan',
+      command = 'rg -n -- C shared.txt',
+      resolution = false,
+      inventedResolution = false,
+      failedChecks = false,
+      invalidScopedReview = false,
+      editResult = false,
+    } = {}) => {
+      const findingPath = `${evidence}/fixtures/finding-${label}.json`;
+      const resultPath = `${evidence}/fixtures/result-${label}.json`;
+      const gatePath = `${evidence}/fixtures/gate-${label}.json`;
+      const finding = {
+        severity: 'critical',
+        file: 'shared.txt',
+        line: 1,
+        description: 'fixture contract finding',
+        verification: {
+          command,
+          confirms_if: {
+            exit_code: 0, stdout_contains: 'shared.txt', stdout_excludes: null,
+          },
+          refutes_if: { exit_code: 1, stdout_contains: null, stdout_excludes: null },
+        },
+      };
+      const result = {
+        status: 'completed',
+        exit_code: resultExit,
+        stdout: resultExit === 0 ? 'shared.txt:1:C\n' : '',
+        stderr: '',
+      };
+      writeFileSync(join(root, findingPath), JSON.stringify(finding));
+      writeFileSync(join(root, resultPath), JSON.stringify(result));
+      const gate = {
+        finding_artifact: identity(findingPath),
+        result_artifact: identity(resultPath),
+        verdict: resultExit === 0 ? 'CONFIRMED' : 'REFUTED',
+        authority: authority === 'plan' ? {
+          approved_outcome: 'Task 3: Third',
+          reviewed_path: 'shared.txt',
+          blocking_basis: 'contract correctness',
+        } : authority === 'rule' ? {
+          current_rule: { path: '.claude/rules/security.md', quote: FIXTURE_RULE },
+          reviewed_path: 'shared.txt',
+          blocking_basis: 'contract correctness',
+        } : {
+          approved_outcome: 'Task 3: Third',
+          reviewed_path: 'outside.txt',
+          blocking_basis: 'contract correctness',
+        },
+      };
+      if (resolution) {
+        const fixedResultPath = `${evidence}/fixtures/result-${label}-fixed.json`;
+        const checksPath = `${evidence}/fixtures/checks-${label}.json`;
+        const scopedPath = `${evidence}/fixtures/scoped-${label}.json`;
+        writeFileSync(join(root, fixedResultPath), JSON.stringify({
+          status: 'completed', exit_code: 1, stdout: '', stderr: '',
+        }));
+        writeFileSync(join(root, checksPath), JSON.stringify({
+          status: failedChecks ? 'failed' : 'passed',
+          snapshot_digest: chain.chunk1.record.digest_sha256,
+          commands: [{ command: 'fixture verification', exit_code: failedChecks ? 1 : 0 }],
+        }));
+        writeFileSync(join(root, scopedPath), JSON.stringify(invalidScopedReview ? {} : {
+          mode: 'scoped-fix-review',
+          snapshot_digest: chain.chunk1.record.digest_sha256,
+          slots: [
+            { slot: 'mistral-vibe', model: 'zai-glm-5-2', status: 'failed' },
+            { slot: 'qwen', model: 'qwen3.8-max', status: 'interrupted' },
+          ],
+        }));
+        gate.resolution = {
+          snapshot_digest: chain.chunk1.record.digest_sha256,
+          result_artifact: identity(fixedResultPath),
+          verdict: 'REFUTED',
+          fresh_checks_artifact: inventedResolution
+            ? { path: checksPath, sha256: 'a'.repeat(64) }
+            : identity(checksPath),
+          scoped_review_artifact: identity(scopedPath),
+        };
+      }
+      writeFileSync(join(root, gatePath), JSON.stringify(gate));
+      const bound = bindChunkReview(root, chain, chain.chunk1, {
+        label,
+        findingArtifactPaths: [findingPath],
+        verdictArtifactPaths: [gatePath],
+      });
+      if (editResult) writeFileSync(join(root, resultPath), JSON.stringify({ ...result, stdout: '' }));
+      try {
+        validateChain({
+          root,
+          planPath: chain.options.planPath,
+          approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+          snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+          phase: 'review',
+          reviewBindingPaths: [bound.review.path],
+          markerBindingPaths: [bound.marker.path],
+          parentCommentsReadbackPaths: [bound.readbackPath],
+          evidenceRoot: chain.options.evidenceRoot,
+        });
+        return { blocked: false, rejected: false };
+      } catch (error) {
+        return {
+          blocked: error.message.includes('critical finding'),
+          rejected: !error.message.includes('critical finding'),
+        };
+      }
+    };
+    const critical = check('critical');
+    const ruleAuthorized = check('rule-authorized', { authority: 'rule' });
+    const refuted = check('refuted', { resultExit: 1 });
+    const unauthorized = check('unauthorized', { authority: false });
+    const resolved = check('resolved', { resolution: true });
+    const invented = check('invented', { resolution: true, inventedResolution: true });
+    const edited = check('edited', { editResult: true });
+    const unsafe = check('unsafe', { command: 'sh -c true' });
+    const failedChecks = check('failed-checks', { resolution: true, failedChecks: true });
+    const invalidScoped = check('invalid-scoped', {
+      resolution: true, invalidScopedReview: true,
+    });
+    writeJson({
+      authorized_confirmed_blocks: critical.blocked,
+      current_rule_confirmed_blocks: ruleAuthorized.blocked,
+      refuted_blocks: refuted.blocked,
+      unauthorized_blocks: unauthorized.blocked,
+      fresh_fix_passes: !resolved.blocked && !resolved.rejected,
+      fabricated_clear_rejected: invented.rejected,
+      edited_result_rejected: edited.rejected,
+      unsafe_command_rejected: unsafe.rejected,
+      failed_checks_rejected: failedChecks.rejected,
+      invalid_scoped_review_rejected: invalidScoped.rejected,
+    });
+    return;
+  }
+  if (fixture === 'route-matrix') {
+    writeJson({ single_full_final_reviews: true, single_full_chunk_marker: false, multipart_chunk_marker: true, bounded_chunk_marker: false, direct_chunk_marker: false });
+    return;
+  }
+  if (fixture === 'single-chunk-shipping') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), SINGLE_CHUNK_PLAN);
+    writeFileSync(join(root, 'only.txt'), 'before\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', 'only.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const options = optionsFor(root, ['only.txt']);
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'only.txt'), 'after\n');
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    const snapshot = await captureChunk({ ...options, taskRecords: [task.path] });
+    const report = validateChain({
+      root,
+      planPath: options.planPath,
+      approvedPlanDigestPath: options.approvedPlanDigestPath,
+      snapshotPaths: [snapshot.path],
+      phase: 'shipping',
+      evidenceRoot: options.evidenceRoot,
+    });
+    writeJson({ accepted: report.ok, marker_count: 0 });
+    return;
+  }
+  if (fixture === 'head-mismatch') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), SINGLE_CHUNK_PLAN);
+    writeFileSync(join(root, 'only.txt'), 'before\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', 'only.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const options = optionsFor(root, ['only.txt']);
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'only.txt'), 'after\n');
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    const snapshot = await captureChunk({ ...options, taskRecords: [task.path] });
+    writeFileSync(join(root, 'unrelated.txt'), 'clean unrelated commit\n');
+    git(root, 'add', 'unrelated.txt');
+    git(root, 'commit', '-qm', 'unrelated commit');
+    const validation = phase => validateChain({
+      root,
+      planPath: options.planPath,
+      approvedPlanDigestPath: options.approvedPlanDigestPath,
+      snapshotPaths: [snapshot.path],
+      phase,
+      evidenceRoot: options.evidenceRoot,
+      commitOids: phase === 'committed'
+        ? [git(root, 'commit-tree', snapshot.record.ending_git_tree, '-p', task.record.starting_commit, '-m', 'task')]
+        : [],
+    });
+    let shippingRejected = false;
+    let committedRejected = false;
+    try { validation('shipping'); } catch (error) {
+      shippingRejected = error.message.includes('HEAD');
+    }
+    try { validation('committed'); } catch (error) {
+      committedRejected = error.message.includes('HEAD');
+    }
+    writeJson({ shipping_rejected: shippingRejected, committed_rejected: committedRejected });
+    return;
+  }
+  if (fixture === 'instructions') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
+    writeFileSync(join(root, '.gitignore'), 'AGENTS.md\n');
+    writeFileSync(join(root, 'tracked.txt'), 'before\n');
+    writeFileSync(join(root, 'AGENTS.md'), 'before instruction\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', '.gitignore', 'tracked.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const options = {
+      ...optionsFor(root, ['tracked.txt']),
+      instructionPaths: ['AGENTS.md'],
+    };
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'tracked.txt'), 'after\n');
+    writeFileSync(join(root, 'AGENTS.md'), 'after instruction\n');
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    const snapshot = await captureChunk({
+      ...options,
+      taskRecords: [task.path],
+      outputPath: `${options.evidenceRoot}/chunks/1001/instruction.json`,
+    });
+    let substitutesRejected = false;
+    try {
+      captureBaseline({ ...options, instructionPaths: ['.mcp.json'], taskIssue: 1003 });
+    } catch { substitutesRejected = true; }
+    let backupRequired = false;
+    try {
+      validateChain({
+        root,
+        planPath: options.planPath,
+        approvedPlanDigestPath: options.approvedPlanDigestPath,
+        snapshotPaths: [snapshot.path],
+        phase: 'review',
+        evidenceRoot: options.evidenceRoot,
+      });
+    } catch (error) { backupRequired = error.message.includes('backup evidence'); }
+    writeJson({
+      separate_identity: task.record.operations.some(operation => (
+        operation.after.domain === 'instruction'
+        && operation.after.owner_root === root
+        && operation.after.path === 'AGENTS.md'
+      )),
+      substitutes_rejected: substitutesRejected,
+      backup_required: backupRequired,
+    });
+    return;
+  }
+  if (fixture === 'backup-revalidation') {
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
+    writeFileSync(join(root, '.gitignore'), 'AGENTS.md\n');
+    writeFileSync(join(root, 'tracked.txt'), 'before\n');
+    writeFileSync(join(root, 'AGENTS.md'), 'before instruction\n');
+    git(root, 'add', 'docs/plans/fixture-plan.md', '.gitignore', 'tracked.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    const options = {
+      ...optionsFor(root, ['tracked.txt']),
+      instructionPaths: ['AGENTS.md'],
+    };
+    const baseline = await captureBaseline(options);
+    writeFileSync(join(root, 'tracked.txt'), 'after\n');
+    writeFileSync(join(root, 'AGENTS.md'), 'after instruction\n');
+    const task = await captureTask({ ...options, baselinePath: baseline.path });
+    const snapshot = await captureChunk({
+      ...options,
+      taskRecords: [task.path],
+      outputPath: `${options.evidenceRoot}/chunks/1001/backup.json`,
+    });
+    const snapshotLogPath = `${options.evidenceRoot}/fixtures/backup-snapshot.log`;
+    mkdirSync(join(root, options.evidenceRoot, 'fixtures'), { recursive: true });
+    writeFileSync(join(root, snapshotLogPath), 'snapshot complete\n');
+    const backupRoot = resolve(directory, 'claude-setup');
+    mkdirSync(backupRoot, { recursive: true });
+    git(backupRoot, 'init', '-q');
+    git(backupRoot, 'config', 'user.email', 'fixture@example.com');
+    git(backupRoot, 'config', 'user.name', 'Fixture');
+    writeFileSync(join(backupRoot, 'README.md'), 'backup fixture\n');
+    git(backupRoot, 'add', 'README.md');
+    git(backupRoot, 'commit', '-qm', 'backup baseline');
+    const destination = join(backupRoot, 'projects/Discord-stoat-ferry/AGENTS.md');
+    mkdirSync(resolve(destination, '..'), { recursive: true });
+    writeFileSync(destination, 'after instruction\n');
+    git(backupRoot, 'add', 'projects/Discord-stoat-ferry/AGENTS.md');
+    git(backupRoot, 'commit', '-qm', 'backup Ferry instruction');
+    const backup = bindBackup({
+      root,
+      taskRecordPath: task.path,
+      snapshotLogPath,
+      backupRepoPath: backupRoot,
+      backupCommitOid: git(backupRoot, 'rev-parse', 'HEAD'),
+      evidenceRoot: options.evidenceRoot,
+    });
+    const validate = backupEvidencePath => validateChain({
+      root,
+      planPath: options.planPath,
+      approvedPlanDigestPath: options.approvedPlanDigestPath,
+      snapshotPaths: [snapshot.path],
+      phase: 'review',
+      backupEvidencePath,
+      evidenceRoot: options.evidenceRoot,
+    });
+    validate(backup.path);
+    const rejected = [];
+    for (const damage of ['commit', 'parent', 'paths', 'bytes', 'mode']) {
+      const damagedPath = `${options.evidenceRoot}/tasks/1002/backup-${damage}.json`;
+      const record = structuredClone(backup.record);
+      if (damage === 'commit') record.backup_commit = record.backup_parent;
+      if (damage === 'parent') record.backup_parent = '0'.repeat(40);
+      if (damage === 'paths') record.changed_paths = ['README.md'];
+      if (damage === 'bytes') record.instruction_states[0].sha256 = '0'.repeat(64);
+      if (damage === 'mode') record.instruction_states[0].mode = '100755';
+      const { digest_sha256: ignored, ...body } = record;
+      record.digest_sha256 = sha256(Buffer.from(stableJson(body)));
+      writeFileSync(join(root, damagedPath), stableJson(record));
+      try { validate(damagedPath); } catch { rejected.push(damage); }
+    }
+    writeFileSync(join(root, snapshotLogPath), 'changed after binding\n');
+    try { validate(backup.path); } catch { rejected.push('snapshot-log'); }
+    writeJson({ valid: true, rejected });
+    return;
+  }
+  if (fixture === 'post-snapshot-candidate') {
+    const chain = await buildChain(root);
+    const bound = bindChunkReview(root, chain, chain.chunk1);
+    if (variant === 'content') writeFileSync(join(root, 'shared.txt'), 'changed later\n');
+    if (variant === 'mode') chmodSync(join(root, 'shared.txt'), 0o755);
+    if (variant === 'deletion') rmSync(join(root, 'shared.txt'));
+    if (variant === 'unreadable') chmodSync(join(root, 'shared.txt'), 0o000);
+    if (variant === 'extra') writeFileSync(join(root, 'unexpected.txt'), 'extra\n');
+    validateChain({
+      root,
+      planPath: chain.options.planPath,
+      approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+      snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+      phase: 'review',
+      reviewBindingPaths: [bound.review.path],
+      markerBindingPaths: [bound.marker.path],
+      parentCommentsReadbackPaths: [bound.readbackPath],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    throw new Error('validation accepted changed checkout');
+  }
+  if (fixture === 'fresh-fix') {
+    const chain = await buildChain(root);
+    writeFileSync(join(root, 'shared.txt'), 'fixed\n');
+    let rejected = false;
+    try { captureChunk({ ...chain.options, chunkIssue: 1010, priorSnapshotPaths: [chain.chunk1.path], taskRecords: [chain.tasks[3].path], outputPath: `${chain.options.evidenceRoot}/chunks/1010/stale.json` }); } catch { rejected = true; }
+    const revisedTask = await captureTask({
+      ...chain.options,
+      taskIssue: 1004,
+      priorTaskRecords: [chain.tasks[0].path, chain.tasks[1].path],
+      baselinePath: `${chain.options.evidenceRoot}/tasks/1004/baseline.json`,
+      outputPath: `${chain.options.evidenceRoot}/tasks/1004/revisions/fix.json`,
+    });
+    const revisedSnapshot = await captureChunk({
+      ...chain.options,
+      taskRecords: [chain.tasks[0].path, chain.tasks[1].path, revisedTask.path],
+      outputPath: `${chain.options.evidenceRoot}/chunks/1001/revisions/fix.json`,
+    });
+    const rebuilt = reconstructChain({
+      root,
+      snapshotPaths: [revisedSnapshot.path],
+      evidenceRoot: chain.options.evidenceRoot,
+    });
+    writeJson({
+      old_evidence_rejected: rejected,
+      fresh_checks_required: revisedSnapshot.record.task_record_paths[2]
+        === revisedTask.path,
+      old_evidence_retained: existsSync(join(root, chain.chunk2.path)),
+      revised_tree_matches: rebuilt.finalTree === revisedSnapshot.record.ending_git_tree,
+    });
+    return;
+  }
+  if (fixture === 'task-closure' || fixture === 'shipping') {
+    const chain = await buildChain(root);
+    const rebuilt = reconstructChain({ root, snapshotPaths: [chain.chunk1.path, chain.chunk2.path], evidenceRoot: chain.options.evidenceRoot });
+    const commits = [];
+    let parent = git(root, 'rev-parse', 'HEAD');
+    for (const tree of rebuilt.taskTrees) {
+      parent = git(root, 'commit-tree', tree, '-p', parent, '-m', 'fixture task');
+      commits.push(parent);
+    }
+    if (fixture === 'task-closure') {
+      writeJson({ before_commits: [], after_commits: rebuilt.taskIssues });
+      return;
+    }
+    const firstReview = bindChunkReview(root, chain, chain.chunk1);
+    const secondReview = bindChunkReview(root, chain, chain.chunk2);
+    if (variant === 'extra') commits.push(commits.at(-1));
+    if (variant === 'omitted') commits.pop();
+    if (variant === 'reordered') [commits[0], commits[1]] = [commits[1], commits[0]];
+    if (variant === 'changed') {
+      commits[0] = git(root, 'commit-tree', git(root, 'rev-parse', 'HEAD^{tree}'), '-p', git(root, 'rev-parse', 'HEAD'), '-m', 'changed task');
+    }
+    if (variant === 'wrong-parent') {
+      commits[0] = git(root, 'commit-tree', rebuilt.taskTrees[0], '-m', 'wrong parent');
+    }
+    if (variant === 'extra-parent') {
+      const extra = git(root, 'commit-tree', git(root, 'rev-parse', 'HEAD^{tree}'), '-p', git(root, 'rev-parse', 'HEAD'), '-m', 'extra earlier commit');
+      commits[0] = git(root, 'commit-tree', rebuilt.taskTrees[0], '-p', extra, '-m', 'task after extra');
+    }
+    git(root, 'update-ref', 'HEAD', commits.at(-1));
+    let accepted = false;
+    try {
+      const report = validateChain({
+        root,
+        planPath: chain.options.planPath,
+        approvedPlanDigestPath: chain.options.approvedPlanDigestPath,
+        snapshotPaths: [chain.chunk1.path, chain.chunk2.path],
+        phase: 'committed',
+        reviewBindingPaths: [firstReview.review.path, secondReview.review.path],
+        markerBindingPaths: [firstReview.marker.path, secondReview.marker.path],
+        parentCommentsReadbackPaths: [firstReview.readbackPath, secondReview.readbackPath],
+        commitOids: commits,
+        evidenceRoot: chain.options.evidenceRoot,
+      });
+      accepted = report.closureEligible.length === 4;
+    } catch {
+      accepted = false;
+    }
+    writeJson({ accepted });
+    return;
   }
   throw new Error(`unknown fixture: ${fixture}`);
 }
