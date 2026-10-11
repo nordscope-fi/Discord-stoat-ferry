@@ -1868,17 +1868,24 @@ async def run_channels(
                     }
                 )
 
-            # Order categories by Discord position (S3). Forum-derived categories
-            # (keyed in category_map by a non-Discord forum key) have no position
-            # and sort to the end with a stable title tie-break.
+            # Order categories by Discord position (S3). Known position ties use
+            # numeric Discord IDs. Categories without usable positions keep the
+            # stable title fallback, including forum-derived categories.
             positions = discord_metadata.category_positions if discord_metadata else {}
             inverse_category_map = {v: k for k, v in state.category_map.items()}
             position_sentinel = 1_000_000
 
-            def _category_sort_key(entry: dict[str, Any]) -> tuple[int, str]:
+            def _category_sort_key(entry: dict[str, Any]) -> tuple[int, int, int, str]:
                 discord_cat_id = inverse_category_map.get(str(entry["id"]), "")
-                pos = positions.get(discord_cat_id, position_sentinel)
-                return (pos, str(entry["title"]))
+                pos = normalize_channel_position(positions.get(discord_cat_id))
+                if pos is not None and discord_cat_id.isascii() and discord_cat_id.isdecimal():
+                    return (pos, 0, int(discord_cat_id), "")
+                return (
+                    pos if pos is not None else position_sentinel,
+                    1,
+                    0,
+                    str(entry["title"]),
+                )
 
             all_categories.sort(key=_category_sort_key)
 

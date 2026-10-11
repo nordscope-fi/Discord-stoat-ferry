@@ -1921,6 +1921,50 @@ async def test_run_channels_category_without_position_sorts_last(tmp_path: Path)
     assert titles == ["Alpha", "Zeta"]
 
 
+@pytest.mark.parametrize(
+    ("positions", "expected"),
+    [
+        ({"10": 1, "2": 1}, ["Zulu", "Alpha"]),
+        ({}, ["Alpha", "Zulu"]),
+        ({"2": 1}, ["Zulu", "Alpha"]),
+        ({"2": 1_000_000}, ["Zulu", "Alpha"]),
+    ],
+)
+async def test_category_position_ties(
+    tmp_path: Path, positions: dict[str, int], expected: list[str]
+) -> None:
+    state = MigrationState(
+        stoat_server_id="srv1",
+        category_map={"10": "c10", "2": "c2"},
+        channel_map={"100": "s100", "200": "s200"},
+    )
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="t",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+        category_positions=positions,
+    )
+    save_discord_metadata(meta, tmp_path)
+    exports = [
+        _make_export(channel_id="100", category_id="10", category="Alpha"),
+        _make_export(channel_id="200", category_id="2", category="Zulu"),
+    ]
+    bodies: list[dict[str, object]] = []
+    with aioresponses() as requests:
+        requests.patch(
+            f"{STOAT_URL}/servers/srv1",
+            payload={},
+            callback=lambda url, **kwargs: bodies.append(  # type: ignore[misc]
+                kwargs.get("json", {})
+            ),
+        )
+        await run_channels(_make_config(tmp_path), state, exports, [].append)
+    assert _category_titles_from_patch(bodies) == expected
+    assert len(bodies) == 1
+
+
 async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
     """CHANNELS phase creates each channel only once even if the same ID appears twice."""
     events: list[MigrationEvent] = []
