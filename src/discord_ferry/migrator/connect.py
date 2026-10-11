@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, redact_url, tls_hint
 from discord_ferry.errors import StoatConnectionError
@@ -149,8 +150,13 @@ async def _verify_token(session: aiohttp.ClientSession, stoat_url: str, token: s
     """Verify the auth token by fetching the authenticated user's info."""
     url = f"{stoat_url.rstrip('/')}/users/@me"
     headers = {"x-session-token": token}
+    if not credential_transport_allowed(url):
+        raise StoatConnectionError(
+            "Credential-bearing token verification requires HTTPS except for localhost "
+            "and private or loopback IP addresses."
+        )
     try:
-        async with session.get(url, headers=headers) as response:
+        async with session.get(url, headers=headers, allow_redirects=False) as response:
             if response.status == 401:
                 raise StoatConnectionError("Authentication failed: invalid or expired token")
             if response.status != 200:
