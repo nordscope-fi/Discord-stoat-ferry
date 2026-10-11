@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.http import proxy_hint, tls_hint
 from discord_ferry.errors import AutumnUploadError
 
@@ -169,6 +170,13 @@ async def upload_to_autumn(
     if tag not in TAG_SIZE_LIMITS:
         raise AutumnUploadError(f"Unknown Autumn tag '{tag}'. Valid tags: {list(TAG_SIZE_LIMITS)}")
 
+    url = f"{autumn_url.rstrip('/')}/{tag}"
+    if not credential_transport_allowed(url):
+        raise AutumnUploadError(
+            "Credential-bearing Autumn requests require HTTPS except for localhost and private "
+            "or loopback IP addresses."
+        )
+
     if not file_path.exists():
         raise AutumnUploadError(f"File not found: {file_path}")
 
@@ -183,7 +191,6 @@ async def upload_to_autumn(
             f"which exceeds the {tag} limit of {limit} bytes."
         )
 
-    url = f"{autumn_url.rstrip('/')}/{tag}"
     headers = {"x-session-token": token}
 
     for attempt in range(MAX_RETRIES):
@@ -192,7 +199,9 @@ async def upload_to_autumn(
         try:
             form.add_field("file", fh, filename=file_path.name)
 
-            async with session.post(url, data=form, headers=headers) as response:
+            async with session.post(
+                url, data=form, headers=headers, allow_redirects=False
+            ) as response:
                 if response.status == 200:
                     try:
                         result = await response.json(content_type=None)
