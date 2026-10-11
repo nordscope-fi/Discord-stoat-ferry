@@ -379,6 +379,142 @@ def test_release_workflow_asserts_the_union_branch_on_macos() -> None:
     )
 
 
+def test_release_workflow_uses_supported_arm64_runner_and_checks_minimum_macos() -> None:
+    """F17: the arm64 build must run on macos-15 and inspect both app manifests."""
+    text = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    macos_job = text.split("build-macos:", 1)[1].split("\n  release:", 1)[0]
+
+    arm64_matrix = re.search(r"- runner: (macos-[^\n]+)\n\s+arch: arm64", macos_job)
+    assert arm64_matrix is not None, "the macOS matrix must retain the arm64 build"
+    assert arm64_matrix.group(1) == "macos-15", (
+        "the arm64 build must use the supported macos-15 runner, not the retiring macos-14 image"
+    )
+
+    helper = "plist_minimum_system_version() {"
+    assert helper in macos_job, "the archive check must inspect each app manifest"
+    minimum_check = macos_job.split(helper, 1)[1].split("codesign --verify", 1)[0]
+    assert "plutil -extract LSMinimumSystemVersion" in minimum_check
+    assert "minimum_macos_version" in minimum_check, (
+        "the build must inspect the Mach-O deployment target when the plist has no declaration"
+    )
+    assert 'test -n "$BUILT_MINIMUM"' in minimum_check
+    assert 'test -n "$EXTRACTED_MINIMUM"' in minimum_check
+    assert '"$BUILT_MINIMUM" != "$EXTRACTED_MINIMUM"' in minimum_check, (
+        "the archive check must reject a bundle whose deployment target changes on extraction"
+    )
+
+
+@pytest.mark.parametrize(
+    ("built_value", "extracted_value", "expected_status", "expected_report"),
+    [
+        ("11.0", "11.0", 0, "LSMinimumSystemVersion: built 11.0, extracted 11.0"),
+        (
+            "__ABSENT__",
+            "__ABSENT__",
+            0,
+            "LSMinimumSystemVersion: built not declared, extracted not declared",
+        ),
+        ("11.0", "12.0", 1, "::error::archive changed LSMinimumSystemVersion"),
+    ],
+)
+def test_release_workflow_checks_built_and_extracted_macos_manifests(
+    tmp_path: Path,
+    built_value: str,
+    extracted_value: str,
+    expected_status: int,
+    expected_report: str,
+) -> None:
+    """Exercise the workflow's plist check for matching, absent, and changed values."""
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    macos_job = workflow.split("build-macos:", 1)[1].split("\n  release:", 1)[0]
+    manifest_marker = "          # macos-15 replaces"
+    manifest_check = macos_job[macos_job.index(manifest_marker) :].split(
+        "          minimum_macos_version() {", 1
+    )[0]
+
+    built_plist = tmp_path / "dist" / "Ferry.app" / "Contents" / "Info.plist"
+    extracted_plist = tmp_path / "_verify" / "Ferry.app" / "Contents" / "Info.plist"
+    for plist, value in (
+        (built_plist, built_value),
+        (extracted_plist, extracted_value),
+    ):
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(f"{value}\n", encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    plutil = bin_dir / "plutil"
+    plutil.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'%s\\n\' "$4" >> "$PLUTIL_CALLS"\n'
+        "value=$(tr -d '\\n' < \"$4\")\n"
+        'if [ "$value" = "__ABSENT__" ]; then exit 1; fi\n'
+        "printf '%s\\n' \"$value\"\n",
+        encoding="utf-8",
+    )
+    plutil.chmod(0o755)
+    calls = tmp_path / "plutil-calls.log"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PLUTIL_CALLS": str(calls),
+    }
+    bash = shutil.which("bash")
+    assert bash is not None, "CI runs repository shell checks through bash"
+
+    result = subprocess.run(
+        [bash, "-o", "pipefail", "-c", 'APP="_verify/Ferry.app"\n' + manifest_check],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_status, result.stdout + result.stderr
+    assert expected_report in result.stdout
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "dist/Ferry.app/Contents/Info.plist",
+        "_verify/Ferry.app/Contents/Info.plist",
+    ]
+
+
+def test_release_workflow_extracts_modern_and_legacy_macos_minimums() -> None:
+    """The archive check must read each Mach-O minimum-version record PyInstaller ships."""
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    macos_job = workflow.split("build-macos:", 1)[1].split("\n  release:", 1)[0]
+    function = macos_job.split("minimum_macos_version() {", 1)[1].split("\n          }", 1)[0]
+    awk_program = function.split("awk '\n", 1)[1].rsplit("\n            '", 1)[0]
+
+    modern = """\\
+Load command 10
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 1
+    minos 11.0
+      sdk 15.5
+"""
+    legacy = """\\
+Load command 9
+      cmd LC_VERSION_MIN_MACOSX
+  cmdsize 16
+ version 10.13
+     sdk 11.0
+"""
+
+    bash = shutil.which("bash")
+    assert bash is not None, "CI runs repository shell checks through bash"
+    for metadata, expected in ((modern, "11.0"), (legacy, "10.13")):
+        result = subprocess.run(
+            [bash, "-c", 'awk "$1"', "--", awk_program],
+            input=metadata,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout.strip() == expected
+
+
 def test_release_workflow_asserts_the_union_branch() -> None:
     """SC-134-18.
 
