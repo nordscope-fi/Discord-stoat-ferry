@@ -546,6 +546,16 @@ class _FakeSession:
         return _FakeResp()
 
 
+class _FakeSessionWithContentType(_FakeSession):
+    def __init__(self, content_type: str) -> None:
+        self._content_type = content_type
+
+    def get(self, url: object, timeout: object = None, allow_redirects: bool = True) -> _FakeResp:
+        response = super().get(url, timeout, allow_redirects)
+        response.headers = {"Content-Type": self._content_type}
+        return response
+
+
 class _FakeSessionCM:
     async def __aenter__(self) -> _FakeSession:
         return _FakeSession()
@@ -633,6 +643,39 @@ async def test_downloader_snowflake_destination_unchanged(tmp_path: Path) -> Non
     assert reason == ""
     assert dest == (tmp_path / "avatars" / "1234567890.png").resolve()
     assert dest.read_bytes() == b"PNG-DUMMY-BYTES"
+
+
+@pytest.mark.parametrize(
+    ("session", "url", "expected_extension"),
+    [
+        (
+            _FakeSessionWithContentType("image/png"),
+            "https://cdn.discordapp.com/avatars/1/avatar.exe",
+            ".png",
+        ),
+        (
+            _FakeSessionWithContentType("image/x-discord-avatar"),
+            "https://cdn.discordapp.com/avatars/1/avatar.gif#.exe",
+            ".gif",
+        ),
+        (
+            _FakeSessionWithContentType("image/x-discord-avatar"),
+            "https://cdn.discordapp.com/avatars/1/avatar#.exe",
+            ".webp",
+        ),
+    ],
+)
+async def test_downloader_uses_safe_extension_sources(
+    tmp_path: Path,
+    session: _FakeSession,
+    url: str,
+    expected_extension: str,
+) -> None:
+    """Content type and parsed path prevent URL query or fragment suffix injection."""
+    dest, reason = await _download_remote_avatar(session, url, tmp_path, "1234567890")
+
+    assert reason == ""
+    assert dest == (tmp_path / "avatars" / f"1234567890{expected_extension}").resolve()
 
 
 async def test_avatar_phase_crafted_id_leaves_marker_untouched(tmp_path: Path) -> None:
