@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 DCE_VERSION = "2.48"
 
-_GITHUB_RELEASE_URL = (
-    "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{version}"
+_GITHUB_RELEASE_ASSET_URL = (
+    "https://github.com/Tyrrrz/DiscordChatExporter/releases/download/{version}/{asset_name}"
 )
 
 _MAX_DCE_BYTES = 150 * 1024 * 1024  # 150 MB hard ceiling
@@ -196,7 +196,7 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
 
     platform_key = _get_platform_key()
     asset_name = _get_asset_name(platform_key)
-    release_url = _GITHUB_RELEASE_URL.format(version=DCE_VERSION)
+    download_url = _GITHUB_RELEASE_ASSET_URL.format(version=DCE_VERSION, asset_name=asset_name)
     dce_dir = _get_dce_dir()
 
     on_event(
@@ -208,35 +208,10 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
     )
 
     data: bytes | None = None
-    # Bound OUTSIDE the try and reassigned before each GET. The `except` below
-    # spans both requests, and `download_url` is bound inside the try, so on a
-    # first-GET failure `target=download_url` would raise UnboundLocalError from
-    # inside an error handler. This name is always bound before it is read.
-    current_url = release_url
+    current_url = download_url
     for attempt in range(2):
         try:
             async with new_session() as session:
-                current_url = release_url
-                async with session.get(
-                    release_url, headers={"Accept": "application/vnd.github.v3+json"}
-                ) as resp:
-                    if resp.status != 200:
-                        raise DCENotFoundError(
-                            f"GitHub API returned {resp.status} for DCE v{DCE_VERSION}"
-                        )
-                    release_data = await resp.json()
-
-                download_url: str | None = None
-                for asset in release_data.get("assets", []):
-                    if asset["name"] == asset_name:
-                        download_url = asset["browser_download_url"]
-                        break
-
-                if download_url is None:
-                    raise DCENotFoundError(
-                        f"Asset {asset_name} not found in DCE v{DCE_VERSION} release"
-                    )
-
                 current_url = download_url
                 async with session.get(download_url) as resp:
                     if resp.status != 200:

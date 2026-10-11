@@ -190,23 +190,38 @@ def _make_dce_zip(*extra_members: str) -> bytes:
     return buf.getvalue()
 
 
+def _dce_asset_url(asset_name: str) -> str:
+    return (
+        f"https://github.com/Tyrrrz/DiscordChatExporter/releases/download/"
+        f"{DCE_VERSION}/{asset_name}"
+    )
+
+
 def _register_dce_download(responses: aioresponses, archive: bytes) -> None:
-    release_url = (
-        f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
-    )
-    responses.get(
-        release_url,
-        status=200,
-        payload={
-            "assets": [
-                {
-                    "name": "test.zip",
-                    "browser_download_url": "https://example.com/test.zip",
-                }
-            ]
-        },
-    )
-    responses.get("https://example.com/test.zip", status=200, body=archive)
+    responses.get(_dce_asset_url("test.zip"), status=200, body=archive)
+
+
+async def test_dce_download_uses_pinned_asset_url_without_release_api(tmp_path: Path) -> None:
+    """A pinned version and checksum make the release API lookup unnecessary."""
+    asset_name = _get_asset_name("osx-arm64")
+    asset_url = _dce_asset_url(asset_name)
+    result: Path | None = None
+    failure: DCENotFoundError | None = None
+
+    with (
+        aioresponses() as responses,
+        patch("platform.system", return_value="Darwin"),
+        patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
+        patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
+    ):
+        responses.get(asset_url, status=200, body=_make_dce_zip())
+        try:
+            result = await download_dce(lambda _event: None, skip_verify=True)
+        except DCENotFoundError as caught:
+            failure = caught
+
+    assert failure is None
+    assert result == tmp_path / "DiscordChatExporter.Cli"
 
 
 class TestArchiveExtraction:
@@ -307,9 +322,7 @@ class TestDownloadDceRetry:
         """download_dce retries once on network error then succeeds."""
         events = []
         dce_zip = _make_dce_zip()
-        release_url = (
-            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
-        )
+        asset_url = _dce_asset_url("test.zip")
 
         with (
             aioresponses() as m,
@@ -323,21 +336,9 @@ class TestDownloadDceRetry:
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             # First attempt: network error
-            m.get(release_url, exception=aiohttp.ClientError("network error"))
+            m.get(asset_url, exception=aiohttp.ClientError("network error"))
             # Second attempt: success
-            m.get(
-                release_url,
-                status=200,
-                payload={
-                    "assets": [
-                        {
-                            "name": "test.zip",
-                            "browser_download_url": "https://example.com/test.zip",
-                        }
-                    ]
-                },
-            )
-            m.get("https://example.com/test.zip", status=200, body=dce_zip)
+            m.get(asset_url, status=200, body=dce_zip)
             (tmp_path / "DiscordChatExporter.Cli").touch()
 
             result = await download_dce(events.append)
@@ -351,9 +352,7 @@ class TestDownloadDceRetry:
         from discord_ferry.errors import DCENotFoundError
 
         events = []
-        release_url = (
-            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
-        )
+        asset_url = _dce_asset_url("test.zip")
 
         with (
             aioresponses() as m,
@@ -361,8 +360,8 @@ class TestDownloadDceRetry:
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
-            m.get(release_url, exception=aiohttp.ClientError("fail 1"))
-            m.get(release_url, exception=aiohttp.ClientError("fail 2"))
+            m.get(asset_url, exception=aiohttp.ClientError("fail 1"))
+            m.get(asset_url, exception=aiohttp.ClientError("fail 2"))
 
             with pytest.raises(DCENotFoundError):
                 await download_dce(events.append)
@@ -378,12 +377,8 @@ class TestDownloadDceRetry:
         from discord_ferry.errors import DCENotFoundError
 
         events = []
-        release_url = (
-            f"https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/tags/{DCE_VERSION}"
-        )
-        key = aiohttp.client_reqrep.ConnectionKey(
-            "api.github.com", 443, True, True, None, None, None
-        )
+        asset_url = _dce_asset_url("test.zip")
+        key = aiohttp.client_reqrep.ConnectionKey("github.com", 443, True, True, None, None, None)
         cert_error = aiohttp.ClientConnectorCertificateError(
             key, ssl.SSLCertVerificationError("bad")
         )
@@ -394,7 +389,7 @@ class TestDownloadDceRetry:
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
             patch("asyncio.sleep", new_callable=AsyncMock) as slept,
         ):
-            m.get(release_url, exception=cert_error)
+            m.get(asset_url, exception=cert_error)
 
             with pytest.raises(DCENotFoundError) as caught:
                 await download_dce(events.append)
@@ -751,9 +746,9 @@ async def test_a_refused_proxy_names_the_proxy(tmp_path, fake_proxy, proxy_env, 
     message = str(caught.value)
     assert "Network error downloading DCE" in message
     # ONE assertion: see the note in tests/test_exporter_runner.py. The split
-    # version put `assert "api.github.com" in message` above the phrase, so the
+    # version put `assert "github.com" in message` above the phrase, so the
     # phrase line never ran under this site's own mutant.
-    assert f"The request to api.github.com went through the proxy at 127.0.0.1:{port}" in message
+    assert f"The request to github.com went through the proxy at 127.0.0.1:{port}" in message
     assert slept.await_count == 0, "a refused proxy is permanent and must not pay the 3s retry"
 
 
@@ -783,7 +778,7 @@ async def test_a_proxy_502_still_retries(tmp_path, fake_proxy, proxy_env, os_pro
             await download_dce(lambda _e: None)
 
     assert len(captured) >= 2, "the 502 was treated as permanent and never retried"
-    assert f"The request to api.github.com went through the proxy at 127.0.0.1:{port}" in str(
+    assert f"The request to github.com went through the proxy at 127.0.0.1:{port}" in str(
         caught.value
     )
 
@@ -795,43 +790,21 @@ async def test_a_proxy_502_still_retries(tmp_path, fake_proxy, proxy_env, os_pro
 _TEST_DCE_CAP = 200_000
 
 
-class _ReleaseThenLocalSession:
-    """Stands in for ``new_session()``: the release lookup is canned, the asset GET is real.
-
-    The first GET (the GitHub release JSON) returns a fixed asset list. The second
-    GET goes over a real ClientSession to the local server, so the body is streamed
-    for real and ``LocalCDN.sent`` counts what the client let the server write.
-    """
+class _AssetThenLocalSession:
+    """Stands in for ``new_session()`` and streams the direct asset from a local server."""
 
     def __init__(self, real: aiohttp.ClientSession, asset_url: str) -> None:
         self._real = real
         self._asset_url = asset_url
 
-    async def __aenter__(self) -> _ReleaseThenLocalSession:
+    async def __aenter__(self) -> _AssetThenLocalSession:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         return None
 
     def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]  # test double
-        if "api.github.com" in url:
-            return _FakeReleaseResponse()
         return self._real.get(self._asset_url)
-
-
-class _FakeReleaseResponse:
-    status = 200
-
-    async def __aenter__(self) -> _FakeReleaseResponse:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        return None
-
-    async def json(self) -> dict[str, object]:
-        return {
-            "assets": [{"name": "test.zip", "browser_download_url": "https://example.test/a.zip"}]
-        }
 
 
 async def _download_from_local(tmp_path: Path, cdn_path: str):  # type: ignore[no-untyped-def]
@@ -840,7 +813,7 @@ async def _download_from_local(tmp_path: Path, cdn_path: str):  # type: ignore[n
 
     real_sleep = asyncio.sleep  # the manager's retry sleep is patched on the shared module
     async with local_cdn() as cdn, aiohttp.ClientSession() as real:
-        session = _ReleaseThenLocalSession(real, cdn.url(cdn_path))
+        session = _AssetThenLocalSession(real, cdn.url(cdn_path))
         with (
             patch("discord_ferry.exporter.manager._MAX_DCE_BYTES", _TEST_DCE_CAP),
             patch("discord_ferry.exporter.manager.new_session", return_value=session),
