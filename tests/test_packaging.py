@@ -18,6 +18,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -732,6 +733,166 @@ def _jobs(text: str) -> dict[str, str]:
         jobs[header.group(1)] = body[header.end() : end]
     assert jobs, "no jobs found"
     return jobs
+
+
+def _run_ferry_spec_with_modules(
+    platform: str, module_names: list[str], *, collect_webview: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Execute the spec with a minimal PyInstaller build graph.
+
+    The fake Analysis supplies only the analyzed pure modules. This makes the
+    test exercise the spec's release guard without building or inspecting a
+    host-specific executable.
+    """
+    harness = textwrap.dedent(
+        """
+        import runpy
+        import sys
+        import types
+
+        class Analysis:
+            def __init__(self, *args, **kwargs):
+                self.pure = [(name, None, "PYMODULE") for name in sys.argv[2:]]
+                self.scripts = []
+                self.binaries = []
+                self.datas = []
+
+        class Artifact:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        hooks = types.ModuleType("PyInstaller.utils.hooks")
+        hooks.collect_all = lambda name: ([], [], ["webview"] if sys.argv[3] == "1" else [])
+        hooks.collect_data_files = lambda name: []
+        hooks.collect_submodules = lambda name: []
+        utils = types.ModuleType("PyInstaller.utils")
+        package = types.ModuleType("PyInstaller")
+        sys.modules.update(
+            {
+                "PyInstaller": package,
+                "PyInstaller.utils": utils,
+                "PyInstaller.utils.hooks": hooks,
+            }
+        )
+        sys.platform = sys.argv[2]
+
+        runpy.run_path(
+            sys.argv[1],
+            init_globals={
+                "Analysis": Analysis,
+                "PYZ": Artifact,
+                "EXE": Artifact,
+                "COLLECT": Artifact,
+                "BUNDLE": Artifact,
+            },
+        )
+        """
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            harness,
+            str(_REPO_ROOT / "ferry.spec"),
+            platform,
+            "1" if collect_webview else "0",
+            *module_names,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_ferry_spec_refuses_a_build_without_pywebview(platform: str) -> None:
+    """#1281: a desktop build must stop before packaging without webview."""
+    result = _run_ferry_spec_with_modules(platform, [])
+
+    assert result.returncode != 0
+    assert "webview" in result.stderr
+
+
+def test_ferry_spec_refuses_a_build_when_collection_omits_pywebview() -> None:
+    """#1281: a successful import is insufficient when collection is empty."""
+    result = _run_ferry_spec_with_modules("darwin", ["webview"], collect_webview=False)
+
+    assert result.returncode != 0
+    assert "did not collect pywebview" in result.stderr
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_ferry_spec_allows_a_build_with_pywebview(platform: str) -> None:
+    """#1281: the guard permits an Analysis that contains pywebview."""
+    result = _run_ferry_spec_with_modules(platform, ["webview"])
+
+    assert result.returncode == 0, result.stderr
+
+
+def _release_asset_preflight() -> str:
+    """Return the PR-reachable shell guard from the release workflow."""
+    workflow = yaml.safe_load(
+        (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["verify-release-assets"]["steps"]
+    for step in steps:
+        if step.get("name") == "Verify release assets":
+            return str(step["run"])
+    raise AssertionError("release asset verification step not found")
+
+
+@pytest.mark.parametrize(
+    ("assets", "empty_assets", "expected_exit"),
+    [
+        (
+            [
+                "Ferry-windows-x86_64.exe",
+                "Ferry-macos-arm64.zip",
+                "Ferry-macos-x86_64.zip",
+            ],
+            set(),
+            0,
+        ),
+        (["Ferry-windows-x86_64.exe", "Ferry-macos-arm64.zip"], set(), 1),
+        (
+            [
+                "Ferry-windows-x86_64.exe",
+                "Ferry-macos-arm64.zip",
+                "Ferry-macos-x86_64.zip",
+            ],
+            {"Ferry-macos-arm64.zip"},
+            1,
+        ),
+        (
+            [
+                "Ferry-windows-x86_64.exe",
+                "Ferry-macos-arm64.zip",
+                "Ferry-macos-x86_64.zip",
+                "unexpected.zip",
+            ],
+            set(),
+            1,
+        ),
+    ],
+)
+def test_release_asset_preflight_accepts_only_the_three_published_assets(
+    tmp_path: Path, assets: list[str], empty_assets: set[str], expected_exit: int
+) -> None:
+    """#1279: the read-only PR guard rejects missing and unexpected downloads."""
+    asset_dir = tmp_path / "release-assets"
+    asset_dir.mkdir()
+    for asset in assets:
+        (asset_dir / asset).write_bytes(b"" if asset in empty_assets else b"asset")
+
+    result = subprocess.run(
+        ["bash", "-c", _release_asset_preflight()],
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_exit, result.stderr
 
 
 def _job_permissions(job: str) -> list[str]:
