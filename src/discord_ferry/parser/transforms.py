@@ -91,7 +91,8 @@ def remap_mentions(
         content: Raw message content from DCE export.
         channel_map: Mapping of Discord channel ID → Stoat channel ID.
         role_map: Mapping of Discord role ID → Stoat role ID.
-        author_names: Mapping of Discord user ID → display name.
+        author_names: Mapping of Discord user ID → display name, collected from
+            message authors and mentioned users.
 
     Returns:
         Content with all mention syntax replaced.

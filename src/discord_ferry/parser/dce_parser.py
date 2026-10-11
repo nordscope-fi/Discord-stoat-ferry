@@ -358,9 +358,9 @@ def validate_export(
     Args:
         exports: Parsed exports to validate.
         export_dir: Source directory (used for context in warning messages).
-        author_names: Optional dict to populate with author ID -> display name
-            mappings during the validation scan. This avoids a second full scan
-            of all messages.
+        author_names: Optional dict to populate with Discord user ID -> display
+            name mappings from message authors and mentioned users during the
+            validation scan. This avoids a second full scan of all messages.
 
     Returns:
         List of warning dicts. Every dict has 'type' and 'message'; some carry
@@ -416,9 +416,16 @@ def validate_export(
                     if check_cdn_url_expiry(att.url) is True:
                         expired_count += 1
 
-            # Collect author names (if caller requested)
-            if author_names is not None and msg.author.id not in author_names:
-                author_names[msg.author.id] = msg.author.nickname or msg.author.name
+            # Collect author and mentioned-user names (if caller requested).
+            # DCE writes a full user record for every message mention, including
+            # users who never authored an exported message.
+            if author_names is not None:
+                author_names.setdefault(msg.author.id, msg.author.nickname or msg.author.name)
+                for mention in msg.mentions:
+                    mention_id = mention.get("id", "")
+                    mention_name = _candidate(mention)
+                    if mention_id and mention_name:
+                        author_names.setdefault(mention_id, mention_name)
 
             # Collect custom emoji IDs from reactions and content
             for reaction in msg.reactions:

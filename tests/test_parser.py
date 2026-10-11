@@ -26,6 +26,7 @@ from discord_ferry.parser.dce_parser import (
     validate_export,
 )
 from discord_ferry.parser.models import DCEExport, DCEMessage, DCEReaction
+from discord_ferry.parser.transforms import remap_mentions
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -491,6 +492,21 @@ def test_validate_detects_rendered_markdown(fixtures_dir: Path) -> None:
     warnings = validate_export(exports, fixtures_dir)
     types = [w["type"] for w in warnings]
     assert "rendered_markdown" in types
+
+
+def test_validate_collects_names_for_users_only_seen_in_mentions(tmp_path: Path) -> None:
+    """A raw mention resolves when its user never authored an exported message."""
+    source = FIXTURES_DIR / "markdown_rendered_multi" / "markdown_rendered_multi_b.json"
+    export_path = tmp_path / "mentions.json"
+    export_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    author_names: dict[str, str] = {}
+    exports = parse_export_directory(tmp_path, metadata_only=True)
+
+    validate_export(exports, tmp_path, author_names=author_names)
+
+    assert author_names["400000000000000001"] == "Alice"
+    assert remap_mentions("hi <@400000000000000001>", {}, {}, author_names) == "hi @Alice"
 
 
 NOT_RENDERED_DIR = FIXTURES_DIR / "mentions_not_rendered"
