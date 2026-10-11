@@ -20,7 +20,7 @@ class PerChannel:
     """A `<channel>: NN%` progress line from DCE's Spectre.Console fallback renderer."""
 
     channel: str
-    pct: int  # 0-100, integer (DCE emits milestones {25, 50, 75, 95, 96, 97, 98, 99, 100})
+    pct: int  # 0-100, integer (the source-derived milestone set is 25, 50, 75, 95-100)
 
 
 PhaseKind = Literal[
@@ -69,7 +69,7 @@ class StatusDot:
 
 @dataclass(frozen=True, slots=True)
 class Error:
-    """Reserved for future use; parser does not currently emit Error.
+    """Source-derived variant reserved for future use; parser does not emit Error.
 
     DCE writes errors to stderr (handled by _read_stderr in runner). Kept in
     the union so error-path lines added later are non-breaking for callers.
