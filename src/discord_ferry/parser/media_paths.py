@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import errno
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def contained_media_path(root: Path, relative: str) -> Path | None:
     """Return the resolved candidate only when it stays inside the resolved root."""
-    if not relative or Path(relative).is_absolute():
+    relative = relative.replace("\\", "/")
+    if not relative or Path(relative).is_absolute() or PureWindowsPath(relative).is_absolute():
         return None
     try:
         resolved_root = root.resolve()

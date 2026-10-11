@@ -18,8 +18,20 @@ def test_in_root_relative_returns_resolved_candidate(tmp_path: Path) -> None:
     assert contained_media_path(tmp_path, "inside/normal.png") == target.resolve()
 
 
+def test_in_root_backslash_relative_returns_resolved_candidate(tmp_path: Path) -> None:
+    (tmp_path / "inside").mkdir()
+    target = tmp_path / "inside" / "normal.png"
+    target.write_bytes(b"x")
+    assert contained_media_path(tmp_path, "inside\\normal.png") == target.resolve()
+
+
 @pytest.mark.parametrize("relative", ["../outside-marker.txt", "/etc/hosts"])
 def test_escape_variants_return_none(tmp_path: Path, relative: str) -> None:
+    assert contained_media_path(tmp_path, relative) is None
+
+
+@pytest.mark.parametrize("relative", ["..\\..\\x.png", "C:\\x.png"])
+def test_windows_escape_variants_return_none(tmp_path: Path, relative: str) -> None:
     assert contained_media_path(tmp_path, relative) is None
 
 
