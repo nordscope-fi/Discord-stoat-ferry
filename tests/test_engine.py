@@ -5776,6 +5776,21 @@ async def test_a_recreated_channel_gets_its_slowmode_back(tmp_path: Path) -> Non
     assert any(e and e.get("slowmode") == 30 for e in edits), f"slowmode was not restored: {edits}"
 
 
+async def test_a_recreated_voice_channel_gets_its_user_limit_back(tmp_path: Path) -> None:
+    """Repair sends Stoat's nested voice.max_users field for a voice user limit."""
+    _, _, edits = await _repair_with_live_categories(
+        tmp_path,
+        live_categories=[],
+        channel_categories={},
+        category_map={},
+        ch_meta_user_limit=7,
+    )
+    assert {"voice": {"max_users": 7}} in edits, f"voice user limit was not restored: {edits}"
+    assert not any(e and "user_limit" in e for e in edits), (
+        f"repair sent the unsupported user_limit field: {edits}"
+    )
+
+
 async def test_a_recreated_channel_with_no_attributes_sends_no_edit(tmp_path: Path) -> None:
     """The other half again: no attributes means no request."""
     _, _, edits = await _repair_with_live_categories(

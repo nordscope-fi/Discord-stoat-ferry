@@ -2348,7 +2348,7 @@ async def _apply_channel_attributes(
     if ch_meta.slowmode > 0:
         edits["slowmode"] = min(ch_meta.slowmode, 21600)
     if ch_meta.user_limit > 0:
-        edits["user_limit"] = ch_meta.user_limit
+        edits["voice"] = {"max_users": ch_meta.user_limit}
     if not edits:
         return
     try:
