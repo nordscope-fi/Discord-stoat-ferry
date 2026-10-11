@@ -70,6 +70,7 @@ _READINESS_CACHE = timedelta(seconds=30)
 # A failed check is remembered briefly (ADR-030). Short, so a recovered GitHub reads as ready
 # within seconds; long enough that callers during an outage share one failed check (#963).
 _READINESS_FAILURE_CACHE = timedelta(seconds=5)
+_GITHUB_UNREADY_STATUS = 503
 _EXPIRY_SWEEP_TASK_NAME = "feedback-expiry-sweep"
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,8 @@ class ServiceJSONFormatter(logging.Formatter):
                 "state": getattr(record, "state", None),
                 "destination_kind": getattr(record, "destination_kind", None),
                 "status_class": getattr(record, "status_class", None),
+                "failure_class": getattr(record, "failure_class", None),
+                "status_code": getattr(record, "status_code", None),
                 "duration_ms": getattr(record, "duration_ms", None),
             },
             separators=(",", ":"),
@@ -115,7 +118,11 @@ def install_service_logging() -> None:
 
     handler = logging.StreamHandler()
     handler.setFormatter(ServiceJSONFormatter())
-    for target in (logger, logging.getLogger("aiohttp.access")):
+    for target in (
+        logger,
+        logging.getLogger("discord_ferry.feedback_service.github"),
+        logging.getLogger("aiohttp.access"),
+    ):
         target.handlers = [handler]
         target.setLevel(logging.INFO)
         target.propagate = False
@@ -156,7 +163,7 @@ async def _ready(request: web.Request) -> web.Response:
 
     if await _github_is_ready(request.app):
         return web.json_response({"status": "ready"})
-    return web.json_response({"status": "unready"}, status=503)
+    return web.json_response({"status": "unready"}, status=_GITHUB_UNREADY_STATUS)
 
 
 async def _github_is_ready(app: web.Application) -> bool:
@@ -169,7 +176,15 @@ async def _github_is_ready(app: web.Application) -> bool:
             return False
         try:
             await app[GITHUB_KEY].check_readiness()
-        except (GitHubAuthenticationError, GitHubReadinessError):
+        except (GitHubAuthenticationError, GitHubReadinessError) as exc:
+            logger.warning(
+                "github_unready",
+                extra={
+                    "event": "github_unready",
+                    "failure_class": type(exc).__name__,
+                    "status_code": _GITHUB_UNREADY_STATUS,
+                },
+            )
             state.expires_at = None
             # Count from the end of the check: a slow failure must not use up its own period.
             state.failed_until = state.now().astimezone(UTC) + _READINESS_FAILURE_CACHE
