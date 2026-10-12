@@ -41,7 +41,7 @@ Before you start, confirm you have these ready:
     !!! info "Window blank or missing?"
         Open `http://localhost:8765` in any browser while Ferry is running. That address is
         fully supported and shows the same interface. See
-        [Troubleshooting](../guides/troubleshooting.md#ferry-window-is-blank-or-says-your-browser-does-not-support-es-modules)
+        [Troubleshooting](../guides/troubleshooting.md#ferrys-window-says-it-could-not-be-drawn-and-your-browser-opens)
         if the window itself will not draw.
 
 === "CLI (Linux / advanced)"
