@@ -1382,6 +1382,57 @@ def test_build_non_voice_failure_aborts(runner: CliRunner, tmp_path: Path) -> No
     assert result.output.index("Build failed") < result.output.index("ferry feedback")
 
 
+@pytest.mark.parametrize("categorized", [False, True])
+@pytest.mark.parametrize(
+    "channel_type, cap",
+    [
+        ("Voice", -1),
+        ("Voice", True),
+        ("Voice", "bad-cap-marker"),
+        ("Voice", 1.5),
+        ("Voice", None),
+        ("Text", 5),
+    ],
+)
+def test_build_bad_cap_never_starts_engine(
+    runner: CliRunner,
+    tmp_path: Path,
+    categorized: bool,
+    channel_type: str,
+    cap: object,
+) -> None:
+    import json
+
+    data = {"name": "S"}
+    channel = {"name": "channel", "type": channel_type, "user_limit": cap}
+    data.update(
+        {"categories": [{"name": "V", "channels": [channel]}]}
+        if categorized
+        else {"uncategorized_channels": [channel]}
+    )
+    source = tmp_path / "bp.json"
+    source.write_text(json.dumps(data))
+    with patch("discord_ferry.core.engine.run_build") as build_engine:
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--blueprint",
+                str(source),
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                _BUILD_TOKEN,
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 1
+    assert "user_limit" in result.output
+    assert "bad-cap-marker" not in result.output
+    assert "Traceback" not in result.output
+    build_engine.assert_not_called()
+
+
 def test_build_empty_blueprint(runner: CliRunner, tmp_path: Path) -> None:  # SC-21
     from discord_ferry.blueprint import ServerBlueprint
 

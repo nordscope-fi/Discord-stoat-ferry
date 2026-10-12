@@ -833,7 +833,7 @@ def build(
     """Build a Stoat server from a template or blueprint."""
     import importlib.resources
 
-    from discord_ferry.blueprint import ServerBlueprint, import_blueprint
+    from discord_ferry.blueprint import BlueprintValidationError, ServerBlueprint, import_blueprint
     from discord_ferry.core.engine import run_build
 
     if not template and not blueprint:
@@ -844,11 +844,16 @@ def build(
         sys.exit(1)
 
     bp: ServerBlueprint
-    if template:
-        templates_dir = importlib.resources.files("discord_ferry.templates")
-        bp = import_blueprint(Path(str(templates_dir / f"{template}.json")))
-    else:
-        bp = import_blueprint(Path(blueprint))  # type: ignore[arg-type]
+    try:
+        if template:
+            templates_dir = importlib.resources.files("discord_ferry.templates")
+            bp = import_blueprint(Path(str(templates_dir / f"{template}.json")))
+        else:
+            bp = import_blueprint(Path(blueprint))  # type: ignore[arg-type]
+    except BlueprintValidationError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(sanitize_secrets(str(exc)))}")
+        _print_feedback_hint()
+        sys.exit(1)
 
     if name:
         bp.name = name
