@@ -2360,7 +2360,7 @@ async def test_embed_overflow_fallback_text(tmp_path: Path) -> None:
 
 
 async def test_cross_channel_reply_fallback(tmp_path: Path) -> None:
-    """Reply to a message in a different channel gets a text annotation when not in map."""
+    """An unmapped source channel uses its Discord name, never its raw id."""
     sent_content: list[str] = []
 
     async def capture_send(
@@ -2381,12 +2381,15 @@ async def test_cross_channel_reply_fallback(tmp_path: Path) -> None:
         reference=ref,
     )
     export = _make_export(channel_id="ch1", messages=[msg])
+    source_export = _make_export(channel_id="ch_other")
+    source_export.channel.name = "source-room"
 
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
-        await run_messages(config, state, [export], lambda e: None)
+        await run_messages(config, state, [export, source_export], lambda e: None)
 
     assert len(sent_content) == 1
-    assert "[Replying to message in #ch_other]" in sent_content[0]
+    assert "[Replying to message in Discord channel #source-room]" in sent_content[0]
+    assert "ch_other" not in sent_content[0]
     assert any(w["type"] == "cross_channel_reply" for w in state.warnings)
 
 
@@ -2421,8 +2424,8 @@ async def test_same_channel_missing_reply_no_annotation(tmp_path: Path) -> None:
     assert not any(w["type"] == "cross_channel_reply" for w in state.warnings)
 
 
-async def test_cross_channel_reply_found_in_map_uses_reply(tmp_path: Path) -> None:
-    """Cross-channel reply that IS in message_map still uses the proper reply reference."""
+async def test_mapped_different_destination_reply_uses_channel_fallback(tmp_path: Path) -> None:
+    """A mapped source in another Stoat channel is named instead of linked."""
     sent_kwargs: list[dict[str, Any]] = []
 
     async def capture_send(
@@ -2431,10 +2434,13 @@ async def test_cross_channel_reply_found_in_map_uses_reply(tmp_path: Path) -> No
         sent_kwargs.append(kwargs)
         return {"_id": "stoat_msg"}
 
-    state = _make_state(message_map={"orig_in_other_ch": "stoat_orig"})
+    state = _make_state(
+        channel_map={"ch1": "stoat_ch1", "discord_source_id": "stoat_destination_id"},
+        message_map={"orig_in_other_ch": "stoat_orig"},
+    )
     config = _make_config(tmp_path)
 
-    ref = DCEReference(message_id="orig_in_other_ch", channel_id="ch_other")
+    ref = DCEReference(message_id="orig_in_other_ch", channel_id="discord_source_id")
     msg = _make_message(
         id="reply3",
         msg_type="Reply",
@@ -2446,11 +2452,48 @@ async def test_cross_channel_reply_found_in_map_uses_reply(tmp_path: Path) -> No
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
 
-    # Should use the proper stoat reply, not text fallback.
+    assert sent_kwargs[0]["replies"] is None
+    assert "[Replying to message in <#stoat_destination_id>]" in sent_kwargs[0]["content"]
+    assert "discord_source_id" not in sent_kwargs[0]["content"]
+    assert state.replies_total == 1
+    assert state.replies_linked == 0
+
+
+async def test_flattened_thread_same_destination_reply_stays_native(tmp_path: Path) -> None:
+    """A thread id can differ from its parent while sharing its Stoat destination."""
+    sent_kwargs: list[dict[str, Any]] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_kwargs.append(kwargs)
+        return {"_id": "stoat_msg"}
+
+    # Discord uses the origin message id as the thread id. A flattened thread can
+    # therefore have a different Discord channel id while sharing the parent target.
+    state = _make_state(
+        channel_map={"ch1": "stoat_ch1", "thread-origin": "stoat_ch1"},
+        message_map={"thread-origin": "stoat_orig"},
+    )
+    config = _make_config(tmp_path)
+    ref = DCEReference(message_id="thread-origin", channel_id="thread-origin")
+    msg = _make_message(
+        id="reply4",
+        msg_type="Reply",
+        content="replying across flattened Discord ids",
+        reference=ref,
+    )
+    export = _make_export(channel_id="ch1", messages=[msg])
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [export], lambda e: None)
+
     assert sent_kwargs[0]["replies"] == [
         {"id": "stoat_orig", "mention": False, "fail_if_not_exists": False}
     ]
-    assert "[Replying to message in #" not in sent_kwargs[0]["content"]
+    assert "[Replying to message in" not in sent_kwargs[0]["content"]
+    assert state.replies_total == 1
+    assert state.replies_linked == 1
 
 
 # ---------------------------------------------------------------------------

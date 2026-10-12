@@ -365,6 +365,7 @@ async def run_messages(
 
     # Sort deterministically by Discord channel ID.
     sorted_exports = sorted(exports, key=lambda e: e.channel.id)
+    source_channel_names = {export.channel.id: export.channel.name for export in sorted_exports}
 
     on_event(
         MigrationEvent(
@@ -465,6 +466,7 @@ async def run_messages(
                     on_event=on_event,
                     channel_sem=channel_sem,
                     save_lock=save_lock,
+                    source_channel_names=source_channel_names,
                 ),
                 name=f"channel-{export.channel.id}",
             )
@@ -1033,6 +1035,7 @@ async def _process_single_channel(
     on_event: EventCallback,
     channel_sem: asyncio.Semaphore,
     save_lock: asyncio.Lock,
+    source_channel_names: dict[str, str],
 ) -> ChannelResult:
     """Process all messages in a single channel, returning a ChannelResult.
 
@@ -1187,6 +1190,7 @@ async def _process_single_channel(
                 on_event=on_event,
                 channel_result=result,
                 export_channel_id=export.channel.id,
+                source_channel_names=source_channel_names,
             )
 
             # Periodic progress event and state save.
@@ -1289,6 +1293,7 @@ async def _process_message(
     channel_result: ChannelResult | None = None,
     export_channel_id: str = "",
     idempotency_salt: str = "",
+    source_channel_names: dict[str, str] | None = None,
 ) -> None:
     """Process and send a single message.
 
@@ -1299,8 +1304,8 @@ async def _process_message(
     When *channel_result* is ``None``, the function writes directly to *state*
     for backward compatibility (e.g., retry path in engine.py).
 
-    *export_channel_id* is the Discord channel ID of the channel being processed,
-    used for cross-channel reply detection.
+    *source_channel_names* maps Discord channel IDs to their exported names for
+    reply fallback text when the source channel has no Stoat destination.
     """
     # Choose accumulator target.
     acc_warnings: list[dict[str, str]] = (
@@ -1578,19 +1583,33 @@ async def _process_message(
         # the two collide, and a sent reply cannot be unsent. Pairs with the parent-wins
         # guard in _merge_channel_result: neither half works alone.
         ref_stoat_id = None
+        reference_stoat_channel_id = None
         if channel_result is not None:
             ref_stoat_id = channel_result.message_map_updates.get(msg.reference.message_id)
+            if ref_stoat_id is not None:
+                reference_stoat_channel_id = stoat_channel_id
         if ref_stoat_id is None:
             ref_stoat_id = state.message_map.get(msg.reference.message_id)
-        if ref_stoat_id:
+        reference_channel_id = msg.reference.channel_id
+        if reference_stoat_channel_id is None and reference_channel_id:
+            reference_stoat_channel_id = state.channel_map.get(reference_channel_id)
+        same_stoat_channel = (
+            not reference_channel_id or reference_stoat_channel_id == stoat_channel_id
+        )
+        if ref_stoat_id and same_stoat_channel:
             replies.append({"id": ref_stoat_id, "mention": False, "fail_if_not_exists": False})
             if channel_result is not None:
                 channel_result.replies_linked += 1
             else:
                 state.replies_linked += 1
-        elif msg.reference.channel_id and msg.reference.channel_id != export_channel_id:
-            # Cross-channel reply — message not in map (different channel), add text fallback.
-            content += f"\n[Replying to message in #{msg.reference.channel_id}]"
+        elif reference_channel_id and not same_stoat_channel:
+            if reference_stoat_channel_id:
+                reply_location = f"<#{reference_stoat_channel_id}>"
+            elif source_channel_names and reference_channel_id in source_channel_names:
+                reply_location = f"Discord channel #{source_channel_names[reference_channel_id]}"
+            else:
+                reply_location = "another Discord channel"
+            content += f"\n[Replying to message in {reply_location}]"
             warn_target: list[dict[str, str]] = (
                 channel_result.warnings if channel_result is not None else state.warnings
             )
