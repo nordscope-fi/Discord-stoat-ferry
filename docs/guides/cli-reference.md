@@ -85,7 +85,7 @@ ferry migrate [OPTIONS]
 | `--skip-emoji` | | false | Do not upload custom emoji |
 | `--skip-reactions` | | false | Do not add reactions |
 | `--skip-threads` | | false | Do not migrate threads or forum posts |
-| `--thread-strategy TEXT` | | `flatten` | Thread handling: `flatten` (each thread becomes a channel), `merge` (thread messages merged into parent channel), or `archive` (exported as markdown attachment) |
+| `--thread-strategy TEXT` | | `flatten` | Thread handling: `flatten` (each thread becomes a channel), `merge` (thread messages merged into its parent channel), or `archive` (local markdown only at `<output-dir>/threads/<parent channel>/<thread>.md`; nothing is posted to Stoat) |
 | `--rate-limit FLOAT` | | 1.0 | Seconds between messages (0.5–3.0 recommended) |
 | `--upload-delay FLOAT` | | 0.5 | Seconds between Autumn file uploads |
 | `--output-dir TEXT` | | `./ferry-output` | Directory for the migration report and state file |

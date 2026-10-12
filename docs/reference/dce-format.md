@@ -61,13 +61,14 @@ with a regex on the filename.
 
 !!! info "Sanitisation for downstream file writes"
     The names above come straight from Discord and can contain any Unicode. When Ferry writes a
-    file **it** owns, it sanitises the name. This includes a thread archive under
-    `--thread-strategy archive` or a merged-thread attachment under `--thread-strategy merge`.
+    thread archive, it sanitises the parent and thread names. Archive mode makes no API calls and
+    posts nothing to Stoat. It writes each file to
+    `{output_dir}/threads/{parent_channel_name}/{thread_name}.md`.
     `sanitize_filename()` strips characters that are illegal on Windows (`< > : " \ | ? *`). It
     replaces `/` with `-` so a name like `wip/2026` never creates a subdirectory, and rewrites
-    Win32 reserved device names (`CON`, `NUL`, etc.). Two threads whose sanitised names collide
-    are suffixed with the thread ID so neither file overwrites the other. This does not affect
-    DCE's own output filenames, DCE writes those before Ferry sees them.
+    Win32 reserved device names (`CON`, `NUL`, etc.). During one run, colliding thread names in one
+    parent folder receive numeric suffixes such as `_2` and `_3`. This does not affect DCE's own
+    output filenames, DCE writes those before Ferry sees them.
 
 ---
 
