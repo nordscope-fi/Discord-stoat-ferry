@@ -1231,6 +1231,53 @@ def test_parse_single_export_metadata_only(tmp_path: Path) -> None:
     assert export.json_path == json_path
 
 
+def test_metadata_only_does_not_use_the_whole_document_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    path = tmp_path / "channel.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    def refuse_whole_document_load(path: Path, max_bytes: int) -> object:
+        raise AssertionError("metadata-only parsing loaded the whole channel file")
+
+    monkeypatch.setattr(
+        "discord_ferry.parser.dce_parser.load_bounded_json", refuse_whole_document_load
+    )
+
+    export = parse_single_export(path, metadata_only=True)
+
+    assert export.message_count == len(data["messages"])
+    assert export.messages == []
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["metadata-dotted-top-level.json", "metadata-empty-name-object.json"],
+)
+def test_metadata_only_ignores_unknown_top_level_prefix_collisions(filename: str) -> None:
+    path = FIXTURES_DIR / "parser" / filename
+
+    eager = parse_single_export(path)
+    metadata = parse_single_export(path, metadata_only=True)
+
+    assert metadata.guild == eager.guild
+    assert metadata.channel == eager.channel
+    assert metadata.message_count == eager.message_count
+
+
+def test_eager_parse_still_returns_every_message(tmp_path: Path) -> None:
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    path = tmp_path / "channel.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    export = parse_single_export(path)
+
+    assert [message.id for message in export.messages] == [
+        message["id"] for message in data["messages"]
+    ]
+
+
 def _forbid_read_text(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(self: Path, *args: object, **kwargs: object) -> str:
         raise AssertionError("the file was read before the size check refused it")
