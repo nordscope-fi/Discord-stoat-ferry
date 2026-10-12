@@ -103,6 +103,11 @@ _STEP_LABELS: list[str] = ["Configure", "Export", "Validate", "Migrate", "Done"]
 
 _GUI_DATA_DIR_NAME = ".discord-ferry"
 
+# Browser pages are per client, but the migration engine belongs to this Ferry
+# process. Keep one task reference here so a reload or second tab cannot launch
+# another engine while the first is still sending.
+_active_migration_task: asyncio.Task[Any] | None = None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1271,6 +1276,8 @@ def validate_page() -> None:
 @ui.page("/migrate")
 async def migrate_page() -> None:
     """Migration screen — run the engine, show live phase/progress/log."""
+    global _active_migration_task
+
     ui.add_head_html(_HEAD_HTML)
 
     storage = app.storage.user
@@ -1283,6 +1290,24 @@ async def migrate_page() -> None:
     # they cannot resolve `ui.context` themselves (issue #123).
     client = ui.context.client
     await client.connected(timeout=_CLIENT_CONNECT_TIMEOUT)
+
+    if _active_migration_task is not None and not _active_migration_task.done():
+        with (
+            ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"),
+            ui.card().classes("w-full max-w-xl shadow-md"),
+        ):
+            ui.label("Migration already running").classes(
+                "text-2xl font-bold text-center mt-2 mb-4"
+            )
+            ui.label(
+                "Another page started a migration in this Ferry process. "
+                "Wait for it to finish before starting another."
+            ).classes("text-gray-600")
+            ui.button("Back", on_click=lambda: ui.navigate.to("/")).classes(
+                "bg-gray-200 text-gray-800"
+            )
+        return
+
     if not app.storage.tab.get("token"):
         # Restart edge: stale non-secret keys on disk but a fresh tab, no token.
         ui.notify("Session expired — re-enter your token", type="warning")
@@ -1296,6 +1321,7 @@ async def migrate_page() -> None:
     # Flag to gate migration start behind the resume/fresh choice.
     resume_choice_made = asyncio.Event()
     needs_resume_choice = previous_state is not None and not previous_state.is_dry_run
+    resume_choice_card: ui.card | None = None
 
     with ui.column().classes("w-full items-center"):  # noqa: SIM117
         with ui.element("div").classes("w-full max-w-3xl fade-in mt-10 mb-0"):
@@ -1304,7 +1330,9 @@ async def migrate_page() -> None:
     if load_problem is not None:
         # Saved progress exists but cannot be used. Never start on our own: a fresh
         # start overwrites state.json, so the operator must choose it knowingly.
-        with ui.card().classes("w-full max-w-2xl mx-auto mb-4 bg-red-50 border-red-300"):
+        with ui.card().classes(
+            "w-full max-w-2xl mx-auto mb-4 bg-red-50 border-red-300"
+        ) as resume_choice_card:
             ui.label("Saved progress could not be read").classes("text-lg font-bold text-red-800")
             ui.label(load_problem).classes("text-red-700")
             ui.label(
@@ -1318,7 +1346,9 @@ async def migrate_page() -> None:
 
             ui.button("Start Fresh", on_click=_start_fresh_anyway).classes("bg-gray-400 text-white")
     elif needs_resume_choice:
-        with ui.card().classes("w-full max-w-2xl mx-auto mb-4 bg-amber-50 border-amber-300"):
+        with ui.card().classes(
+            "w-full max-w-2xl mx-auto mb-4 bg-amber-50 border-amber-300"
+        ) as resume_choice_card:
             msgs_done = len(previous_state.message_map)  # type: ignore[union-attr]
             phase = previous_state.current_phase or "unknown"  # type: ignore[union-attr]
             ui.label("Previous migration found").classes("text-lg font-bold text-amber-800")
@@ -1399,7 +1429,20 @@ async def migrate_page() -> None:
     )
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):  # noqa: SIM117
-        with ui.card().classes("w-full max-w-3xl shadow-md"):
+        with ui.card().classes("w-full max-w-xl shadow-md") as migration_conflict_card:
+            ui.label("Migration already running").classes(
+                "text-2xl font-bold text-center mt-2 mb-4"
+            )
+            ui.label(
+                "Another page started a migration in this Ferry process. "
+                "Wait for it to finish before starting another."
+            ).classes("text-gray-600")
+            ui.button("Back", on_click=lambda: ui.navigate.to("/")).classes(
+                "bg-gray-200 text-gray-800"
+            )
+        migration_conflict_card.set_visibility(False)
+
+        with ui.card().classes("w-full max-w-3xl shadow-md") as migration_card:
             ui.label("Migration Running").classes("text-2xl font-bold text-center mt-2 mb-4")
 
             # Phase indicator row
@@ -1821,8 +1864,21 @@ async def migrate_page() -> None:
     # ---------------------------------------------------------------------------
 
     async def _run() -> None:
+        global _active_migration_task
+
         # Wait for the user to choose Resume or Start Fresh before starting.
         await resume_choice_made.wait()
+
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        if _active_migration_task is not None and not _active_migration_task.done():
+            with client:
+                if resume_choice_card is not None:
+                    resume_choice_card.set_visibility(False)
+                migration_card.set_visibility(False)
+                migration_conflict_card.set_visibility(True)
+            return
+        _active_migration_task = current_task
 
         with client:
             # Same slot re-entry as the rollback task above: ui.notify is
@@ -1878,7 +1934,20 @@ async def migrate_page() -> None:
                 with contextlib.suppress(Exception):
                     _clear_tokens(app.storage.tab, _SESSION_TOKEN_KEYS)
 
-    background_tasks.create(_run())
+    task = background_tasks.create(_run())
+
+    def _release_guard(done_task: asyncio.Task[Any]) -> None:
+        global _active_migration_task
+        if _active_migration_task is done_task:
+            _active_migration_task = None
+
+    task.add_done_callback(_release_guard)
+
+    def _cancel_abandoned_before_start() -> None:
+        if not resume_choice_made.is_set():
+            task.cancel()
+
+    client.on_delete(_cancel_abandoned_before_start)
 
 
 # ---------------------------------------------------------------------------
