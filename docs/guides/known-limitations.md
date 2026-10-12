@@ -16,7 +16,7 @@ These limitations relate to how channels, threads, and server organization are r
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel, or `--thread-strategy archive` to export as a markdown attachment. Both are also available in the GUI's thread strategy setting. |
+| Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel. Use `--thread-strategy archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; archive mode posts nothing to Stoat. Both options are also available in the GUI's thread strategy setting. |
 | Forum posts | DCE 2.48 exports each post as a public thread. Ferry applies the selected thread strategy; with the default `flatten` strategy, each post becomes a text channel. DCE does not label these thread exports as forum posts, so Ferry cannot build its forum category or index from a normal 2.48 export. | Recreate the forum grouping and index manually after migration. |
 | Stage Channels | Not migrated (no Stoat equivalent) | None |
 | Scheduled Events | Not migrated | None |

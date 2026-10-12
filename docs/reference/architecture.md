@@ -1370,18 +1370,18 @@ The `thread_strategy` config option controls how forum and thread channels are h
 |----------|-----------|
 | `flatten` | Each thread becomes its own standalone text channel (default pre-v2) |
 | `merge` | Thread messages are appended into the parent channel after it is processed; threads are NOT created as separate channels. Processed after all parent channels complete. |
-| `archive` | Threads are converted to a markdown attachment on a header message in the parent channel, no new channel is created |
+| `archive` | Thread messages are written only to local markdown files at `{output_dir}/threads/{parent_channel_name}/{thread_name}.md`; no API calls are made and nothing is posted to Stoat |
 
 `min_thread_messages` (default 0 = include all) filters out threads with fewer messages than
 the threshold, useful for suppressing near-empty auto-created threads.
 
-**Filename sanitisation (from v2.19.12, PR #443).** The `archive` and `merge` strategies write
-attachment filenames derived from free-form Discord parent-channel and thread names.
+**Filename sanitisation (from v2.19.12, PR #443).** The `archive` strategy derives its local parent
+folder and markdown filename from free-form Discord parent-channel and thread names.
 `sanitize_filename()` in `migrator/messages.py` strips characters that are illegal on Windows
 (`< > : " \ | ? *`). It collapses forward slashes so a thread called `wip/2026` does not create a
-subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). Two
-threads whose sanitised names collide are suffixed with the thread ID so neither file overwrites
-the other.
+subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). During one run,
+threads whose sanitised names collide within a parent folder receive numeric suffixes such as
+`_2` and `_3`.
 
 ---
 

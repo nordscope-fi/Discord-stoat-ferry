@@ -53,7 +53,7 @@ Click **Advanced Options** to expand the following settings. Defaults are safe f
 | Skip emoji | Off | Do not upload custom emoji. |
 | Skip reactions | Off | Do not add message reactions. |
 | Skip threads | Off | Do not migrate threads or forum posts. Useful when approaching the 200-channel limit. |
-| Thread strategy | Flatten | How to handle threads and forum posts. **Flatten** (default) creates a dedicated channel for each thread. **Merge** appends thread messages into the parent channel. **Archive** exports the thread as a markdown attachment in the parent channel. |
+| Thread strategy | Flatten | How to handle threads and forum posts. **Flatten** (default) creates a dedicated channel for each thread. **Merge** appends thread messages into the parent channel. **Archive** writes local markdown files to `<selected output directory>/threads/<parent channel>/<thread>.md`; it posts nothing to Stoat. The default output directory is `~/.discord-ferry/ferry-output`. |
 | Dry run | Off | Run all migration phases without actually contacting the Stoat server. Useful for validating your export before committing to a full migration. |
 | Existing server ID | *(empty)* | Paste a Stoat server ID to migrate into a server you have already created, rather than creating a new one. |
 | Server name | *(empty)* | Name for the new Stoat server. Defaults to the Discord server's name. |
