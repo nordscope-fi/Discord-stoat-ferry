@@ -405,6 +405,31 @@ async def test_feedback_recovery_copies_saves_and_retries_only_when_chosen(
     assert client.submissions[0]["request_id"] == client.submissions[1]["request_id"]
 
 
+async def test_feedback_recovery_edit_replaces_request_id_before_resubmitting(user: User) -> None:
+    client = _FakeFeedbackClient(aiohttp.ClientConnectionError("offline"), _receipt())
+    with patch("discord_ferry.feedback_gui.FeedbackClient", return_value=client):
+        await user.open("/")
+        await _open_feedback_report(user)
+        await _fill_short_report(user, description="Before failure")
+        _set_value(user, "I understand this report will be public on GitHub", True)
+        user.find("Send feedback").click()
+        await user.should_see("Feedback could not be sent")
+
+        user.find("Edit report").click()
+        await user.should_see("1. Report")
+        _set_value(user, "Description", "After failure")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        user.find("Continue to public review").click()
+        await user.should_see("3. Public review")
+        _set_value(user, "I understand this report will be public on GitHub", True)
+        user.find("Send feedback").click()
+        await user.should_see("Feedback shared")
+
+    assert len(client.submissions) == 2
+    assert client.submissions[0]["request_id"] != client.submissions[1]["request_id"]
+
+
 async def test_feedback_cancel_closes_dialog_and_cancels_inflight_send(user: User) -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()

@@ -264,7 +264,7 @@ def test_feedback_failure_edit_returns_to_review_before_resubmitting() -> None:
     assert len(client.submissions) == 2
     assert client.submissions[0]["description"] == "Before failure"
     assert client.submissions[1]["description"] == "After failure"
-    assert client.submissions[0]["request_id"] == client.submissions[1]["request_id"]
+    assert client.submissions[0]["request_id"] != client.submissions[1]["request_id"]
 
 
 def test_feedback_cancel_stops_before_a_client_or_request() -> None:

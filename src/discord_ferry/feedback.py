@@ -804,29 +804,43 @@ class FeedbackDraft:
             raise FeedbackValidationError("no diagnostics are available to acknowledge")
         self.diagnostics_acknowledged = True
 
+    def _replace_request_id_if_content_changed(self, previous: object, current: object) -> None:
+        if previous != current:
+            self.request_id = uuid4()
+
     def edit_kind(self, kind: FeedbackKind) -> None:
+        self._replace_request_id_if_content_changed(self.kind, kind)
         self.kind = kind
         self.public_acknowledged = False
 
     def edit_description(self, description: str) -> None:
-        self.description = normalize_text("description", description, minimum=1, maximum=8_000)
+        normalized = normalize_text("description", description, minimum=1, maximum=8_000)
+        self._replace_request_id_if_content_changed(self.description, normalized)
+        self.description = normalized
         self.public_acknowledged = False
 
     def edit_expected(self, expected: str | None) -> None:
-        self.expected = _optional_text("expected", expected, maximum=4_000)
+        normalized = _optional_text("expected", expected, maximum=4_000)
+        self._replace_request_id_if_content_changed(self.expected, normalized)
+        self.expected = normalized
         self.public_acknowledged = False
 
     def edit_reproduction(self, reproduction: str | None) -> None:
-        self.reproduction = _optional_text("reproduction", reproduction, maximum=4_000)
+        normalized = _optional_text("reproduction", reproduction, maximum=4_000)
+        self._replace_request_id_if_content_changed(self.reproduction, normalized)
+        self.reproduction = normalized
         self.public_acknowledged = False
 
     def edit_diagnostics(self, diagnostics: FeedbackDiagnostics | None) -> None:
+        self._replace_request_id_if_content_changed(self.diagnostics, diagnostics)
         self.diagnostics = diagnostics
         self.public_acknowledged = False
         self.diagnostics_acknowledged = False
 
     def edit_contact_email(self, contact_email: str | None) -> None:
-        self.contact_email = _contact_email(contact_email)
+        normalized = _contact_email(contact_email)
+        self._replace_request_id_if_content_changed(self.contact_email, normalized)
+        self.contact_email = normalized
 
     def render_public_body(self) -> str:
         return render_public_feedback_body(

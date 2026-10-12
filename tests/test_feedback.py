@@ -828,6 +828,40 @@ def test_feedback_draft_retry_keeps_the_request_id_and_replaces_the_challenge() 
     assert first_request.challenge.challenge_id != second_request.challenge.challenge_id
 
 
+def test_feedback_draft_replaces_request_id_only_when_report_content_changes() -> None:
+    draft = FeedbackDraft(FeedbackKind.GENERAL, "A general note")
+    original_request_id = draft.request_id
+
+    draft.edit_description("A general note")
+
+    assert draft.request_id == original_request_id
+
+    draft.edit_description("An edited general note")
+
+    assert draft.request_id != original_request_id
+
+
+@pytest.mark.parametrize(
+    ("editor", "value"),
+    [
+        ("edit_kind", FeedbackKind.IDEA),
+        ("edit_expected", "An expected result"),
+        ("edit_reproduction", "A reproduction step"),
+        ("edit_diagnostics", FeedbackDiagnostics.from_mapping(_valid_diagnostics())),
+        ("edit_contact_email", "owner@example.com"),
+    ],
+)
+def test_feedback_draft_replaces_request_id_for_each_changed_content_field(
+    editor: str, value: object
+) -> None:
+    draft = FeedbackDraft(FeedbackKind.GENERAL, "A general note")
+    original_request_id = draft.request_id
+
+    getattr(draft, editor)(value)
+
+    assert draft.request_id != original_request_id
+
+
 def test_feedback_draft_save_is_explicit_owner_only_and_excludes_contact(
     tmp_path: Path,
     windows_filesystem: None,
