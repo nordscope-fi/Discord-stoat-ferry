@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.16] - 2026-10-12
+
+### Fixed
+
+- Create capped Voice channels in one request and preserve voice caps through blueprint export, import and build, with an optional offline metadata folder in both interfaces (#1246).
+
 ## [2.43.15] - 2026-10-12
 
 ### Fixed
