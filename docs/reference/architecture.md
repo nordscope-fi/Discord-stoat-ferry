@@ -744,10 +744,12 @@ categories array on the server.
 **Full parse** (`parse_export_directory(export_dir)`): Reads all `*.json` files in the
 directory, parses guild, channel, and message data into typed dataclasses.
 
-**Metadata-only parse** (`parse_export_directory(export_dir, metadata_only=True)`): Reads
-guild and channel data but **skips the messages array**. Sets `json_path` and `message_count`
-on each `DCEExport` so messages can be streamed later. This is the default mode, it keeps
-memory flat for large exports.
+**Metadata-only parse** (`parse_export_directory(export_dir, metadata_only=True)`): Streams through
+the file and retains direct scalar fields from `guild` and `channel`, plus `messageCount` and
+`exportedAt`. Message values are read as parser events and discarded instead of being collected
+into an array. Each `DCEExport` therefore has an empty `messages` list, with `json_path` and
+`message_count` set so messages can be streamed later. This is the default mode, and its memory use
+does not grow with the message count.
 
 **Streaming** (`stream_messages(json_path)`): Uses `ijson.items()` to iterate messages one at
 a time with O(1) memory per message. Used by VALIDATE (for scanning), EMOJI (for extraction),

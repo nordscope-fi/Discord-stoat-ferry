@@ -10,7 +10,11 @@ from urllib.parse import parse_qs, urlparse
 
 import ijson  # type: ignore[import-untyped]
 
-from discord_ferry.core.boundedjson import JsonLoadRefusedError, load_bounded_json
+from discord_ferry.core.boundedjson import (
+    JsonLoadRefusedError,
+    load_bounded_json,
+    load_bounded_json_metadata,
+)
 from discord_ferry.errors import ExportError
 from discord_ferry.parser.models import (
     DCEAttachment,
@@ -273,7 +277,10 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         ValueError: If the file is not a valid DCE export (missing required keys), is
             larger than ``MAX_EXPORT_JSON_BYTES``, or is nested too deeply.
     """
-    raw: Any = load_bounded_json(json_path, MAX_EXPORT_JSON_BYTES)
+    if metadata_only:
+        raw: Any = load_bounded_json_metadata(json_path, MAX_EXPORT_JSON_BYTES)
+    else:
+        raw = load_bounded_json(json_path, MAX_EXPORT_JSON_BYTES)
 
     if not isinstance(raw, dict):
         raise ValueError("The top-level JSON value must be an object")
