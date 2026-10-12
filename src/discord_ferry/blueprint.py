@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.boundedjson import load_bounded_json
+from discord_ferry.discord.metadata import read_cached_metadata
 from discord_ferry.errors import BlueprintValidationError as BlueprintValidationError
 
 if TYPE_CHECKING:
@@ -71,7 +72,12 @@ class ServerBlueprint:
     uncategorized_channels: list[BlueprintChannel] = field(default_factory=list)
 
 
-def blueprint_from_exports(exports: list[DCEExport], name: str | None = None) -> ServerBlueprint:
+def blueprint_from_exports(
+    exports: list[DCEExport],
+    name: str | None = None,
+    *,
+    metadata_dir: Path | None = None,
+) -> ServerBlueprint:
     """Build a ServerBlueprint from parsed DCE exports.
 
     The single home for the channel-mapping rule both shells depend on: a
@@ -81,6 +87,19 @@ def blueprint_from_exports(exports: list[DCEExport], name: str | None = None) ->
     ``uncategorized_channels``. Keeping it here, rather than a copy in each
     shell, is why the CLI and GUI cannot diverge on the mapping.
     """
+    metadata = None
+    if metadata_dir is not None:
+        guild_ids = {export.guild.id for export in exports}
+        if len(guild_ids) != 1:
+            raise BlueprintValidationError(
+                "Selected metadata requires exports from one Discord server"
+            )
+        cached = read_cached_metadata(metadata_dir, export_guild_ids=guild_ids)
+        if cached.meta is None:
+            raise BlueprintValidationError(
+                "Selected metadata is missing, malformed or belongs to another Discord server"
+            )
+        metadata = cached.meta
     guild_name = name or exports[0].guild.name
     categories: dict[str, list[BlueprintChannel]] = {}
     uncategorized: list[BlueprintChannel] = []
@@ -90,7 +109,12 @@ def blueprint_from_exports(exports: list[DCEExport], name: str | None = None) ->
         if ch.type == 4:  # category-type channel, not a real channel
             continue
         stoat_type = "Voice" if ch.type == 2 else "Text"
-        bp_channel = BlueprintChannel(name=ch.name, type=stoat_type)
+        ch_meta = metadata.channel_metadata.get(ch.id) if metadata else None
+        bp_channel = BlueprintChannel(
+            name=ch.name,
+            type=stoat_type,
+            user_limit=ch_meta.user_limit if stoat_type == "Voice" and ch_meta else 0,
+        )
         if ch.category:
             categories.setdefault(ch.category, []).append(bp_channel)
         else:
