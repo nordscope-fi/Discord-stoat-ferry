@@ -22,20 +22,12 @@ The API URL is the web address that Ferry sends data to. It is different from th
 
 === "Self-hosted Stoat"
 
-    1. Your API URL is usually `https://api.yourdomain.com`, where `yourdomain.com` is the domain you used when setting up Stoat. For example, if your Stoat instance is at `https://chat.example.com`, the API is typically at `https://api.example.com`.
+    1. With the official self-hosting kit, your API URL is your Stoat domain followed by `/api`. For example, if your Stoat instance is at `https://chat.example.com`, use `https://chat.example.com/api`.
 
-    2. If you are not sure, check the configuration file you used during setup. In a Docker Compose setup, look for the service labelled `api` or `backend` and the domain assigned to it in your reverse proxy config (Caddy, Nginx, Traefik, etc.).
-
-    3. To confirm the URL is correct, paste it into your browser's address bar and press Enter. A working API endpoint returns a short block of text (JSON, machine-readable data) rather than a blank page or error. It should look something like:
-
-        ```json
-        {"revolt":"0.7.x","features":{...},"ws":"...","app":"..."}
-        ```
-
-    <!-- screenshot: api-url-browser-json-response -->
+    2. If your deployment does not use the official kit, ask its administrator for the API URL. The browser address for the chat application is not enough to identify a custom API route.
 
     !!! tip "Still not sure which URL to use?"
-        Search your Docker Compose file or reverse proxy config for `REVOLT_PUBLIC_URL` or the hostname assigned to the `api` container. That is your API URL.
+        The official kit serves the API at `/api` and its instance metadata at `/.well-known/stoat`. Do not look for `REVOLT_PUBLIC_URL`; that setting is not part of the pinned Stoat source or official kit.
 
 ---
 
