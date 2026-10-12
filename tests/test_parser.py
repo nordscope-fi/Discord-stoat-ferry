@@ -394,6 +394,25 @@ def test_thread_parent_name(fixtures_dir: Path) -> None:
     assert export.parent_channel_name == "general"
 
 
+def test_thread_parent_comes_from_json_when_guild_name_contains_separator(
+    tmp_path: Path,
+) -> None:
+    """DCE 2.48 writes the parent id and name in the channel object."""
+    source = (
+        FIXTURES_DIR
+        / "dce_2_48"
+        / "captured"
+        / "Discord Ferry Test - general - Cool Thread [1543572368977428611].json"
+    )
+    path = tmp_path / "Foo - Bar - general - Cool Thread [1543572368977428611].json"
+    path.write_bytes(source.read_bytes())
+
+    export = parse_single_export(path, metadata_only=True)
+
+    assert export.channel.category_id == "1543572361285083187"
+    assert export.parent_channel_name == "general"
+
+
 def test_forum_export_detected(fixtures_dir: Path) -> None:
     """Forum thread fixture is also parsed with is_thread=True."""
     export = parse_single_export(

@@ -280,7 +280,12 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         ]
         messages.sort(key=lambda m: m.timestamp)
 
-    is_thread, parent_channel_name = _infer_thread_info(json_path.stem, channel.type)
+    is_thread, parent_channel_name = _infer_thread_info(
+        json_path.stem,
+        channel.type,
+        parent_channel_id=channel.category_id,
+        parent_channel_name=channel.category,
+    )
 
     return DCEExport(
         guild=guild,
@@ -503,7 +508,13 @@ def validate_export(
     return warnings
 
 
-def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[bool, str]:
+def _infer_thread_info(
+    filename: str,
+    channel_type: int | None = None,
+    *,
+    parent_channel_id: str = "",
+    parent_channel_name: str = "",
+) -> tuple[bool, str]:
     """Infer whether a filename represents a thread and return its parent channel name.
 
     Args:
@@ -512,6 +523,9 @@ def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[
             authoritative: a non-thread type is never a thread, regardless of
             " - " in the guild/channel name. When ``None`` (e.g. filename-only
             callers), the 3-segment filename heuristic alone is used.
+        parent_channel_id: DCE's ``channel.categoryId`` value. For a thread,
+            DCE writes the parent channel id here.
+        parent_channel_name: DCE's corresponding parent channel name.
 
     Returns:
         Tuple of (is_thread, parent_channel_name).
@@ -522,11 +536,13 @@ def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[
     # thread, even if the guild/channel name contains " - ".
     if channel_type is not None and channel_type not in _THREAD_TYPE_CODES:
         return False, ""
+    if channel_type in _THREAD_TYPE_CODES and parent_channel_id:
+        return True, parent_channel_name
     match = _THREE_SEGMENT_RE.match(filename)
     if match:
         parent_channel_name = match.group(2)
         return True, parent_channel_name
-    return False, ""
+    return channel_type in _THREAD_TYPE_CODES, ""
 
 
 def _parse_guild(raw: Any) -> DCEGuild:
