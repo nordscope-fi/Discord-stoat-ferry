@@ -378,12 +378,14 @@ DiscordMetadata(  # Persisted to discord_metadata.json
 
 ```python
 BlueprintRole(name, colour, permissions, rank)
-BlueprintChannel(name, type, nsfw)  # type: "Text" or "Voice"
+BlueprintChannel(name, type, nsfw, user_limit=0)  # type: "Text" or "Voice"
 BlueprintCategory(name, channels)
 ServerBlueprint(name, description, roles, categories, uncategorized_channels)
 ```
 
 Blueprints use **names, not IDs**, making them portable across Stoat instances.
+
+Voice channels retain a positive `user_limit` in blueprint JSON. Missing or zero means unlimited; zero is omitted on export. Invalid caps are rejected before server creation.
 
 ---
 
@@ -1239,9 +1241,14 @@ or IDs. Useful for:
 # Export blueprint from DCE exports
 ferry export-blueprint --from ~/exports/my-server/ --output my-server.json
 
+# Include cached voice caps without a login
+ferry export-blueprint --from ./exports --metadata-dir ./migration-output --output server.json
+
 # Create server from blueprint
 ferry build --blueprint my-server.json --stoat-url ...
 ```
+
+Both export interfaces accept an optional folder containing `discord_metadata.json`. The cache must match the single exported server. A selected missing, malformed or mismatched cache stops export without replacing the output. No folder retains the existing offline behavior.
 
 ### Preset Templates
 

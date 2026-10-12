@@ -292,6 +292,7 @@ ferry export-blueprint [OPTIONS]
 | `--from PATH` | Path to DCE export directory *(required)* |
 | `--output PATH` / `-o` | Output path for the blueprint JSON file *(required)* |
 | `--name TEXT` | Override the server name stored in the blueprint |
+| `--metadata-dir PATH` | Optional folder containing Ferry's cached discord_metadata.json; reads local settings without a login |
 
 **Example:**
 
@@ -299,9 +300,14 @@ ferry export-blueprint [OPTIONS]
 # Export a blueprint from an existing DCE export
 ferry export-blueprint --from ~/exports/my-discord-server/ --output my-server-blueprint.json
 
+# Include cached voice caps without a login
+ferry export-blueprint --from ./exports --metadata-dir ./migration-output --output server.json
+
 # Then use it to create a new server
 ferry build --blueprint my-server-blueprint.json --stoat-url https://api.stoat.chat
 ```
+
+The GUI export page offers the same optional metadata folder. A selected cache must match the single exported Discord server. Missing, malformed or mismatched selected metadata stops export without replacing an existing output. Without the option, export keeps its existing offline behavior.
 
 !!! tip "Blueprints use names, not IDs"
     Blueprints store role and channel names rather than Discord IDs, making them portable across different Stoat instances.
