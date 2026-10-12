@@ -399,8 +399,8 @@ async def _heartbeat(
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     """Platform-aware subprocess termination.
 
-    POSIX: SIGTERM (process.terminate()) -- DCE has a chance to flush partial
-    JSON before exit.
+    POSIX: SIGTERM (process.terminate()) stops DCE without its console
+    cancellation path. A partial JSON export may not be closed before exit.
 
     Windows: CTRL_BREAK_EVENT to the child's process group (safe because we
     spawned with CREATE_NEW_PROCESS_GROUP -- the signal targets only the child,
