@@ -10,6 +10,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.17] - 2026-10-12
+
+### Fixed
+
+- Read thread parents from exported channel IDs, preserving filename fallback when the JSON lacks a parent ID (#1216).
+- Reject duplicate channel IDs before migration sends messages, name both export files, and ask the user to remove the older file (#1224).
+- Stream export metadata without retaining the message array, preserving normal parsing and preventing unknown JSON keys from replacing channel or guild IDs (#1244).
+- Ignore environment and `.env` Discord tokens for offline exports with a note naming `DISCORD_TOKEN`, while preserving explicit flag conflicts (#1197).
+- Report unusable HTTP and HTTPS proxy logins without exposing credentials or changing proxy selection (#1234).
+- Keep one browser migration running per Ferry process across page disconnects, block competing starts, and preserve pending resume prompts through temporary reconnects (#1237).
+
+### Changed
+
+- Describe local thread archive files and their output paths, correct export parsing documentation, and document HTTP 409 receipt replays after contact-key rotation (#1215, #1296).
+
 ## [2.43.16] - 2026-10-12
 
 ### Fixed
