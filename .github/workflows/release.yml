@@ -13,6 +13,8 @@ on:
   pull_request:
     paths:
       - "ferry.spec"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/release.yml"
       - "src/discord_ferry/core/http.py"
   workflow_dispatch:
