@@ -1559,6 +1559,95 @@ def _write_dce_channel(dir_path: Path, fname: str, ch_id: str, ch_type: int, ch_
     (dir_path / fname).write_text(json.dumps(doc), encoding="utf-8")
 
 
+def _write_voice_cap_metadata(folder: Path, *, guild_id: str = "111") -> None:
+    from discord_ferry.discord.metadata import ChannelMeta, DiscordMetadata, save_discord_metadata
+
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id=guild_id,
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={"201": ChannelMeta(nsfw=False, user_limit=5)},
+        ),
+        folder,
+    )
+
+
+def test_export_blueprint_metadata_cap(runner: CliRunner, tmp_path: Path) -> None:
+    import json
+
+    from aioresponses import aioresponses
+
+    source, metadata = tmp_path / "exports", tmp_path / "metadata"
+    source.mkdir()
+    _write_dce_channel(source, "voice.json", "201", 2, "Voice")
+    _write_voice_cap_metadata(metadata)
+    output = tmp_path / "bp.json"
+    with aioresponses() as requests:
+        result = runner.invoke(
+            main,
+            [
+                "export-blueprint",
+                "--from",
+                str(source),
+                "-o",
+                str(output),
+                "--metadata-dir",
+                str(metadata),
+            ],
+            catch_exceptions=False,
+        )
+        assert not requests.requests
+    assert result.exit_code == 0
+    assert json.loads(output.read_text())["categories"][0]["channels"][0]["user_limit"] == 5
+    assert "--metadata-dir" in runner.invoke(main, ["export-blueprint", "--help"]).output
+
+
+@pytest.mark.parametrize("failure", ["missing", "malformed", "wrong-guild", "bad-cap"])
+def test_export_blueprint_metadata_error_preserves_output(
+    runner: CliRunner,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    import json
+
+    source, metadata = tmp_path / "exports", tmp_path / "metadata"
+    source.mkdir()
+    metadata.mkdir()
+    _write_dce_channel(source, "voice.json", "201", 2, "Voice")
+    if failure == "wrong-guild":
+        _write_voice_cap_metadata(metadata, guild_id="222")
+    elif failure == "malformed":
+        (metadata / "discord_metadata.json").write_text("{")
+    elif failure == "bad-cap":
+        _write_voice_cap_metadata(metadata)
+        cache = metadata / "discord_metadata.json"
+        raw = json.loads(cache.read_text())
+        raw["channel_metadata"]["201"]["user_limit"] = "bad-cap-marker"
+        cache.write_text(json.dumps(raw))
+    output = tmp_path / "bp.json"
+    output.write_text("OLD")
+    result = runner.invoke(
+        main,
+        [
+            "export-blueprint",
+            "--from",
+            str(source),
+            "-o",
+            str(output),
+            "--metadata-dir",
+            str(metadata),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "bad-cap-marker" not in result.output
+    assert "Traceback" not in result.output
+    assert output.read_text() == "OLD"
+
+
 def test_export_blueprint_keeps_voice_type(runner: CliRunner, tmp_path: Path) -> None:  # SC-14
     import json
 
