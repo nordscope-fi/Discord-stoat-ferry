@@ -116,6 +116,9 @@ Before you start, confirm you have these ready:
       --stoat-url https://api.stoat.chat
     ```
 
+    If `DISCORD_TOKEN` is set in the environment or loaded from `.env`, Ferry ignores it in
+    offline mode and prints a note. Passing `--discord-token` with `--export-dir` remains an error.
+
     Additional flags:
 
     | Flag | Effect |

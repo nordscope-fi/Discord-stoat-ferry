@@ -322,6 +322,69 @@ def test_migrate_env_vars(runner: CliRunner) -> None:
     assert config.token == "env-token"
 
 
+def test_migrate_offline_ignores_discord_token_from_environment(runner: CliRunner) -> None:
+    mock_engine = _make_mock_engine()
+    discord_token = "discord-env-token-AAAABBBBCCCC9876"
+    env = {
+        "DISCORD_TOKEN": discord_token,
+        "STOAT_URL": "http://env-url",
+        "STOAT_TOKEN": "stoat-env-token-AAAABBBBCCCC9876",
+    }
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            ["migrate", "--export-dir", FIXTURES_DIR],
+            env=env,
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert (
+        result.output.count("Ignoring DISCORD_TOKEN because --export-dir uses existing exports.")
+        == 1
+    )
+    assert discord_token not in result.output
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.discord_token is None
+    assert config.skip_export is True
+
+
+def test_migrate_offline_ignores_discord_token_loaded_from_dotenv(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mock_engine = _make_mock_engine()
+    discord_token = "discord-dotenv-token-AAAABBBBCCCC9876"
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+
+    def load_test_dotenv() -> None:
+        monkeypatch.setenv("DISCORD_TOKEN", discord_token)
+
+    env = {
+        "STOAT_URL": "http://env-url",
+        "STOAT_TOKEN": "stoat-env-token-AAAABBBBCCCC9876",
+    }
+    with (
+        patch("discord_ferry.cli.load_dotenv", side_effect=load_test_dotenv),
+        patch("discord_ferry.cli.run_migration", mock_engine),
+    ):
+        result = runner.invoke(
+            main,
+            ["migrate", "--export-dir", FIXTURES_DIR],
+            env=env,
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert (
+        result.output.count("Ignoring DISCORD_TOKEN because --export-dir uses existing exports.")
+        == 1
+    )
+    assert discord_token not in result.output
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.discord_token is None
+    assert config.skip_export is True
+
+
 def test_migrate_engine_error(runner: CliRunner) -> None:
     mock_engine = AsyncMock(side_effect=MigrationError("Phase connect failed: boom"))
     with patch("discord_ferry.cli.run_migration", mock_engine):
