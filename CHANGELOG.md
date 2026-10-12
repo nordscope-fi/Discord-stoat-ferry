@@ -10,6 +10,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.14] - 2026-10-12
+
+### Fixed
+
+- Suppress migration notifications with Stoat's message flag, remap embed titles, descriptions and fields, and omit local author icon paths (#1205, #1211, #1212).
+- Recognize typed upload-size failures and server limits, and require matching evidence in deep upload probes (#1258).
+- Reject empty files and corrupt Pillow-supported images before upload on every tag, bundle the decoder in desktop builds, and leave JPEG XL validation to Stoat (#1260).
+- Retry temporary Discord server failures within a bounded budget and identify metadata and token-validation requests with the documented User-Agent (#1225, #1271).
+- Correct the exporter's POSIX termination comment without changing how cancellation stops the child process (#1288).
+- Renew feedback request IDs when report content changes, preserve IDs on plain retries, and check the exact serialized body against the 32 KiB service limit (#1239, #1240).
+- Correct self-hosted API URLs, Discord export requirements and token guidance, the first-migration troubleshooting link, and the supported upload body-limit setting (#1283, #1284, #1333, #1334).
+
 ## [2.43.13] - 2026-10-12
 
 ### Fixed
