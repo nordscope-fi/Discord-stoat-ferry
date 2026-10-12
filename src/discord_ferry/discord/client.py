@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
+from discord_ferry import __version__
 from discord_ferry.core.http import proxy_error_is_permanent, proxy_hint, read_bounded, tls_hint
 from discord_ferry.discord.models import (
     DiscordChannel,
@@ -25,6 +26,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DISCORD_API = "https://discord.com/api/v10"
+DISCORD_API_USER_AGENT = (
+    f"DiscordBot (https://github.com/nordscope-fi/Discord-stoat-ferry, {__version__})"
+)
+DISCORD_5XX_MAX_ATTEMPTS = 3
+DISCORD_5XX_RETRY_DELAY_SECONDS = 1.0
 _MAX_RETRIES = 3
 _MAX_429_RETRIES = 5  # separate bounded budget for 429s (does not consume _MAX_RETRIES)
 _MAX_RETRY_DELAY_SECONDS = 60  # cap any server/body-advertised 429 retry delay
@@ -128,16 +134,21 @@ async def _discord_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
 
 
 async def _discord_request(session: aiohttp.ClientSession, token: str, path: str) -> Any:
-    """GET the Discord API, honouring Retry-After with separate bounded 429/network budgets.
+    """GET the Discord API with separate bounded 429, 5xx, and network budgets.
 
     429s advance only ``rate_limit_retries`` (bounded by ``_MAX_429_RETRIES``); network errors
-    advance only ``network_attempts`` (bounded by ``_MAX_RETRIES``) — a 429 burst can no longer
-    exhaust the network budget and abort the metadata phase.
+    advance only ``network_attempts`` (bounded by ``_MAX_RETRIES``); 5xx responses advance only
+    ``server_error_attempts`` (bounded by ``DISCORD_5XX_MAX_ATTEMPTS``).
     """
     url = f"{DISCORD_API}{path}"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
+    headers = {
+        "Authorization": token,
+        "Content-Type": "application/json",
+        "User-Agent": DISCORD_API_USER_AGENT,
+    }
     network_attempts = 0
     rate_limit_retries = 0
+    server_error_attempts = 0
 
     while True:
         try:
@@ -164,6 +175,11 @@ async def _discord_request(session: aiohttp.ClientSession, token: str, path: str
                         )
                     await asyncio.sleep(await _discord_429_delay_seconds(resp))
                     continue
+                if 500 <= resp.status < 600:
+                    server_error_attempts += 1
+                    if server_error_attempts < DISCORD_5XX_MAX_ATTEMPTS:
+                        await asyncio.sleep(DISCORD_5XX_RETRY_DELAY_SECONDS)
+                        continue
                 text = await resp.text()
                 raise MigrationError(f"Discord API error {resp.status}: {text}")
         except (DiscordAuthError, MigrationError):

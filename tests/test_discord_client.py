@@ -10,6 +10,7 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
+from discord_ferry import __version__
 from discord_ferry.discord import fetch_and_translate_guild_metadata
 from discord_ferry.discord.client import (
     _parse_channel,
@@ -631,6 +632,53 @@ async def test_discord_network_error_bounded(mock_discord: aioresponses) -> None
         async with aiohttp.ClientSession() as session:
             with pytest.raises(MigrationError, match="Discord API network error"):
                 await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+
+async def test_discord_get_retries_transient_5xx(mock_discord: aioresponses) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, status=502, body="bad gateway")
+    mock_discord.get(url, payload=[])
+
+    with patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        async with aiohttp.ClientSession() as session:
+            roles = await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    assert roles == []
+    sleep.assert_awaited_once_with(1.0)
+
+
+async def test_discord_get_5xx_exhaustion_keeps_existing_error(
+    mock_discord: aioresponses,
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from discord_ferry.errors import MigrationError
+
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    for _ in range(3):
+        mock_discord.get(url, status=502, body="bad gateway")
+
+    with patch("discord_ferry.discord.client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="Discord API error 502: bad gateway"):
+                await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    assert sleep.await_count == 2
+
+
+async def test_discord_get_sends_documented_user_agent(mock_discord: aioresponses) -> None:
+    url = f"{DISCORD_API}/guilds/{GUILD_ID}/roles"
+    mock_discord.get(url, payload=[])
+
+    async with aiohttp.ClientSession() as session:
+        await fetch_guild_roles(session, TOKEN, GUILD_ID)
+
+    request = next(iter(mock_discord.requests.values()))[0]
+    assert request.kwargs["headers"]["User-Agent"] == (
+        f"DiscordBot (https://github.com/nordscope-fi/Discord-stoat-ferry, {__version__})"
+    )
 
 
 async def test_certificate_error_skips_the_network_retry(mock_discord: aioresponses) -> None:

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aioresponses import aioresponses
 
+from discord_ferry import __version__
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.exporter.runner import (
@@ -185,9 +186,42 @@ class TestValidateDiscordToken:
         from discord_ferry.errors import DiscordAuthError
 
         with aioresponses() as m:
-            m.get("https://discord.com/api/v10/users/@me", status=500)
-            with pytest.raises(DiscordAuthError, match="unexpected status"):
+            for _ in range(3):
+                m.get("https://discord.com/api/v10/users/@me", status=500)
+            with (
+                pytest.raises(DiscordAuthError, match="unexpected status"),
+                patch(
+                    "discord_ferry.exporter.runner.asyncio.sleep", new_callable=AsyncMock
+                ) as sleep,
+            ):
                 await validate_discord_token("some-token")
+            assert sleep.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_transient_5xx_is_retried(self) -> None:
+        with aioresponses() as m:
+            m.get("https://discord.com/api/v10/users/@me", status=502)
+            m.get("https://discord.com/api/v10/users/@me", status=200)
+            with patch(
+                "discord_ferry.exporter.runner.asyncio.sleep", new_callable=AsyncMock
+            ) as sleep:
+                await validate_discord_token("some-token")
+
+        sleep.assert_awaited_once_with(1.0)
+
+    @pytest.mark.asyncio
+    async def test_sends_documented_user_agent(self) -> None:
+        with aioresponses() as m:
+            url = "https://discord.com/api/v10/users/@me"
+            m.get(url, status=200)
+
+            await validate_discord_token("some-token")
+
+            request = next(iter(m.requests.values()))[0]
+
+        assert request.kwargs["headers"]["User-Agent"] == (
+            f"DiscordBot (https://github.com/nordscope-fi/Discord-stoat-ferry, {__version__})"
+        )
 
 
 # ---------- New tests for the v2.2.0 parser-based runner ----------
