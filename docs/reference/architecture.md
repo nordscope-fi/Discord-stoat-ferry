@@ -1324,7 +1324,7 @@ rate limit handling, and British spelling conventions without depending on SDK r
 | Attachments per message | 5 | Not configurable |
 | Embeds per message | 5 | Not configurable |
 | Reactions per message | 20 | Not configurable |
-| Attachment upload size | 20 MB | `attachment_size` |
+| Upload request body size | 20 MB | `body_limit_size` |
 
 Ferry's VALIDATE phase warns when source data is likely to exceed these limits. Pass
 `--max-channels N` and `--max-emoji N` to match your self-hosted configuration.
