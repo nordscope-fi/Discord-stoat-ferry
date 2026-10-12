@@ -859,6 +859,7 @@ async def api_create_channel(
     channel_type: str | None = None,
     description: str | None = None,
     nsfw: bool = False,
+    user_limit: int | None = None,
 ) -> dict[str, Any]:
     """Create a channel on a server.
 
@@ -871,16 +872,24 @@ async def api_create_channel(
         channel_type: Stoat channel type string (e.g. "Text", "Voice"). Optional.
         description: Channel topic/description. Optional.
         nsfw: Whether the channel is age-restricted. Defaults to False.
+        user_limit: Positive Voice capacity, or zero/None for unlimited.
 
     Returns:
         Channel object dict from the API (includes ``_id``).
     """
+    if user_limit is not None:
+        if type(user_limit) is not int or user_limit < 0:
+            raise ValueError("user_limit must be a non-negative integer")
+        if user_limit > 0 and channel_type != "Voice":
+            raise ValueError("user_limit is only supported for Voice channels")
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/channels"
     data: dict[str, Any] = {"name": name, "nsfw": nsfw}
     if channel_type is not None:
         data["type"] = channel_type
     if description is not None:
         data["description"] = description
+    if user_limit:
+        data["voice"] = {"max_users": user_limit}
     return await _api_request(session, "POST", url, token, data)
 
 
