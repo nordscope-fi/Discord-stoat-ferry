@@ -51,8 +51,8 @@ Stoat v0.15.7 maps `ErrorType::IsBot` to [`Status::BadRequest`](https://github.c
 | | |
 |---|---|
 | **Symptom** | Ferry logs warnings about missing attachment files; some messages arrive without their attached images or files |
-| **Cause** | DiscordChatExporter did not download the media files. This happens when the export was created without the `--media` flag, or when Discord CDN links had already expired before export. |
-| **Solution** | Re-export from DiscordChatExporter with the `--media` flag. Discord CDN links expire within approximately 24 hours of the original export, so export and migrate promptly. |
+| **Cause** | DiscordChatExporter did not download the media files. This happens when the export was created without the `--media` flag. |
+| **Solution** | Re-export from DiscordChatExporter with the `--media` flag. This downloads the files locally for Ferry to migrate. |
 
 ### No valid DiscordChatExporter (DCE) JSON files found
 
@@ -378,15 +378,7 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 
 ---
 
-## Content Delivery Network (CDN) and Attachment Issues
-
-### Expired CDN URLs
-
-| | |
-|---|---|
-| **Symptom** | Ferry warns "X attachment URLs have expired" during validation |
-| **Cause** | Your DCE export is more than 24 hours old and was created without the `--media` flag. Discord CDN links expire, so the URLs in the export no longer work. |
-| **Solution** | Re-export from DiscordChatExporter with the `--media` flag. This downloads all files locally so they do not depend on Discord's CDN. |
+## Attachment limits
 
 ### Attachment overflow
 
