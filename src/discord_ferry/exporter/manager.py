@@ -7,7 +7,11 @@ import hashlib
 import io
 import json as _json
 import logging
+import os
 import platform
+import shutil
+import stat
+import tempfile
 import time as _time
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -165,18 +169,27 @@ def detect_dotnet() -> bool:
     return True
 
 
-def get_dce_path() -> Path | None:
-    """Return path to DCE executable if it exists, else None."""
-    dce_dir = _get_dce_dir()
-    if not dce_dir.exists():
-        return None
-
+def _dce_executable_path(dce_dir: Path) -> Path:
+    """Return the platform-specific executable path within a DCE directory."""
     if platform.system() == "Windows":
-        exe = dce_dir / "DiscordChatExporter.Cli.exe"
-    else:
-        exe = dce_dir / "DiscordChatExporter.Cli"
+        return dce_dir / "DiscordChatExporter.Cli.exe"
+    return dce_dir / "DiscordChatExporter.Cli"
 
-    return exe if exe.exists() else None
+
+def _is_regular_executable(path: Path) -> bool:
+    """Return whether path is a non-link regular executable for this platform."""
+    try:
+        is_regular = stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+    return is_regular and (platform.system() == "Windows" or os.access(path, os.X_OK))
+
+
+def get_dce_path() -> Path | None:
+    """Return the cached DCE path only when it is a regular executable file."""
+    dce_dir = _get_dce_dir()
+    exe = _dce_executable_path(dce_dir)
+    return exe if _is_regular_executable(exe) else None
 
 
 async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) -> Path:
@@ -259,20 +272,43 @@ async def download_dce(on_event: EventCallback, *, skip_verify: bool = False) ->
     if not skip_verify:
         _verify_dce_checksum(data, DCE_VERSION, platform_key)
 
-    dce_dir.mkdir(parents=True, exist_ok=True)
+    dce_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{dce_dir.name}-", dir=dce_dir.parent))
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            members = _validated_archive_members(zf, dce_dir)
-            zf.extractall(dce_dir, members=members)
-    except zipfile.BadZipFile as e:
-        raise DCENotFoundError(f"Downloaded file is not a valid zip: {e}") from e
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                members = _validated_archive_members(zf, staging_dir)
+                zf.extractall(staging_dir, members=members)
+        except zipfile.BadZipFile as e:
+            raise DCENotFoundError(f"Downloaded file is not a valid zip: {e}") from e
 
-    exe_path = get_dce_path()
-    if exe_path is None:
-        raise DCENotFoundError(f"Extraction succeeded but executable not found in {dce_dir}")
+        staged_exe = _dce_executable_path(staging_dir)
+        try:
+            is_regular = stat.S_ISREG(staged_exe.lstat().st_mode)
+        except OSError:
+            is_regular = False
+        if not is_regular:
+            raise DCENotFoundError(
+                f"Extraction succeeded but executable not found in {staging_dir}"
+            )
 
-    if platform.system() != "Windows":
-        exe_path.chmod(0o755)
+        if platform.system() != "Windows":
+            staged_exe.chmod(0o755)
+        if not _is_regular_executable(staged_exe):
+            raise DCENotFoundError("Extracted DCE file is not executable")
+
+        if dce_dir.is_symlink() or dce_dir.is_file():
+            dce_dir.unlink()
+        elif dce_dir.exists():
+            shutil.rmtree(dce_dir)
+        staging_dir.replace(dce_dir)
+
+        exe_path = get_dce_path()
+        if exe_path is None:
+            raise DCENotFoundError(f"Installed DCE executable is invalid in {dce_dir}")
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
 
     on_event(
         MigrationEvent(
