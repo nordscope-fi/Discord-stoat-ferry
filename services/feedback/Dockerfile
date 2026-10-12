@@ -1,4 +1,4 @@
-FROM python:3.11.13-slim-bookworm@sha256:86adf8dbadc3d6e82ee5dd2c74bec2e1c2467cdad47886280501df722372d2e1 AS builder
+FROM python:3.11.17-slim-bookworm@sha256:0a310eeecf4e1f5a0743f9a6520c90c88d089c903ca5fd283f501e3a805f5f89 AS builder
 
 ENV UV_PROJECT_ENVIRONMENT=/opt/feedback-venv \
     UV_LINK_MODE=copy
@@ -14,7 +14,7 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable --extra feedback-service
 
 
-FROM python:3.11.13-slim-bookworm@sha256:86adf8dbadc3d6e82ee5dd2c74bec2e1c2467cdad47886280501df722372d2e1 AS runtime
+FROM python:3.11.17-slim-bookworm@sha256:0a310eeecf4e1f5a0743f9a6520c90c88d089c903ca5fd283f501e3a805f5f89 AS runtime
 
 ENV PATH=/opt/feedback-venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
