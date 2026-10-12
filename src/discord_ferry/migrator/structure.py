@@ -1528,6 +1528,11 @@ async def run_channels(
                         channel_type=stoat_type,
                         description=description,
                         nsfw=nsfw,
+                        user_limit=(
+                            ch_meta.user_limit
+                            if stoat_type == "Voice" and ch_meta is not None
+                            else None
+                        ),
                     )
                     stoat_channel_id = result["_id"]
                 except MigrationError as exc:
@@ -1585,6 +1590,10 @@ async def run_channels(
                 # dict[str, str]. `or` is the safer of the two here. The same
                 # applies to the role and forum index sites below.
                 state.created_channel_names[ch.id] = result.get("name") or unique_name
+                if created_as_voice and ch_meta is not None and ch_meta.user_limit > 0:
+                    state.native_fidelity_counts["user_limit"] = (
+                        state.native_fidelity_counts.get("user_limit", 0) + 1
+                    )
 
                 # Apply channel permission overrides from Discord metadata.
                 await apply_channel_permissions(
@@ -1597,7 +1606,7 @@ async def run_channels(
                     phase="channels",
                 )
 
-                # S1/S2 (native-fidelity batch 2): apply slowmode + voice user_limit.
+                # Slowmode still requires an edit; the Voice cap was sent at creation.
                 if ch_meta is not None:
                     edit_kwargs: dict[str, Any] = {}
                     if ch_meta.slowmode > 0:
@@ -1613,8 +1622,6 @@ async def run_channels(
                                 }
                             )
                         edit_kwargs["slowmode"] = min(ch_meta.slowmode, 21600)
-                    if created_as_voice and ch_meta.user_limit >= 1:
-                        edit_kwargs["voice"] = {"max_users": ch_meta.user_limit}
                     if edit_kwargs:
                         try:
                             await api_edit_channel(
@@ -1627,10 +1634,6 @@ async def run_channels(
                             if "slowmode" in edit_kwargs:
                                 state.native_fidelity_counts["slowmode"] = (
                                     state.native_fidelity_counts.get("slowmode", 0) + 1
-                                )
-                            if "voice" in edit_kwargs:
-                                state.native_fidelity_counts["user_limit"] = (
-                                    state.native_fidelity_counts.get("user_limit", 0) + 1
                                 )
                         except Exception as exc:  # noqa: BLE001
                             state.warnings.append(
