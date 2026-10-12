@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.boundedjson import load_bounded_json
+from discord_ferry.errors import BlueprintValidationError as BlueprintValidationError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,6 +37,19 @@ class BlueprintChannel:
     name: str
     type: str = "Text"  # "Text" or "Voice"
     nsfw: bool = False
+    user_limit: int = 0
+
+    def __post_init__(self) -> None:
+        self.validate_user_limit()
+
+    def validate_user_limit(self) -> None:
+        """Reject caps that cannot be represented by a Voice channel."""
+        if type(self.user_limit) is not int or self.user_limit < 0:
+            raise BlueprintValidationError("Channel user_limit must be a non-negative integer")
+        if self.user_limit > 0 and self.type != "Voice":
+            raise BlueprintValidationError(
+                "Channel user_limit is only supported for Voice channels"
+            )
 
 
 @dataclass
@@ -100,8 +114,8 @@ def export_blueprint(blueprint: ServerBlueprint, output_path: Path) -> None:
         blueprint: The blueprint to export.
         output_path: Path to write the JSON file.
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     data = _blueprint_to_dict(blueprint)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic: import_blueprint reads this file back, so a truncated export outlives
     # the run that produced it and there is no way to tell it apart from a good one
     # until the import fails or builds a partial server (#175).
@@ -127,6 +141,14 @@ def import_blueprint(input_path: Path) -> ServerBlueprint:
     return _dict_to_blueprint(raw)
 
 
+def _channel_to_dict(ch: BlueprintChannel) -> dict[str, Any]:
+    ch.validate_user_limit()
+    result: dict[str, Any] = {"name": ch.name, "type": ch.type, "nsfw": ch.nsfw}
+    if ch.user_limit:
+        result["user_limit"] = ch.user_limit
+    return result
+
+
 def _blueprint_to_dict(bp: ServerBlueprint) -> dict[str, Any]:
     return {
         "name": bp.name,
@@ -143,15 +165,11 @@ def _blueprint_to_dict(bp: ServerBlueprint) -> dict[str, Any]:
         "categories": [
             {
                 "name": cat.name,
-                "channels": [
-                    {"name": ch.name, "type": ch.type, "nsfw": ch.nsfw} for ch in cat.channels
-                ],
+                "channels": [_channel_to_dict(ch) for ch in cat.channels],
             }
             for cat in bp.categories
         ],
-        "uncategorized_channels": [
-            {"name": ch.name, "type": ch.type, "nsfw": ch.nsfw} for ch in bp.uncategorized_channels
-        ],
+        "uncategorized_channels": [_channel_to_dict(ch) for ch in bp.uncategorized_channels],
     }
 
 
@@ -173,6 +191,7 @@ def _dict_to_blueprint(data: dict[str, Any]) -> ServerBlueprint:
                     name=ch["name"],
                     type=ch.get("type", "Text"),
                     nsfw=ch.get("nsfw", False),
+                    user_limit=ch.get("user_limit", 0),
                 )
                 for ch in cat.get("channels", [])
             ],
@@ -184,6 +203,7 @@ def _dict_to_blueprint(data: dict[str, Any]) -> ServerBlueprint:
             name=ch["name"],
             type=ch.get("type", "Text"),
             nsfw=ch.get("nsfw", False),
+            user_limit=ch.get("user_limit", 0),
         )
         for ch in data.get("uncategorized_channels", [])
     ]

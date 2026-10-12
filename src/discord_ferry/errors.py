@@ -9,6 +9,10 @@ class ValidationError(FerryError):
     """Export validation failed."""
 
 
+class BlueprintValidationError(FerryError, ValueError):
+    """Invalid blueprint cap or explicitly selected metadata."""
+
+
 class CheckError(FerryError):
     """A finished migration cannot be checked against a live server.
 

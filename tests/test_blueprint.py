@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import json
 import os
 from pathlib import Path
 from typing import IO
@@ -292,3 +293,109 @@ def test_the_real_blueprint_limit_leaves_wide_headroom_over_the_shipped_template
     sizes = [Path(str(templates / f"{n}.json")).stat().st_size for n in ("gaming", "community")]
     needed = 1000 * max(sizes)
     assert needed <= blueprint.MAX_BLUEPRINT_BYTES
+
+
+@pytest.mark.parametrize("categorized", [False, True])
+def test_blueprint_voice_cap_roundtrip(tmp_path: Path, categorized: bool) -> None:
+    ch = BlueprintChannel(name="voice", type="Voice", user_limit=5)
+    bp = ServerBlueprint(
+        name="S",
+        categories=[BlueprintCategory(name="V", channels=[ch])] if categorized else [],
+        uncategorized_channels=[] if categorized else [ch],
+    )
+    output = tmp_path / "bp.json"
+    export_blueprint(bp, output)
+    loaded = import_blueprint(output)
+    result = loaded.categories[0].channels[0] if categorized else loaded.uncategorized_channels[0]
+    assert result.user_limit == 5
+    assert json.loads(output.read_text())["categories" if categorized else "uncategorized_channels"]
+
+
+@pytest.mark.parametrize("categorized", [False, True])
+@pytest.mark.parametrize("cap", [-1, True, "bad-cap-marker", 1.5, None])
+def test_blueprint_import_rejects_bad_cap(
+    tmp_path: Path,
+    categorized: bool,
+    cap: object,
+) -> None:
+    data = {"name": "S"}
+    channel = {"name": "voice", "type": "Voice", "user_limit": cap}
+    data.update(
+        {"categories": [{"name": "V", "channels": [channel]}]}
+        if categorized
+        else {"uncategorized_channels": [channel]}
+    )
+    output = tmp_path / "bp.json"
+    output.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="user_limit") as error:
+        import_blueprint(output)
+    assert "bad-cap-marker" not in str(error.value)
+
+
+@pytest.mark.parametrize("cap", [-1, True, "bad-cap-marker", 1.5, None])
+def test_blueprint_construction_rejects_bad_cap(cap: object) -> None:
+    with pytest.raises(ValueError, match="user_limit"):
+        BlueprintChannel(name="voice", type="Voice", user_limit=cap)  # type: ignore[arg-type]  # Invalid input.
+
+
+@pytest.mark.parametrize("categorized", [False, True])
+def test_blueprint_mutated_cap_preserves_output(tmp_path: Path, categorized: bool) -> None:
+    ch = BlueprintChannel(name="voice", type="Voice")
+    ch.user_limit = -1
+    bp = ServerBlueprint(
+        name="S",
+        categories=[BlueprintCategory(name="V", channels=[ch])] if categorized else [],
+        uncategorized_channels=[] if categorized else [ch],
+    )
+    output = tmp_path / "bp.json"
+    output.write_text("OLD")
+    with pytest.raises(ValueError, match="user_limit"):
+        export_blueprint(bp, output)
+    assert output.read_text() == "OLD"
+
+
+def test_blueprint_text_cap_rejected() -> None:
+    with pytest.raises(ValueError, match="Voice"):
+        BlueprintChannel(name="text", user_limit=5)
+
+
+def test_blueprint_cap_error_inherits_project_and_value_errors() -> None:
+    from discord_ferry.errors import BlueprintValidationError, FerryError
+
+    assert issubclass(BlueprintValidationError, FerryError)
+    assert issubclass(BlueprintValidationError, ValueError)
+
+
+@pytest.mark.parametrize("categorized", [False, True])
+def test_blueprint_import_and_mutation_reject_text_cap(tmp_path: Path, categorized: bool) -> None:
+    data = {"name": "S"}
+    channel = {"name": "text", "type": "Text", "user_limit": 5}
+    data.update(
+        {"categories": [{"name": "V", "channels": [channel]}]}
+        if categorized
+        else {"uncategorized_channels": [channel]}
+    )
+    output = tmp_path / "bp.json"
+    output.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="Voice"):
+        import_blueprint(output)
+    ch = BlueprintChannel(name="text")
+    ch.user_limit = 5
+    bp = ServerBlueprint(
+        name="S",
+        categories=[BlueprintCategory(name="V", channels=[ch])] if categorized else [],
+        uncategorized_channels=[] if categorized else [ch],
+    )
+    output.write_text("OLD")
+    with pytest.raises(ValueError, match="Voice"):
+        export_blueprint(bp, output)
+    assert output.read_text() == "OLD"
+
+
+def test_blueprint_zero_and_old_caps_omit_field(tmp_path: Path) -> None:
+    old = tmp_path / "old.json"
+    old.write_text('{"name":"S","uncategorized_channels":[{"name":"voice","type":"Voice"}]}')
+    bp = import_blueprint(old)
+    assert bp.uncategorized_channels[0].user_limit == 0
+    export_blueprint(bp, old)
+    assert "user_limit" not in json.loads(old.read_text())["uncategorized_channels"][0]
