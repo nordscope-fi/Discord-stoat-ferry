@@ -899,9 +899,24 @@ def build(
     help="Output path for the blueprint JSON file",
 )
 @click.option("--name", default=None, help="Override server name in blueprint")
-def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
+@click.option(
+    "--metadata-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Optional folder containing cached discord_metadata.json (offline)",
+)
+def export_blueprint_cmd(
+    from_dir: str,
+    output: str,
+    name: str | None,
+    metadata_dir: str | None,
+) -> None:
     """Export a DCE export directory as a reusable blueprint."""
-    from discord_ferry.blueprint import blueprint_from_exports, export_blueprint
+    from discord_ferry.blueprint import (
+        BlueprintValidationError,
+        blueprint_from_exports,
+        export_blueprint,
+    )
 
     try:
         exports = parse_export_directory(Path(from_dir))
@@ -914,9 +929,17 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
         _print_feedback_hint()
         sys.exit(1)
 
-    bp = blueprint_from_exports(exports, name)
-
-    export_blueprint(bp, Path(output))
+    try:
+        bp = blueprint_from_exports(
+            exports,
+            name,
+            metadata_dir=Path(metadata_dir) if metadata_dir is not None else None,
+        )
+        export_blueprint(bp, Path(output))
+    except BlueprintValidationError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(sanitize_secrets(str(exc)))}")
+        _print_feedback_hint()
+        sys.exit(1)
     console.print(
         f"[bold green]Blueprint exported[/] to {_safe(output)} "
         f"({len(bp.categories)} categories, "
