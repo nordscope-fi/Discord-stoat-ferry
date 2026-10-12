@@ -589,18 +589,31 @@ def _add_options(options: list[Any]) -> Callable[[F], F]:
     return decorator
 
 
-def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
+def _build_config(
+    kwargs: dict[str, Any],
+    *,
+    discord_token_source: click.core.ParameterSource | None,
+) -> FerryConfig:
     """Build a FerryConfig from Click kwargs."""
     export_dir_str = kwargs.get("export_dir")
     discord_token = kwargs.get("discord_token")
     discord_server = kwargs.get("discord_server")
 
     # Mode detection: orchestrated vs offline
-    if export_dir_str and discord_token:
+    if (
+        export_dir_str
+        and discord_token
+        and discord_token_source is click.core.ParameterSource.COMMANDLINE
+    ):
         raise click.UsageError("Cannot use both --export-dir and --discord-token")
 
     if export_dir_str:
         # Offline mode
+        if discord_token and discord_token_source is click.core.ParameterSource.ENVIRONMENT:
+            console.print(
+                "[cyan]Note:[/] Ignoring DISCORD_TOKEN because --export-dir uses existing exports."
+            )
+        discord_token = None
         export_dir = Path(export_dir_str)
         skip_export = True
     elif discord_token and discord_server:
@@ -682,7 +695,8 @@ def feedback_command() -> None:
 
 @main.command()
 @_add_options(_common_options)
-def migrate(**kwargs: Any) -> None:
+@click.pass_context
+def migrate(ctx: click.Context, /, **kwargs: Any) -> None:
     """Run the full migration."""
     stoat_url = kwargs.get("stoat_url")
     token = kwargs.get("token")
@@ -695,7 +709,10 @@ def migrate(**kwargs: Any) -> None:
         sys.exit(1)
 
     try:
-        config = _build_config(kwargs)
+        config = _build_config(
+            kwargs,
+            discord_token_source=ctx.get_parameter_source("discord_token"),
+        )
     except click.UsageError as exc:
         console.print(f"[bold red]Error:[/] {_safe(exc)}")
         sys.exit(1)
