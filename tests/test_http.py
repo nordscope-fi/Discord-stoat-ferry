@@ -1317,6 +1317,31 @@ def test_a_malformed_proxy_url_is_reported(proxy_env, os_proxy) -> None:
     ]
 
 
+@pytest.mark.parametrize("variable", ["HTTPS_PROXY", "HTTP_PROXY"])
+def test_a_colon_in_a_scheme_proxy_login_is_reported_without_credentials(
+    proxy_env, os_proxy, variable: str
+) -> None:
+    login = "ferry:user"
+    encoded_login = "ferry%3Auser"
+    password = "SUPERSECRET"
+    raw = f"http://{encoded_login}:{password}@corp:8080"
+    target = TARGET if variable == "HTTPS_PROXY" else "http://api.stoat.test/"
+    with os_proxy({}), proxy_env(**{variable: raw}):
+        choice = http.resolve_proxy_or_raise(target)
+        notices = http.proxy_notices()
+        lines = http.format_proxy_notices()
+
+    scheme = variable.removesuffix("_PROXY").lower()
+    assert choice is None
+    assert [(notice.kind, notice.scheme, notice.display) for notice in notices] == [
+        ("malformed", scheme, "<unparseable>")
+    ]
+    rendered = "\n".join(lines)
+    assert login not in rendered
+    assert encoded_login not in rendered
+    assert password not in rendered
+
+
 @pytest.mark.parametrize("variable", ["ALL_PROXY", "HTTPS_PROXY"])
 def test_a_notice_display_never_carries_userinfo(proxy_env, os_proxy, variable) -> None:
     """Constraint 5, at BOTH _safe_display call sites.
