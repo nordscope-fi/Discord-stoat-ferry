@@ -1118,8 +1118,9 @@ async def api_search_pinned_messages(
     same way: ``_api_request`` is declared ``-> dict[str, Any]`` but this route
     returns an array.
 
-    Requires ``ReadMessageHistory``. Lands in the ``messaging`` rate bucket
-    (POST), 10 per 10 seconds keyed per channel id.
+    Requires ``ReadMessageHistory``. Lands in the ``channels`` rate bucket,
+    15 per 10 seconds keyed per channel id. Only a POST whose third route
+    segment is ``messages`` lands in the ``messaging`` bucket.
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/search"
     data = {"pinned": True, "limit": 100, "sort": "Latest"}
