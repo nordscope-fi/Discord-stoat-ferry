@@ -148,7 +148,8 @@ bitmask.
 > `stoatchat/stoatchat` at `crates/core/permissions/src/models/channel.rs`. `developers.stoat.chat`
 > has lagged it, and an earlier revision of this page reproduced a 13-bit subset from that site —
 > which is how Ferry came to drop `MentionEveryone` as "nonexistent" and to ship voice channels that
-> granted no voice permissions. Verified against source 2026-08-02 (commit `502203d3`).
+> granted no voice permissions. Verified against Stoat v0.15.7 source on 2026-10-12 (commit
+> `5fb97ec4e7fd2f37fab38c834d3c354914ef4589`).
 
 All **34** defined bits:
 
@@ -193,6 +194,17 @@ Bit 5 and bits 14–19 are undefined gaps. Bits **41–52 are a declared "free a
 marked do-not-use, so never derive an "all permissions" value from Stoat's `GrantAllSafe`
 (`0x000F_FFFF_FFFF_FFFF`) — it spans the free area, and Stoat computes it for server owners without
 ever persisting it to a role.
+
+### How Stoat resolves channel permissions
+
+For a non-owner server member, Stoat v0.15.7 starts with the server default, then applies the channel
+default, each server-role override, and each channel-role override, in that order. The channel
+default therefore sits below role permissions.
+
+Two member fields act after those bitmask layers. When `can_publish` is false, Stoat revokes `Speak`
+and `Video`. When `can_receive` is false, it revokes `Listen`. Both fields default to true. Stoat
+then applies the timeout restriction and removes all permissions if `ViewChannel` is absent. A
+server owner receives `GrantAllSafe` instead of this sequence.
 
 **`Connect` alone does not give you a working voice channel.** Stoat gates *joining* on `Connect`
 (`voice_join.rs:52`) but builds the LiveKit token's `can_subscribe` from `Listen`

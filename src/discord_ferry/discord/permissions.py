@@ -69,8 +69,9 @@ DISCORD_TO_STOAT: dict[int, int | list[int]] = {
 # (`member_edit.rs:55,89`), which does not apply channel overrides.
 
 # Every bit position defined by Stoat's `ChannelPermission` enum, mirrored from
-# stoatchat/stoatchat `crates/core/permissions/src/models/channel.rs` (commit
-# 502203d3, read 2026-08-02). Read the SOURCE, not the developer docs site --
+# Stoat v0.15.7 `crates/core/permissions/src/models/channel.rs` (commit
+# 5fb97ec4e7fd2f37fab38c834d3c354914ef4589, read 2026-10-12). Read the SOURCE,
+# not the developer docs site --
 # the docs lagged source, which is how a correct MentionEveryone mapping came to
 # be deleted as "nonexistent" in v2.6.15.
 #
