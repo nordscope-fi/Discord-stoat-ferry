@@ -189,6 +189,7 @@ def _flush_inline_row(row: list[tuple[str, str]], parts: list[str]) -> None:
 def flatten_embed(
     embed: dict[str, object],
     export_dir: Path | None = None,
+    text_transform: Callable[[str], str] | None = None,
 ) -> tuple[dict[str, object], Path | None, bool]:
     """Convert a Discord embed dict to a Stoat-compatible SendableEmbed dict.
 
@@ -198,6 +199,7 @@ def flatten_embed(
     Args:
         embed: Discord embed as parsed from DCE JSON.
         export_dir: Root export directory for resolving local media paths.
+        text_transform: Optional remapping applied to the title, description, and fields.
 
     Returns:
         Tuple of (embed dict, local media path or None, escaped). The media path
@@ -206,6 +208,10 @@ def flatten_embed(
         export-root containment check.
     """
     parts: list[str] = []
+
+    def transform_text(value: object) -> str:
+        text = str(value)
+        return text_transform(text) if text_transform is not None else text
 
     # Author name
     author = embed.get("author")
@@ -217,7 +223,7 @@ def flatten_embed(
     # Main description
     description = embed.get("description")
     if description:
-        parts.append(str(description))
+        parts.append(transform_text(description))
 
     # Fields — inline fields are grouped into pipe-separated rows (max 3 per row)
     fields = embed.get("fields")
@@ -226,8 +232,8 @@ def flatten_embed(
         for field_obj in fields:
             if not isinstance(field_obj, dict):
                 continue
-            fname = str(field_obj.get("name", ""))
-            fvalue = str(field_obj.get("value", ""))
+            fname = transform_text(field_obj.get("name", ""))
+            fvalue = transform_text(field_obj.get("value", ""))
             if not fname and not fvalue:
                 continue
             is_inline = bool(field_obj.get("isInline", False))
@@ -257,7 +263,7 @@ def flatten_embed(
     # Simple scalar fields
     title = embed.get("title")
     if title is not None and str(title).strip():
-        title_str = str(title)
+        title_str = transform_text(title)
         if len(title_str) > 100:
             title_str = title_str[:97] + "..."
         result["title"] = title_str
@@ -274,8 +280,8 @@ def flatten_embed(
     # icon_url from author
     if isinstance(author, dict):
         icon_url = author.get("iconUrl")
-        if icon_url is not None:
-            result["icon_url"] = str(icon_url)[:256]
+        if isinstance(icon_url, str) and icon_url.startswith(("http://", "https://")):
+            result["icon_url"] = icon_url[:256]
 
     # Flattened description
     if parts:

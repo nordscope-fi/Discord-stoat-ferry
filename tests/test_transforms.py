@@ -404,6 +404,15 @@ def test_flatten_embed_truncates_url_and_icon_url_to_256_characters() -> None:
     assert result["icon_url"] == url[:256]
 
 
+def test_flatten_embed_omits_local_author_icon_path() -> None:
+    """A DCE export path must not be sent to Stoat as an author icon URL."""
+    result, _, _ = flatten_embed(
+        {"title": "Local author icon", "author": {"iconUrl": "media/embed-author.png"}}
+    )
+
+    assert "icon_url" not in result
+
+
 def test_all_inline_fields_in_rows() -> None:
     """3 inline fields render as a pipe-separated row."""
     embed: dict[str, object] = {

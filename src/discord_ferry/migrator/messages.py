@@ -1491,8 +1491,17 @@ async def _process_message(
     # Step 4: Flatten embeds (max 5, only those with title or description).
     stoat_embeds: list[dict[str, Any]] = []
     embed_media_ids: list[str] = []
+
+    def remap_embed_text(text: str) -> str:
+        remapped = remap_mentions(text, state.channel_map, state.role_map, state.author_names)
+        return remap_emoji(remapped, state.emoji_map)
+
     for raw_embed in msg.embeds[:5]:
-        flat, embed_media_path, _embed_escaped = flatten_embed(raw_embed, config.export_dir)
+        flat, embed_media_path, _embed_escaped = flatten_embed(
+            raw_embed,
+            config.export_dir,
+            remap_embed_text,
+        )
         if flat.get("description") or flat.get("title"):
             if _embed_escaped:
                 acc_warnings.append(

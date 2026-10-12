@@ -710,6 +710,43 @@ async def test_embed_without_title_or_description_excluded(
     assert "msg1" in state.message_map
 
 
+async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
+    """Embed titles, descriptions, and fields use the message remapping tables."""
+    sent: list[dict[str, Any]] = []
+    state = _make_state(
+        channel_map={"ch1": "stoat_ch1", "456": "stoat_channel"},
+        role_map={"321": "stoat_role"},
+        emoji_map={"999": "stoat_emoji"},
+        author_names={"123": "Alice"},
+    )
+    config = _make_config(tmp_path)
+    msg = _make_message(
+        id="embed-remap",
+        content="embed",
+        embeds=[
+            {
+                "title": "Hello <@123> <:party:999>",
+                "description": "See <#456>",
+                "fields": [
+                    {
+                        "name": "Role <@&321>",
+                        "value": "Emoji <:party:999>",
+                    }
+                ],
+            }
+        ],
+    )
+
+    with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
+        await run_messages(config, state, [_make_export(messages=[msg])], lambda e: None)
+
+    embed = sent[0]["embeds"][0]
+    assert embed["title"] == "Hello @Alice :stoat_emoji:"
+    assert "See <#stoat_channel>" in embed["description"]
+    assert "**Role <@&stoat_role>**" in embed["description"]
+    assert "Emoji :stoat_emoji:" in embed["description"]
+
+
 # ---------------------------------------------------------------------------
 # Reply references
 # ---------------------------------------------------------------------------
