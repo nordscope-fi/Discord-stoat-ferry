@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import ssl
 import zipfile
 from pathlib import Path
@@ -179,6 +180,36 @@ class TestGetDcePath:
             result = get_dce_path()
             assert result is None
 
+    @pytest.mark.parametrize("entry_kind", ["directory", "non_executable", "symlink"])
+    def test_returns_none_when_cached_entry_is_not_a_regular_executable(
+        self, tmp_path: Path, entry_kind: str
+    ) -> None:
+        dce_dir = tmp_path / "dce"
+        dce_dir.mkdir()
+        executable = dce_dir / "DiscordChatExporter.Cli"
+
+        if entry_kind == "directory":
+            executable.mkdir()
+        elif entry_kind == "non_executable":
+            executable.touch(mode=0o644)
+        else:
+            target = tmp_path / "real-dce"
+            target.touch(mode=0o755)
+            try:
+                executable.symlink_to(target)
+            except OSError as error:
+                pytest.skip(f"file links are unavailable: {error}")
+
+        with (
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
+            patch("platform.system", return_value="Darwin"),
+            patch(
+                "discord_ferry.exporter.manager.os.access",
+                return_value=entry_kind != "non_executable",
+            ),
+        ):
+            assert get_dce_path() is None
+
 
 def _make_dce_zip(*extra_members: str) -> bytes:
     """Create a minimal valid DCE zip in memory."""
@@ -225,6 +256,64 @@ async def test_dce_download_uses_pinned_asset_url_without_release_api(tmp_path: 
 
 
 class TestArchiveExtraction:
+    async def test_install_renames_ready_staging_directory_into_place(self, tmp_path: Path) -> None:
+        dce_dir = tmp_path / "dce"
+        rename_sources: list[Path] = []
+        original_replace = Path.replace
+
+        def observe_replace(source: Path, target: Path) -> Path:
+            staged_executable = source / "DiscordChatExporter.Cli"
+            assert source != dce_dir
+            assert target == dce_dir
+            assert not dce_dir.exists()
+            assert staged_executable.is_file()
+            assert os.access(staged_executable, os.X_OK)
+            rename_sources.append(source)
+            return original_replace(source, target)
+
+        with (
+            aioresponses() as responses,
+            patch("platform.system", return_value="Darwin"),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
+            patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("discord_ferry.exporter.manager._verify_dce_checksum"),
+            patch.object(Path, "replace", observe_replace),
+        ):
+            _register_dce_download(responses, _make_dce_zip("resources/data.txt"))
+            result = await download_dce(lambda _event: None)
+
+        assert result == dce_dir / "DiscordChatExporter.Cli"
+        assert len(rename_sources) == 1
+
+    async def test_failed_staging_preserves_existing_cache(self, tmp_path: Path) -> None:
+        dce_dir = tmp_path / "dce"
+        dce_dir.mkdir()
+        cached_executable = dce_dir / "DiscordChatExporter.Cli"
+        cached_executable.write_text("existing verified cache", encoding="utf-8")
+        cached_executable.chmod(0o755)
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("resources/incomplete.txt", "partial replacement")
+
+        with (
+            aioresponses() as responses,
+            patch("platform.system", return_value="Darwin"),
+            patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
+            patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
+            patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
+            patch("discord_ferry.exporter.manager._verify_dce_checksum"),
+        ):
+            _register_dce_download(responses, archive_buffer.getvalue())
+            with pytest.raises(DCENotFoundError, match="executable not found"):
+                await download_dce(lambda _event: None)
+
+        assert cached_executable.read_text(encoding="utf-8") == "existing verified cache"
+        assert os.access(cached_executable, os.X_OK)
+        assert not (dce_dir / "resources" / "incomplete.txt").exists()
+        assert not [path for path in tmp_path.iterdir() if path.name.startswith(".dce-")]
+
     @pytest.mark.parametrize("skip_verify", [False, True])
     @pytest.mark.parametrize(
         "member_name",
@@ -257,8 +346,8 @@ class TestArchiveExtraction:
             with pytest.raises(DCENotFoundError, match="outside target directory"):
                 await download_dce(lambda _event: None, skip_verify=skip_verify)
 
-        assert dce_dir.exists()
-        assert not any(dce_dir.iterdir())
+        assert not dce_dir.exists()
+        assert not [path for path in tmp_path.iterdir() if path.name.startswith(".dce-")]
         if skip_verify:
             verify.assert_not_called()
         else:
@@ -291,7 +380,7 @@ class TestArchiveExtraction:
         else:
             verify.assert_called_once()
 
-    async def test_existing_directory_link_escape_is_rejected(self, tmp_path: Path) -> None:
+    async def test_staging_does_not_follow_link_from_existing_cache(self, tmp_path: Path) -> None:
         dce_dir = tmp_path / "dce"
         outside = tmp_path / "outside"
         dce_dir.mkdir()
@@ -303,17 +392,18 @@ class TestArchiveExtraction:
 
         with (
             aioresponses() as responses,
+            patch("platform.system", return_value="Darwin"),
             patch("discord_ferry.exporter.manager._get_dce_dir", return_value=dce_dir),
             patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
             patch("discord_ferry.exporter.manager._verify_dce_checksum"),
         ):
             _register_dce_download(responses, _make_dce_zip("link/escape.txt"))
-            with pytest.raises(DCENotFoundError, match="outside target directory"):
-                await download_dce(lambda _event: None)
+            result = await download_dce(lambda _event: None)
 
+        assert result == dce_dir / "DiscordChatExporter.Cli"
         assert not (outside / "escape.txt").exists()
-        assert not (dce_dir / "DiscordChatExporter.Cli").exists()
+        assert (dce_dir / "link" / "escape.txt").is_file()
 
 
 class TestDownloadDceRetry:
@@ -326,6 +416,8 @@ class TestDownloadDceRetry:
 
         with (
             aioresponses() as m,
+            patch("platform.system", return_value="Darwin"),
+            patch("discord_ferry.exporter.manager._get_platform_key", return_value="osx-arm64"),
             patch("discord_ferry.exporter.manager._get_dce_dir", return_value=tmp_path),
             patch("discord_ferry.exporter.manager._get_asset_name", return_value="test.zip"),
             patch(
