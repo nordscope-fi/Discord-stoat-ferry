@@ -448,6 +448,44 @@ class TestDceFailureOutput:
 
 
 class TestStderrTaskDrainedOnCancel:
+    @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX subprocess termination")
+    async def test_silent_child_stops_when_cancel_event_is_set(self, tmp_path: Path) -> None:
+        config = _make_config(tmp_path)
+        config.cancel_event = asyncio.Event()
+        children: list[asyncio.subprocess.Process] = []
+        create_subprocess_exec = asyncio.create_subprocess_exec
+
+        async def capture_child(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+            child = await create_subprocess_exec(*args, **kwargs)
+            children.append(child)
+            return child
+
+        async def cancel_after_launch() -> None:
+            while not children:
+                await asyncio.sleep(0)
+            config.cancel_event.set()
+
+        cancel_task = asyncio.create_task(cancel_after_launch())
+        with (
+            patch(
+                "discord_ferry.exporter.runner._build_dce_command",
+                return_value=[sys.executable, "-c", "import time; time.sleep(60)"],
+            ),
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                new=capture_child,
+            ),
+            pytest.raises(asyncio.CancelledError, match="Export cancelled by user"),
+        ):
+            await asyncio.wait_for(
+                run_dce_export(config, tmp_path / "dce", lambda _event: None),
+                timeout=1.0,
+            )
+
+        await cancel_task
+        assert len(children) == 1
+        assert children[0].returncode is not None
+
     @pytest.mark.asyncio
     async def test_stderr_task_done_after_cancel(self, tmp_path: Path) -> None:
         lines = [b"general: 25%\n"] * 100
@@ -1137,6 +1175,21 @@ class TestDrainCancel:
         consumed = await _drain_overlong_line(reader, cancel)
         assert consumed >= 0
         assert not reader.at_eof()  # did NOT drain everything
+
+    @pytest.mark.asyncio
+    async def test_drain_overlong_line_wakes_when_cancel_is_set_during_wait(self) -> None:
+        reader = asyncio.StreamReader(limit=64)
+        reader.feed_data(b"x" * 1000)
+        with pytest.raises(asyncio.LimitOverrunError):
+            await reader.readuntil(b"\n")
+
+        cancel = asyncio.Event()
+        drain_task = asyncio.create_task(_drain_overlong_line(reader, cancel))
+        await asyncio.sleep(0)
+        cancel.set()
+
+        with pytest.raises(asyncio.CancelledError, match="Export cancelled by user"):
+            await asyncio.wait_for(drain_task, timeout=1.0)
 
 
 class TestOverlongStdoutActivity:

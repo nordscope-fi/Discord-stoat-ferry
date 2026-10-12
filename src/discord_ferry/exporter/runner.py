@@ -448,7 +448,7 @@ async def _drain_overlong_line(
         if cancel_event is not None and cancel_event.is_set():
             return total
         try:
-            tail = await reader.readuntil(b"\n")
+            tail = await _readuntil_or_cancel(reader, cancel_event)
             total += len(tail)
             return total
         except asyncio.LimitOverrunError as exc:
@@ -457,6 +457,29 @@ async def _drain_overlong_line(
         except asyncio.IncompleteReadError as exc:
             total += len(exc.partial)
             return total
+
+
+async def _readuntil_or_cancel(
+    reader: asyncio.StreamReader, cancel_event: asyncio.Event | None
+) -> bytes:
+    """Read one line while allowing an export cancel event to wake the wait."""
+    if cancel_event is None:
+        return await reader.readuntil(b"\n")
+
+    read_task = asyncio.create_task(reader.readuntil(b"\n"))
+    cancel_task = asyncio.create_task(cancel_event.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            (read_task, cancel_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        if cancel_task in done:
+            raise asyncio.CancelledError("Export cancelled by user")
+        return read_task.result()
+    finally:
+        for task in (read_task, cancel_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(read_task, cancel_task, return_exceptions=True)
 
 
 async def validate_discord_token(token: str) -> None:
@@ -654,7 +677,7 @@ async def run_dce_export(
                 raise asyncio.CancelledError("Export cancelled by user")
 
             try:
-                raw_line = await process.stdout.readuntil(b"\n")
+                raw_line = await _readuntil_or_cancel(process.stdout, config.cancel_event)
             except asyncio.IncompleteReadError as exc:
                 raw_line = exc.partial
                 if not raw_line:
