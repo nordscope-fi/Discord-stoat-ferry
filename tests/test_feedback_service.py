@@ -780,6 +780,33 @@ async def test_challenge_route_requires_closed_valid_body(
         await client.close()
 
 
+@pytest.mark.parametrize("route", ["/v1/challenge", "/v1/feedback"])
+async def test_service_rejects_an_oversized_json_integer_as_json(
+    tmp_path: object,
+    route: str,
+) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    client = TestClient(TestServer(create_app(_service_config(tmp_path))))
+    await client.start_server()
+    try:
+        body = b'{"value":' + (b"1" * 5_000) + b"}"
+        response = await client.post(
+            route,
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+        assert response.status == 400
+        assert response.content_type == "application/json"
+        assert (
+            FeedbackError.from_mapping(await response.json()).code
+            is FeedbackErrorCode.INVALID_INPUT
+        )
+    finally:
+        await client.close()
+
+
 async def test_challenge_route_requires_json_content_type(tmp_path: object) -> None:
     from discord_ferry.feedback_service.app import create_app
 
@@ -918,6 +945,51 @@ def _feedback_request(
         diagnostics_acknowledged=diagnostics is not None,
         challenge=challenge,
     )
+
+
+@pytest.mark.parametrize(
+    "field_updates",
+    [
+        {"description": "a\ud800b"},
+        {
+            "diagnostics": {
+                "ferry_version": "1",
+                "operating_system": "linux",
+                "architecture": "arm64",
+                "interface": "cli",
+                "stage": "setup",
+                "log_excerpt": "proxy http://user:p@ss@proxy.example:8080",
+            },
+            "diagnostics_acknowledged": True,
+        },
+    ],
+    ids=["lone-surrogate", "double-at-userinfo"],
+)
+async def test_feedback_route_rejects_invalid_text_as_json(
+    tmp_path: object,
+    field_updates: dict[str, object],
+) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    body = _feedback_request().to_mapping()
+    body.update(field_updates)
+    client = TestClient(TestServer(create_app(_service_config(tmp_path), now=lambda: NOW)))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/v1/feedback",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+
+        assert response.status == 400
+        assert response.content_type == "application/json"
+        assert (
+            FeedbackError.from_mapping(await response.json()).code
+            is FeedbackErrorCode.INVALID_INPUT
+        )
+    finally:
+        await client.close()
 
 
 class _FeedbackGitHub(_ReadyGitHub):
