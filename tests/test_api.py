@@ -531,6 +531,75 @@ async def test_api_create_channel(mock_aiohttp: aioresponses) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "channel_type, cap", [("Voice", 5), ("Voice", 0), ("Voice", None), ("Text", 0)]
+)
+async def test_api_create_channel_cap_body(
+    mock_aiohttp: aioresponses,
+    channel_type: str,
+    cap: int | None,
+) -> None:
+    mock_aiohttp.post(f"{BASE_URL}/servers/srv1/channels", payload={"_id": "ch"})
+    async with aiohttp.ClientSession() as session:
+        await api_create_channel(
+            session,
+            BASE_URL,
+            TOKEN,
+            "srv1",
+            name="channel",
+            channel_type=channel_type,
+            user_limit=cap,
+        )
+    requests = [call for calls in mock_aiohttp.requests.values() for call in calls]
+    assert len(requests) == 1
+    body = requests[0].kwargs["json"]
+    if cap:
+        assert body["voice"] == {"max_users": cap}
+    else:
+        assert "voice" not in body
+
+
+@pytest.mark.parametrize(
+    "channel_type, cap",
+    [
+        ("Voice", -1),
+        ("Voice", True),
+        ("Voice", "bad-cap-marker"),
+        ("Voice", 1.5),
+        ("Text", 5),
+        (None, 5),
+    ],
+)
+async def test_api_create_channel_rejects_bad_cap(
+    mock_aiohttp: aioresponses,
+    channel_type: str | None,
+    cap: object,
+) -> None:
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(ValueError, match="user_limit") as error:
+            await api_create_channel(
+                session,
+                BASE_URL,
+                TOKEN,
+                "srv1",
+                name="channel",
+                channel_type=channel_type,
+                user_limit=cap,  # type: ignore[arg-type]  # Deliberately test invalid runtime input.
+            )
+    assert not mock_aiohttp.requests
+    assert "bad-cap-marker" not in str(error.value)
+
+
+async def test_api_create_channel_default_omits_cap(mock_aiohttp: aioresponses) -> None:
+    mock_aiohttp.post(f"{BASE_URL}/servers/srv1/channels", payload={"_id": "ch"})
+    async with aiohttp.ClientSession() as session:
+        await api_create_channel(
+            session, BASE_URL, TOKEN, "srv1", name="voice", channel_type="Voice"
+        )
+    request = next(iter(mock_aiohttp.requests.values()))[0]
+    assert "voice" not in request.kwargs["json"]
+
+
 async def test_api_edit_server(mock_aiohttp: aioresponses) -> None:
     """PATCH /servers/srv1 passes kwargs as the JSON body."""
     mock_aiohttp.patch(
