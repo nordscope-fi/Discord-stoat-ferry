@@ -947,7 +947,8 @@ async def api_send_message(
         replies: List of reply reference dicts. Optional.
         idempotency_key: Deduplication key sent as ``Idempotency-Key`` HTTP header
             (use ``f"ferry-{discord_msg_id}"``). Optional.
-        silent: Suppress notifications. Defaults to True to avoid spam during migration.
+        silent: Suppress notifications with Stoat's message flag. Defaults to True to avoid
+            spam during migration.
 
     Returns:
         Message object dict from the API (includes ``_id``).
@@ -965,7 +966,7 @@ async def api_send_message(
     if replies is not None:
         data["replies"] = replies
     if silent:
-        data["silent"] = True
+        data["flags"] = 2
     extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
     return await _api_request(session, "POST", url, token, data, extra_headers=extra)
 

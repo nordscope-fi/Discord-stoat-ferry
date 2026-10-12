@@ -302,7 +302,7 @@ After a successful migration:
 - Sticker images are uploaded as attachments (with text fallback for unsupported formats)
 - Pinned messages are re-pinned in their channels
 - Custom emoji are available in the server
-- Migrated messages do not trigger notification spam
+- Migrated messages use Stoat's notification-suppression flag to avoid notification spam
 
 !!! info "Why do messages show a timestamp at the start?"
     Stoat does not support importing historical message timestamps. Ferry embeds the original date and time as the first line of each message so the conversation history stays readable.

@@ -658,8 +658,10 @@ async def test_api_send_message_excludes_none_fields(mock_aiohttp: aioresponses)
     assert "replies" not in captured_body
 
 
-async def test_api_send_message_includes_silent_by_default(mock_aiohttp: aioresponses) -> None:
-    """api_send_message includes silent=true in the payload by default."""
+async def test_api_send_message_suppresses_notifications_by_default(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """api_send_message sends Stoat's notification-suppression wire flag by default."""
     captured_body: dict[str, object] = {}
 
     def capture_callback(url: object, **kwargs: object) -> None:
@@ -674,11 +676,12 @@ async def test_api_send_message_includes_silent_by_default(mock_aiohttp: aioresp
     async with aiohttp.ClientSession() as session:
         await api_send_message(session, BASE_URL, TOKEN, "ch1", content="Hello")
 
-    assert captured_body.get("silent") is True
+    assert captured_body.get("flags") == 2
+    assert "silent" not in captured_body
 
 
 async def test_api_send_message_silent_false_omits_field(mock_aiohttp: aioresponses) -> None:
-    """api_send_message with silent=False omits the silent field from payload."""
+    """api_send_message with silent=False omits notification suppression."""
     captured_body: dict[str, object] = {}
 
     def capture_callback(url: object, **kwargs: object) -> None:
@@ -693,6 +696,7 @@ async def test_api_send_message_silent_false_omits_field(mock_aiohttp: aiorespon
     async with aiohttp.ClientSession() as session:
         await api_send_message(session, BASE_URL, TOKEN, "ch1", content="Hello", silent=False)
 
+    assert "flags" not in captured_body
     assert "silent" not in captured_body
 
 
