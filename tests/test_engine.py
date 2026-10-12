@@ -1117,6 +1117,37 @@ async def test_run_migration_stops_cleanly_for_a_malformed_streamed_message(tmp_
         )
 
 
+async def test_duplicate_channel_ids_stop_before_the_message_phase(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    first = _write_dce_json(export_dir, "same-channel", [_dce_msg_dict("message-1")])
+    second = export_dir / "Test renamed - same-channel [same-channel].json"
+    second.write_bytes(first.read_bytes())
+    message_phase_called = False
+
+    async def message_phase(
+        config: FerryConfig,
+        state: MigrationState,
+        exports: list,
+        emit: EventCallback,
+    ) -> None:
+        nonlocal message_phase_called
+        message_phase_called = True
+
+    overrides = {**_NOOP_OVERRIDES, "messages": message_phase}
+
+    with pytest.raises(ExportError) as caught:
+        await run_migration(
+            _make_config(tmp_path, export_dir=export_dir),
+            lambda _event: None,
+            phase_overrides=overrides,
+        )
+
+    assert first.name in str(caught.value)
+    assert second.name in str(caught.value)
+    assert message_phase_called is False
+
+
 def _make_exports_from_dir(export_dir: Path) -> list[DCEExport]:
     """Parse all JSON files in export_dir into DCEExport objects with json_path set."""
     from discord_ferry.parser.dce_parser import parse_export_directory

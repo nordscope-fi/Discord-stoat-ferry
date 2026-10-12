@@ -216,10 +216,12 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
         ExportError: If any channel file cannot be read as a DCE export.
     """
     exports: list[DCEExport] = []
+    channel_files: dict[str, list[str]] = {}
     for json_path in sorted(export_dir.glob("*.json")):
         try:
             export = parse_single_export(json_path, metadata_only=metadata_only)
             exports.append(export)
+            channel_files.setdefault(export.channel.id, []).append(json_path.name)
         except JsonLoadRefusedError as exc:
             # A refused channel is a real export Ferry cannot read, not a stray
             # file. Skipping it would report a finished migration with the
@@ -232,6 +234,22 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
                 f"Could not parse '{json_path.name}' as a DCE export: {exc}. "
                 "Ferry stopped so that no channel is left out without notice."
             ) from exc
+
+    duplicate_channels = {
+        channel_id: filenames
+        for channel_id, filenames in channel_files.items()
+        if len(filenames) > 1
+    }
+    if duplicate_channels:
+        details = "; ".join(
+            f"channel ID {channel_id!r}: {', '.join(repr(name) for name in filenames)}"
+            for channel_id, filenames in duplicate_channels.items()
+        )
+        raise ExportError(
+            f"Multiple export files contain the same Discord channel ({details}). "
+            "This usually means the guild or channel was renamed between exports. "
+            "Remove the older file and try again."
+        )
     exports.sort(key=lambda e: e.channel.name)
     return exports
 

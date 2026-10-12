@@ -153,6 +153,23 @@ def test_validate_reports_a_malformed_message_without_a_traceback(
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
+def test_validate_names_both_files_with_the_same_channel_id(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "300")
+    data = json.loads((Path(FIXTURES_DIR) / "simple_channel.json").read_text(encoding="utf-8"))
+    first = tmp_path / "Guild before rename - general [222].json"
+    second = tmp_path / "Guild after rename - chat [222].json"
+    first.write_text(json.dumps(data), encoding="utf-8")
+    second.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(main, ["validate", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert first.name in result.output
+    assert second.name in result.output
+
+
 # ---------------------------------------------------------------------------
 # Migrate — argument validation
 # ---------------------------------------------------------------------------
