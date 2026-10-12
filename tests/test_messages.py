@@ -2821,6 +2821,47 @@ async def test_new_thread_posts_header(tmp_path: Path) -> None:
     assert headers == ["[Thread migrated from #general]"]
 
 
+async def test_merge_uses_parent_id_when_two_channels_share_a_name(tmp_path: Path) -> None:
+    """A thread's categoryId selects its parent without a name collision."""
+    sent_channels: list[str] = []
+
+    async def capture_send(
+        session: Any, stoat_url: Any, token: Any, channel_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        sent_channels.append(channel_id)
+        return {"_id": f"stoat-{len(sent_channels)}"}
+
+    first_parent = DCEExport(
+        guild=_make_guild(),
+        channel=DCEChannel(id="parent-1", type=0, name="general"),
+    )
+    second_parent = DCEExport(
+        guild=_make_guild(),
+        channel=DCEChannel(id="parent-2", type=0, name="general"),
+    )
+    thread = DCEExport(
+        guild=_make_guild(),
+        channel=DCEChannel(
+            id="thread-1",
+            type=11,
+            name="topic",
+            category_id="parent-1",
+            category="general",
+        ),
+        messages=[_make_message(id="100")],
+        message_count=1,
+        is_thread=True,
+        parent_channel_name="general",
+    )
+    state = _make_state(channel_map={"parent-1": "stoat-parent-1", "parent-2": "stoat-parent-2"})
+    config = _make_config(tmp_path, thread_strategy="merge")
+
+    with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
+        await run_messages(config, state, [first_parent, second_parent, thread], lambda e: None)
+
+    assert sent_channels == ["stoat-parent-1", "stoat-parent-1"]
+
+
 async def test_unchanged_forum_makes_zero_posts(tmp_path: Path) -> None:
     """#79: an unchanged forum channel (type 15, marker present) posts nothing — no header."""
     sent: list[dict[str, Any]] = []

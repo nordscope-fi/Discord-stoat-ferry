@@ -50,9 +50,11 @@ DCE writes one JSON file per channel or thread, using a deterministic naming pat
 | Forum thread | `{Guild} - {Forum Name} - {Thread Name} [{thread_id}].json` |
 | Thread in channel | `{Guild} - {Channel} - {Thread Name} [{thread_id}].json` |
 
-**Thread-to-parent relationship is not in the JSON.** Ferry infers it from the filename: a file with
-three dash-separated segments (Guild, Parent, Thread) is a thread or forum post. The ID in brackets
-is always the thread's own ID, not the parent channel's ID.
+For a thread, DCE 2.48 writes its parent channel ID to `channel.categoryId` and the parent name to
+`channel.category`. Ferry treats the parsed channel type as authoritative. When a parent ID is
+present, Ferry reads the parent from those JSON fields. Without a parent ID, it falls back to the
+three-segment filename. The ID in brackets is always the thread's own ID, not the parent channel's
+ID.
 
 The ID in brackets is always at the end of the stem before the `.json` extension. Ferry extracts it
 with a regex on the filename.

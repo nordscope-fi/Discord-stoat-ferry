@@ -760,13 +760,14 @@ scan.
 
 ### Thread Inference
 
-DCE does not include thread-to-parent relationships in JSON metadata. Ferry infers them from
-filenames:
+DCE 2.48 writes a thread's parent channel ID to `channel.categoryId` and its parent name to
+`channel.category`. Ferry uses the parsed `channel.type` as the authority on whether an export is a
+thread. A known non-thread type remains a regular channel even when its guild or channel name
+contains ` - `.
 
-- `{Guild} - {Channel} [{id}].json` → regular channel (2 dash-separated segments)
-- `{Guild} - {Parent} - {Thread} [{id}].json` → thread or forum post (3 segments)
-
-The `DCEExport` dataclass stores `is_thread` and `parent_channel_name` based on this inference.
+For a thread with a parent ID, Ferry takes the parent name from `channel.category`. It falls back to
+the parent segment in `{Guild} - {Parent} - {Thread} [{id}].json` only when the JSON has no parent
+ID. The `DCEExport` dataclass stores the resulting `is_thread` and `parent_channel_name` values.
 
 ### Content Transforms (`parser/transforms.py`)
 
