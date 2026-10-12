@@ -10,6 +10,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.15] - 2026-10-12
+
+### Fixed
+
+- Cancel Discord exports while the exporter is waiting for output, including an overlong line, and stop the child before cancellation returns (#1232).
+- Reject invalid cached exporter executables, prepare downloads in a temporary directory, and publish the executable only after its permissions are ready (#1289).
+- Name empty feedback timeouts and show the service's retry time in both interfaces (#1242).
+- Return JSON 400 errors for oversized integers, lone Unicode surrogates, and double-@ URL userinfo in feedback requests (#1238).
+- Link replies only within the same Stoat destination channel, name other channels in text fallbacks, and count only native replies as linked (#1230).
+
+### Changed
+
+- Raise the aiohttp, NiceGUI, PyJWT, and certifi dependency floors, and upgrade only uvicorn and its required HTTP parser to remove the two test warnings (#1175, #1274).
+- Pin the feedback image to Python 3.11.17, add Docker dependency updates, run packaging checks for dependency-only pull requests, and lock the docs dependency install (#1275, #1276, #1277).
+- Use GitHub's compatible 2026-03-10 REST API version for feedback (#1278).
+- Correct the pinned-search rate bucket and macOS proxy docstrings, document Stoat 0.15.7 permission resolution, and distinguish parsed export fields from delivered content (#1266, #1293, #1272, #1270).
+
 ## [2.43.14] - 2026-10-12
 
 ### Fixed
