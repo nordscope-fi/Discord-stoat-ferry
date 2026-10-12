@@ -24,6 +24,7 @@ from discord_ferry.feedback import (
     FeedbackValidationError,
     RuntimeContext,
     build_diagnostics,
+    feedback_submission_error_message,
     render_diagnostics,
 )
 
@@ -410,9 +411,9 @@ class _FeedbackDialogController:
             async with FeedbackClient() as feedback_client:
                 receipt = await feedback_client.submit(self.draft)
         except _SUBMISSION_ERRORS as exc:
-            self.result_error = sanitize_secrets_for_public_output(str(exc))
-            if not self.result_error:
-                self.result_error = "The feedback service did not accept the report."
+            self.result_error = sanitize_secrets_for_public_output(
+                feedback_submission_error_message(exc)
+            )
         else:
             self.result_url = receipt.url
         finally:

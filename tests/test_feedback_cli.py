@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -16,8 +17,11 @@ from discord_ferry.errors import MigrationError
 from discord_ferry.feedback import (
     Architecture,
     FeedbackDiagnostics,
+    FeedbackError,
+    FeedbackErrorCode,
     FeedbackInterface,
     FeedbackKind,
+    FeedbackServiceError,
     FeedbackStage,
     OperatingSystem,
 )
@@ -211,6 +215,39 @@ def test_feedback_failure_retry_keeps_request_id_and_gets_a_new_attempt() -> Non
     assert client.submissions[0]["request_id"] == client.submissions[1]["request_id"]
     assert "offline" in result.output
     assert "issues/42" in result.output
+
+
+def test_feedback_timeout_names_the_empty_error() -> None:
+    client = _FakeFeedbackClient(TimeoutError())
+
+    result = _invoke_feedback(
+        "Bug\nTimed out\n\n\n\nn\nContinue\ny\ny\nCancel\n",
+        client,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Feedback could not be sent: Feedback service timed out." in result.output
+
+
+def test_feedback_throttle_shows_when_to_retry() -> None:
+    client = _FakeFeedbackClient(
+        FeedbackServiceError(
+            429,
+            FeedbackError(
+                code=FeedbackErrorCode.THROTTLED,
+                message="Too many feedback requests. Try again later.",
+                retry_at=datetime(2026, 8, 31, 13, 0, tzinfo=UTC),
+            ),
+        )
+    )
+
+    result = _invoke_feedback(
+        "Bug\nThrottled\n\n\n\nn\nContinue\ny\ny\nCancel\n",
+        client,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Retry after 2026-08-31T13:00:00Z." in result.output
 
 
 def test_feedback_failure_prints_the_complete_public_draft_then_cancels() -> None:

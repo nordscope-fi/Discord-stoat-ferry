@@ -11,7 +11,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 from urllib.parse import urlparse
@@ -777,6 +777,22 @@ class FeedbackServiceError(RuntimeError):
         self.error = error
 
 
+def feedback_submission_error_message(exc: BaseException) -> str:
+    """Name empty timeouts and include the service's retry time when present."""
+
+    message = str(exc)
+    if not message:
+        message = (
+            "Feedback service timed out."
+            if isinstance(exc, TimeoutError)
+            else "The feedback service did not accept the report."
+        )
+    if isinstance(exc, FeedbackServiceError) and exc.error.retry_at is not None:
+        retry_at = exc.error.retry_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        message = f"{message} Retry after {retry_at}."
+    return message
+
+
 class _DraftForSubmission(Protocol):
     request_id: UUID
 
@@ -1027,6 +1043,7 @@ __all__ = [
     "challenge_proof_input",
     "clean_diagnostics_for_send",
     "feedback_content_hash",
+    "feedback_submission_error_message",
     "normalize_text",
     "render_diagnostics",
     "render_public_feedback_body",
