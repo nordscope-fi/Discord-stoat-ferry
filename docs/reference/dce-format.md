@@ -110,14 +110,16 @@ users hold old exports.
 | `GuildPrivateThread` | 12 | TextChannel (flatten) | Becomes a standalone text channel |
 | `GuildStageVoice` | 13 | Not migrated | Stoat has no stage channel |
 | `GuildDirectory` | 14 | Not migrated | No Stoat equivalent |
-| `GuildForum` | 15 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the forum |
-| `GuildMedia` | 16 | TextChannel(s) per thread | One text channel per thread, grouped in a category named after the media channel |
+| `GuildForum` | 15 | Parser compatibility only | DCE 2.48 removes forum containers before export. Their posts arrive as `GuildPublicThread` (11), so normal 2.48 exports do not reach Ferry's type-15 delivery path. |
+| `GuildMedia` | 16 | Parser compatibility only | DCE 2.48's `ChannelKind` enum does not define this value. Ferry can parse it if present, but normal 2.48 output does not produce it. |
 
 Stoat has exactly five channel types. `SavedMessages` stores a user's own notes, `DirectMessage`
 and `Group` are private chats, and `TextChannel` and `VoiceChannel` are server channels.
 There are no native threads or forums, so Discord threads are flattened into regular text channels.
-Forum and media channel threads are grouped into dedicated Stoat categories named after the parent
-forum, preserving the organisational structure.
+
+The 2.48 field-disposition ledger uses `consumed` to mean that Ferry parses a field. It does not
+promise that the field controls destination delivery. In normal DCE 2.48 output, forum containers
+are not exported directly, and their posts follow the ordinary thread strategy as type 11.
 
 ---
 
