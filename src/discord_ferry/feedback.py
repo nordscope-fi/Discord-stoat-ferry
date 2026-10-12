@@ -202,8 +202,11 @@ def normalize_text(name: str, value: object, *, minimum: int, maximum: int) -> s
     for character in normalized:
         if character in {"\n", "\t"}:
             continue
-        if unicodedata.category(character) == "Cc":
+        category = unicodedata.category(character)
+        if category == "Cc":
             raise FeedbackValidationError(f"{name} contains an unsupported control character")
+        if category == "Cs":
+            raise FeedbackValidationError(f"{name} contains invalid Unicode")
     length = len(normalized.encode("utf-8"))
     if length < minimum:
         raise FeedbackValidationError(f"{name} must contain at least {minimum} UTF-8 bytes")

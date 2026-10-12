@@ -242,7 +242,7 @@ async def _challenge(request: web.Request) -> web.Response:
         )
     try:
         data = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (UnicodeDecodeError, ValueError):
         return _error_response("invalid_input", "Request JSON is invalid.", status=400)
     if not isinstance(data, dict) or set(data) != {"contract_version", "request_id"}:
         return _error_response("invalid_input", "Request body is invalid.", status=400)
@@ -380,7 +380,7 @@ async def _feedback(request: web.Request) -> web.Response:
         )
     try:
         data = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (UnicodeDecodeError, ValueError):
         return _error_response(
             FeedbackErrorCode.INVALID_INPUT.value,
             "Request JSON is invalid.",
@@ -389,6 +389,7 @@ async def _feedback(request: web.Request) -> web.Response:
     try:
         feedback = FeedbackRequest.from_mapping(data)
         source = _request_source(request)
+        cleaned = feedback.cleaned_for_send()
     except FeedbackValidationError:
         return _error_response(
             FeedbackErrorCode.INVALID_INPUT.value,
@@ -420,7 +421,6 @@ async def _feedback(request: web.Request) -> web.Response:
             status=400,
         )
 
-    cleaned = feedback.cleaned_for_send()
     destination_kind = (
         DestinationKind.ISSUE if cleaned.kind is FeedbackKind.BUG else DestinationKind.DISCUSSION
     )
