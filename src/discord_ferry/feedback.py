@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 MAX_COUNTER = 9_007_199_254_740_991
+_MAX_FEEDBACK_REQUEST_BYTES = 32 * 1024
 _BASE64URL = re.compile(r"^[A-Za-z0-9_-]+$")
 _DISCORD_TOKEN = re.compile(r"\b(?:mfa\.[\w-]{20,}|[\w-]{23,28}\.[\w-]{6,7}\.[\w-]{27,})\b")
 _AUTHORIZATION_HEADER = re.compile(
@@ -705,6 +706,12 @@ def feedback_content_hash(request: FeedbackRequest) -> str:
     return hashlib.sha256(canonical_json(request.content_for_hash())).hexdigest()
 
 
+def _serialized_feedback_request(request: FeedbackRequest) -> bytes:
+    """Encode the exact JSON body that the feedback service receives."""
+
+    return json.dumps(request.to_mapping()).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class FeedbackReceipt:
     """Accepted feedback destination returned to Ferry."""
@@ -978,9 +985,13 @@ class FeedbackClient:
         return challenge
 
     async def _post_once(self, request: FeedbackRequest) -> FeedbackReceipt:
+        body = _serialized_feedback_request(request)
+        if len(body) > _MAX_FEEDBACK_REQUEST_BYTES:
+            raise FeedbackValidationError("feedback report exceeds the 32 KiB service limit")
         async with self.session.post(
             f"{self._base_url}/v1/feedback",
-            json=request.to_mapping(),
+            data=body,
+            headers={"Content-Type": "application/json"},
         ) as response:
             if not 200 <= response.status < 300:
                 await self._raise_service_error(response)

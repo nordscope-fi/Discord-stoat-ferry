@@ -706,6 +706,38 @@ async def test_feedback_client_does_not_retry_a_failed_write(
     assert len(mocked.requests[("POST", URL(feedback_url))]) == 1
 
 
+@pytest.mark.asyncio
+async def test_feedback_client_rejects_a_request_exceeding_the_serialized_body_limit() -> None:
+    data = _valid_request()
+    data.update(
+        description="Ж" * 2_666,
+        expected="Ж" * 1_333,
+        reproduction="Ж" * 1_333,
+        diagnostics=None,
+        diagnostics_acknowledged=False,
+        contact_email="a" * 240 + "@b.co",
+    )
+    request = FeedbackRequest.from_mapping(data)
+    serialized_body = json.dumps(request.to_mapping()).encode("utf-8")
+    feedback_url = "https://feedback.example/v1/feedback"
+
+    assert len(serialized_body) > 32 * 1024
+    with aioresponses() as mocked:
+        mocked.post(
+            feedback_url,
+            payload={
+                "receipt": "018f4c8c-3f52-7a89-a901-2123456789ac",
+                "destination_kind": "issue",
+                "url": "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/999",
+            },
+        )
+        async with FeedbackClient("https://feedback.example") as client:
+            with pytest.raises(FeedbackValidationError, match="exceeds the 32 KiB service limit"):
+                await client._post_once(request)
+
+    assert ("POST", URL(feedback_url)) not in mocked.requests
+
+
 def _draft_challenge(draft: FeedbackDraft) -> feedback_module.Challenge:
     return replace(
         feedback_module.Challenge.from_response_mapping(_challenge_response()),
