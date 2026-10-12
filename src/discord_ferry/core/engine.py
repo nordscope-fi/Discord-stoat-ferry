@@ -4012,6 +4012,7 @@ async def _build_blueprint_channel(
             name=truncate_name(ch.name),
             channel_type=ch.type,
             nsfw=ch.nsfw,
+            user_limit=ch.user_limit or None,
         )
     except MigrationError:
         if ch.type == "Voice":
@@ -4055,6 +4056,15 @@ async def run_build(
     ``run_rollback`` -- there is no recorded id map to undo.
     """
     import uuid
+
+    try:
+        for category in blueprint.categories:
+            for ch in category.channels:
+                ch.validate_user_limit()
+        for ch in blueprint.uncategorized_channels:
+            ch.validate_user_limit()
+    except ValueError as exc:
+        raise MigrationError(str(exc)) from exc
 
     own_session = session is None
     sess = session or new_session()
