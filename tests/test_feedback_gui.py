@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ import aiohttp
 import pytest
 
 from discord_ferry.errors import MigrationError
+from discord_ferry.feedback import FeedbackError, FeedbackErrorCode, FeedbackServiceError
 from discord_ferry.state import MigrationState
 
 if TYPE_CHECKING:
@@ -403,6 +405,41 @@ async def test_feedback_recovery_copies_saves_and_retries_only_when_chosen(
 
     assert len(client.submissions) == 2
     assert client.submissions[0]["request_id"] == client.submissions[1]["request_id"]
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (TimeoutError(), "Feedback service timed out."),
+        (
+            FeedbackServiceError(
+                429,
+                FeedbackError(
+                    code=FeedbackErrorCode.THROTTLED,
+                    message="Too many feedback requests. Try again later.",
+                    retry_at=datetime(2026, 8, 31, 13, 0, tzinfo=UTC),
+                ),
+            ),
+            "Retry after 2026-08-31T13:00:00Z.",
+        ),
+    ],
+    ids=["empty-timeout", "retry-at"],
+)
+async def test_feedback_failure_shows_actionable_error(
+    user: User,
+    error: BaseException,
+    message: str,
+) -> None:
+    client = _FakeFeedbackClient(error)
+    with patch("discord_ferry.feedback_gui.FeedbackClient", return_value=client):
+        await user.open("/")
+        await _open_feedback_report(user)
+        await _fill_short_report(user)
+        _set_value(user, "I understand this report will be public on GitHub", True)
+        user.find("Send feedback").click()
+
+        await user.should_see("Feedback could not be sent")
+        await user.should_see(message)
 
 
 async def test_feedback_recovery_edit_replaces_request_id_before_resubmitting(user: User) -> None:

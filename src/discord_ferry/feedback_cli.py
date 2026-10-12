@@ -20,6 +20,7 @@ from discord_ferry.feedback import (
     FeedbackValidationError,
     RuntimeContext,
     build_diagnostics,
+    feedback_submission_error_message,
     render_diagnostics,
 )
 
@@ -208,7 +209,7 @@ async def _submit_draft(draft: FeedbackDraft) -> bool:
             try:
                 receipt = await client.submit(draft)
             except _SUBMISSION_ERRORS as exc:
-                message = sanitize_secrets_for_public_output(str(exc))
+                message = sanitize_secrets_for_public_output(feedback_submission_error_message(exc))
                 click.echo(f"Feedback could not be sent: {message}")
                 while True:
                     action = _choice(
