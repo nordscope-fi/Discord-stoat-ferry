@@ -64,6 +64,10 @@ if TYPE_CHECKING:
 
 STOAT_URL = "https://api.test"
 AUTUMN_URL = "https://autumn.test"
+_VALID_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6360606060000000050001a5f645400000000049454e44ae426082"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +355,7 @@ async def test_run_server_uploads_icon(tmp_path: Path) -> None:
     events: list[MigrationEvent] = []
     icon_file = tmp_path / "media" / "icon.png"
     icon_file.parent.mkdir(parents=True)
-    icon_file.write_bytes(b"PNG")
+    icon_file.write_bytes(_VALID_PNG)
 
     config = _make_config(tmp_path)
     state = MigrationState(autumn_url=AUTUMN_URL)
@@ -377,7 +381,7 @@ async def test_run_server_icon_upload_failure_is_non_fatal(tmp_path: Path) -> No
     events: list[MigrationEvent] = []
     icon_file = tmp_path / "media" / "icon.png"
     icon_file.parent.mkdir(parents=True)
-    icon_file.write_bytes(b"PNG")
+    icon_file.write_bytes(_VALID_PNG)
 
     config = _make_config(tmp_path)
     state = MigrationState(autumn_url=AUTUMN_URL)
@@ -687,7 +691,7 @@ async def test_run_server_icon_uploads_from_a_foreign_working_directory(
     events: list[MigrationEvent] = []
     icon_file = tmp_path / "media" / "icon.png"
     icon_file.parent.mkdir(parents=True)
-    icon_file.write_bytes(b"PNG")
+    icon_file.write_bytes(_VALID_PNG)
     elsewhere = tmp_path.parent / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
@@ -1074,7 +1078,7 @@ async def test_a_server_disconnect_degrades_rather_than_aborting(tmp_path: Path)
         aioresponses() as m,
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
@@ -3399,7 +3403,7 @@ async def test_banner_uploaded_and_applied(tmp_path: Path) -> None:
         # CDN banner download.
         m.get(
             f"{BANNER_CDN}/111/abc123banner.png?size=1024",
-            body=b"FAKEPNG",
+            body=_VALID_PNG,
         )
         # Autumn banner upload.
         m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
@@ -3785,7 +3789,7 @@ async def test_banner_download_sends_no_auth_header_even_with_a_token(tmp_path: 
         m.get(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"})
         m.get(
             f"{BANNER_CDN}/111/testhash.png?size=1024",
-            body=b"FAKEPNG",
+            body=_VALID_PNG,
             callback=_capture_get,
         )
         m.post(f"{AUTUMN_URL}/banners", payload={"id": "autumn-banner-id"})
@@ -4002,7 +4006,7 @@ async def test_run_roles_icon_upload_failure_degrades(tmp_path: Path) -> None:
         aioresponses() as m,
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
@@ -4050,7 +4054,7 @@ async def test_resolve_role_icon_tags_failure_with_caller_phase(tmp_path: Path) 
         aioresponses() as m,
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
         # Autumn upload fails, so _resolve_role_icon appends role_icon_upload_failed.
@@ -4095,7 +4099,7 @@ async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
         aioresponses() as m,
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
         patch(
             "discord_ferry.migrator.structure.write_bytes_no_follow",
@@ -4128,7 +4132,7 @@ async def test_role_icon_link_planted_at_the_staging_path_is_not_written_through
         aioresponses(),
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
         async with get_session(config) as session:
@@ -4164,7 +4168,7 @@ async def test_role_icon_folder_planted_as_a_link_is_refused(tmp_path: Path) -> 
         aioresponses(),
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
         patch("discord_ferry.migrator.structure.upload_to_autumn", new=fake_upload),
     ):
@@ -4192,7 +4196,7 @@ async def test_role_icon_normal_write_reaches_the_upload(tmp_path: Path) -> None
         aioresponses(),
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
         patch("discord_ferry.migrator.structure.upload_to_autumn", new=fake_upload),
     ):
@@ -4200,7 +4204,7 @@ async def test_role_icon_normal_write_reaches_the_upload(tmp_path: Path) -> None
             result = await _resolve_role_icon(session, config, state, "moderator", "111", "abc")
 
     assert result == "icon-1"
-    assert seen == [b"pngbytes"]
+    assert seen == [_VALID_PNG]
     assert state.warnings == []
     assert not (tmp_path / "role-icons" / "111.png").exists()
 
@@ -4678,7 +4682,7 @@ async def test_run_roles_icon_certificate_failure_explains_itself(tmp_path: Path
         aioresponses() as m,
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
@@ -4727,7 +4731,7 @@ async def test_run_roles_icon_warning_never_carries_the_response_body(tmp_path: 
         aioresponses() as m,
         patch(
             "discord_ferry.migrator.structure.download_role_icon",
-            new=AsyncMock(return_value=b"pngbytes"),
+            new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
@@ -4795,7 +4799,7 @@ async def test_a_refused_proxy_names_the_proxy(
             aioresponses(passthrough=[AUTUMN_URL]) as m,
             patch(
                 "discord_ferry.migrator.structure.download_role_icon",
-                new=AsyncMock(return_value=b"pngbytes"),
+                new=AsyncMock(return_value=_VALID_PNG),
             ),
         ):
             m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})

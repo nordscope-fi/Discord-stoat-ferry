@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 from typing import TYPE_CHECKING
 
 import aiohttp
+from PIL import Image, UnidentifiedImageError
 
 from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.http import proxy_hint, tls_hint
@@ -25,7 +27,8 @@ _RETRYABLE_STATUSES = {429, 502, 503, 504}
 
 # Autumn's limits are DECIMAL megabytes, as written in stoatchat's Revolt.toml -- never
 # N * 1024 * 1024. Getting that wrong makes our pre-upload guard LOOSER than the server's,
-# so a file in the gap band is uploaded and then rejected with a 413. Verified 2026-08-02
+# so a file in the gap band is uploaded and then rejected with FileTooLarge (HTTP 422).
+# Verified 2026-08-02
 # against `features.limits.default.file_upload_size_limits` on https://api.stoat.chat/;
 # `ferry probe` re-checks it against whatever instance you point it at.
 TAG_SIZE_LIMITS: dict[str, int] = {
@@ -36,6 +39,74 @@ TAG_SIZE_LIMITS: dict[str, int] = {
     "banners": 6_000_000,
     "emojis": 500_000,
 }
+
+# Stoat accepts JPEG XL but Pillow does not decode it. A JPEG XL codestream starts
+# with FF 0A; its container begins with the JXL box signature. Leave either form
+# for Stoat to validate, including corrupt files bearing a JPEG XL signature.
+_JXL_CODESTREAM_SIGNATURE = b"\xff\x0a"
+_JXL_CONTAINER_SIGNATURE = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+# Only inspect Stoat image formats, not document formats with external renderers.
+_PILLOW_IMAGE_FORMATS = ("AVIF", "BMP", "GIF", "ICO", "JPEG", "PNG", "TIFF", "WEBP")
+_IMAGE_SUFFIXES = frozenset(
+    {".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".jxl", ".png", ".tif", ".tiff", ".webp"}
+)
+
+
+def _is_jpeg_xl(file_path: Path) -> bool:
+    """Return whether *file_path* has one of JPEG XL's two file signatures."""
+    with file_path.open("rb") as source:
+        signature = source.read(len(_JXL_CONTAINER_SIGNATURE))
+    return signature.startswith(_JXL_CODESTREAM_SIGNATURE) or signature.startswith(
+        _JXL_CONTAINER_SIGNATURE
+    )
+
+
+def _is_image_filename(file_path: Path, filename: str | None) -> bool:
+    """Return whether either local or outbound filename identifies an image."""
+    return any(
+        candidate.lower().endswith(tuple(_IMAGE_SUFFIXES))
+        for candidate in (file_path.name, filename or "")
+    )
+
+
+def _is_jpeg_xl_filename(file_path: Path, filename: str | None) -> bool:
+    """Return whether either local or outbound filename identifies JPEG XL."""
+    return any(candidate.lower().endswith(".jxl") for candidate in (file_path.name, filename or ""))
+
+
+def _validate_image(file_path: Path, tag: str, filename: str | None) -> None:
+    """Reject unsupported or corrupt image data before sending an Autumn request."""
+    if _is_jpeg_xl(file_path):
+        return
+
+    identified = False
+    try:
+        # Image.open identifies the format lazily. load() reads its data too, so a
+        # truncated or otherwise corrupt image is rejected before the HTTP request.
+        with Image.open(file_path, formats=_PILLOW_IMAGE_FORMATS) as image:
+            identified = True
+            image.verify()
+        with Image.open(file_path, formats=_PILLOW_IMAGE_FORMATS) as image:
+            for frame in range(getattr(image, "n_frames", 1)):
+                image.seek(frame)
+                image.load()
+    except (
+        EOFError,
+        Image.DecompressionBombError,
+        OSError,
+        SyntaxError,
+        UnidentifiedImageError,
+        ValueError,
+    ) as exc:
+        # A filename hint must not override a format Pillow already identified.
+        if not identified and _is_jpeg_xl_filename(file_path, filename):
+            return
+        if tag == "attachments" and not identified and not _is_image_filename(file_path, filename):
+            return
+        raise AutumnUploadError(
+            f"File '{file_path.name}' is not a valid image for the {tag} tag."
+        ) from exc
+
 
 # Single-flight registry: coalesces concurrent first-uploads of the same cache key
 # (``upload_cache_key(tag, file_path)``, the same key upload_with_cache caches under) so
@@ -187,12 +258,17 @@ async def upload_to_autumn(
         raise AutumnUploadError(f"Not a regular file: {file_path}")
 
     file_size = file_path.stat().st_size
+    if file_size == 0:
+        raise AutumnUploadError(f"File '{file_path.name}' is empty.")
+
     limit = TAG_SIZE_LIMITS[tag]
     if file_size > limit:
         raise AutumnUploadError(
             f"File '{file_path.name}' is {file_size} bytes, "
             f"which exceeds the {tag} limit of {limit} bytes."
         )
+
+    await asyncio.to_thread(_validate_image, file_path, tag, filename)
 
     headers = {"x-session-token": token}
 
@@ -251,10 +327,28 @@ async def upload_to_autumn(
                         await asyncio.sleep(2)
                     continue
 
-                if response.status == 413:
+                error: object | None = None
+                if response.status == 422:
+                    with contextlib.suppress(aiohttp.ClientError, ValueError):
+                        error = await response.json(content_type=None)
+
+                if response.status == 413 or (
+                    response.status == 422
+                    and isinstance(error, dict)
+                    and error.get("type") == "FileTooLarge"
+                ):
                     limit = TAG_SIZE_LIMITS.get(tag, 0)
+                    if isinstance(error, dict):
+                        server_limit = error.get("max")
+                        if (
+                            isinstance(server_limit, int)
+                            and not isinstance(server_limit, bool)
+                            and server_limit >= 0
+                        ):
+                            limit = server_limit
+                    status = " (HTTP 422)" if response.status == 422 else ""
                     raise AutumnUploadError(
-                        f"File too large: {file_path.name} "
+                        f"File too large{status}: {file_path.name} "
                         # Decimal MB, matching TAG_SIZE_LIMITS -- dividing by 1_048_576
                         # would render the 20_000_000 cap as "limit: 19.1 MB".
                         f"({file_path.stat().st_size / 1_000_000:.1f} MB, "

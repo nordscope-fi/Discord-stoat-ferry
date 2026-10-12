@@ -8,6 +8,7 @@ full build-and-inspect smoke test exists.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -140,6 +141,76 @@ def test_ferry_spec_collects_certifi() -> None:
     assert re.search(r"all_datas\s*=[^\n]*certifi_datas", spec_text), (
         "certifi_datas must appear in the all_datas concatenation, not merely be assigned"
     )
+
+
+def test_ferry_spec_collects_pillow_for_image_validation() -> None:
+    """The spec passes Pillow's collected files to PyInstaller's build graph."""
+    harness = textwrap.dedent(
+        """
+        import json
+        import runpy
+        import sys
+        import types
+
+        class Analysis:
+            def __init__(self, *args, **kwargs):
+                print(json.dumps({
+                    "datas": kwargs["datas"],
+                    "binaries": kwargs["binaries"],
+                    "hiddenimports": kwargs["hiddenimports"],
+                    "excludes": kwargs["excludes"],
+                }))
+                self.pure = [("webview", None, "PYMODULE")]
+                self.scripts = []
+                self.binaries = []
+                self.datas = []
+
+        class Artifact:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        def collect_all(name):
+            if name == "PIL":
+                return [("pillow-data", "PIL")], [("pillow-bin", "PIL")], ["PIL", "PIL.Image"]
+            if name == "webview":
+                return [], [], ["webview"]
+            return [], [], []
+
+        hooks = types.ModuleType("PyInstaller.utils.hooks")
+        hooks.collect_all = collect_all
+        hooks.collect_data_files = lambda name: []
+        hooks.collect_submodules = lambda name: []
+        utils = types.ModuleType("PyInstaller.utils")
+        package = types.ModuleType("PyInstaller")
+        sys.modules.update({
+            "PyInstaller": package,
+            "PyInstaller.utils": utils,
+            "PyInstaller.utils.hooks": hooks,
+        })
+        sys.platform = "win32"
+        runpy.run_path(sys.argv[1], init_globals={
+            "Analysis": Analysis,
+            "PYZ": Artifact,
+            "EXE": Artifact,
+            "COLLECT": Artifact,
+            "BUNDLE": Artifact,
+        })
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", harness, str(_REPO_ROOT / "ferry.spec")],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    analysis = json.loads(result.stdout)
+    assert ["pillow-data", "PIL"] in analysis["datas"]
+    assert ["pillow-bin", "PIL"] in analysis["binaries"]
+    assert "PIL" in analysis["hiddenimports"]
+    assert "PIL.Image" in analysis["hiddenimports"]
+    assert "PIL" not in analysis["excludes"]
 
 
 def test_ferry_spec_builds_onedir_on_darwin() -> None:

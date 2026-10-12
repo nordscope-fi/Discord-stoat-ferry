@@ -45,6 +45,10 @@ BASE_URL = "https://stoat.test"
 AUTUMN_URL = "https://autumn.test"
 TOKEN = "test-token"
 CHANNEL_MSG_URL = f"{BASE_URL}/channels/stoat_ch1/messages"
+_VALID_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6360606060000000050001a5f645400000000049454e44ae426082"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +432,7 @@ async def test_build_masquerade_avatar_upload_and_cache(
 ) -> None:
     """Local avatar file is uploaded to Autumn and stored in avatar_cache."""
     avatar_file = tmp_path / "avatar.png"
-    avatar_file.write_bytes(b"x" * 100)
+    avatar_file.write_bytes(_VALID_PNG)
 
     mock_aiohttp.post(f"{AUTUMN_URL}/avatars", payload={"id": "new_avatar_id"})
 
@@ -567,7 +571,7 @@ async def test_non_forwarded_empty_content_with_attachment_not_skipped(
 ) -> None:
     """Empty content + attachment + reference = NOT a forwarded message (has attachment)."""
     att_file = tmp_path / "file.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "att_id"})
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
@@ -597,7 +601,7 @@ async def test_attachment_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> N
     """Only the first 5 attachments are uploaded."""
     for i in range(7):
         f = tmp_path / f"file{i}.png"
-        f.write_bytes(b"x" * 10)
+        f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
@@ -653,7 +657,7 @@ async def test_missing_local_attachment_skipped(tmp_path: Path, mock_aiohttp: ai
 async def test_attachment_upload_cache_used(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """If an attachment is in upload_cache, it is not re-uploaded."""
     att_file = tmp_path / "cached.png"
-    att_file.write_bytes(b"x" * 10)
+    att_file.write_bytes(_VALID_PNG)
     cache_key = f"attachments:{att_file}"
 
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
@@ -1383,7 +1387,7 @@ async def test_attachments_uploaded_counter_increments(
 ) -> None:
     """attachments_uploaded counter increments on successful upload."""
     att_file = tmp_path / "file.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "att_id"})
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
@@ -1431,7 +1435,7 @@ async def test_embed_media_upload(tmp_path: Path, mock_aiohttp: aioresponses) ->
     thumb_dir = tmp_path / "media"
     thumb_dir.mkdir()
     thumb_file = thumb_dir / "thumb.png"
-    thumb_file.write_bytes(b"fake-png-data")
+    thumb_file.write_bytes(_VALID_PNG)
 
     msg = _make_message(
         id="msg_embed",
@@ -1468,7 +1472,7 @@ async def test_sticker_image_upload(tmp_path: Path, mock_aiohttp: aioresponses) 
     sticker_dir = tmp_path / "stickers"
     sticker_dir.mkdir()
     sticker_file = sticker_dir / "cool.png"
-    sticker_file.write_bytes(b"fake-sticker-data")
+    sticker_file.write_bytes(_VALID_PNG)
 
     msg = _make_message(
         id="msg_sticker",
@@ -1617,7 +1621,7 @@ async def test_file_size_zero_falls_through_to_upload(
 ) -> None:
     """file_size_bytes=0 (unknown size) falls through to normal upload path."""
     att_file = tmp_path / "unknown_size.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
 
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_id"})
 
@@ -1646,7 +1650,7 @@ async def test_file_size_zero_falls_through_to_upload(
 async def test_attachment_upload_uses_original_unicode_dce_filename(tmp_path: Path) -> None:
     """Autumn receives fileName, rather than DCE's hash-suffixed media path name."""
     stored_path = tmp_path / "report-a1b2c3d4.pdf"
-    stored_path.write_bytes(b"data")
+    stored_path.write_bytes(_VALID_PNG)
     state = _make_state()
     config = _make_config(tmp_path)
     message = _make_message(
@@ -1680,7 +1684,7 @@ async def test_attachment_exactly_at_limit_proceeds(
 ) -> None:
     """Attachment exactly at 20 MB limit proceeds to upload (> not >=)."""
     att_file = tmp_path / "exact.bin"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
 
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_exact"})
 
@@ -1905,7 +1909,7 @@ async def test_checkpoint_interval_from_config(tmp_path: Path, mock_aiohttp: aio
 async def test_successful_send_marks_referenced(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """After a successful api_send_message, autumn_ids are added to referenced_autumn_ids."""
     att_file = tmp_path / "file.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_att1"})
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg1"})
 
@@ -1932,7 +1936,7 @@ async def test_failed_send_leaves_orphan(tmp_path: Path) -> None:
         raise RuntimeError("API down")
 
     att_file = tmp_path / "file.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -2193,7 +2197,7 @@ async def test_five_attachments_no_overflow(tmp_path: Path, mock_aiohttp: aiores
     """5 attachments produce no overflow warning and no overflow text in content."""
     for i in range(5):
         f = tmp_path / f"file{i}.png"
-        f.write_bytes(b"x" * 10)
+        f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
@@ -2227,7 +2231,7 @@ async def test_seven_attachments_overflow_text(tmp_path: Path, mock_aiohttp: aio
     """7 attachments: first 5 uploaded, content includes overflow text, state updated."""
     for i in range(5):
         f = tmp_path / f"file{i}.png"
-        f.write_bytes(b"x" * 10)
+        f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
@@ -2264,7 +2268,7 @@ async def test_ten_attachments_overflow(tmp_path: Path, mock_aiohttp: aiorespons
     """10 attachments: 5 in overflow text."""
     for i in range(5):
         f = tmp_path / f"file{i}.png"
-        f.write_bytes(b"x" * 10)
+        f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
@@ -3274,7 +3278,7 @@ async def test_attachment_only_message_not_labeled_empty(
 ) -> None:
     """An attachment-only message (uploads OK) is NOT labeled [empty message] (S4.2)."""
     att_file = tmp_path / "file.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "att_id"})
     sent: list[dict[str, Any]] = []
     state = _make_state()
@@ -3353,7 +3357,7 @@ async def test_sticker_registered_in_autumn_uploads(
     """A successfully-uploaded sticker id is tracked in autumn_uploads and referenced."""
     sticker_dir = tmp_path / "stickers"
     sticker_dir.mkdir()
-    (sticker_dir / "cool.png").write_bytes(b"data")
+    (sticker_dir / "cool.png").write_bytes(_VALID_PNG)
     msg = _make_message(
         id="msg_s",
         content="hi",
@@ -3377,7 +3381,7 @@ async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: ai
     """verify_uploads on: a sticker size mismatch skips the sticker; the message still sends."""
     sticker_dir = tmp_path / "stickers"
     sticker_dir.mkdir()
-    (sticker_dir / "cool.png").write_bytes(b"data")
+    (sticker_dir / "cool.png").write_bytes(_VALID_PNG)
     msg = _make_message(
         id="msg_s2",
         content="hi",
@@ -3403,7 +3407,7 @@ async def test_embed_media_registered_and_referenced_not_orphan(
     """Embed media id is tracked AND referenced on success -> not reported as an orphan."""
     media = tmp_path / "media"
     media.mkdir()
-    (media / "thumb.png").write_bytes(b"png")
+    (media / "thumb.png").write_bytes(_VALID_PNG)
     msg = _make_message(
         id="msg_e",
         content="x",
@@ -3427,7 +3431,7 @@ async def test_embed_media_not_a_top_level_attachment(tmp_path: Path) -> None:
     """Embed media id is set on flat['media'] but NOT in the sent attachments (5-cap untouched)."""
     media = tmp_path / "media"
     media.mkdir()
-    (media / "thumb.png").write_bytes(b"png")
+    (media / "thumb.png").write_bytes(_VALID_PNG)
     msg = _make_message(
         id="msg_e2",
         content="x",
@@ -3458,7 +3462,7 @@ async def test_embed_media_unsent_is_orphan(tmp_path: Path) -> None:
 
     media = tmp_path / "media"
     media.mkdir()
-    (media / "thumb.png").write_bytes(b"png")
+    (media / "thumb.png").write_bytes(_VALID_PNG)
     msg = _make_message(
         id="msg_e3",
         content="x",
@@ -3481,7 +3485,7 @@ async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aior
     """verify_uploads on: an embed-media size mismatch skips the media; the message still sends."""
     media = tmp_path / "media"
     media.mkdir()
-    (media / "thumb.png").write_bytes(b"x" * 100)
+    (media / "thumb.png").write_bytes(_VALID_PNG)
     msg = _make_message(
         id="msg_e4",
         content="x",
@@ -3760,7 +3764,7 @@ async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: ai
     of forwarding at all.
     """
     att_file = tmp_path / "fwd.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "fwd_att_id"})
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
@@ -3792,7 +3796,7 @@ async def test_forwarded_with_empty_content_but_attachment_still_sends(
     than used to replace the content.
     """
     att_file = tmp_path / "only.png"
-    att_file.write_bytes(b"data")
+    att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "only_id"})
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
 
@@ -3832,7 +3836,7 @@ async def test_forwarded_attachments_over_the_cap_are_reported_not_dropped_silen
     state = _make_state()
     config = _make_config(tmp_path)
     for name in [f"o{i}.png" for i in range(4)] + [f"f{i}.png" for i in range(2)]:
-        (tmp_path / name).write_bytes(b"data")
+        (tmp_path / name).write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "up"}, repeat=True)
     own = [DCEAttachment(id=f"o{i}", url=f"o{i}.png", file_name=f"o{i}.png") for i in range(4)]
     fwd = [DCEAttachment(id=f"f{i}", url=f"f{i}.png", file_name=f"f{i}.png") for i in range(2)]
@@ -4503,7 +4507,7 @@ async def test_attachment_upload_passes_skip_cache(tmp_path: Path) -> None:
         return "fresh-id"
 
     att_file = tmp_path / "pic.png"
-    att_file.write_bytes(b"x" * 10)
+    att_file.write_bytes(_VALID_PNG)
 
     state = _make_state()
     config = _make_config(tmp_path)
