@@ -25,7 +25,7 @@ DiscordChatExporter.Cli exportguild \
 **Why:**
 
 - `--markdown false` preserves raw mention syntax (`<@123456789>`) so Ferry can remap mentions to Stoat users. Without it, mentions become plain text like `@Username` and cannot be reconstructed.
-- `--media` downloads all attachments locally. Discord CDN links expire within approximately 24 hours. Without this flag, images and files will be missing from the migration.
+- `--media` downloads assets referenced by the export, including attachments and images. Ferry needs those local files to migrate them.
 
 ---
 
@@ -41,7 +41,7 @@ Check that your Stoat instance can accept the files in your export:
 | Banners | 6 MB |
 | Emoji | 500 KB |
 
-**Why:** Files exceeding these limits will fail to upload silently. Self-hosted admins can raise limits in `Revolt.overrides.toml` — see [Self-Hosted Tips](self-hosted-tips.md). On the official hosted service, these limits are fixed.
+**Why:** Files exceeding these limits will fail to upload. Self-hosted admins can raise limits in `Revolt.overrides.toml`. See [Self-Hosted Tips](self-hosted-tips.md). On the official hosted service, these limits are fixed.
 
 ---
 
@@ -67,7 +67,7 @@ Ferry processes multiple channels in parallel (default: 3 concurrent). Use these
 | 50,000 | ~5 hours |
 | 100,000 | ~8–10 hours |
 
-**Why:** Large migrations take hours or days. Knowing the duration upfront lets you plan around maintenance windows and avoid interrupting a migration partway through. Ferry supports resume, but an uninterrupted run is always smoother. Actual speed depends on how evenly messages are distributed across channels — servers where one channel holds most messages will see less benefit from parallelism.
+**Why:** Large migrations take hours or days. Knowing the duration upfront lets you plan around maintenance windows and avoid interrupting a migration partway through. Ferry supports resume, but an uninterrupted run is always smoother. Actual speed depends on how evenly messages are distributed across channels. Servers where one channel holds most messages will see less benefit from parallelism.
 
 ---
 
@@ -77,7 +77,7 @@ Stoat's default limit is **200 channels per server**. Every Discord thread and f
 
 Run `ferry validate` on your export to see the projected channel count before starting.
 
-**Why:** If the total exceeds 200, the migration will fail partway through. Use `--thread-strategy merge` to avoid creating a channel per thread, or `--skip-threads` to omit threads entirely (both also available in the GUI). Self-hosted admins can raise the limit — see [Self-Hosted Tips](self-hosted-tips.md#raising-limits-for-migration).
+**Why:** If the total exceeds 200, the migration will fail partway through. Use `--thread-strategy merge` to avoid creating a channel per thread, or `--skip-threads` to omit threads entirely (both also available in the GUI). Self-hosted admins can raise the limit. See [Self-Hosted Tips](self-hosted-tips.md#raising-limits-for-migration).
 
 ---
 
@@ -138,7 +138,7 @@ Ferry 2.0 adds several options. Decide which apply to your migration before you 
 | `--thread-strategy flatten\|merge\|archive` | Controls how Discord threads are represented in Stoat | Default is `flatten` (each thread becomes a channel). Use `merge` to append thread messages to the parent channel, or `archive` to create read-only channels |
 | `--incremental` | Migrate only messages posted since the last run | Subsequent runs on a live-but-slowing server; requires a previous completed migration |
 | `--verify-uploads` | After each file upload, compare file sizes | Use when uploads may be silently corrupted (slow connections, large files) |
-| `--cleanup-orphans` | Detect and report files that were uploaded but never referenced (report-only — nothing is deleted) | Useful on self-hosted instances to find files worth cleaning up manually |
+| `--cleanup-orphans` | Detect and report files that were uploaded but never referenced (report-only, nothing is deleted) | Useful on self-hosted instances to find files worth cleaning up manually |
 | `--force` | Override the export freshness check (exports older than 30 days) | Only use if re-running with a known-good old export |
 | `--force-unlock` | Remove the advisory migration lock from the server | Use if a previous migration crashed and left the lock in place |
 | `--skip-dce-verify` | Skip SHA-256 verification of the DCE binary | Not recommended; use only in air-gapped environments where the hash is already verified |
@@ -149,7 +149,7 @@ Ferry 2.0 adds several options. Decide which apply to your migration before you 
 | `--skip-avatars` | Skip the avatar pre-flight phase | Avatars still upload on demand during messages |
 | `--validate-after` | Post-migration count comparison | Use when you want an automatic sanity check of the result |
 
-**Why:** Choosing the wrong thread strategy or omitting `--incremental` on a second run will duplicate messages or create an unexpected channel structure. Decide before starting — these options cannot be changed mid-migration.
+**Why:** Choosing the wrong thread strategy or omitting `--incremental` on a second run will duplicate messages or create an unexpected channel structure. Decide before starting. These options cannot be changed mid-migration.
 
 ---
 
@@ -173,7 +173,7 @@ Copy this condensed checklist for quick use:
 
 ## See Also
 
-- [Exporting from Discord](../getting-started/export-discord.md) — detailed export instructions
-- [Known Limitations](known-limitations.md) — what changes or gets lost during migration
-- [Self-Hosted Tips](self-hosted-tips.md) — raising limits and configuring your Stoat instance
-- [Troubleshooting](troubleshooting.md) — solutions for common migration errors
+- [Exporting from Discord](../getting-started/export-discord.md), detailed export instructions
+- [Known Limitations](known-limitations.md), what changes or gets lost during migration
+- [Self-Hosted Tips](self-hosted-tips.md), raising limits and configuring your Stoat instance
+- [Troubleshooting](troubleshooting.md), solutions for common migration errors

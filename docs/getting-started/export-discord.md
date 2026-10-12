@@ -17,7 +17,7 @@ correctly.
 - A computer running Windows, macOS, or Linux
 - Access to your Discord account in a web browser (not the desktop app)
 - Enough free disk space for your server's media (allow 2x your server's approximate file size)
-- Server Manager or Administrator role on the Discord server you are migrating
+- A Discord account that can view the channels you want to export and read their message history
 
 ---
 
@@ -52,58 +52,18 @@ These file names are from the [DiscordChatExporter 2.48 release assets](https://
 
 ---
 
-## Step 2: Get Your Discord User Token
+## Step 2: Get a Discord Token
 
-Your Discord user token (a long string of letters, numbers, and symbols) acts like a temporary
-password that lets DCE read your server on your behalf. This is different from a bot token.
-
-!!! warning "Use a user token, NOT a bot token"
-    Bot tokens cannot reliably export threads. Forum channels and thread history will be incomplete
-    or missing entirely if you use a bot token. You must use your **user** token.
+DiscordChatExporter accepts either a user token or a bot token. Use a token for an account that
+can view the channels you want to export and read their message history.
 
 !!! warning "Never share your token with anyone"
-    Your user token gives complete access to your Discord account, the same as your email and
-    password combined. Do not paste it into chat, DMs, screenshots, or support tickets. Treat it
-    like your bank password. If you accidentally share it, go to Discord Settings and change your
-    password immediately; this invalidates the old token.
+    A token gives the bearer access as that account. Do not paste it into chat, DMs, screenshots,
+    or support tickets. Treat it like a password.
 
-### How to find your user token
-
-These steps use a web browser. Chrome, Firefox, and Edge all work.
-
-1. Open **[https://discord.com/app](https://discord.com/app)** in your browser and log in if
-   prompted.
-
-2. Press **F12** (Windows/Linux) or **Option + Command + I** (macOS) to open the browser's
-   developer tools panel (a panel with code and network information used by web developers).
-
-3. Click the **Network** tab at the top of the developer tools panel.
-
-<!-- screenshot: Browser developer tools open with Network tab selected -->
-
-4. In the Network tab, look for a search or filter box and type `library` to filter requests.
-
-5. In Discord's main window, click on any server or channel to trigger a network request.
-
-6. A request named `library` (or similar) should appear in the list. Click it.
-
-7. In the panel that opens on the right, scroll down to find the **Request Headers** section.
-
-8. Find the line that starts with `authorization:`. The value after the colon is your token.
-   It looks like a long string such as:
-   ```
-   MTExMjM0NTY3ODkw.GhIjKl.AbCdEfGhIjKlMnOpQrStUvWxYz012345
-   ```
-
-9. Right-click the value and choose **Copy value**, or click at the start of the value and
-   drag to select it all, then copy.
-
-<!-- screenshot: Network tab showing the authorization header value -->
-
-!!! tip "Token not appearing?"
-    Try clicking on a different channel or server in Discord to generate a new network request,
-    then look for the `authorization` header again. Make sure you are on the **Network** tab,
-    not the **Console** or **Elements** tab.
+For instructions on obtaining a token, use the
+[DiscordChatExporter guide](https://github.com/Tyrrrz/DiscordChatExporter/wiki/Obtaining-Token).
+The upstream guide can keep pace with Discord's web application.
 
 ---
 
@@ -128,9 +88,8 @@ The server ID is a long number, such as `987654321012345678`.
     - **`--markdown false`**: Without this flag, DCE replaces raw mention data like `<@123456>`
       with plain text like `@Username`. Discord Ferry uses the raw IDs to remap mentions to Stoat
       users. If the IDs are gone, all mentions will appear as plain text in the migrated server.
-    - **`--media`**: Without this flag, DCE saves only Discord CDN links instead of downloading
-      the actual files. Discord CDN links expire within approximately 24 hours. Any attachment
-      link that was not downloaded will be permanently broken in the migrated server.
+    - **`--media`**: Downloads assets referenced by the export, including attached files and
+      images. Ferry needs those local files to migrate attachments.
 
 Open a terminal, the text command window (on Windows: Command Prompt or PowerShell; on macOS/Linux: the Terminal app). Navigate to the folder where you unzipped DCE.
 
@@ -152,7 +111,7 @@ Replace:
 
 | Placeholder | Replace with |
 |-------------|-------------|
-| `YOUR_TOKEN_HERE` | The token you copied in Step 2 |
+| `YOUR_TOKEN_HERE` | The token you obtained in Step 2 |
 | `YOUR_SERVER_ID` | The server ID you copied in Step 3 |
 
 !!! tip "Keeping the token out of your shell history"
