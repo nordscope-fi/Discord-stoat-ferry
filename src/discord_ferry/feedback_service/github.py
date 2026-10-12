@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 _API_ROOT = "https://api.github.com"
 _GRAPHQL_URL = f"{_API_ROOT}/graphql"
-_API_VERSION = "2022-11-28"
+_API_VERSION = "2026-03-10"
 _APP_JWT_LIFETIME = timedelta(minutes=10)
 _APP_JWT_CLOCK_SKEW = timedelta(minutes=1)
 _INSTALLATION_REFRESH = timedelta(minutes=1)

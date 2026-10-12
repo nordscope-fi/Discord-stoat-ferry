@@ -379,7 +379,7 @@ async def test_auth_mints_rs256_app_jwt_and_uses_installation_identifiers(
     request = mock_github.requests[("POST", URL(INSTALLATION_URL))][0]
     headers = request.kwargs["headers"]
     assert headers["Accept"] == "application/vnd.github+json"
-    assert headers["X-GitHub-Api-Version"] == "2022-11-28"
+    assert headers["X-GitHub-Api-Version"] == "2026-03-10"
     scheme, encoded = headers["Authorization"].split(" ", 1)
     assert scheme == "Bearer"
     claims = jwt.decode(
