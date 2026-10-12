@@ -2,12 +2,14 @@
 
 import ssl
 from pathlib import Path
+from unittest.mock import patch
 
 import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from aioresponses import aioresponses
+from PIL import Image
 
 from discord_ferry.core.http import new_session
 from discord_ferry.errors import AutumnUploadError
@@ -15,6 +17,16 @@ from discord_ferry.uploader.autumn import upload_to_autumn, upload_with_cache
 
 AUTUMN_URL = "https://autumn.test"
 TOKEN = "test-token-abc"
+_VALID_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc````\x00\x00\x00\x05\x00\x01"
+    b"\xa5\xf6E@\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def _valid_png(size: int) -> bytes:
+    """Return a decodable PNG with at least *size* bytes for upload tests."""
+    return _VALID_PNG + b"x" * max(size - len(_VALID_PNG), 0)
 
 
 @pytest.fixture
@@ -37,7 +49,7 @@ async def session() -> aiohttp.ClientSession:
 async def test_upload_to_autumn_success(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A valid file upload returns the Autumn file ID from the JSON response."""
     file = tmp_path / "test.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
 
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "file123"})
 
@@ -51,7 +63,7 @@ async def test_upload_to_autumn_preserves_unicode_filename(tmp_path: Path) -> No
     """Autumn receives the original Unicode filename in its multipart metadata."""
     filename = "guést ☃ name.png"
     file = tmp_path / filename
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     received_bodies: list[bytes] = []
 
     async def receive_upload(request: web.Request) -> web.Response:
@@ -78,7 +90,7 @@ async def test_upload_to_autumn_preserves_unicode_filename(tmp_path: Path) -> No
 async def test_upload_to_autumn_uses_supplied_unicode_filename(tmp_path: Path) -> None:
     """Attachment metadata can differ from DCE's hash-suffixed local media path."""
     file = tmp_path / "report-a1b2c3d4.pdf"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     received_bodies: list[bytes] = []
 
     async def receive_upload(request: web.Request) -> web.Response:
@@ -127,6 +139,185 @@ async def test_upload_to_autumn_file_too_large(tmp_path: Path) -> None:
             await upload_to_autumn(session, AUTUMN_URL, "emojis", oversized, TOKEN)
 
 
+async def test_upload_to_autumn_rejects_an_empty_attachment_before_request(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Autumn's FileTooSmall response is avoided for every tag, including attachments."""
+    empty = tmp_path / "empty.bin"
+    empty.touch()
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "must-not-upload"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="empty"):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", empty, TOKEN)
+
+    assert not mock_aiohttp.requests
+
+
+async def test_upload_to_autumn_rejects_corrupt_image_before_request(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Image-only tags reject input Pillow cannot decode without sending it to Autumn."""
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not an image")
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", payload={"id": "must-not-upload"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="valid image"):
+            await upload_to_autumn(session, AUTUMN_URL, "icons", corrupt, TOKEN)
+
+    assert not mock_aiohttp.requests
+
+
+async def test_upload_to_autumn_rejects_corrupt_image_attachment_before_request(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """An original image filename makes attachments validate cached image content too."""
+    cached = tmp_path / "cached-media.bin"
+    cached.write_bytes(b"not an image")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "must-not-upload"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="valid image"):
+            await upload_to_autumn(
+                session,
+                AUTUMN_URL,
+                "attachments",
+                cached,
+                TOKEN,
+                filename="photo.png",
+            )
+
+    assert not mock_aiohttp.requests
+
+
+async def test_upload_to_autumn_rejects_recognized_corrupt_image_attachment(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Content identified as an image must not bypass attachment validation."""
+    corrupt = bytearray(_VALID_PNG)
+    corrupt[corrupt.index(b"IDAT") + 4] = 0
+    cached = tmp_path / "cached-media.bin"
+    cached.write_bytes(corrupt)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "must-not-upload"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="valid image"):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", cached, TOKEN)
+
+    assert not mock_aiohttp.requests
+
+
+async def test_upload_to_autumn_rejects_image_with_corrupt_png_crc(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """PNG checksum corruption must fail even when loading its pixels succeeds."""
+    corrupt = bytearray(_VALID_PNG)
+    idat = corrupt.index(b"IDAT")
+    data_length = int.from_bytes(corrupt[idat - 4 : idat], "big")
+    crc_offset = idat + 4 + data_length
+    corrupt[crc_offset] ^= 1
+    image = tmp_path / "image.png"
+    image.write_bytes(corrupt)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "must-not-upload"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="valid image"):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", image, TOKEN)
+
+    assert not mock_aiohttp.requests
+
+
+@pytest.mark.parametrize(
+    "local_name,filename", [("image.jxl", None), ("cached-media.bin", "photo.jxl")]
+)
+async def test_upload_to_autumn_rejects_known_corrupt_png_with_jxl_filename(
+    tmp_path: Path, mock_aiohttp: aioresponses, local_name: str, filename: str | None
+) -> None:
+    """A JPEG XL filename must not bypass checks for identified PNG content."""
+    corrupt = bytearray(_VALID_PNG)
+    idat = corrupt.index(b"IDAT")
+    data_length = int.from_bytes(corrupt[idat - 4 : idat], "big")
+    corrupt[idat + 4 + data_length] ^= 1
+    image = tmp_path / local_name
+    image.write_bytes(corrupt)
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "must-not-upload"})
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="valid image"):
+            await upload_to_autumn(
+                session, AUTUMN_URL, "attachments", image, TOKEN, filename=filename
+            )
+
+    assert not mock_aiohttp.requests
+
+
+async def test_upload_to_autumn_permits_non_image_attachment(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Attachments remain able to carry arbitrary document bytes."""
+    document = tmp_path / "report.pdf"
+    document.write_bytes(b"%PDF-1.7\nnot an image")
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "document-id"})
+
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "attachments", document, TOKEN)
+
+    assert result == "document-id"
+
+
+async def test_upload_to_autumn_permits_eps_without_external_renderer(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """An EPS document stays an attachment without invoking Ghostscript."""
+    document = tmp_path / "drawing.eps"
+    document.write_bytes(
+        b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\n%%EndComments\nshowpage\n%%EOF\n"
+    )
+    mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "eps-id"})
+
+    with patch(
+        "PIL.EpsImagePlugin.Ghostscript", side_effect=AssertionError("renderer called")
+    ) as render:
+        async with aiohttp.ClientSession() as session:
+            result = await upload_to_autumn(session, AUTUMN_URL, "attachments", document, TOKEN)
+
+    assert result == "eps-id"
+    render.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "image_format", ["AVIF", "BMP", "GIF", "ICO", "JPEG", "PNG", "TIFF", "WEBP"]
+)
+async def test_upload_to_autumn_accepts_stoat_pillow_image_formats(
+    tmp_path: Path, mock_aiohttp: aioresponses, image_format: str
+) -> None:
+    """Every Stoat image format decoded by Pillow remains uploadable."""
+    file = tmp_path / "image.bin"
+    with Image.new("RGB", (16, 16), (20, 40, 60)) as image:
+        image.save(file, format=image_format)
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", payload={"id": "image-id"})
+
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "icons", file, TOKEN)
+
+    assert result == "image-id"
+
+
+async def test_upload_to_autumn_defers_jxl_validation_to_stoat(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """JPEG XL stays uploadable because Pillow does not decode Stoat's JXL format."""
+    jxl = tmp_path / "image.jxl"
+    jxl.write_bytes(b"\xff\x0aJXL payload for Stoat")
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", payload={"id": "jxl-id"})
+
+    async with aiohttp.ClientSession() as session:
+        result = await upload_to_autumn(session, AUTUMN_URL, "icons", jxl, TOKEN)
+
+    assert result == "jxl-id"
+
+
 async def test_upload_to_autumn_invalid_tag(tmp_path: Path) -> None:
     """An unrecognised tag raises AutumnUploadError before any HTTP call."""
     file = tmp_path / "file.bin"
@@ -140,7 +331,7 @@ async def test_upload_to_autumn_invalid_tag(tmp_path: Path) -> None:
 async def test_upload_to_autumn_429_retry(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A 429 response causes a retry after the retry_after delay; second attempt succeeds."""
     file = tmp_path / "img.png"
-    file.write_bytes(b"y" * 200)
+    file.write_bytes(_valid_png(200))
 
     # First request: 429 with 100 ms retry_after
     mock_aiohttp.post(
@@ -195,10 +386,47 @@ async def test_upload_to_autumn_413_specific_message(
 ) -> None:
     """HTTP 413 produces error message with file size and limit."""
     file = tmp_path / "big.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=413, body=b"Payload Too Large")
     async with aiohttp.ClientSession() as session:
         with pytest.raises(AutumnUploadError, match="File too large"):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+
+
+async def test_upload_to_autumn_422_file_too_large_specific_message(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Stoat's FileTooLarge response has the same actionable error as HTTP 413."""
+    file = tmp_path / "big.png"
+    file.write_bytes(_valid_png(100))
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=422,
+        payload={"type": "FileTooLarge", "max": 1_234_567},
+    )
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(
+            AutumnUploadError,
+            match=r"File too large \(HTTP 422\).*limit: 1\.2 MB",
+        ):
+            await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
+
+
+async def test_upload_to_autumn_other_422_keeps_the_server_error(
+    tmp_path: Path, mock_aiohttp: aioresponses
+) -> None:
+    """Only FileTooLarge is translated into the local size-limit message."""
+    file = tmp_path / "empty.png"
+    file.write_bytes(_valid_png(100))
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=422,
+        payload={"type": "FileTooSmall"},
+    )
+
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(AutumnUploadError, match="FileTooSmall"):
             await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
 
 
@@ -210,7 +438,7 @@ async def test_upload_to_autumn_413_specific_message(
 async def test_upload_with_cache_hit(tmp_path: Path) -> None:
     """A pre-populated cache entry is returned without making any HTTP request."""
     file = tmp_path / "cached.png"
-    file.write_bytes(b"c" * 100)
+    file.write_bytes(_valid_png(100))
 
     cache: dict[str, str] = {f"attachments:{file}": "cached_id_xyz"}
 
@@ -227,7 +455,7 @@ async def test_upload_with_cache_hit(tmp_path: Path) -> None:
 async def test_upload_with_cache_miss(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A cache miss triggers an upload and stores the result in the cache dict."""
     file = tmp_path / "fresh.png"
-    file.write_bytes(b"f" * 100)
+    file.write_bytes(_valid_png(100))
 
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "new_file_id"})
 
@@ -407,7 +635,7 @@ async def test_upload_with_cache_skip_cache_gets_fresh_id(
 ) -> None:
     """With skip_cache=True, a cached key is ignored and a fresh upload runs."""
     f = tmp_path / "shared.png"
-    f.write_bytes(b"x" * 50)
+    f.write_bytes(_valid_png(50))
     cache: dict[str, str] = {f"attachments:{f}": "cached-id-111"}
 
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "fresh-id-222"})
@@ -457,7 +685,7 @@ async def test_upload_non_json_200_raises_autumn_error(
 ) -> None:
     """A 200 with an HTML body raises AutumnUploadError, not ContentTypeError."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=200,
@@ -474,7 +702,7 @@ async def test_upload_empty_200_body_raises_autumn_error(
 ) -> None:
     """An empty 200 body (json -> None) raises AutumnUploadError."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=200, body=b"")
     async with aiohttp.ClientSession() as session:
         with pytest.raises(AutumnUploadError):
@@ -486,7 +714,7 @@ async def test_upload_200_missing_id_raises_autumn_error(
 ) -> None:
     """A 200 whose JSON lacks 'id' raises AutumnUploadError."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"size": 50})
     async with aiohttp.ClientSession() as session:
         with pytest.raises(AutumnUploadError):
@@ -498,7 +726,7 @@ async def test_upload_error_message_omits_token_and_body(
 ) -> None:
     """The raised error never contains the response body or the token (Tiger #1)."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=200,
@@ -521,7 +749,7 @@ async def test_upload_error_message_omits_token_and_body(
 async def test_verify_size_mismatch_raises(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """verify_size=True with a server size != local size raises AutumnUploadError."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 999})
     async with aiohttp.ClientSession() as session:
         with pytest.raises(AutumnUploadError, match="size mismatch"):
@@ -533,7 +761,7 @@ async def test_verify_size_mismatch_raises(tmp_path: Path, mock_aiohttp: aioresp
 async def test_verify_size_mismatch_not_cached(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A mismatch via upload_with_cache leaves NO cache entry (corrupt id never cached)."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 999})
     cache: dict[str, str] = {}
     async with aiohttp.ClientSession() as session:
@@ -549,7 +777,7 @@ async def test_verify_size_match_returns_and_caches(
 ) -> None:
     """verify_size=True with matching size returns the id and caches it."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 100})
     cache: dict[str, str] = {}
     async with aiohttp.ClientSession() as session:
@@ -565,7 +793,7 @@ async def test_verify_size_no_size_field_returns_id(
 ) -> None:
     """verify_size=True with no 'size' field returns the id (best-effort unchanged)."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x"})
     async with aiohttp.ClientSession() as session:
         result = await upload_to_autumn(
@@ -579,7 +807,7 @@ async def test_verify_size_false_ignores_mismatch(
 ) -> None:
     """Default verify_size=False ignores a size mismatch (path unchanged)."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 100)
+    file.write_bytes(_valid_png(100))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "x", "size": 999})
     async with aiohttp.ClientSession() as session:
         result = await upload_to_autumn(session, AUTUMN_URL, "attachments", file, TOKEN)
@@ -608,7 +836,7 @@ async def test_429_html_body_retries_then_succeeds(
 ) -> None:
     """A 429 with an HTML body retries (no ContentTypeError) using the default backoff."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments", status=429, body=b"<html>429</html>", content_type="text/html"
     )
@@ -624,7 +852,7 @@ async def test_429_empty_body_default_backoff(
 ) -> None:
     """A 429 with an empty body falls back to the 1000 ms default."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, body=b"")
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
     async with aiohttp.ClientSession() as session:
@@ -638,7 +866,7 @@ async def test_429_body_retry_after_honored(
 ) -> None:
     """A 429 with a body retry_after sleeps that many ms (existing behavior preserved)."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": 100})
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
     async with aiohttp.ClientSession() as session:
@@ -652,7 +880,7 @@ async def test_429_retry_after_header_used(
 ) -> None:
     """A 429 with no body field but a Retry-After header sleeps that many seconds."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments", status=429, body=b"", headers={"Retry-After": "2"}
     )
@@ -668,7 +896,7 @@ async def test_429_exhausted_raises(
 ) -> None:
     """Three consecutive 429s exhaust retries and raise AutumnUploadError (no crash)."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     for _ in range(3):
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, body=b"")
     async with aiohttp.ClientSession() as session:
@@ -692,7 +920,7 @@ async def test_429_x_ratelimit_reset_after_is_milliseconds(
     default made every Autumn 429 retry nine seconds early, into a bucket still shut.
     """
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -715,7 +943,7 @@ async def test_429_negative_retry_after_floors_at_zero(
     loop hot and burn all three attempts against a still-closed bucket.
     """
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": -5000})
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
     async with aiohttp.ClientSession() as session:
@@ -729,7 +957,7 @@ async def test_429_absurd_retry_after_is_capped(
 ) -> None:
     """An hour-long advertised delay is capped at 60 s rather than presenting as a hang."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -748,7 +976,7 @@ async def test_429_unparseable_reset_after_falls_back_to_default(
 ) -> None:
     """A non-numeric X-RateLimit-Reset-After is ignored, not fatal."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -767,7 +995,7 @@ async def test_429_body_retry_after_outranks_reset_after_header(
 ) -> None:
     """The body stays the most specific source when both it and the ms header are present."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -791,7 +1019,7 @@ async def test_429_retry_after_header_outranks_reset_after_header(
     precedence chain cannot silently swap the units.
     """
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -815,7 +1043,7 @@ async def test_429_nan_reset_after_header_falls_back_to_default(
     timer heap. Guards the clamp against giving false assurance.
     """
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -834,7 +1062,7 @@ async def test_429_infinite_reset_after_header_falls_back_to_default(
 ) -> None:
     """An infinite delay is treated as garbage, not as "wait the maximum"."""
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments",
         status=429,
@@ -857,7 +1085,7 @@ async def test_429_nan_body_retry_after_falls_back_to_default(
     serialising a float, not a hand-written header.
     """
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(
         f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": float("nan")}
     )
@@ -877,7 +1105,7 @@ async def test_429_boolean_body_retry_after_is_ignored(
     1.0 ms -- below the clamp's floor, so it would slip past as effectively no backoff.
     """
     file = tmp_path / "x.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_valid_png(50))
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", status=429, payload={"retry_after": True})
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "ok"})
     async with aiohttp.ClientSession() as session:
@@ -908,7 +1136,7 @@ async def test_certificate_error_becomes_an_actionable_autumn_error(
     reject — that is exactly the unactionable state #137 was filed about.
     """
     file = tmp_path / "icon.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/icons", exception=_cert_error())
 
     async with aiohttp.ClientSession() as session:
@@ -935,7 +1163,7 @@ async def test_certificate_error_is_not_retried(
     mocked, so a retry would also change the exception the caller sees.
     """
     file = tmp_path / "icon.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/icons", exception=_cert_error())
 
     async with aiohttp.ClientSession() as session:
@@ -957,7 +1185,7 @@ async def test_non_certificate_client_error_is_re_raised_unchanged(
     under both implementations — the AutumnUploadError check is what discriminates.
     """
     file = tmp_path / "icon.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/icons", exception=aiohttp.ClientOSError("connection reset"))
 
     async with aiohttp.ClientSession() as session:
@@ -982,7 +1210,7 @@ async def test_a_refused_proxy_names_the_proxy(
     TYPE before any assertion below runs. That is the mutant's signature here.
     """
     file = tmp_path / "icon.png"
-    file.write_bytes(b"x" * 50)
+    file.write_bytes(_VALID_PNG)
     make, _ = fake_proxy
     server = await make(b"403 Forbidden")
     port = server.sockets[0].getsockname()[1]

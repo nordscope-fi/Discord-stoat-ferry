@@ -54,7 +54,7 @@ async def test_private_http_raw_upload_remains_available(tmp_path: Path) -> None
                 "session-token",
             )
 
-    assert status == 413
+    assert status == (413, None)
     assert len(mocked.requests[("POST", URL(url))]) == 1
 
 

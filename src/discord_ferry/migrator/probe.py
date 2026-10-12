@@ -80,8 +80,8 @@ async def _raw_autumn_upload(
     tag: str,
     file_path: Path,
     token: str,
-) -> int:
-    """Upload a file to Autumn and return the HTTP status code.
+) -> tuple[int, str | None]:
+    """Upload a file to Autumn and return its status and typed 422 error, if any.
 
     No client-side size check, no retry. Used by the deep probe to test
     whether the server enforces its advertised limit.
@@ -100,7 +100,14 @@ async def _raw_autumn_upload(
         async with session.post(url, data=form, headers=headers, allow_redirects=False) as resp:
             if 300 <= resp.status < 400:
                 raise AutumnUploadError("Deep-probe Autumn request refused a redirect.")
-            return resp.status
+            error_type: str | None = None
+            if resp.status == 422:
+                with contextlib.suppress(aiohttp.ClientError, ValueError):
+                    body: Any = await resp.json(content_type=None)
+                    response_type = body.get("type") if isinstance(body, dict) else None
+                    if isinstance(response_type, str):
+                        error_type = response_type
+            return resp.status, error_type
     finally:
         fh.close()
 
@@ -458,13 +465,17 @@ async def _probe_one_tag(
                 banner_set = True
 
         over_file = _make_test_file(tmp, tag, limit + 1)
-        over_status = await _raw_autumn_upload(sess, autumn_url, tag, over_file, token)
+        over_status, over_error_type = await _raw_autumn_upload(
+            sess, autumn_url, tag, over_file, token
+        )
+        limit_enforced = over_status == 422 and over_error_type == "FileTooLarge"
 
         report.add(
             f"deep_{tag}_over_limit",
-            "ok" if over_status != 200 else "warn",
+            "ok" if limit_enforced else "warn",
             f"size={limit + 1}, limit={limit}, status={over_status}"
-            + ("" if over_status != 200 else " (limit NOT enforced)"),
+            + (f", type={over_error_type}" if over_error_type else "")
+            + ("" if limit_enforced else " (expected FileTooLarge 422)"),
         )
     except Exception as exc:  # noqa: BLE001
         report.add(f"deep_{tag}_error", "fail", f"{type(exc).__name__}: {exc}")

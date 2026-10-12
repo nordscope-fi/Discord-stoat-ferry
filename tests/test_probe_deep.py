@@ -66,6 +66,12 @@ def test_make_test_file_png_various_tags(tmp_path: Path) -> None:
             assert f.read(8) == b"\x89PNG\r\n\x1a\n", f"{tag} not valid PNG"
 
 
+def test_make_test_file_png_exact_at_tag_limit(tmp_path: Path) -> None:
+    """The at-limit probe sends exactly the configured number of image bytes."""
+    path = _make_test_file(tmp_path, "icons", TAG_SIZE_LIMITS["icons"])
+    assert path.stat().st_size == TAG_SIZE_LIMITS["icons"]
+
+
 async def test_check_autumn_returns_autumn_url(mock_aiohttp: aioresponses) -> None:
     """_check_autumn returns the discovered autumn_url for deep probe reuse."""
     mock_aiohttp.get(
@@ -96,8 +102,28 @@ async def test_raw_upload_returns_status_without_raising(
     test_file = tmp_path / "over.bin"
     test_file.write_bytes(b"\x00" * 100)
     async with aiohttp.ClientSession() as sess:
-        status = await _raw_autumn_upload(sess, AUTUMN_URL, "attachments", test_file, TOKEN)
-    assert status == 413
+        status, error_type = await _raw_autumn_upload(
+            sess, AUTUMN_URL, "attachments", test_file, TOKEN
+        )
+    assert (status, error_type) == (413, None)
+
+
+async def test_raw_upload_reads_stoat_file_too_large_type(
+    mock_aiohttp: aioresponses, tmp_path: Path
+) -> None:
+    """The deep probe records the typed 422 response that proves an enforced limit."""
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/attachments",
+        status=422,
+        payload={"type": "FileTooLarge", "max": 50},
+    )
+    test_file = tmp_path / "over.bin"
+    test_file.write_bytes(b"\x00" * 100)
+    async with aiohttp.ClientSession() as sess:
+        status, error_type = await _raw_autumn_upload(
+            sess, AUTUMN_URL, "attachments", test_file, TOKEN
+        )
+    assert (status, error_type) == (422, "FileTooLarge")
 
 
 async def test_raw_upload_returns_200_on_success(
@@ -109,7 +135,7 @@ async def test_raw_upload_returns_200_on_success(
     test_file.write_bytes(b"\x89PNG" + b"\x00" * 96)
     async with aiohttp.ClientSession() as sess:
         status = await _raw_autumn_upload(sess, AUTUMN_URL, "icons", test_file, TOKEN)
-    assert status == 200
+    assert status == (200, None)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +203,27 @@ async def test_deep_at_limit_accepted_reports_ok(
     assert result.startswith("ok:")
 
 
+async def test_deep_at_limit_file_too_large_reports_the_422_status(
+    mock_aiohttp: aioresponses, tmp_path: Path
+) -> None:
+    """A tier-specific FileTooLarge result identifies Stoat's actual 422 response."""
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/icons",
+        status=422,
+        payload={"type": "FileTooLarge", "max": ICON_LIMIT - 1},
+    )
+    _mock_over_limit_reject(mock_aiohttp, "icons")
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as sess:
+        await _probe_one_tag(
+            sess, BASE_URL, AUTUMN_URL, TOKEN, SERVER_ID, "icons", ICON_LIMIT, tmp_path, report
+        )
+
+    result = _check(report, "deep_icons_at_limit")
+    assert result.startswith("warn:")
+    assert "File too large (HTTP 422)" in result
+
+
 async def test_deep_over_limit_rejected_reports_ok(
     mock_aiohttp: aioresponses, tmp_path: Path
 ) -> None:
@@ -190,7 +237,50 @@ async def test_deep_over_limit_rejected_reports_ok(
             sess, BASE_URL, AUTUMN_URL, TOKEN, SERVER_ID, "icons", ICON_LIMIT, tmp_path, report
         )
     result = _check(report, "deep_icons_over_limit")
-    assert result.startswith("ok:")
+    assert result.startswith("warn:")
+    assert "expected FileTooLarge" in result
+
+
+async def test_deep_over_limit_file_too_large_reports_ok(
+    mock_aiohttp: aioresponses, tmp_path: Path
+) -> None:
+    """Only Stoat's typed 422 response proves that the configured limit was enforced."""
+    _mock_at_limit_accept(mock_aiohttp, "icons")
+    mock_aiohttp.post(
+        f"{AUTUMN_URL}/icons",
+        status=422,
+        payload={"type": "FileTooLarge", "max": ICON_LIMIT},
+    )
+    mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", status=200, payload={}, repeat=True)
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as sess:
+        await _probe_one_tag(
+            sess, BASE_URL, AUTUMN_URL, TOKEN, SERVER_ID, "icons", ICON_LIMIT, tmp_path, report
+        )
+
+    assert _check(report, "deep_icons_over_limit").startswith("ok:")
+
+
+@pytest.mark.parametrize(
+    ("status", "payload"),
+    [(422, {"type": "FileTooSmall"}), (403, {"type": "NotAuthorised"})],
+)
+async def test_deep_over_limit_other_response_reports_warn(
+    mock_aiohttp: aioresponses, tmp_path: Path, status: int, payload: dict[str, str]
+) -> None:
+    """A rejection unrelated to size does not show that Autumn enforced the tag limit."""
+    _mock_at_limit_accept(mock_aiohttp, "icons")
+    mock_aiohttp.post(f"{AUTUMN_URL}/icons", status=status, payload=payload)
+    mock_aiohttp.patch(f"{BASE_URL}/servers/{SERVER_ID}", status=200, payload={}, repeat=True)
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as sess:
+        await _probe_one_tag(
+            sess, BASE_URL, AUTUMN_URL, TOKEN, SERVER_ID, "icons", ICON_LIMIT, tmp_path, report
+        )
+
+    result = _check(report, "deep_icons_over_limit")
+    assert result.startswith("warn:")
+    assert "expected FileTooLarge" in result
 
 
 async def test_deep_over_limit_accepted_reports_warn(
@@ -207,7 +297,7 @@ async def test_deep_over_limit_accepted_reports_warn(
         )
     result = _check(report, "deep_icons_over_limit")
     assert result.startswith("warn:")
-    assert "limit NOT enforced" in result
+    assert "expected FileTooLarge 422" in result
 
 
 async def test_deep_attachments_channel_deleted_on_success(

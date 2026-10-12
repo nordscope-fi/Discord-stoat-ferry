@@ -24,6 +24,9 @@ nicegui_datas, nicegui_bins, nicegui_imports = collect_all("nicegui")
 # aiohttp has its own data files
 aiohttp_datas, aiohttp_bins, aiohttp_imports = collect_all("aiohttp")
 
+# upload_to_autumn validates image content with Pillow before sending files.
+pillow_datas, pillow_bins, pillow_imports = collect_all("PIL")
+
 # certifi's cacert.pem is the fallback trust store core/http.py loads on top of
 # the OS store (issue #134). hooks-contrib would usually collect it, but only
 # if the analysis sees certifi imported; naming it here removes that condition.
@@ -44,17 +47,18 @@ ferry_imports = collect_submodules("discord_ferry")
 # Aggregate
 # ---------------------------------------------------------------------------
 
-all_datas = nicegui_datas + aiohttp_datas + webview_datas + certifi_datas + [
+all_datas = nicegui_datas + aiohttp_datas + pillow_datas + webview_datas + certifi_datas + [
     ("src/discord_ferry/templates/*.json", "discord_ferry/templates"),
     # Pinned DCE SHA-256 hashes — MUST be bundled, otherwise exporter/manager.py
     # silently skips checksum verification in the frozen binary (the supply-chain
     # security gate from v2.2.12 would be defeated only in the shipped app).
     ("src/discord_ferry/dce_checksums.json", "discord_ferry"),
 ]
-all_binaries = nicegui_bins + aiohttp_bins + webview_bins
+all_binaries = nicegui_bins + aiohttp_bins + pillow_bins + webview_bins
 all_hiddenimports = (
     nicegui_imports
     + aiohttp_imports
+    + pillow_imports
     + webview_imports
     + uvicorn_imports
     + ferry_imports
@@ -98,7 +102,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "PIL", "numpy", "pandas"],
+    excludes=["tkinter", "matplotlib", "numpy", "pandas"],
     noarchive=False,
 )
 
