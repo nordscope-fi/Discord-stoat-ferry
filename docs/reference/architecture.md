@@ -753,10 +753,13 @@ memory flat for large exports.
 a time with O(1) memory per message. Used by VALIDATE (for scanning), EMOJI (for extraction),
 and MESSAGES (for import) when running in metadata-only mode.
 
-**Validation** (`validate_export(exports, export_dir, author_names)`): Single-pass scan that
-checks for rendered markdown detection (missing `--markdown false`), missing media files,
-duplicate channel IDs, and limit violations. Populates `author_names` dict to avoid a second
-scan.
+**Directory parse** (`parse_export_directory(export_dir)`): Refuses duplicate channel IDs before
+the validation scan. Its error names every file carrying each repeated ID so the operator can
+remove the older export.
+
+**Validation** (`validate_export(exports, export_dir, author_names)`): Single-pass scan that checks
+for rendered markdown detection (missing `--markdown false`), missing media files, and limit
+violations. Populates `author_names` dict to avoid a second scan.
 
 ### Thread Inference
 

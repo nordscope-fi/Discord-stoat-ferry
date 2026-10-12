@@ -373,6 +373,37 @@ def test_parse_export_directory_refuses_invalid_files(fixtures_dir: Path, tmp_pa
         parse_export_directory(temp_dir)
 
 
+def _write_export_with_channel_id(path: Path, channel_id: str, channel_name: str) -> None:
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    data["channel"]["id"] = channel_id
+    data["channel"]["name"] = channel_name
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_parse_export_directory_rejects_duplicate_channel_ids_with_both_filenames(
+    tmp_path: Path,
+) -> None:
+    old_path = tmp_path / "Guild before rename - general [222].json"
+    new_path = tmp_path / "Guild after rename - chat [222].json"
+    _write_export_with_channel_id(old_path, "222", "general")
+    _write_export_with_channel_id(new_path, "222", "chat")
+
+    with pytest.raises(ExportError) as caught:
+        parse_export_directory(tmp_path, metadata_only=True)
+
+    assert old_path.name in str(caught.value)
+    assert new_path.name in str(caught.value)
+
+
+def test_parse_export_directory_accepts_distinct_channel_ids(tmp_path: Path) -> None:
+    _write_export_with_channel_id(tmp_path / "old-name.json", "111", "general")
+    _write_export_with_channel_id(tmp_path / "new-name.json", "222", "chat")
+
+    exports = parse_export_directory(tmp_path, metadata_only=True)
+
+    assert {export.channel.id for export in exports} == {"111", "222"}
+
+
 # ---------------------------------------------------------------------------
 # Thread detection on full export
 # ---------------------------------------------------------------------------
