@@ -963,11 +963,12 @@ class _FerryRequest(aiohttp.ClientRequest):
         `re.match` form lives in `requests`, not the standard library. Corrected
         at the final review of this branch.
 
-        The boundary stays, as defense in depth over that platform code. One
-        unguarded path is still real on 3.12: `_proxy_bypass_macosx_sysconf`
-        indexes `proxy_settings['exclude_simple']` without a guard, which raises
-        `KeyError`, and `KeyError` subclasses Exception directly rather than
-        ValueError or TypeError.
+        An earlier version also claimed that
+        `_proxy_bypass_macosx_sysconf` could raise `KeyError` while indexing
+        `proxy_settings['exclude_simple']`. CPython's
+        `_scproxy._get_proxy_settings()` inserts that key into every dictionary
+        it returns, defaulting it to false when macOS provides no value, so that
+        line cannot raise `KeyError`.
         """
         if url is None:
             return None
