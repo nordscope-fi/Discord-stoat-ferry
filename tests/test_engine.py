@@ -6112,6 +6112,80 @@ async def test_run_build_non_voice_channel_failure_propagates() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("categorized", [False, True])
+@pytest.mark.parametrize(
+    "channel_type, cap",
+    [
+        ("Voice", -1),
+        ("Voice", True),
+        ("Voice", "bad-cap-marker"),
+        ("Voice", 1.5),
+        ("Voice", None),
+        ("Text", 5),
+    ],
+)
+async def test_run_build_bad_cap_before_side_effects(
+    categorized: bool,
+    channel_type: str,
+    cap: object,
+) -> None:
+    from discord_ferry.blueprint import BlueprintCategory, BlueprintChannel, ServerBlueprint
+
+    ch = BlueprintChannel(name="invalid", type=channel_type)
+    ch.user_limit = cap  # type: ignore[assignment]  # Mutable runtime input can be malformed.
+    channels = [BlueprintChannel(name="valid"), ch]
+    bp = ServerBlueprint(
+        name="S",
+        categories=[BlueprintCategory(name="V", channels=channels)] if categorized else [],
+        uncategorized_channels=[] if categorized else channels,
+    )
+    create_server = AsyncMock(return_value="srv")
+    with (
+        patch.object(engine_module, "api_create_server", create_server),
+        patch.object(engine_module, "api_create_channel", AsyncMock(return_value={"_id": "ch"})),
+        patch.object(engine_module, "api_upsert_categories", AsyncMock()),
+        patch.object(engine_module, "new_session", return_value=AsyncMock()) as factory,
+        pytest.raises(MigrationError, match="user_limit") as error,
+    ):
+        await engine_module.run_build("https://api.test", "t", bp, lambda event: None)
+    create_server.assert_not_awaited()
+    factory.assert_not_called()
+    assert "bad-cap-marker" not in str(error.value)
+
+
+@pytest.mark.parametrize("categorized", [False, True])
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_run_build_voice_cap_body(categorized: bool, fallback: bool) -> None:
+    from discord_ferry.blueprint import BlueprintCategory, BlueprintChannel, ServerBlueprint
+
+    ch = BlueprintChannel(name="voice", type="Voice", user_limit=5)
+    bp = ServerBlueprint(
+        name="S",
+        categories=[BlueprintCategory(name="V", channels=[ch])] if categorized else [],
+        uncategorized_channels=[] if categorized else [ch],
+    )
+    events: list[MigrationEvent] = []
+    with (
+        aioresponses() as requests,
+        patch.object(engine_module, "api_create_server", AsyncMock(return_value="srv")),
+        patch.object(engine_module, "api_upsert_categories", AsyncMock()),
+    ):
+        if fallback:
+            requests.post("https://api.test/servers/srv/channels", status=400)
+        requests.post("https://api.test/servers/srv/channels", payload={"_id": "voice"})
+        async with aiohttp.ClientSession() as session:
+            await engine_module.run_build(
+                "https://api.test", "t", bp, events.append, session=session
+            )
+        calls = [call for batch in requests.requests.values() for call in batch]
+    assert calls[0].kwargs["json"]["voice"] == {"max_users": 5}
+    assert len(calls) == (2 if fallback else 1)
+    if fallback:
+        assert calls[1].kwargs["json"]["type"] == "Text"
+        assert "voice" not in calls[1].kwargs["json"]
+        assert any(event.status == "warning" for event in events)
+
+
 async def _repair_with_server_default(
     tmp_path: Path,
     *,
