@@ -19,6 +19,11 @@ import aiohttp
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session, proxy_hint, resolve_proxy_or_raise, tls_hint
 from discord_ferry.core.security import safe_sanitize, strip_control
+from discord_ferry.discord.client import (
+    DISCORD_5XX_MAX_ATTEMPTS,
+    DISCORD_5XX_RETRY_DELAY_SECONDS,
+    DISCORD_API_USER_AGENT,
+)
 from discord_ferry.errors import DiscordAuthError, ExportError
 from discord_ferry.exporter.dce_output import (
     Banner,
@@ -465,14 +470,30 @@ async def validate_discord_token(token: str) -> None:
     # the handler could pass as `target`, and proxy_hint takes no default for it.
     url = "https://discord.com/api/v10/users/@me"
     try:
-        async with (
-            new_session() as session,
-            session.get(url, headers={"Authorization": token}) as resp,
-        ):
-            if resp.status == 401:
-                raise DiscordAuthError("Invalid Discord token. Check that you copied it correctly.")
-            if resp.status != 200:
-                raise DiscordAuthError(f"Discord API returned unexpected status {resp.status}")
+        async with new_session() as session:
+            server_error_attempts = 0
+            while True:
+                async with session.get(
+                    url,
+                    headers={
+                        "Authorization": token,
+                        "User-Agent": DISCORD_API_USER_AGENT,
+                    },
+                ) as resp:
+                    if 500 <= resp.status < 600:
+                        server_error_attempts += 1
+                        if server_error_attempts < DISCORD_5XX_MAX_ATTEMPTS:
+                            await asyncio.sleep(DISCORD_5XX_RETRY_DELAY_SECONDS)
+                            continue
+                    if resp.status == 401:
+                        raise DiscordAuthError(
+                            "Invalid Discord token. Check that you copied it correctly."
+                        )
+                    if resp.status != 200:
+                        raise DiscordAuthError(
+                            f"Discord API returned unexpected status {resp.status}"
+                        )
+                    return
     except aiohttp.ClientError as exc:
         # Proxy first, never both, no gate: this handler has no retry.
         hint = proxy_hint(exc, target=url) or tls_hint(exc) or ""
