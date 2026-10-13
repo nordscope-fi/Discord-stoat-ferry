@@ -31,7 +31,7 @@ from discord_ferry.errors import CheckError, FerryError
 from discord_ferry.migrator.api import (
     api_fetch_emoji_list,
     api_fetch_messages,
-    api_fetch_server_with_channels,
+    api_fetch_server_view,
 )
 
 if TYPE_CHECKING:
@@ -390,9 +390,9 @@ async def _check_structure(
     tail check consults it and skips the rest, so one deleted channel yields one
     finding rather than two.
 
-    Two requests for the whole family, whatever the entity count: the server
-    fetch carries roles and categories as full objects alongside the channels,
-    and emoji need one more because ``Server`` has no emoji field.
+    Three requests for the whole family, whatever the entity count: plain and
+    expanded server reads separate membership from visibility, while emoji
+    need their own read because ``Server`` has no emoji field.
     """
     on_event(
         MigrationEvent(
@@ -401,39 +401,15 @@ async def _check_structure(
             message="Checking server structure...",
         )
     )
-    payload = await api_fetch_server_with_channels(sess, stoat_url, token, state.stoat_server_id)
+    view = await api_fetch_server_view(sess, stoat_url, token, state.stoat_server_id)
     emoji = await api_fetch_emoji_list(sess, stoat_url, token, state.stoat_server_id)
 
-    # Three id conventions arrive in this ONE response, verified against
-    # upstream rather than assumed, because they do not agree with each other:
-    #
-    #   channel objects   ->  "_id"   (Channel carries serde(rename = "_id"))
-    #   category objects  ->  "id"    (Category has NO rename)
-    #   roles             ->  the KEY of a HashMap<String, Role>, so the map's
-    #                         keys are read, not each Role's inner "_id"
-    #
-    # A later pass that "makes these consistent" breaks two of the three. The
-    # sibling hazard is already recorded for messages, which use "_id" while
-    # Ferry's webhook id field uses "id".
-    server = payload.get("server") or {}
-    # Two lists, and the pair is the discriminator. `server.channels` comes back
-    # UNFILTERED and names every channel id; the sibling array holds only the
-    # objects this token may ViewChannel. Consulting the objects alone cannot
-    # tell a deleted channel from one merely hidden, which would make
-    # `channel_missing` unreachable and lose the point of the tool.
-    all_channel_ids = set(server.get("channels") or [])
-    # An id-to-name dict, mirroring `found_titles` in the category branch below.
-    # The name is needed for the rename comparison and is already in this
-    # response, so keeping it costs no request and the two-request budget for the
-    # whole structure family is unchanged.
-    #
-    # The isinstance and `"_id" in c` guards are unchanged, so `visible_ids`
-    # derived from this dict has exactly the membership the previous set
-    # comprehension produced, malformed entries dropped identically.
+    # Channel objects use _id, categories use id, and roles use their map key.
+    # The plain server list retains hidden ids; expanded objects retain names.
+    all_channel_ids = view.all_channel_ids
+    # Collection identities are validated before any absence classification.
     visible_names = {
-        c["_id"]: _readable_name(c)
-        for c in (payload.get("channels") or [])
-        if isinstance(c, dict) and "_id" in c
+        identity: _readable_name(channel) for identity, channel in view.visible_channels.items()
     }
     visible_ids = set(visible_names)
 
@@ -518,19 +494,13 @@ async def _check_structure(
     # comparison needs the Role objects the values hold. `set()` over a dict
     # takes its keys, so `role_ids` is exactly what the previous one-liner
     # produced.
-    roles_map = server.get("roles") or {}
+    roles_map = view.roles
     role_ids = set(roles_map)
     for discord_id, stoat_id in state.role_map.items():
         present = stoat_id in role_ids
         if present:
             recorded_role = state.created_role_names.get(discord_id)
-            # Guard the VALUE, matching what the channel and category branches
-            # already do. Until this comparison existed the roles map was
-            # consumed with set(), which takes the KEYS and never touches a
-            # value, so a None or a bare string was harmless. Reading a name off
-            # one raises AttributeError, and mypy --strict cannot catch it
-            # because the payload is typed dict[str, Any]. A malformed value
-            # degrades to no-name-found rather than aborting the whole check.
+            # A valid role may have no readable name, so skip that comparison.
             found_role_name = _readable_name(roles_map.get(stoat_id))
             if (
                 recorded_role is not None
@@ -564,18 +534,8 @@ async def _check_structure(
             stoat_id=stoat_id,
         )
 
-    # Categories are the ONE entity whose expected name Ferry records, in
-    # state.category_names, so this is the only name comparison in the tool. A
-    # channel or role rename is undetectable, which is stated as a limit rather
-    # than approximated (spec P2 S11).
-    #
-    # `categories` is Optional upstream: the key can be absent entirely on a
-    # server that never had one, not merely an empty list.
-    found_titles = {
-        c["id"]: c.get("title", "")
-        for c in (server.get("categories") or [])
-        if isinstance(c, dict) and "id" in c
-    }
+    # A legitimately omitted category collection was normalized to empty.
+    found_titles = {c["id"]: c["title"] for c in view.categories}
     for discord_id, stoat_id in state.category_map.items():
         if stoat_id not in found_titles:
             report.add(
@@ -638,7 +598,7 @@ async def _check_structure(
                 stoat_id=stoat_id,
             )
 
-    emoji_names = {e["_id"]: _readable_name(e) for e in emoji if isinstance(e, dict) and "_id" in e}
+    emoji_names = {e["_id"]: _readable_name(e) for e in emoji}
     for discord_id, stoat_id in state.emoji_map.items():
         present = stoat_id in emoji_names
         if present:
@@ -795,7 +755,7 @@ async def _one_tail(
                 discord_id=discord_id,
                 stoat_id=stoat_id,
             )
-    window_ids = [m["_id"] for m in window if isinstance(m, dict) and "_id" in m]
+    window_ids = [m["_id"] for m in window]
     status, kind, detail = _classify_tail(
         expected=expected,
         window_ids=window_ids,
