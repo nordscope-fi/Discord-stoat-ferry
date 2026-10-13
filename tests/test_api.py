@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 import logging
 import ssl
 import time
@@ -57,6 +60,216 @@ from discord_ferry.migrator.api import (
 
 BASE_URL = "https://api.test"
 TOKEN = "test-session-token"
+
+_CAPTURE_ROOT = Path(__file__).parent / "fixtures" / "stoat_0_15_7"
+_CAPTURE_SERVER = "01M4T13BVE9P80WR51EWTAWMKQ"
+_CAPTURE_VISIBLE = "01M4T13BVED8EKJ4KAHZ7HJDKT"
+_CAPTURE_HIDDEN = "01M4T13BVTR4JFT1QM7QN1GFSG"
+
+
+async def test_server_view_retains_hidden_membership(mock_aiohttp: aioresponses) -> None:
+    fetch_view = getattr(api_module, "api_fetch_server_view", None)
+    assert callable(fetch_view), "A validated server read must retain membership and visibility"
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{_CAPTURE_SERVER}",
+        body=(_CAPTURE_ROOT / "member-plain.json").read_bytes(),
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{_CAPTURE_SERVER}?include_channels=true",
+        body=(_CAPTURE_ROOT / "member-expanded.json").read_bytes(),
+    )
+    async with aiohttp.ClientSession() as session:
+        view = await fetch_view(session, BASE_URL, TOKEN, _CAPTURE_SERVER)
+    assert view.server_id == _CAPTURE_SERVER
+    assert view.all_channel_ids == frozenset({_CAPTURE_VISIBLE, _CAPTURE_HIDDEN})
+    assert set(view.visible_channels) == {_CAPTURE_VISIBLE}
+    assert set(view.roles) == {"01M4T13BVX18ECH3D281K6NGAC"}
+    assert [c["id"] for c in view.categories] == ["fixture-visible", "fixture-hidden"]
+    assert view.channel_names == {"General"}
+    assert [(method, str(url)) for method, url in mock_aiohttp.requests] == [
+        ("GET", f"{BASE_URL}/servers/{_CAPTURE_SERVER}"),
+        ("GET", f"{BASE_URL}/servers/{_CAPTURE_SERVER}?include_channels=true"),
+    ]
+
+
+def test_capture_bytes_and_duplicate_channels_are_preserved() -> None:
+    provenance = json.loads((_CAPTURE_ROOT / "provenance.json").read_text())
+    assert provenance["version"] == "0.15.7"
+    assert len(provenance["responses"]) == 7
+    for response in provenance["responses"]:
+        body = (_CAPTURE_ROOT / response["file"]).read_bytes()
+        assert hashlib.sha256(body).hexdigest() == response["sha256"]
+    for name, visible_count in [("owner-expanded.json", 2), ("member-expanded.json", 1)]:
+        pairs = json.loads((_CAPTURE_ROOT / name).read_bytes(), object_pairs_hook=list)
+        arrays = [value for key, value in pairs if key == "channels"]
+        assert len(arrays) == 2
+        assert arrays[0] == [_CAPTURE_VISIBLE, _CAPTURE_HIDDEN]
+        assert len(arrays[1]) == visible_count
+        decoded = json.loads((_CAPTURE_ROOT / name).read_bytes())
+        assert isinstance(decoded["channels"][0], dict)
+        assert "server" not in decoded
+    created = json.loads((_CAPTURE_ROOT / "create-wrapped.json").read_bytes())
+    assert isinstance(created["server"], dict)
+    assert isinstance(created["channels"], list)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "root",
+        "identity_missing",
+        "identity_type",
+        "identity_wrong",
+        "channels_missing",
+        "channels_type",
+        "channel_id_type",
+        "channel_id_empty",
+        "channel_duplicate",
+        "visible_root",
+        "visible_identity",
+        "visible_channels",
+        "visible_entry",
+        "visible_id_missing",
+        "visible_id_type",
+        "visible_duplicate",
+        "visible_outside",
+        "roles_null",
+        "roles_array",
+        "role_value",
+        "role_key_empty",
+        "roles_disagree",
+        "categories_null",
+        "categories_map",
+        "category_entry",
+        "category_id_missing",
+        "category_title",
+        "category_channels_missing",
+        "category_channels_type",
+        "category_channel_type",
+        "category_duplicate",
+        "categories_disagree",
+    ],
+)
+async def test_server_view_rejects_unreadable_evidence(
+    mock_aiohttp: aioresponses, mutation: str
+) -> None:
+    fetch_view = getattr(api_module, "api_fetch_server_view", None)
+    assert callable(fetch_view), "Server evidence must be validated before use"
+    plain = json.loads((_CAPTURE_ROOT / "owner-plain.json").read_bytes())
+    expanded = json.loads((_CAPTURE_ROOT / "owner-expanded.json").read_bytes())
+    secret_marker = "payload-secret-marker"
+    if mutation == "root":
+        plain = []
+    elif mutation == "identity_missing":
+        plain.pop("_id")
+    elif mutation == "identity_type":
+        plain["_id"] = 7
+    elif mutation == "identity_wrong":
+        plain["_id"] = secret_marker
+    elif mutation == "channels_missing":
+        plain.pop("channels")
+    elif mutation == "channels_type":
+        plain["channels"] = {}
+    elif mutation == "channel_id_type":
+        plain["channels"] = [7]
+    elif mutation == "channel_id_empty":
+        plain["channels"] = [""]
+    elif mutation == "channel_duplicate":
+        plain["channels"].append(plain["channels"][0])
+    elif mutation == "visible_root":
+        expanded = []
+    elif mutation == "visible_identity":
+        expanded["_id"] = secret_marker
+    elif mutation == "visible_channels":
+        expanded["channels"] = None
+    elif mutation == "visible_entry":
+        expanded["channels"].append(secret_marker)
+    elif mutation == "visible_id_missing":
+        expanded["channels"][0].pop("_id")
+    elif mutation == "visible_id_type":
+        expanded["channels"][0]["_id"] = 7
+    elif mutation == "visible_duplicate":
+        expanded["channels"].append(copy.deepcopy(expanded["channels"][0]))
+    elif mutation == "visible_outside":
+        expanded["channels"][0]["_id"] = secret_marker
+    elif mutation == "roles_null":
+        plain["roles"] = None
+    elif mutation == "roles_array":
+        plain["roles"] = []
+    elif mutation == "role_value":
+        plain["roles"] = {"s-role": secret_marker}
+    elif mutation == "role_key_empty":
+        plain["roles"] = {"": {}}
+    elif mutation == "roles_disagree":
+        expanded["roles"] = {}
+    elif mutation == "categories_null":
+        plain["categories"] = None
+    elif mutation == "categories_map":
+        plain["categories"] = {}
+    elif mutation == "category_entry":
+        plain["categories"].append(secret_marker)
+    elif mutation == "category_id_missing":
+        plain["categories"][0].pop("id")
+    elif mutation == "category_title":
+        plain["categories"][0]["title"] = None
+    elif mutation == "category_channels_missing":
+        plain["categories"][0].pop("channels")
+    elif mutation == "category_channels_type":
+        plain["categories"][0]["channels"] = {}
+    elif mutation == "category_channel_type":
+        plain["categories"][0]["channels"] = [7]
+    elif mutation == "category_duplicate":
+        plain["categories"].append(copy.deepcopy(plain["categories"][0]))
+    elif mutation == "categories_disagree":
+        expanded["categories"][0]["title"] = secret_marker
+    mock_aiohttp.get(f"{BASE_URL}/servers/{_CAPTURE_SERVER}", payload=plain)
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{_CAPTURE_SERVER}?include_channels=true", payload=expanded
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as error:
+            await fetch_view(session, BASE_URL, TOKEN, _CAPTURE_SERVER)
+    assert secret_marker not in str(error.value)
+    assert TOKEN not in str(error.value)
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 2
+
+
+@pytest.mark.parametrize("omitted", [True, False])
+async def test_server_view_accepts_empty_optional_collections(
+    mock_aiohttp: aioresponses, omitted: bool
+) -> None:
+    fetch_view = getattr(api_module, "api_fetch_server_view", None)
+    assert callable(fetch_view), "Optional collections must have a validated empty representation"
+    payload: dict[str, object] = {"_id": _CAPTURE_SERVER, "channels": []}
+    if not omitted:
+        payload.update(roles={}, categories=[])
+    mock_aiohttp.get(f"{BASE_URL}/servers/{_CAPTURE_SERVER}", payload=payload)
+    mock_aiohttp.get(f"{BASE_URL}/servers/{_CAPTURE_SERVER}?include_channels=true", payload=payload)
+    async with aiohttp.ClientSession() as session:
+        view = await fetch_view(session, BASE_URL, TOKEN, _CAPTURE_SERVER)
+    assert view.roles == {}
+    assert view.categories == []
+    assert view.all_channel_ids == frozenset()
+    assert view.visible_channels == {}
+
+
+async def test_server_view_normalizes_category_order_and_role_keys(
+    mock_aiohttp: aioresponses,
+) -> None:
+    fetch_view = getattr(api_module, "api_fetch_server_view", None)
+    assert callable(fetch_view), "Server metadata must use category and role identity"
+    plain = json.loads((_CAPTURE_ROOT / "owner-plain.json").read_bytes())
+    expanded = json.loads((_CAPTURE_ROOT / "owner-expanded.json").read_bytes())
+    plain["roles"] = expanded["roles"] = {"s-role-key": {"name": "keyed"}}
+    expanded["categories"].reverse()
+    mock_aiohttp.get(f"{BASE_URL}/servers/{_CAPTURE_SERVER}", payload=plain)
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{_CAPTURE_SERVER}?include_channels=true", payload=expanded
+    )
+    async with aiohttp.ClientSession() as session:
+        view = await fetch_view(session, BASE_URL, TOKEN, _CAPTURE_SERVER)
+    assert set(view.roles) == {"s-role-key"}
+    assert [c["id"] for c in view.categories] == ["fixture-visible", "fixture-hidden"]
 
 
 # ---------------------------------------------------------------------------
@@ -2201,28 +2414,23 @@ async def test_message_fetch_rejects_a_non_list_body(
 async def test_server_with_channels_requests_channel_objects(
     mock_aiohttp: aioresponses,
 ) -> None:
-    """Pins include_channels=true and both lists in the response.
-
-    Upstream returns FetchServerResponse::JustServer without the parameter and
-    ServerWithChannels with it. Two different top-level shapes from one route,
-    so the parameter is what decides which one arrives.
-
-    Both lists matter downstream: server.channels is UNFILTERED and lists every
-    channel id, while the sibling channels array holds only objects the caller
-    may ViewChannel. That pair is the only way to tell a deleted channel from an
-    invisible one.
-    """
+    """The expanded wrapper returns flat fields and decoded visible objects."""
     mock_aiohttp.get(
-        f"{BASE_URL}/servers/srv1?include_channels=true",
-        payload={
-            "server": {"_id": "srv1", "channels": ["01JSTOATCH00000000000AAA"]},
-            "channels": [{"_id": "01JSTOATCH00000000000AAA", "name": "general"}],
-        },
+        f"{BASE_URL}/servers/{_CAPTURE_SERVER}?include_channels=true",
+        body=(_CAPTURE_ROOT / "member-expanded.json").read_bytes(),
     )
     async with aiohttp.ClientSession() as session:
-        out = await api_fetch_server_with_channels(session, BASE_URL, TOKEN, "srv1")
-    assert out["server"]["channels"] == ["01JSTOATCH00000000000AAA"]
-    assert out["channels"][0]["name"] == "general"
+        out = await api_fetch_server_with_channels(session, BASE_URL, TOKEN, _CAPTURE_SERVER)
+    assert out["_id"] == _CAPTURE_SERVER
+    assert "server" not in out
+    assert out["channels"] == [
+        {
+            "channel_type": "TextChannel",
+            "_id": _CAPTURE_VISIBLE,
+            "server": _CAPTURE_SERVER,
+            "name": "General",
+        }
+    ]
 
 
 async def test_api_fetch_server_still_sends_no_include_channels(
