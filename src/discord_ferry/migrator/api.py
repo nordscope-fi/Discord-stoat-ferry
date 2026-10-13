@@ -1318,7 +1318,7 @@ async def api_fetch_messages(
         raise MigrationError(
             f"Expected a JSON array of messages from {redact_url(url)}, got {type(raw).__name__}"
         )
-    return raw
+    return _read_id_objects(raw, "messages", "_id")
 
 
 async def api_fetch_server_with_channels(
@@ -1485,4 +1485,4 @@ async def api_fetch_emoji_list(
         raise MigrationError(
             f"Expected a JSON array of emoji from {redact_url(url)}, got {type(raw).__name__}"
         )
-    return raw
+    return _read_id_objects(raw, "emoji", "_id")

@@ -272,6 +272,31 @@ async def test_server_view_normalizes_category_order_and_role_keys(
     assert [c["id"] for c in view.categories] == ["fixture-visible", "fixture-hidden"]
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [None, "payload-secret-marker", {}, {"id": "s-kept"}, {"_id": 7}, {"_id": ""}, {"_id": None}],
+)
+@pytest.mark.parametrize("family", ["messages", "emoji"])
+async def test_read_collection_entry_rejected(
+    mock_aiohttp: aioresponses, entry: object, family: str
+) -> None:
+    if family == "messages":
+        url = f"{BASE_URL}/channels/s-channel/messages?limit=100&sort=Latest"
+    else:
+        url = f"{BASE_URL}/servers/s-server/emojis"
+    mock_aiohttp.get(url, payload=[{"_id": "s-before"}, entry, {"_id": "s-after"}])
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match=f"Invalid response field {family}") as error:
+            if family == "messages":
+                await api_fetch_messages(
+                    session, BASE_URL, TOKEN, "s-channel", limit=100, sort="Latest"
+                )
+            else:
+                await api_fetch_emoji_list(session, BASE_URL, TOKEN, "s-server")
+    assert "payload-secret-marker" not in str(error.value)
+    assert TOKEN not in str(error.value)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
