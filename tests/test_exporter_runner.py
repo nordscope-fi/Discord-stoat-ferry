@@ -110,7 +110,7 @@ class TestBuildCommand:
     def test_command_construction(self, tmp_path: Path) -> None:
         dce_path = tmp_path / "dce"
         cfg = _make_config(tmp_path)
-        cmd = _build_dce_command(cfg, dce_path)
+        cmd = _build_dce_command(cfg, dce_path, reuse_media=True)
         assert cmd[0] == str(dce_path)
         assert "exportguild" in cmd
         # The token reaches DCE through DISCORD_TOKEN, never argv (#978).
@@ -128,6 +128,28 @@ class TestBuildCommand:
         assert "All" in cmd
         assert "--output" in cmd
         assert str(tmp_path / "exports") in cmd
+
+    def test_command_omits_media_reuse_without_a_completed_export(self, tmp_path: Path) -> None:
+        cmd = _build_dce_command(_make_config(tmp_path), tmp_path / "dce")
+
+        assert "--reuse-media" not in cmd
+
+    async def test_run_explains_why_media_reuse_is_disabled(self, tmp_path: Path) -> None:
+        events: list[MigrationEvent] = []
+
+        with (
+            patch(
+                "discord_ferry.exporter.runner.asyncio.create_subprocess_exec",
+                side_effect=RuntimeError("stop before subprocess execution"),
+            ),
+            pytest.raises(RuntimeError, match="stop before subprocess execution"),
+        ):
+            await run_dce_export(_make_config(tmp_path), tmp_path / "dce", events.append)
+
+        notices = [event for event in events if event.status == "notice"]
+        assert [event.message for event in notices] == [
+            "Media reuse disabled: no previous completed export is recorded for this folder."
+        ]
 
     def test_escapes_percent_in_export_path_for_dce_templates(self, tmp_path: Path) -> None:
         config = replace(_make_config(tmp_path), export_dir=tmp_path / "100%done")
