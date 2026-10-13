@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.19] - 2026-10-13
+
+### Fixed
+
+- Check reads flat Stoat server replies and distinguishes hidden channels from deleted ones (#1169).
+- Repair ignores unverifiable findings, rechecks missing structure and preserves surviving categories (#1169).
+- Malformed message and emoji entries cannot become confirmed missing content (#1169).
+
 ## [2.43.18] - 2026-10-13
 
 ### Fixed
