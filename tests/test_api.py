@@ -147,7 +147,7 @@ async def test_api_create_webhook_reads_id_and_token(mock_aiohttp: aioresponses)
 
 
 async def test_api_fetch_channel_returns_type(mock_aiohttp: aioresponses) -> None:
-    """GET /channels/{id} returns the channel object (used for Bug #194 check)."""
+    """GET /channels/{id} returns the channel object for the voice support check."""
     mock_aiohttp.get(
         f"{BASE_URL}/channels/ch_tmp", payload={"_id": "ch_tmp", "channel_type": "Text"}
     )

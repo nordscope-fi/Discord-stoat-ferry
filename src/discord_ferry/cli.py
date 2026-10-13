@@ -1316,7 +1316,7 @@ def probe_cmd(
     as_json: bool,
     verbose: bool,
 ) -> None:
-    """Probe a live Stoat instance for Autumn limits, rate window, voice Bug #194, webhooks."""
+    """Probe a live Stoat instance for Autumn limits, rate window, voice, and webhooks."""
     load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")

@@ -153,10 +153,10 @@ The simplest approach is to use the server owner's token and avoid this list ent
 
 ## Voice Channels
 
-!!! warning "Known issue: Bug #194"
-    Voice channel creation may produce text channels instead of voice channels in some Stoat versions. This is a known upstream bug. If voice channel layout matters, check your Stoat version's release notes. You can verify channel types in the Stoat web interface after migration completes.
+!!! warning "Voice depends on the instance"
+    Voice channels require the voice service (LiveKit) to be enabled on the target Stoat instance. Run `ferry probe` before migrating to read the instance's advertised setting and test voice-channel creation. If a voice channel cannot be created, Ferry retries it as a text channel.
 
-Voice channels require the Vortex (or LiveKit) service to function. Creating voice channels without this service will create the channel structure but the channels will not be usable for voice.
+Verify the resulting channel types in the Stoat web interface after migration completes.
 
 ---
 

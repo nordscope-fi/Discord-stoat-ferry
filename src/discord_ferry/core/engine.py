@@ -4156,7 +4156,7 @@ async def _build_blueprint_channel(
     ch: BlueprintChannel,
     on_event: EventCallback,
 ) -> str:
-    """Create a blueprint channel, retrying a failed Voice channel as Text (Stoat Bug #194).
+    """Create a blueprint channel, retrying a failed Voice channel as Text.
 
     Mirrors the migration path's voice fallback (``structure.py``). Only a ``"Voice"``-type
     create failure is retried as ``"Text"``; any other ``MigrationError`` propagates. Returns

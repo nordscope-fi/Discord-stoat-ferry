@@ -274,12 +274,49 @@ async def _report_autumn_reachable(
 async def _check_voice_bug(
     sess: aiohttp.ClientSession, stoat_url: str, token: str, server_id: str, report: ProbeReport
 ) -> None:
-    # SOURCE-VERIFIED (stoatchat/stoatchat core/models/v0/channels.rs): Stoat has
-    # NO VoiceChannel variant — every server channel serializes as
-    # "channel_type":"TextChannel". A Voice request maps to TextChannel{ voice: Some(..) }.
-    # So the real signal for "voice works on this instance" is the PRESENCE of a non-null
-    # `voice` field on the returned channel — NOT the discriminator. On stock self-hosted,
-    # voice is unsupported (#194/#176) and `voice` comes back absent (plain text).
+    # SOURCE-VERIFIED (stoatchat/stoatchat v0.15.7,
+    # crates/delta/src/routes/root.rs): `features.livekit.enabled` says whether
+    # the instance has a configured voice service.
+    try:
+        async with sess.get(f"{stoat_url.rstrip('/')}/") as resp:
+            if resp.status != 200:
+                report.add(
+                    "voice_channel",
+                    "fail",
+                    "could not determine whether voice is enabled: "
+                    f"Stoat root returned HTTP {resp.status}",
+                )
+                return
+            root: Any = await resp.json()
+    except Exception as exc:  # noqa: BLE001 -- probe must continue
+        report.add(
+            "voice_channel",
+            "fail",
+            "could not determine whether voice is enabled: "
+            f"Stoat root unreachable: {type(exc).__name__}: {exc}",
+        )
+        return
+
+    livekit_enabled = _sub_dict(_sub_dict(root, "features"), "livekit").get("enabled")
+    if livekit_enabled is False:
+        report.add(
+            "voice_channel",
+            "warn",
+            "voice is unavailable because features.livekit.enabled is false; "
+            "Discord voice channels cannot be used",
+        )
+        return
+    if livekit_enabled is not True:
+        report.add(
+            "voice_channel",
+            "warn",
+            "could not determine whether voice is enabled: "
+            "features.livekit.enabled is absent or not a boolean",
+        )
+        return
+
+    # A configured service can still reject creation. Confirm the request and
+    # read the channel back before reporting support.
     channel_id: str | None = None
     try:
         created = await api_create_channel(
@@ -300,7 +337,7 @@ async def _check_voice_bug(
                 "voice_channel",
                 "warn",
                 f"requested Voice but `voice` field absent (channel_type={discriminator}); "
-                "voice unsupported on this instance / Bug #194; Discord voice channels become text",
+                "voice is unavailable on this instance; Discord voice channels become text",
             )
     except Exception as exc:  # noqa: BLE001
         report.add("voice_channel", "fail", f"{type(exc).__name__}: {exc}")

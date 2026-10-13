@@ -108,7 +108,7 @@ These limitations relate to platform-level features that either work differently
 
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Voice channels | Created, but functionality may be limited due to a known upstream issue (Stoat Bug #194) | Verify channel types in the Stoat web interface after migration; voice requires the Vortex or LiveKit service. Run `ferry probe` to check whether your instance supports voice before migrating. |
+| Voice channels | Voice use requires LiveKit on the target Stoat instance. If voice creation fails, Ferry retries the channel as text. | Run `ferry probe` before migrating to check whether the target instance has voice enabled. Verify the channel types in the Stoat web interface after migration. |
 | AutoMod | Not supported by Stoat | Configure moderation manually after migration |
 | Welcome Screen | Not migrated | None |
 | Soundboard | Not supported by Stoat | None |

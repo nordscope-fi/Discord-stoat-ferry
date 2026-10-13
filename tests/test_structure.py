@@ -2328,7 +2328,7 @@ async def test_voice_cap_resume_does_not_recount_carried_channels(tmp_path: Path
 
 
 async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
-    """A voice channel that falls back to text (Bug #194) skips the voice PATCH.
+    """A voice channel that falls back to text skips the voice PATCH.
 
     slowmode is still applied to the text-fallback channel.
     """
@@ -2354,7 +2354,7 @@ async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
     edit_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
-        # First call (Voice) fails -> Bug #194 fallback to Text.
+        # First call (Voice) fails, then the channel falls back to Text.
         m.post(f"{STOAT_URL}/servers/srv1/channels", status=400)
         m.post(
             f"{STOAT_URL}/servers/srv1/channels",
@@ -5217,7 +5217,7 @@ async def test_a_collision_pair_records_distinct_suffixed_names(tmp_path: Path) 
 async def test_a_voice_retry_records_the_retrys_response(tmp_path: Path) -> None:
     """SC-2.6. The retry reassigns the response INSIDE an except block.
 
-    A voice channel that fails is retried as text (#194). The id-map write sits
+    A voice channel that fails is retried as text. The id-map write sits
     OUTSIDE the try, so `result` there is whichever attempt succeeded, and the
     name write belongs beside it.
 

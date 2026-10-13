@@ -15,7 +15,6 @@ DiscordChatExporter export \
   --format Json \
   --markdown false \
   --media \
-  --reuse-media \
   --include-threads All \
   --output /path/to/export/
 ```
@@ -25,8 +24,15 @@ DiscordChatExporter export \
 | `--format Json` | Ferry's parser reads JSON only |
 | `--markdown false` | Without this flag DCE renders mention syntax (`<@123>`) as display names (`@Username`), destroying the IDs needed for remapping |
 | `--media` | Downloads all attachments, avatars, and emoji locally. Discord CDN URLs expire within ~24 hours |
-| `--reuse-media` | Skips redownloading media that already exists locally. Ferry's own DCE runner passes this so a re-export or resume-after-crash finishes in minutes rather than re-fetching every attachment |
 | `--include-threads All` | Exports threads and forum posts as separate files alongside their parent channels |
+
+`--reuse-media` is optional. It skips every media file already present, without checking whether an
+interrupted download left the file incomplete.
+
+!!! warning "Use `--reuse-media` only after a completed export"
+    Ferry passes this flag only when its saved state records a completed export in the same Discord
+    server cache. After an interrupted or failed export, Ferry omits the flag so DCE replaces
+    existing media files.
 
 !!! warning "--markdown false is critical"
     If an export was made without `--markdown false`, Ferry's VALIDATE phase will detect rendered
@@ -105,7 +111,7 @@ users hold old exports.
 | What DCE writes | Type ID | Stoat target | Notes |
 |-----------------|---------|-------------|-------|
 | `GuildTextChat` | 0 | TextChannel | Direct mapping |
-| `GuildVoiceChat` | 2 | VoiceChannel | May create a text channel on some instances (bug #194) |
+| `GuildVoiceChat` | 2 | VoiceChannel | Requires LiveKit on the target instance. Ferry retries a failed creation as text. |
 | `GuildCategory` | 4 | Category | Two-step creation, see [Stoat API Notes](stoat-api-notes.md) |
 | `GuildNews` | 5 | TextChannel | An announcement channel, treated as text |
 | `GuildNewsThread` | 10 | TextChannel (flatten) | Becomes a standalone text channel |
