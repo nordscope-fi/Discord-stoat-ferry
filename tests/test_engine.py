@@ -447,6 +447,7 @@ async def test_run_migration_default_connect_phase(tmp_path: Path) -> None:
                 "stoat": "0.8.5",
                 "features": {"autumn": {"enabled": True, "url": "https://autumn.test"}},
             },
+            repeat=True,
         )
         m.get(
             f"{config.stoat_url}/users/@me",
@@ -626,8 +627,9 @@ async def test_discord_metadata_skipped_when_no_token(tmp_path: Path) -> None:
 
     with aioresponses() as m:
         await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
-        # Verify no Discord API requests were made
-        assert len(m.requests) == 0
+        request_urls = [str(url) for _, url in m.requests]
+        assert request_urls.count(f"{config.stoat_url}/") == 1
+        assert not [url for url in request_urls if url.startswith(_DISCORD_API)]
 
     assert not (tmp_path / "discord_metadata.json").exists()
     export_events = [e for e in events if e.phase == "export"]
@@ -669,8 +671,9 @@ async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
 
     with aioresponses() as m:
         await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
-        # No Discord API calls should be made
-        assert len(m.requests) == 0
+        request_urls = [str(url) for _, url in m.requests]
+        assert request_urls.count(f"{config.stoat_url}/") == 1
+        assert not [url for url in request_urls if url.startswith(_DISCORD_API)]
 
     export_events = [e for e in events if e.phase == "export"]
     assert any("cached" in e.message.lower() for e in export_events if e.status == "progress")
@@ -705,7 +708,7 @@ def _cached_events(events: list[MigrationEvent]) -> list[MigrationEvent]:
 
 
 async def test_resume_uses_cached_metadata_for_this_export(tmp_path: Path) -> None:
-    """The valid case keeps working: the cache is announced and nothing is fetched."""
+    """The cache is announced and no Discord metadata is fetched."""
     from aioresponses import aioresponses
 
     _write_resume_cache(tmp_path, _GUILD_ID)
@@ -713,7 +716,9 @@ async def test_resume_uses_cached_metadata_for_this_export(tmp_path: Path) -> No
     config = _make_config(tmp_path, discord_token="t", discord_server_id=_GUILD_ID, resume=True)
     with aioresponses() as m:
         await run_migration(config, events.append, phase_overrides=_NOOP_OVERRIDES)
-        assert len(m.requests) == 0
+        request_urls = [str(url) for _, url in m.requests]
+        assert request_urls.count(f"{config.stoat_url}/") == 1
+        assert not [url for url in request_urls if url.startswith(_DISCORD_API)]
     assert len(_cached_events(events)) == 1
 
 
@@ -3340,7 +3345,15 @@ async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
         return report
 
-    async def _fake_retry(cfg: Any, st: Any, exports: Any, on_event: Any) -> None:
+    async def _fake_retry(
+        cfg: Any,
+        st: Any,
+        exports: Any,
+        on_event: Any,
+        *,
+        _upload_limits_ready: bool,
+    ) -> None:
+        assert _upload_limits_ready is True
         st.failed_messages = [st.failed_messages[0]]  # one now succeeds
 
     with (
@@ -3443,7 +3456,8 @@ async def _repair_with_report(
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         aioresponses() as m,
     ):
-        # The #957 convergence check spends one GET on every non-dry repair;
+        m.get(f"{BASE_URL}/", payload={})
+        # The #957 convergence check spends another GET on every non-dry repair;
         # a stored default of 0 with no metadata makes it a no-op.
         m.get(
             f"{BASE_URL}/servers/{R_SERVER}",
@@ -3453,6 +3467,14 @@ async def _repair_with_report(
         await run_repair(config, state, [], events.append)
         requests = list(m.requests)
     return state, requests, events
+
+
+def _assert_repair_baseline_requests(requests: list[Any]) -> None:
+    """Assert the limit discovery and convergence reads, with no repair request."""
+    request_urls = [str(url) for _, url in requests]
+    assert request_urls.count(f"{BASE_URL}/") == 1
+    assert request_urls.count(f"{BASE_URL}/servers/{R_SERVER}") == 1
+    assert len(requests) == 2, f"repair sent more than its two baseline GETs: {requests}"
 
 
 @pytest.mark.parametrize(
@@ -3473,7 +3495,7 @@ async def test_repair_never_acts_on_an_unverifiable_result(tmp_path: Path, kind:
     sent something and then failed.
     """
     _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, "unverifiable"))
-    assert len(requests) == 1, f"repair sent more than the convergence GET: {requests}"
+    _assert_repair_baseline_requests(requests)
     assert [r for r in requests if "include_channels" in str(r[1])] == [], (
         f"repair acted on an unverifiable {kind}"
     )
@@ -3488,7 +3510,7 @@ async def test_repair_never_acts_on_a_warn_result(tmp_path: Path, kind: str) -> 
     overruled, which is why warn is excluded and fail is not.
     """
     _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, "warn"))
-    assert len(requests) == 1, f"repair sent more than the convergence GET: {requests}"
+    _assert_repair_baseline_requests(requests)
     assert [r for r in requests if "include_channels" in str(r[1])] == [], (
         f"repair acted on a warn: {kind}"
     )
@@ -3509,7 +3531,7 @@ async def test_repair_never_acts_on_a_non_actionable_tail_kind(tmp_path: Path, k
     """Only tail_absent and tail_and_after_absent are repairable tails."""
     status = "fail" if kind == "channel_empty" else "ok"
     _, requests, events = await _repair_with_report(tmp_path, _report_with(kind, status))
-    assert len(requests) == 1, f"repair sent more than the convergence GET: {requests}"
+    _assert_repair_baseline_requests(requests)
     assert [r for r in requests if "include_channels" in str(r[1])] == [], (
         f"repair acted on a non-actionable tail kind: {kind}"
     )
@@ -5634,9 +5656,17 @@ async def test_repair_drains_the_dead_letter_queue(tmp_path: Path) -> None:
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
         return CheckReport()
 
-    async def _fake_retry(cfg: Any, st: Any, exps: Any, _on: Any) -> None:
+    async def _fake_retry(
+        cfg: Any,
+        st: Any,
+        exps: Any,
+        _on: Any,
+        *,
+        _upload_limits_ready: bool,
+    ) -> None:
         seen["exports"] = exps
         seen["queued"] = len(st.failed_messages)
+        seen["upload_limits_ready"] = _upload_limits_ready
 
     export = _export_for(R_D_CHANNEL)
     with (
@@ -5649,6 +5679,7 @@ async def test_repair_drains_the_dead_letter_queue(tmp_path: Path) -> None:
 
     assert seen.get("queued") == 1, "repair never drained the dead-letter queue"
     assert seen["exports"] == [export], "the drain was given the wrong exports"
+    assert seen["upload_limits_ready"] is True
 
 
 async def test_repair_skips_the_drain_when_nothing_is_queued(tmp_path: Path) -> None:
@@ -5748,7 +5779,15 @@ async def test_a_resent_message_is_dropped_from_the_dead_letter_queue(
 
     drained: list[str] = []
 
-    async def _fake_retry(_cfg: Any, st: Any, _exports: Any, _on: Any) -> None:
+    async def _fake_retry(
+        _cfg: Any,
+        st: Any,
+        _exports: Any,
+        _on: Any,
+        *,
+        _upload_limits_ready: bool,
+    ) -> None:
+        assert _upload_limits_ready is True
         drained.extend(fm.discord_msg_id for fm in st.failed_messages)
 
     async def _sends_fine(**_kw: Any) -> None:

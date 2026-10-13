@@ -447,7 +447,7 @@ async def test_download_role_icon_none_when_oversize(monkeypatch):
     # parser assertion on aiohttp 3.14).
     from discord_ferry.discord import client as discord_client
 
-    monkeypatch.setattr(discord_client, "_ROLE_ICON_MAX_BYTES", 4)
+    monkeypatch.setattr(discord_client, "get_tag_size_limit", lambda tag: 4)
     url = "https://cdn.discordapp.com/role-icons/r1/hash.png"
     with aioresponses() as m:
         m.get(url, body=b"toobig", status=200)

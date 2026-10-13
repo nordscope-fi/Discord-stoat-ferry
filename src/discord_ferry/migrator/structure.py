@@ -341,6 +341,7 @@ async def run_server(
                             config.token,
                             state.upload_cache,
                             config.upload_delay,
+                            skip_cache=True,
                         )
                         await api_edit_server(
                             session,
@@ -393,6 +394,7 @@ async def run_server(
                         config.token,
                         state.upload_cache,
                         config.upload_delay,
+                        skip_cache=True,
                     )
                     await api_edit_server(
                         session,

@@ -259,6 +259,7 @@ async def upload_and_create_emoji(
         config.token,
         state.upload_cache,
         config.upload_delay,
+        skip_cache=True,
     )
     sanitized_name = sanitize_emoji_name(name, used_names)
     if sanitized_name != sanitize_emoji_name(name):
