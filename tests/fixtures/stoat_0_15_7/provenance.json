@@ -1,0 +1,65 @@
+{
+  "version": "0.15.7",
+  "backend_commit": "5fb97ec4e7fd2f37fab38c834d3c354914ef4589",
+  "source": "Local ferry-gap lab, synthetic owner/member and server",
+  "channels_key_count_scope": "All nesting levels; expanded replies have two top-level channels keys",
+  "captured_at": "2026-10-13T07:02:13.950Z",
+  "responses": [
+    {
+      "file": "create-wrapped.json",
+      "method": "POST",
+      "path": "/servers/create",
+      "status": 200,
+      "sha256": "ac1b752170dbc92aad9057d41b89c63c57074db3f422ade9f5dfa9535c678ab7",
+      "channels_key_count": 2
+    },
+    {
+      "file": "owner-plain.json",
+      "method": "GET",
+      "path": "/servers/01M4T13BVE9P80WR51EWTAWMKQ",
+      "status": 200,
+      "sha256": "26c9740b97cca9301aa79958d8822a7e3209083a96861914e3a3a4ab04608871",
+      "channels_key_count": 3
+    },
+    {
+      "file": "owner-expanded.json",
+      "method": "GET",
+      "path": "/servers/01M4T13BVE9P80WR51EWTAWMKQ?include_channels=true",
+      "status": 200,
+      "sha256": "329d0f4abea4fcf0b73ced04057ac60c99bceed42c451ff1826a3671dec7a5b8",
+      "channels_key_count": 4
+    },
+    {
+      "file": "member-plain.json",
+      "method": "GET",
+      "path": "/servers/01M4T13BVE9P80WR51EWTAWMKQ",
+      "status": 200,
+      "sha256": "26c9740b97cca9301aa79958d8822a7e3209083a96861914e3a3a4ab04608871",
+      "channels_key_count": 3
+    },
+    {
+      "file": "member-expanded.json",
+      "method": "GET",
+      "path": "/servers/01M4T13BVE9P80WR51EWTAWMKQ?include_channels=true",
+      "status": 200,
+      "sha256": "e12a20e1d793d4e07786322dc6df6c3951975e50d352f3a2bf267e4c152b2402",
+      "channels_key_count": 4
+    },
+    {
+      "file": "emoji-list.json",
+      "method": "GET",
+      "path": "/servers/01M4T13BVE9P80WR51EWTAWMKQ/emojis",
+      "status": 200,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "channels_key_count": 0
+    },
+    {
+      "file": "message-list.json",
+      "method": "GET",
+      "path": "/channels/01M4T13BVED8EKJ4KAHZ7HJDKT/messages?limit=100&sort=Latest",
+      "status": 200,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "channels_key_count": 0
+    }
+  ]
+}
