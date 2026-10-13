@@ -3425,6 +3425,30 @@ def _report_with(kind: str, status: str, *, discord_id: str = R_D_CHANNEL) -> Ch
     return report
 
 
+@pytest.mark.parametrize("status", ["ok", "warn", "unverifiable"])
+@pytest.mark.parametrize(
+    "kind",
+    sorted(
+        engine_module._REPAIRABLE_STRUCTURE
+        | engine_module._REPAIRABLE_EMOJI
+        | engine_module._REPAIRABLE_TAIL
+    ),
+)
+@pytest.mark.parametrize("discord_id", [R_D_CHANNEL, "forum-index-d-forum"])
+async def test_nonfail_repairable_kind_is_skipped(
+    tmp_path: Path, status: str, kind: str, discord_id: str
+) -> None:
+    config = _make_repair_config(tmp_path, dry_run=True)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    report = _report_with(kind, status, discord_id=discord_id)
+    events: list[MigrationEvent] = []
+    with patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)):
+        outcome = await run_repair(config, state, [], events.append)
+    assert _partition_counts(events) == (0, 0)
+    assert outcome.recreated_emoji == []
+    assert any("0 missing emoji, 0 forum indexes" in e.message for e in events)
+
+
 def _partition_counts(events: list[MigrationEvent]) -> tuple[int, int]:
     """Read the (structure, tail) work counts out of run_repair's own event.
 

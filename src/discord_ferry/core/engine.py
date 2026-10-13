@@ -1767,9 +1767,8 @@ async def run_retry_failed(
 
 #: The only structure kinds repair acts on.
 #:
-#: Membership against a literal set, NEVER a test on ``status``. A ``fail`` kind
-#: added after this batch would be swept into a status test silently, and repair
-#: has no way to handle a defect it has not seen.
+#: Failure status and membership in this set are both required. A new fail kind
+#: must not reach a repair path until that path explicitly supports it.
 _REPAIRABLE_STRUCTURE = frozenset({"channel_missing", "role_missing", "category_missing"})
 
 #: The only tail kinds repair acts on. ``tail_not_recorded`` and
@@ -2997,6 +2996,8 @@ async def run_repair(
     forum_index_work: list[CheckResult] = []
     forum_index_rebuild_work: list[CheckResult] = []
     for result in report.results:
+        if result.status != "fail":
+            continue
         is_structure = result.kind in _REPAIRABLE_STRUCTURE
         is_emoji = result.kind in _REPAIRABLE_EMOJI
         if not is_structure and not is_emoji and result.kind not in _REPAIRABLE_TAIL:
