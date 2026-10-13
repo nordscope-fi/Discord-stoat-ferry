@@ -10,6 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.18] - 2026-10-13
+
+### Fixed
+
+- Upload fresh emoji, server icons and banners when their cached Autumn IDs may already be attached (#1187).
+- Apply the Stoat instance's published upload limits for the account's tier, with the current limits as a fallback when unavailable (#1209).
+- Reuse exporter media only after a completed export into the same folder, and clear the completion flag before another attempt starts (#1223).
+- Check whether the Stoat instance enables its voice service before probing voice, and report unavailable feature information without claiming voice is disabled (#1210).
+
+### Changed
+
+- Describe voice as an instance capability and replace retired Autumn source citations with Stoat v0.15.7 references (#1210, #1261).
+
 ## [2.43.17] - 2026-10-12
 
 ### Fixed
