@@ -51,6 +51,7 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_role_ranks,
     api_edit_server,
+    api_fetch_root,
     api_fetch_self,
     api_fetch_server,
     api_fetch_server_with_channels,
@@ -115,6 +116,7 @@ from discord_ferry.state import (
     load_state,
     save_state,
 )
+from discord_ferry.uploader.autumn import configure_upload_limits
 
 if TYPE_CHECKING:
     from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
@@ -684,6 +686,7 @@ async def run_migration(
 
     async with new_session() as session:
         config.session = session
+        await _initialize_upload_limits(session, config)
 
         # S17: Acquire advisory migration lock on the target server (existing server only).
         lock_acquired = False
@@ -802,6 +805,45 @@ async def run_migration(
     on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
 
     return state
+
+
+async def _initialize_upload_limits(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+) -> str:
+    """Load this run's Autumn limits from Stoat and return the selected tier."""
+    if config.dry_run:
+        return configure_upload_limits({}, None)
+
+    try:
+        root = await api_fetch_root(session, config.stoat_url)
+    except TimeoutError:
+        root = {}
+
+    if not isinstance(root, dict):
+        root = {}
+
+    features = root.get("features")
+    limits = features.get("limits") if isinstance(features, dict) else None
+    global_limits = limits.get("global") if isinstance(limits, dict) else None
+    new_user_limits = limits.get("new_user") if isinstance(limits, dict) else None
+    tier_is_knowable = (
+        isinstance(global_limits, dict)
+        and isinstance(global_limits.get("new_user_hours"), int)
+        and isinstance(new_user_limits, dict)
+    )
+    if not tier_is_knowable:
+        return configure_upload_limits(root, None)
+
+    user_id: str | None = None
+    try:
+        user = await api_fetch_self(session, config.stoat_url, config.token)
+        raw_user_id = user.get("_id")
+        if isinstance(raw_user_id, str):
+            user_id = raw_user_id
+    except Exception:  # noqa: BLE001 - root limits still have a safe default tier
+        pass
+    return configure_upload_limits(root, user_id)
 
 
 async def _run_phases(
@@ -1493,6 +1535,8 @@ async def run_retry_failed(
     state: MigrationState,
     exports: list[DCEExport],
     on_event: EventCallback,
+    *,
+    _upload_limits_ready: bool = False,
 ) -> None:
     """Re-process failed messages from state.failed_messages.
 
@@ -1558,6 +1602,8 @@ async def run_retry_failed(
 
     async with get_session(config) as session:
         config.session = session
+        if not _upload_limits_ready:
+            await _initialize_upload_limits(session, config)
         retried = 0
         still_failed: list[FailedMessage] = []
         # Batch 3 (S1): iterate a snapshot — _process_message (channel_result=None) appends
@@ -2954,6 +3000,14 @@ async def run_repair(
         outcome.declined = _repair_declined(state, warnings_start)
         return outcome
 
+    own_limits_session = session is None
+    limits_session = session or new_session()
+    try:
+        await _initialize_upload_limits(limits_session, config)
+    finally:
+        if own_limits_session:
+            await limits_session.close()
+
     # Emoji pass, ordered BEFORE structure and tail so channel_map, role_map and
     # author_names still hold their migration-time values when a referencing
     # message is re-rendered. That ordering is what keeps the rewrite scoped to
@@ -3335,7 +3389,13 @@ async def run_repair(
     # empty queue, so this costs nothing when there is nothing to drain.
     if state.failed_messages:
         before = len(state.failed_messages)
-        await run_retry_failed(config, state, exports, on_event)
+        await run_retry_failed(
+            config,
+            state,
+            exports,
+            on_event,
+            _upload_limits_ready=True,
+        )
         outcome.dead_letter = {
             "drained": before - len(state.failed_messages),
             "remaining": len(state.failed_messages),
