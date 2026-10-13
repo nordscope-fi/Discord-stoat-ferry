@@ -529,7 +529,8 @@ async def _resolve_role_icon(
         # Fixed template rather than str(exc). The reason recorded here for four
         # releases, that the Autumn body may echo x-session-token, was never verified
         # and is false. Autumn serialises only the error variant name plus max_size on
-        # one variant (revoltchat/autumn, src/util/result.rs), and Stoat only
+        # one variant (stoatchat/stoatchat v0.15.7,
+        # crates/core/result/src/lib.rs), and Stoat only
         # error_type and a compile-time file:line:column (stoatchat/stoatchat,
         # crates/core/result/src/lib.rs). Neither echoes a request header.
         #
@@ -1540,7 +1541,7 @@ async def run_channels(
                 except MigrationError as exc:
                     if stoat_type == "Voice":
                         created_as_voice = False
-                        # Voice channels may fail (Bug #194) — retry as text.
+                        # Voice creation depends on the target instance. Retry a failure as text.
                         state.warnings.append(
                             {
                                 "phase": "channels",

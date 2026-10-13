@@ -668,7 +668,7 @@ async def api_fetch_channel(
     """Fetch a channel object by id (GET /channels/{id}).
 
     Used by the probe to read back the actual ``channel_type`` / ``voice`` field
-    after a create (voice Bug #194 detection).
+    after testing voice-channel creation on the target instance.
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
     return await _api_request(session, "GET", url, token)

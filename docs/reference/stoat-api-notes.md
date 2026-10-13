@@ -401,7 +401,7 @@ owning server — **not** via `POST /servers/{id}/emojis`. The emoji ID is clien
 
 ## Known Issues
 
-!!! bug "Voice channel bug #194"
-    On some self-hosted Stoat instances, creating a `VoiceChannel` via the API produces a text channel
-    instead. Ferry logs a warning during the CHANNELS phase when voice channels are encountered. The
-    channel is still created; it just may not behave as a voice channel on affected instances.
+!!! warning "Voice depends on the instance"
+    The Stoat root reports voice availability through `features.livekit.enabled`. Run `ferry probe`
+    before migrating to read that setting and test voice-channel creation. During migration, Ferry
+    logs a warning and retries a failed voice-channel creation as text.

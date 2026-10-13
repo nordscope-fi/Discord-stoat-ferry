@@ -7,7 +7,12 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.migrator import api as api_module
-from discord_ferry.migrator.probe import ProbeReport, _check_autumn, run_probe
+from discord_ferry.migrator.probe import (
+    ProbeReport,
+    _check_autumn,
+    _check_voice_bug,
+    run_probe,
+)
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 
 BASE_URL = "https://api.test"
@@ -52,32 +57,68 @@ async def test_probe_voice_teardown_fires_on_getback_failure(
     mock_aiohttp: aioresponses, api_slept: AsyncMock
 ) -> None:
     """If the GET-back fails, the created channel is still deleted (I2)."""
-    # Root (autumn discovery) — minimal.
     mock_aiohttp.get(
-        f"{BASE_URL}/", payload={"features": {"autumn": {"url": f"{BASE_URL}/autumn"}}}
+        f"{BASE_URL}/",
+        payload={"features": {"livekit": {"enabled": True, "nodes": []}}},
     )
-    # Voice check: create succeeds (returns TextChannel — this fork has no VoiceChannel variant),
-    # GET-back 500s on every retry, DELETE must still fire.
+    # Voice check: create succeeds, GET-back 503s on every retry, DELETE must still fire.
     mock_aiohttp.post(
         f"{BASE_URL}/servers/srv1/channels",
         payload={"_id": "ch_tmp", "channel_type": "TextChannel"},
     )
-    mock_aiohttp.get(f"{BASE_URL}/channels/ch_tmp", status=500, repeat=True)
+    mock_aiohttp.get(f"{BASE_URL}/channels/ch_tmp", status=503, repeat=True)
     delete_called = {"n": 0}
     mock_aiohttp.delete(
         f"{BASE_URL}/channels/ch_tmp",
         callback=lambda u, **k: delete_called.__setitem__("n", 1),
         status=204,
     )
-    # Webhook check: create 4xx (disabled) — keep it simple.
-    mock_aiohttp.post(f"{BASE_URL}/channels/ch_tmp/webhooks", status=403, repeat=True)
-
+    report = ProbeReport()
     async with aiohttp.ClientSession() as session:
-        report = await run_probe(BASE_URL, TOKEN, "srv1", _noop_event, session=session)
+        await _check_voice_bug(session, BASE_URL, TOKEN, "srv1", report)
 
     assert delete_called["n"] == 1  # teardown fired despite GET-back failure
     assert isinstance(report, ProbeReport)
     assert api_slept.await_count > 0
+
+
+async def test_probe_voice_warns_without_creating_channel_when_livekit_disabled(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """The Stoat root feature flag settles that voice is unavailable."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/",
+        payload={"features": {"livekit": {"enabled": False, "nodes": []}}},
+    )
+
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as session:
+        await _check_voice_bug(session, BASE_URL, TOKEN, "srv1", report)
+
+    result = _check(report, "voice_channel")
+    assert result.startswith("warn:")
+    assert "features.livekit.enabled is false" in result
+    assert "cannot be used" in result
+
+
+async def test_probe_voice_unreachable_root_reports_inability_without_claiming_disabled(
+    mock_aiohttp: aioresponses,
+) -> None:
+    """A failed root read is unknown availability, not a disabled feature."""
+    mock_aiohttp.get(
+        f"{BASE_URL}/",
+        exception=aiohttp.ClientConnectionError("root unavailable"),
+    )
+
+    report = ProbeReport()
+    async with aiohttp.ClientSession() as session:
+        await _check_voice_bug(session, BASE_URL, TOKEN, "srv1", report)
+
+    result = _check(report, "voice_channel")
+    assert result.startswith("fail:")
+    assert "could not determine whether voice is enabled" in result
+    assert "root unavailable" in result
+    assert "disabled" not in result
 
 
 # ---------------------------------------------------------------------------
