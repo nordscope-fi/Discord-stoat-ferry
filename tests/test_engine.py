@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core import engine as engine_module
@@ -26,6 +26,7 @@ from discord_ferry.core.engine import (
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import CheckError, DuplicateSendError, ExportError, MigrationError
 from discord_ferry.migrator import messages as messages_module
+from discord_ferry.migrator.api import ServerReadView
 from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
 from discord_ferry.migrator.verify import CheckReport, CheckResult, RepairOutcome
 from discord_ferry.parser.models import (
@@ -3271,17 +3272,36 @@ async def test_run_repair_records_recreated_entities(tmp_path: Path) -> None:
     state.category_names[d_cat] = "Text Channels"
 
     report = CheckReport()
-    report.add(name="general", status="fail", kind="channel_missing", detail="x", discord_id=d_ch)
-    report.add(name="mods", status="fail", kind="role_missing", detail="x", discord_id=d_role)
     report.add(
-        name="Text Channels", status="fail", kind="category_missing", detail="x", discord_id=d_cat
+        name="general",
+        status="fail",
+        kind="channel_missing",
+        detail="x",
+        discord_id=d_ch,
+        stoat_id="01JSTOATCHNOLD",
+    )
+    report.add(
+        name="mods",
+        status="fail",
+        kind="role_missing",
+        detail="x",
+        discord_id=d_role,
+        stoat_id="01JSTOATROLEOLD",
+    )
+    report.add(
+        name="Text Channels",
+        status="fail",
+        kind="category_missing",
+        detail="x",
+        discord_id=d_cat,
+        stoat_id="01JSTOATCATOLD",
     )
 
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
         return report
 
-    async def _fake_view(*_a: Any, **_k: Any) -> tuple[set[str], dict[str, Any]]:
-        return set(), {}
+    async def _fake_view(*_a: Any, **_k: Any) -> ServerReadView:
+        return ServerReadView(R_SERVER, frozenset(), {}, {}, [])
 
     async def _fake_ch(sess: Any, cfg: Any, st: Any, result: Any, *_a: Any, **_k: Any) -> bool:
         st.channel_map[result.discord_id] = "01JSTOATCHNNEW"
@@ -3304,6 +3324,12 @@ async def test_run_repair_records_recreated_entities(tmp_path: Path) -> None:
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "_live_server_view", _fake_view),
+        patch.object(engine_module, "_initialize_upload_limits", new=AsyncMock()),
+        patch.object(
+            engine_module,
+            "api_fetch_server",
+            new=AsyncMock(return_value={"default_permissions": 0}),
+        ),
         patch.object(engine_module, "load_bound_discord_metadata", lambda *a, **k: None),
         patch.object(engine_module, "_recreate_channel", _fake_ch),
         patch.object(engine_module, "_recreate_role", _fake_role),
@@ -3359,7 +3385,11 @@ async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "run_retry_failed", _fake_retry),
-        patch.object(engine_module, "_live_server_view", new=AsyncMock(return_value=(set(), []))),
+        patch.object(
+            engine_module,
+            "_live_server_view",
+            new=AsyncMock(return_value=ServerReadView(R_SERVER, frozenset(), {}, {}, [])),
+        ),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
     ):
         outcome = await run_repair(config, state, [], lambda _e: None)
@@ -3447,6 +3477,351 @@ async def test_nonfail_repairable_kind_is_skipped(
     assert _partition_counts(events) == (0, 0)
     assert outcome.recreated_emoji == []
     assert any("0 missing emoji, 0 forum indexes" in e.message for e in events)
+
+
+@pytest.mark.parametrize("kind", ["role_missing", "category_missing", "channel_missing"])
+async def test_reappeared_structure_is_not_recreated(tmp_path: Path, kind: str) -> None:
+    identity = "s-reappeared"
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=R_SERVER)
+    report = _report_with(kind, "fail")
+    report.results[0].stoat_id = identity
+    plain: dict[str, Any] = {"_id": R_SERVER, "channels": [], "roles": {}, "categories": []}
+    if kind == "role_missing":
+        state.role_map = {R_D_CHANNEL: identity}
+        plain["roles"] = {identity: {"name": "kept"}}
+    elif kind == "category_missing":
+        state.category_map = {R_D_CHANNEL: identity}
+        plain["categories"] = [{"id": identity, "title": "kept", "channels": []}]
+    else:
+        state.channel_map = {R_D_CHANNEL: identity}
+        plain["channels"] = [identity]
+    before = dataclasses.asdict(state)
+    create = AsyncMock(return_value=False)
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
+        patch.object(engine_module, "_initialize_upload_limits", new=AsyncMock()),
+        patch.object(engine_module, "_recreate_role", new=create),
+        patch.object(engine_module, "_recreate_category", new=create),
+        patch.object(engine_module, "_recreate_channel", new=create),
+        aioresponses() as mock,
+    ):
+        mock.get(f"{BASE_URL}/servers/{R_SERVER}", payload=plain, repeat=True)
+        mock.get(
+            f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
+            payload={**plain, "channels": []},
+            repeat=True,
+        )
+        outcome = await run_repair(config, state, [], lambda event: None)
+    create.assert_not_awaited()
+    assert state.channel_map == before["channel_map"]
+    assert state.role_map == before["role_map"]
+    assert state.category_map == before["category_map"]
+    assert (
+        outcome.recreated_channels == outcome.recreated_roles == outcome.recreated_categories == []
+    )
+
+
+async def test_category_recreation_updates_working_copy(tmp_path: Path) -> None:
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        category_map={"d-a": "s-a", "d-b": "s-b"},
+        category_names={"d-a": "A", "d-b": "B"},
+    )
+    live = [{"id": "s-kept", "title": "Kept", "channels": ["s-channel"]}]
+    writes = AsyncMock()
+    config = _make_repair_config(tmp_path)
+    with patch.object(engine_module, "api_upsert_categories", new=writes):
+        for discord_id in ("d-a", "d-b"):
+            result = CheckResult(
+                name="category",
+                status="fail",
+                kind="category_missing",
+                detail="fixture",
+                discord_id=discord_id,
+                stoat_id=state.category_map[discord_id],
+            )
+            await engine_module._recreate_category(
+                object(), config, state, result, live, lambda e: None
+            )
+    assert [c["id"] for c in live] == ["s-kept", "s-a", "s-b"]
+    assert writes.await_args.args[4] == live
+    assert live[0]["channels"] == ["s-channel"]
+
+
+async def test_category_write_failure_does_not_advance_working_copy(tmp_path: Path) -> None:
+    state = MigrationState(
+        stoat_server_id=R_SERVER, category_map={"d-a": "s-a"}, category_names={"d-a": "A"}
+    )
+    live = [{"id": "s-kept", "title": "Kept", "channels": ["s-channel"]}]
+    before = json.loads(json.dumps(live))
+    result = CheckResult(
+        name="category",
+        status="fail",
+        kind="category_missing",
+        detail="",
+        discord_id="d-a",
+        stoat_id="s-a",
+    )
+    with (
+        patch.object(
+            engine_module,
+            "api_upsert_categories",
+            new=AsyncMock(side_effect=MigrationError("write failed")),
+        ),
+        pytest.raises(MigrationError, match="write failed"),
+    ):
+        await engine_module._recreate_category(
+            object(), _make_repair_config(tmp_path), state, result, live, lambda e: None
+        )
+    assert live == before
+    assert state.category_map == {"d-a": "s-a"}
+
+
+async def test_category_repair_resume_matches_uninterrupted_run(tmp_path: Path) -> None:
+    server = "01M4T13BVE9P80WR51EWTAWMKQ"
+
+    async def run_case(interrupted: bool) -> list[dict[str, Any]]:
+        config = _make_repair_config(tmp_path / str(interrupted))
+        state = MigrationState(
+            stoat_server_id="01M4T13BVE9P80WR51EWTAWMKQ",
+            channel_map={"800000000000000001": "01M4T13BVED8EKJ4KAHZ7HJDKT"},
+            category_map={"800000000000000002": "s-a", "800000000000000003": "s-b"},
+            category_names={"800000000000000002": "A", "800000000000000003": "B"},
+            channel_categories={"800000000000000001": "800000000000000002"},
+        )
+        remote = [{"id": "s-kept", "title": "Kept", "channels": ["01M4T13BVED8EKJ4KAHZ7HJDKT"]}]
+        writes: list[list[dict[str, Any]]] = []
+
+        def read(url: Any, **kwargs: Any) -> CallbackResult:
+            channels: list[Any] = ["01M4T13BVED8EKJ4KAHZ7HJDKT"]
+            if url.query.get("include_channels") == "true":
+                channels = [{"_id": "01M4T13BVED8EKJ4KAHZ7HJDKT", "name": "Kept"}]
+            return CallbackResult(
+                payload={
+                    "_id": "01M4T13BVE9P80WR51EWTAWMKQ",
+                    "channels": channels,
+                    "roles": {},
+                    "categories": remote,
+                    "default_permissions": FERRY_MIN_PERMISSIONS,
+                }
+            )
+
+        async def write(*args: Any) -> None:
+            if interrupted and len(writes) == 1:
+                raise MigrationError("interrupted before second category write")
+            replacement = json.loads(json.dumps(args[4]))
+            writes.append(replacement)
+            remote[:] = replacement
+
+        with (
+            patch.object(engine_module, "api_upsert_categories", new=write),
+            patch.object(engine_module, "_initialize_upload_limits", new=AsyncMock()),
+            aioresponses() as mock,
+        ):
+            mock.get(f"{BASE_URL}/servers/{server}", callback=read, repeat=True)
+            mock.get(
+                f"{BASE_URL}/servers/{server}?include_channels=true",
+                callback=read,
+                repeat=True,
+            )
+            mock.get(f"{BASE_URL}/servers/{server}/emojis", payload=[], repeat=True)
+            mock.get(
+                f"{BASE_URL}/channels/01M4T13BVED8EKJ4KAHZ7HJDKT/messages?limit=100&sort=Latest",
+                payload=[],
+                repeat=True,
+            )
+            if interrupted:
+                with pytest.raises(MigrationError, match="interrupted"):
+                    await run_repair(config, state, [], lambda event: None)
+                assert [category["id"] for category in remote] == ["s-kept", "s-a"]
+                state = load_state(config.output_dir)
+                assert state.category_map == {
+                    "800000000000000002": "s-a",
+                    "800000000000000003": "s-b",
+                }
+                assert state.channel_categories == {"800000000000000001": "800000000000000002"}
+                interrupted = False
+                outcome = await run_repair(config, state, [], lambda event: None)
+                assert [row["discord_id"] for row in outcome.recreated_categories] == [
+                    "800000000000000003"
+                ]
+            else:
+                await run_repair(config, state, [], lambda event: None)
+        assert len(writes) == 2
+        return remote
+
+    expected = [
+        {"id": "s-kept", "title": "Kept", "channels": ["01M4T13BVED8EKJ4KAHZ7HJDKT"]},
+        {"id": "s-a", "title": "A", "channels": ["01M4T13BVED8EKJ4KAHZ7HJDKT"]},
+        {"id": "s-b", "title": "B", "channels": []},
+    ]
+    assert await run_case(False) == expected
+    assert await run_case(True) == expected
+
+
+async def test_repair_preserves_the_original_category_evidence(tmp_path: Path) -> None:
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        category_map={"d-missing": "s-missing"},
+        category_names={"d-missing": "Missing"},
+    )
+    categories = [{"id": "s-kept", "title": "Kept", "channels": ["s-other"]}]
+    before = json.loads(json.dumps(categories))
+    view = ServerReadView(
+        R_SERVER,
+        frozenset({"s-other"}),
+        {"s-other": {"_id": "s-other", "name": "Other"}},
+        {},
+        categories,
+    )
+    report = _report_with("category_missing", "fail", discord_id="d-missing")
+    report.results[0].stoat_id = "s-missing"
+    writes = AsyncMock()
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
+        patch.object(engine_module, "_initialize_upload_limits", new=AsyncMock()),
+        patch.object(engine_module, "_live_server_view", new=AsyncMock(return_value=view)),
+        patch.object(engine_module, "api_upsert_categories", new=writes),
+        patch.object(
+            engine_module,
+            "api_fetch_server",
+            new=AsyncMock(return_value={"default_permissions": FERRY_MIN_PERMISSIONS}),
+        ),
+    ):
+        outcome = await run_repair(config, state, [], lambda event: None)
+    assert len(outcome.recreated_categories) == 1
+    assert [c["id"] for c in writes.await_args.args[4]] == ["s-kept", "s-missing"]
+    assert view.categories == before
+
+
+@pytest.mark.parametrize("stage", ["initial", "fresh"])
+async def test_invalid_server_read_stops_repair_writes(tmp_path: Path, stage: str) -> None:
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        role_map={"d-role": "s-old-role"},
+        created_role_names={"d-role": "Kept"},
+    )
+    state.pending_emoji_rewrites = {"d-emoji": {"old": "s-old", "new": "s-new", "server": R_SERVER}}
+    before = dataclasses.asdict(state)
+    report = _report_with("role_missing", "fail", discord_id="d-role")
+    report.results[0].stoat_id = "s-old-role"
+    role_create = AsyncMock(return_value=True)
+    emoji_pass = AsyncMock()
+    with (
+        contextlib.ExitStack() as stack,
+        aioresponses() as mock,
+    ):
+        stack.enter_context(
+            patch.object(engine_module, "_initialize_upload_limits", new=AsyncMock())
+        )
+        stack.enter_context(patch.object(engine_module, "_recreate_role", new=role_create))
+        stack.enter_context(patch.object(engine_module, "_run_emoji_repair_pass", new=emoji_pass))
+        if stage == "fresh":
+            stack.enter_context(
+                patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report))
+            )
+        plain = {"_id": R_SERVER, "channels": [], "roles": {}}
+        mock.get(f"{BASE_URL}/servers/{R_SERVER}", payload=plain)
+        mock.get(
+            f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
+            payload={**plain, "categories": None},
+        )
+        with pytest.raises(MigrationError, match="Invalid response field categories"):
+            await run_repair(config, state, [], lambda event: None)
+    role_create.assert_not_awaited()
+    if stage == "initial":
+        emoji_pass.assert_not_awaited()
+    assert state.role_map == before["role_map"]
+    assert state.pending_emoji_rewrites == before["pending_emoji_rewrites"]
+    assert all(method == "GET" for method, url in mock.requests)
+
+
+async def test_raw_healthy_repair_makes_zero_server_writes(tmp_path: Path) -> None:
+    from discord_ferry.migrator.verify import run_check
+
+    capture = FIXTURES_DIR / "stoat_0_15_7"
+    server = "01M4T13BVE9P80WR51EWTAWMKQ"
+    state = MigrationState(
+        stoat_server_id=server,
+        channel_map={
+            "800000000000000002": "01M4T13BVED8EKJ4KAHZ7HJDKT",
+            "800000000000000003": "01M4T13BVTR4JFT1QM7QN1GFSG",
+        },
+        role_map={"800000000000000004": "01M4T13BVX18ECH3D281K6NGAC"},
+        category_map={
+            "800000000000000005": "fixture-visible",
+            "800000000000000006": "fixture-hidden",
+        },
+        category_names={
+            "800000000000000005": "Visible category",
+            "800000000000000006": "Hidden category",
+        },
+        channel_categories={
+            "800000000000000002": "800000000000000005",
+            "800000000000000003": "800000000000000006",
+        },
+        message_map={"100000000000000001": "00000000000000000000000000"},
+        channel_high_water={"800000000000000002": "100000000000000001"},
+        channel_message_counts={"800000000000000002": 1},
+        completed_channel_ids={"800000000000000002", "800000000000000003"},
+    )
+    before = dataclasses.asdict(state)
+    with aioresponses() as mock:
+        mock.get(
+            f"{BASE_URL}/servers/{server}",
+            body=(capture / "owner-plain.json").read_bytes(),
+            repeat=True,
+        )
+        mock.get(
+            f"{BASE_URL}/servers/{server}?include_channels=true",
+            body=(capture / "owner-expanded.json").read_bytes(),
+            repeat=True,
+        )
+        mock.get(f"{BASE_URL}/servers/{server}/emojis", payload=[], repeat=True)
+        mock.get(f"{BASE_URL}/", payload={}, repeat=True)
+        for channel in ("01M4T13BVED8EKJ4KAHZ7HJDKT", "01M4T13BVTR4JFT1QM7QN1GFSG"):
+            mock.get(
+                f"{BASE_URL}/channels/{channel}/messages?limit=100&sort=Latest",
+                payload=[{"_id": "00000000000000000000000000"}]
+                if channel.endswith("HJDKT")
+                else [],
+                repeat=True,
+            )
+        check = await run_check(BASE_URL, TOKEN, state, lambda event: None)
+        assert check.counts() == {"ok": 7, "warn": 0, "fail": 0, "unverifiable": 0}
+        config = _make_repair_config(tmp_path, incremental=True)
+        for _ in range(2):
+            outcome = await run_repair(config, state, [], lambda event: None)
+            state = load_state(config.output_dir)
+        export = DCEExport(
+            guild=DCEGuild(id="d-guild", name="Fixture"),
+            channel=DCEChannel(id="800000000000000002", type=0, name="Visible"),
+            messages=[
+                DCEMessage(
+                    id="100000000000000001",
+                    type="Default",
+                    timestamp="2026-10-13T00:00:00Z",
+                    content="Already copied",
+                    author=DCEAuthor(id="d-author", name="Fixture"),
+                )
+            ],
+            message_count=1,
+        )
+        await messages_module.run_messages(config, state, [export], lambda event: None)
+        assert all(method == "GET" for method, url in mock.requests)
+    assert (
+        outcome.recreated_channels == outcome.recreated_roles == outcome.recreated_categories == []
+    )
+    assert state.channel_map == before["channel_map"]
+    assert state.role_map == before["role_map"]
+    assert state.category_map == before["category_map"]
+    assert state.message_map == before["message_map"]
+    assert state.channel_high_water == before["channel_high_water"]
+    assert state.channel_categories == before["channel_categories"]
+    assert state.completed_channel_ids == before["completed_channel_ids"]
 
 
 def _partition_counts(events: list[MigrationEvent]) -> tuple[int, int]:
@@ -3577,7 +3952,11 @@ async def test_repair_recreates_a_missing_forum_index_channel(tmp_path: Path) ->
     events: list[MigrationEvent] = []
     with (
         patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
-        patch.object(engine_module, "_live_server_view", new=AsyncMock(return_value=(set(), []))),
+        patch.object(
+            engine_module,
+            "_live_server_view",
+            new=AsyncMock(return_value=ServerReadView(R_SERVER, frozenset(), {}, {}, [])),
+        ),
         patch.object(
             engine_module, "_recreate_forum_index", new=AsyncMock(return_value=True)
         ) as recreate,
@@ -3611,11 +3990,7 @@ async def _repair_recording_saves(
         # Registered with repeat so a report with none simply never uses it, which
         # is what test_repair_fetches_the_collision_set_only_when_recreating then
         # asserts by counting.
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels("general"),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels("general"), repeat=True)
         await run_repair(config, state, [], events.append)
         requests = list(m.requests)
     return saves, requests, events
@@ -3696,11 +4071,7 @@ async def test_an_interrupted_repair_keeps_what_it_already_recreated(tmp_path: P
         patch.object(engine_module, "save_state", _record_save),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -3815,15 +4186,32 @@ async def test_repair_dry_run_does_not_mutate_state_warnings(tmp_path: Path) -> 
     )
 
 
+def _register_repair_server_reads(
+    mock: aioresponses,
+    payload: dict[str, Any],
+    *,
+    repeat: bool = False,
+    plain_overrides: dict[str, Any] | None = None,
+) -> None:
+    """Register two flat reads from explicit plain/visible fixture evidence."""
+    plain = {"default_permissions": 0, **(plain_overrides or {}), **payload["plain"]}
+    mock.get(f"{BASE_URL}/servers/{R_SERVER}", payload=plain, repeat=True)
+    mock.get(
+        f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
+        payload={**plain, "channels": payload["channels"]},
+        repeat=repeat,
+    )
+
+
 def _server_with_channels(*names: str) -> dict[str, Any]:
-    """A ServerWithChannels body carrying the given visible channel names.
+    """Plain membership and visible objects for two separate read responses.
 
     Stoat ids stay visibly different from the names, so a test cannot pass by
     comparing a value with itself.
     """
     ids = [f"01JSTOATCHN00000000{i:04d}" for i in range(len(names))]
     return {
-        "server": {"_id": R_SERVER, "channels": ids},
+        "plain": {"_id": R_SERVER, "channels": ids},
         "channels": [{"_id": cid, "name": n} for cid, n in zip(ids, names, strict=True)],
     }
 
@@ -3838,17 +4226,15 @@ async def test_the_collision_set_comes_from_the_live_server(tmp_path: Path) -> N
     config = _make_repair_config(tmp_path)
     state = MigrationState(stoat_server_id=R_SERVER)
     with aioresponses() as m:
-        m.get(
-            f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
-            payload=_server_with_channels("general", "announcements"),
-        )
+        _register_repair_server_reads(m, _server_with_channels("general", "announcements"))
         async with aiohttp.ClientSession() as session:
-            names, _ = await engine_module._live_server_view(session, config, state)
+            view = await engine_module._live_server_view(session, config, state)
+            names = view.channel_names
     assert names == {"general", "announcements"}
 
 
-async def test_the_collision_set_skips_an_entry_it_cannot_read(tmp_path: Path) -> None:
-    """A malformed entry contributes nothing rather than None.
+async def test_the_collision_set_skips_an_unreadable_name(tmp_path: Path) -> None:
+    """An unreadable name contributes nothing rather than None.
 
     The payload is dict[str, Any], so mypy cannot catch a missing or non-string
     name. An unreadable entry must be skipped, not coerced: a None in a set[str]
@@ -3857,18 +4243,25 @@ async def test_the_collision_set_skips_an_entry_it_cannot_read(tmp_path: Path) -
     config = _make_repair_config(tmp_path)
     state = MigrationState(stoat_server_id=R_SERVER)
     payload = {
-        "server": {"_id": R_SERVER, "channels": ["a", "b", "c", "d"]},
+        "plain": {
+            "_id": R_SERVER,
+            "channels": [
+                "01JSTOATCHN000000000AAA",
+                "01JSTOATCHN000000000BBB",
+                "01JSTOATCHN000000000CCC",
+            ],
+        },
         "channels": [
             {"_id": "01JSTOATCHN000000000AAA", "name": "general"},
             {"_id": "01JSTOATCHN000000000BBB"},  # no name key at all
             {"_id": "01JSTOATCHN000000000CCC", "name": None},  # explicit null
-            "not-a-dict",  # not an object
         ],
     }
     with aioresponses() as m:
-        m.get(f"{BASE_URL}/servers/{R_SERVER}?include_channels=true", payload=payload)
+        _register_repair_server_reads(m, payload)
         async with aiohttp.ClientSession() as session:
-            names, _ = await engine_module._live_server_view(session, config, state)
+            view = await engine_module._live_server_view(session, config, state)
+            names = view.channel_names
     assert names == {"general"}
 
 
@@ -3900,10 +4293,7 @@ async def test_repair_fetches_the_collision_set_when_there_is_work(tmp_path: Pat
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         aioresponses() as m,
     ):
-        m.get(
-            f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
-            payload=_server_with_channels("general"),
-        )
+        _register_repair_server_reads(m, _server_with_channels("general"))
         await run_repair(config, state, [], events.append)
 
     assert any("names already on the server" in e.message for e in events), (
@@ -3989,11 +4379,7 @@ async def _repair_recreating_role(
         ),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels("general"),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels("general"), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/roles",
             payload=create_payload if create_payload is not None else {"id": S_ROLE_NEW},
@@ -4092,11 +4478,7 @@ async def _repair_recreating_channel(
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(*live_names),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(*live_names), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload=create_payload
@@ -4329,23 +4711,20 @@ async def _repair_with_metadata(
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
+        _register_repair_server_reads(
+            m,
+            _server_with_channels(),
             repeat=True,
+            plain_overrides={
+                "id": R_SERVER,
+                "default_permissions": 4_194_304 | FERRY_MIN_PERMISSIONS | (1 << 34),
+            },
         )
         # The #957 convergence check fetches the bare server document on every
         # non-dry repair. An owner-edited default (floor plus an extra bit) must
         # produce the manual-review warning and no write, so this test cannot
         # pass by way of a failed fetch.
-        m.get(
-            f"{BASE_URL}/servers/{R_SERVER}",
-            payload={
-                "id": R_SERVER,
-                "default_permissions": 4_194_304 | FERRY_MIN_PERMISSIONS | (1 << 34),
-            },
-            repeat=True,
-        )
+
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -4461,11 +4840,7 @@ async def test_a_repair_permission_failure_is_recorded_as_a_repair(tmp_path: Pat
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -4533,14 +4908,14 @@ async def _repair_recreating_category(
 
     payload = _server_with_channels("general")
     if live_categories is not None:
-        payload["server"]["categories"] = live_categories  # type: ignore[index]
+        payload["plain"]["categories"] = live_categories  # type: ignore[index]
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         aioresponses() as m,
     ):
-        m.get(re.compile(r".*/servers/.*include_channels.*"), payload=payload, repeat=True)
+        _register_repair_server_reads(m, payload, repeat=True)
         m.patch(f"{BASE_URL}/servers/{R_SERVER}", payload={})
         await run_repair(config, state, [], events.append)
         sent: dict[str, Any] | None = None
@@ -4677,11 +5052,7 @@ async def _repair_with_state(
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -4890,11 +5261,7 @@ async def _repair_resending(
         aioresponses() as m,
     ):
         assert real_process is not None
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -5083,11 +5450,7 @@ async def _repair_merge_parent(
         patch.object(messages_module, "api_send_message", _record),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": R_NEW_CHANNEL, "name": "general"},
@@ -5457,11 +5820,7 @@ async def test_a_resend_salts_its_idempotency_keys_with_the_new_channel(
         patch.object(engine_module, "_process_message", _capture),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -5500,11 +5859,7 @@ async def test_the_origin_header_key_is_salted_too(tmp_path: Path) -> None:
         patch.object(engine_module, "_process_message", _noop_process),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
@@ -5574,11 +5929,7 @@ async def _repair_tail_run(
         patch.object(engine_module, "_process_message", _capture),
         aioresponses() as m,
     ):
-        m.get(
-            re.compile(r".*/servers/.*include_channels.*"),
-            payload=_server_with_channels(),
-            repeat=True,
-        )
+        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         await run_repair(config, state, [export], events.append)
     return state, calls, events
 
@@ -5883,7 +6234,7 @@ async def _repair_with_live_categories(
         return _report_with("channel_missing", "fail")
 
     payload = _server_with_channels("other")
-    payload["server"]["categories"] = live_categories  # type: ignore[index]
+    payload["plain"]["categories"] = live_categories  # type: ignore[index]
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
@@ -5891,7 +6242,7 @@ async def _repair_with_live_categories(
         patch.object(engine_module, "_process_message", _noop_process),
         aioresponses() as m,
     ):
-        m.get(re.compile(r".*/servers/.*include_channels.*"), payload=payload, repeat=True)
+        _register_repair_server_reads(m, payload, repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},

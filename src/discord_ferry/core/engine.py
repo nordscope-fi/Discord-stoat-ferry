@@ -8,6 +8,7 @@ import dataclasses
 import re
 import socket
 from collections.abc import Callable, Coroutine, Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -54,7 +55,7 @@ from discord_ferry.migrator.api import (
     api_fetch_root,
     api_fetch_self,
     api_fetch_server,
-    api_fetch_server_with_channels,
+    api_fetch_server_view,
     api_pin_message,
     api_search_pinned_messages,
     api_send_message,
@@ -121,6 +122,7 @@ from discord_ferry.uploader.autumn import configure_upload_limits
 if TYPE_CHECKING:
     from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
     from discord_ferry.discord.metadata import ChannelMeta
+    from discord_ferry.migrator.api import ServerReadView
 
     # Type-only: run_check itself is imported inside run_repair, matching how
     # check_cmd reaches it, so the verify module stays off the engine's import
@@ -1800,56 +1802,24 @@ async def _live_server_view(
     session: aiohttp.ClientSession,
     config: FerryConfig,
     state: MigrationState,
-) -> tuple[set[str], list[dict[str, Any]]]:
-    """One fetch, two things repair needs: the collision set and the categories.
-
-    Returns ``(channel_names, categories)``. Both come from the same response
-    because both are needed only when something is being recreated, and the
-    /servers bucket allows 5 requests per 10 seconds.
-
-    The categories half exists because ``api_upsert_categories`` is a FULL-ARRAY
-    PATCH: it sets the server's entire categories list. Recreating one missing
-    category by sending only that category would delete every other one. So the
-    current array has to come back first, and a test drives two survivors.
-
-    ``server.categories`` is Optional upstream and the key can be absent
-    entirely, which is why it is read through ``or []`` rather than indexed.
-
-    The channel-names half, for the collision set:
-
-    Repair names a recreated channel with ``make_unique_channel_name``, and what
-    differs from a migration is not the rule but its INPUT. ``run_channels``
-    builds its set across the whole export, because on a migration that is every
-    name about to exist. On a repair the correct set is what is on the server
-    NOW: a channel originally created as ``general-1``, whose collision partner
-    has since been deleted, should come back as ``general``.
-
-    Costs ONE request, on the ``/servers`` bucket at 5 per 10 seconds. It cannot
-    be taken from the ``CheckReport``, which is why repair pays for it
-    separately: ``visible_names`` is local to ``_check_structure`` and reaches a
-    ``CheckResult`` only through ``expected``/``found`` on a rename comparison,
-    so the far more common unchanged-name case carries no name at all.
-
-    Known limit, shared with ``ferry check`` itself and not introduced here: the
-    sibling ``channels`` array holds only what this token may ViewChannel, so a
-    channel it cannot see is absent from this set and a recreation could collide
-    with one. That is the same blindness ``channel_not_visible`` documents.
-    """
-    payload = await api_fetch_server_with_channels(
+) -> ServerReadView:
+    """Read validated server evidence before dependent structure writes."""
+    return await api_fetch_server_view(
         session, config.stoat_url, config.token, state.stoat_server_id
     )
-    names: set[str] = set()
-    for channel in payload.get("channels") or []:
-        # isinstance rather than a bare .get: the payload is dict[str, Any], so
-        # mypy cannot help, and an entry Ferry cannot read must be skipped rather
-        # than contribute None to a set[str]. verify.py guards the same way.
-        if isinstance(channel, dict):
-            name = channel.get("name")
-            if isinstance(name, str):
-                names.add(name)
-    server = payload.get("server") or {}
-    categories = [c for c in (server.get("categories") or []) if isinstance(c, dict)]
-    return names, categories
+
+
+def _structure_still_missing(result: CheckResult, view: ServerReadView) -> bool:
+    identity = result.stoat_id
+    if identity is None:
+        return False
+    if result.kind == "channel_missing":
+        return identity not in view.all_channel_ids
+    if result.kind == "role_missing":
+        return identity not in view.roles
+    if result.kind == "category_missing":
+        return all(category["id"] != identity for category in view.categories)
+    return False
 
 
 def _channel_message_ids(export: DCEExport) -> list[str]:
@@ -2650,6 +2620,7 @@ async def _recreate_category(
     await api_upsert_categories(
         session, config.stoat_url, config.token, state.stoat_server_id, rebuilt
     )
+    live_categories[:] = rebuilt
     state.category_map[discord_id] = new_id
     on_event(
         MigrationEvent(
@@ -3134,7 +3105,12 @@ async def run_repair(
         own_session = session is None
         sess = session or new_session()
         try:
-            existing_names, live_categories = await _live_server_view(sess, config, state)
+            view = await _live_server_view(sess, config, state)
+            existing_names = view.channel_names
+            live_categories = deepcopy(view.categories)
+            structure_work = [
+                result for result in structure_work if _structure_still_missing(result, view)
+            ]
             on_event(
                 MigrationEvent(
                     phase="repair",
@@ -3409,7 +3385,12 @@ async def run_repair(
         fi_sess = session or new_session()
         try:
             if forum_index_work:
-                existing_names, live_categories = await _live_server_view(fi_sess, config, state)
+                view = await _live_server_view(fi_sess, config, state)
+                existing_names = view.channel_names
+                live_categories = deepcopy(view.categories)
+                forum_index_work = [
+                    result for result in forum_index_work if _structure_still_missing(result, view)
+                ]
                 for result in forum_index_work:
                     created = await _recreate_forum_index(
                         fi_sess, config, state, result, existing_names, live_categories, on_event
