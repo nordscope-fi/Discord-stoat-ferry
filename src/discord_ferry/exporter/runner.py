@@ -151,20 +151,24 @@ def _build_dce_environment(parent: Mapping[str, str] | None = None) -> dict[str,
     return env
 
 
-def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
+def _build_dce_command(
+    config: FerryConfig,
+    dce_path: Path,
+    *,
+    reuse_media: bool = False,
+) -> list[str]:
     """Build the DCE CLI command list.
 
     The token is not on it. DCE reads ``DISCORD_TOKEN`` when ``--token`` is absent,
     and ``run_dce_export`` sets that in the child environment, so the token never
     shows in a process listing (#978).
     """
-    return [
+    command = [
         str(dce_path),
         "exportguild",
         "-g",
         config.discord_server_id or "",
         "--media",
-        "--reuse-media",
         "--markdown",
         "false",
         "--format",
@@ -174,6 +178,9 @@ def _build_dce_command(config: FerryConfig, dce_path: Path) -> list[str]:
         "--output",
         str(config.export_dir).replace("%", "%%"),
     ]
+    if reuse_media:
+        command.insert(command.index("--markdown"), "--reuse-media")
+    return command
 
 
 def _check_disk_space(export_dir: Path, on_event: EventCallback) -> None:
@@ -527,6 +534,9 @@ async def run_dce_export(
     config: FerryConfig,
     dce_path: Path,
     on_event: EventCallback,
+    *,
+    reuse_media: bool = False,
+    reuse_media_reason: str = "no previous completed export is recorded for this folder",
 ) -> Path:
     """Run DCE as an async subprocess and stream progress.
 
@@ -534,6 +544,8 @@ async def run_dce_export(
         config: Ferry configuration with discord_token and discord_server_id.
         dce_path: Path to the DCE executable.
         on_event: Callback for progress events.
+        reuse_media: Whether DCE may trust files already in the media folder.
+        reuse_media_reason: One-line explanation emitted when reuse is disabled.
 
     Returns:
         Path to the export directory containing JSON files.
@@ -544,8 +556,17 @@ async def run_dce_export(
     """
     _check_disk_space(config.export_dir, on_event)
 
-    cmd = _build_dce_command(config, dce_path)
+    cmd = _build_dce_command(config, dce_path, reuse_media=reuse_media)
     config.export_dir.mkdir(parents=True, exist_ok=True)
+
+    if not reuse_media:
+        on_event(
+            MigrationEvent(
+                phase="export",
+                status="notice",
+                message=f"Media reuse disabled: {reuse_media_reason}.",
+            )
+        )
 
     child_env = _build_dce_environment()  # allowlist, not a copy (#976)
     # The RAISING sibling, with a boundary here. resolve_proxy would swallow and

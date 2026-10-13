@@ -209,6 +209,50 @@ def _warn_metadata(state: MigrationState, on_event: EventCallback, kind: str, me
     on_event(MigrationEvent(phase="export", status="warning", message=message))
 
 
+def _export_media_reuse_policy(
+    config: FerryConfig,
+    *,
+    previous_export_completed: bool,
+    previous_export_had_channel_failures: bool,
+    previous_export_started_at: str,
+) -> tuple[bool, str | None]:
+    """Decide whether DCE may trust files already in its media folder."""
+    if not previous_export_completed:
+        return False, None
+    if previous_export_had_channel_failures:
+        return False, "the saved export includes failed Discord channels"
+    if not config.discord_server_id:
+        return False, "the saved export cannot be tied to a Discord server"
+
+    expected_export_dir = config.output_dir / "dce_cache" / config.discord_server_id
+    if config.export_dir.resolve() != expected_export_dir.resolve():
+        return False, "the selected export folder is not Ferry's cache for this Discord server"
+    if not config.export_dir.is_dir():
+        return False, "the previously completed export folder no longer exists"
+
+    cached = read_cached_metadata(
+        config.output_dir,
+        configured_guild_id=config.discord_server_id,
+        check_keys=True,
+    )
+    if cached.problem is not None:
+        return False, "the saved Discord metadata does not match this export"
+    if cached.meta is None:
+        return False, "the completed export is not bound to this server cache"
+    try:
+        export_started_at = datetime.fromisoformat(previous_export_started_at)
+        metadata_fetched_at = datetime.fromisoformat(cached.meta.fetched_at)
+    except ValueError:
+        return False, "the completed export is not bound to this server cache"
+    if (
+        export_started_at.tzinfo is None
+        or metadata_fetched_at.tzinfo is None
+        or metadata_fetched_at < export_started_at
+    ):
+        return False, "the completed export is not bound to this server cache"
+    return True, None
+
+
 async def run_migration(
     config: FerryConfig,
     on_event: EventCallback,
@@ -238,15 +282,30 @@ async def run_migration(
     if config.resume and config.incremental:
         raise MigrationError("--resume and --incremental are mutually exclusive.")
 
+    previous_export_completed = False
+    previous_export_had_channel_failures = False
+    previous_export_started_at = ""
+    export_checkpoint_state: MigrationState | None = None
+    state_path = config.output_dir / "state.json"
+
     # Load or create state
     if config.resume:
         state = load_state(config.output_dir)
+        previous_export_completed = state.export_completed
+        previous_export_had_channel_failures = any(
+            warning.get("type") == "dce_channel_failed" for warning in state.warnings
+        )
+        previous_export_started_at = state.started_at
         if state.is_dry_run:
             raise MigrationError("Cannot resume from a dry-run state. Start a fresh migration.")
     elif config.incremental:
-        state_path = config.output_dir / "state.json"
         if state_path.exists():
             prior = load_state(config.output_dir)
+            previous_export_completed = prior.export_completed
+            previous_export_had_channel_failures = any(
+                warning.get("type") == "dce_channel_failed" for warning in prior.warnings
+            )
+            previous_export_started_at = prior.started_at
             if prior.is_dry_run:
                 # A dry run fills message_map with `dry-msg-<id>` sentinels for EVERY
                 # message, threads included, in the dry-run branch of run_messages, and
@@ -388,9 +447,21 @@ async def run_migration(
                 )
             )
     else:
+        if state_path.exists():
+            with contextlib.suppress(StateError):
+                export_checkpoint_state = load_state(config.output_dir)
+                previous_export_completed = export_checkpoint_state.export_completed
+                previous_export_had_channel_failures = any(
+                    warning.get("type") == "dce_channel_failed"
+                    for warning in export_checkpoint_state.warnings
+                )
+                previous_export_started_at = export_checkpoint_state.started_at
         state = MigrationState()
         state.started_at = datetime.now(UTC).isoformat()
         state.is_dry_run = config.dry_run
+
+    if config.resume or config.incremental:
+        export_checkpoint_state = state
 
     # Set AFTER the four state paths converge, deliberately, and not inside any
     # of them. --resume loads, --incremental either carries from a prior state or
@@ -441,12 +512,16 @@ async def run_migration(
             )
         )
 
+        export_had_channel_failures = False
+
         def record_export_event(event: MigrationEvent) -> None:
             """Persist DCE's partial channel failures through the existing warnings list."""
+            nonlocal export_had_channel_failures
             message = strip_control(_safe(config, event.message))
             channel_name = strip_control(_safe(config, event.channel_name))
             event = dataclasses.replace(event, message=message, channel_name=channel_name)
             if event.detail and event.detail.get("dce_channel_failure") is True:
+                export_had_channel_failures = True
                 state.warnings.append(
                     {
                         "phase": "export",
@@ -457,8 +532,32 @@ async def run_migration(
                 )
             on_event(event)
 
-        await run_dce_export(config, dce_path, record_export_event)
-        state.export_completed = True
+        reuse_media, reuse_media_reason = _export_media_reuse_policy(
+            config,
+            previous_export_completed=previous_export_completed,
+            previous_export_had_channel_failures=previous_export_had_channel_failures,
+            previous_export_started_at=previous_export_started_at,
+        )
+        if export_checkpoint_state is not None:
+            export_checkpoint_state.export_completed = False
+            save_state(export_checkpoint_state, config.output_dir)
+        if reuse_media:
+            await run_dce_export(
+                config,
+                dce_path,
+                record_export_event,
+                reuse_media=True,
+            )
+        elif reuse_media_reason is not None:
+            await run_dce_export(
+                config,
+                dce_path,
+                record_export_event,
+                reuse_media_reason=reuse_media_reason,
+            )
+        else:
+            await run_dce_export(config, dce_path, record_export_event)
+        state.export_completed = not export_had_channel_failures
         save_state(state, config.output_dir)
         on_event(MigrationEvent(phase="export", status="completed", message="Export complete."))
     else:
