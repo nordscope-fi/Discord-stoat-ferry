@@ -28,7 +28,7 @@ def test_feedback_container_has_a_locked_non_root_runtime() -> None:
     source = DOCKERFILE.read_text()
     uv_requirements = UV_REQUIREMENTS.read_text()
 
-    assert source.count("FROM python:3.11.17-slim-bookworm") == 2
+    assert source.count("FROM python:3.14.8-slim-bookworm") == 2
     assert "pip install --require-hashes" in source
     assert "uv-requirements.txt" in source
     assert uv_requirements.startswith("uv==0.12.18 \\\n")
