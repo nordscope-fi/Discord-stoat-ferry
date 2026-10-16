@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
 ## [2.43.19] - 2026-10-13
