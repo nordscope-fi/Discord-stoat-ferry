@@ -696,17 +696,20 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
             continue
         try:
             parsed = URL(raw)
+            socks = parsed.scheme.startswith("socks")
+            if not socks:
+                _strip_userinfo(parsed)
         except (ValueError, TypeError):
             found.append(
                 ProxyNotice(
                     kind="malformed",
                     scheme=scheme,
-                    display="<unparseable>",
+                    display=_safe_display(raw),
                     outcome="Connected direct.",
                 )
             )
             continue
-        if parsed.scheme.startswith("socks"):
+        if socks:
             found.append(
                 ProxyNotice(
                     kind="socks",

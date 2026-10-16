@@ -15,6 +15,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import _recreate_forum_index, run_repair
+from discord_ferry.migrator.api import ServerReadView
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, CheckReport, CheckResult
 from discord_ferry.state import MigrationState
 
@@ -229,6 +230,30 @@ def _routing_state(tmp_path: Path) -> MigrationState:
     )
 
 
+async def test_repair_skips_a_reappearing_hidden_forum_index(tmp_path: Path) -> None:
+    state = _routing_state(tmp_path)
+    view = ServerReadView(
+        "srv",
+        frozenset({"old-idx", "s1"}),
+        {"s1": {"_id": "s1", "name": "Other"}},
+        {},
+        [{"id": "cat-s", "title": "F", "channels": ["old-idx", "s1"]}],
+    )
+    with (
+        patch(_DEDUPE, new=AsyncMock()),
+        patch(_CHECK, new=AsyncMock(return_value=_report("channel_missing"))),
+        patch(_LIVE, new=AsyncMock(return_value=view)),
+        patch(f"{_ENGINE}._initialize_upload_limits", new=AsyncMock()),
+        patch(f"{_ENGINE}.api_fetch_server", new=AsyncMock(return_value={})),
+        patch(_RECREATE, new=AsyncMock(return_value=True)) as recreate,
+    ):
+        outcome = await run_repair(_config(tmp_path), state, [], lambda event: None)
+    recreate.assert_not_awaited()
+    assert outcome.recreated_channels == []
+    assert state.channel_map["forum-index-f"] == "old-idx"
+    assert view.categories[0]["channels"] == ["old-idx", "s1"]
+
+
 async def test_repair_recreates_lone_forum_index(tmp_path: Path) -> None:
     """SC-I2/SC-3.2/SC-3.3: the forum index as the ONLY broken entity is still repaired.
 
@@ -239,7 +264,14 @@ async def test_repair_recreates_lone_forum_index(tmp_path: Path) -> None:
     with (
         patch(_DEDUPE, new=AsyncMock()),
         patch(_CHECK, new=AsyncMock(return_value=_report("channel_missing"))),
-        patch(_LIVE, new=AsyncMock(return_value=(set(), [{"id": "cat-s", "channels": []}]))),
+        patch(
+            _LIVE,
+            new=AsyncMock(
+                return_value=ServerReadView(
+                    "srv", frozenset(), {}, {}, [{"id": "cat-s", "title": "F", "channels": []}]
+                )
+            ),
+        ),
         patch(_RECREATE, new=AsyncMock(return_value=True)) as recreate,
     ):
         await run_repair(config, state, [], [].append)
@@ -255,7 +287,7 @@ async def test_repair_routes_tail_absent_to_rebuild_without_create(tmp_path: Pat
     with (
         patch(_DEDUPE, new=AsyncMock()),
         patch(_CHECK, new=AsyncMock(return_value=_report("tail_absent"))),
-        patch(_LIVE, new=AsyncMock(return_value=(set(), []))),
+        patch(_LIVE, new=AsyncMock(return_value=ServerReadView("srv", frozenset(), {}, {}, []))),
         patch(_RECREATE, new=AsyncMock(return_value=True)) as recreate,
         patch(_REBUILD, new=AsyncMock()) as rebuild,
     ):

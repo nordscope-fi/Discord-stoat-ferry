@@ -10,6 +10,7 @@ import random
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -668,7 +669,7 @@ async def api_fetch_channel(
     """Fetch a channel object by id (GET /channels/{id}).
 
     Used by the probe to read back the actual ``channel_type`` / ``voice`` field
-    after a create (voice Bug #194 detection).
+    after testing voice-channel creation on the target instance.
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
     return await _api_request(session, "GET", url, token)
@@ -859,6 +860,7 @@ async def api_create_channel(
     channel_type: str | None = None,
     description: str | None = None,
     nsfw: bool = False,
+    user_limit: int | None = None,
 ) -> dict[str, Any]:
     """Create a channel on a server.
 
@@ -871,16 +873,24 @@ async def api_create_channel(
         channel_type: Stoat channel type string (e.g. "Text", "Voice"). Optional.
         description: Channel topic/description. Optional.
         nsfw: Whether the channel is age-restricted. Defaults to False.
+        user_limit: Positive Voice capacity, or zero/None for unlimited.
 
     Returns:
         Channel object dict from the API (includes ``_id``).
     """
+    if user_limit is not None:
+        if type(user_limit) is not int or user_limit < 0:
+            raise ValueError("user_limit must be a non-negative integer")
+        if user_limit > 0 and channel_type != "Voice":
+            raise ValueError("user_limit is only supported for Voice channels")
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/channels"
     data: dict[str, Any] = {"name": name, "nsfw": nsfw}
     if channel_type is not None:
         data["type"] = channel_type
     if description is not None:
         data["description"] = description
+    if user_limit:
+        data["voice"] = {"max_users": user_limit}
     return await _api_request(session, "POST", url, token, data)
 
 
@@ -1308,7 +1318,7 @@ async def api_fetch_messages(
         raise MigrationError(
             f"Expected a JSON array of messages from {redact_url(url)}, got {type(raw).__name__}"
         )
-    return raw
+    return _read_id_objects(raw, "messages", "_id")
 
 
 async def api_fetch_server_with_channels(
@@ -1327,16 +1337,128 @@ async def api_fetch_server_with_channels(
     ``validate_after`` block in ``run_migration`` and under rollback, neither of
     which this work touches.
 
-    The response carries two lists, and the pair is the point. ``server`` is
-    returned unmodified, so its own ``channels`` field still names every channel
-    id on the server. The sibling ``channels`` array holds only the channel
-    objects the caller may ``ViewChannel``. Comparing the two is the only way to
-    tell a channel that was deleted from one this token simply cannot see.
+    The response is flat. Serde flattens Server beside the visible channel
+    objects, producing two top-level ``channels`` keys. Normal JSON decoding
+    retains only the visible objects. Use :func:`api_fetch_server_view` when
+    complete membership evidence is needed to distinguish hidden from deleted.
 
     Lands in the ``servers`` rate bucket, 5 per 10 seconds keyed per server id.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}?include_channels=true"
     return await _api_request(session, "GET", url, token)
+
+
+@dataclass(frozen=True)
+class ServerReadView:
+    server_id: str
+    all_channel_ids: frozenset[str]
+    visible_channels: dict[str, dict[str, Any]]
+    roles: dict[str, dict[str, Any]]
+    categories: list[dict[str, Any]]
+
+    @property
+    def channel_names(self) -> set[str]:
+        return {
+            name
+            for channel in self.visible_channels.values()
+            if isinstance(name := channel.get("name"), str)
+        }
+
+
+def _invalid_read(field: str, value: object) -> MigrationError:
+    return MigrationError(f"Invalid response field {field}: got {type(value).__name__}")
+
+
+def _read_id(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise _invalid_read(field, value)
+    return value
+
+
+def _read_id_list(value: object, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise _invalid_read(field, value)
+    return [_read_id(item, field) for item in value]
+
+
+def _read_id_objects(value: object, field: str, key: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise _invalid_read(field, value)
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise _invalid_read(field, item)
+        _read_id(item.get(key), f"{field}.{key}")
+        rows.append(item)
+    return rows
+
+
+def _index_read_objects(
+    rows: list[dict[str, Any]], key: str, field: str
+) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = _read_id(row.get(key), f"{field}.{key}")
+        if identity in indexed:
+            raise MigrationError(f"Duplicate response identity in {field}")
+        indexed[identity] = row
+    return indexed
+
+
+def _read_server_metadata(
+    value: object, server_id: str
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(value, dict):
+        raise _invalid_read("server", value)
+    if _read_id(value.get("_id"), "server._id") != server_id:
+        raise MigrationError("Unexpected server identity in response")
+    raw_roles = value.get("roles", {})
+    if not isinstance(raw_roles, dict):
+        raise _invalid_read("roles", raw_roles)
+    roles: dict[str, dict[str, Any]] = {}
+    for identity, role in raw_roles.items():
+        _read_id(identity, "roles.key")
+        if not isinstance(role, dict):
+            raise _invalid_read("roles.entry", role)
+        roles[identity] = role
+    categories = _read_id_objects(value.get("categories", []), "categories", "id")
+    _index_read_objects(categories, "id", "categories")
+    for category in categories:
+        if not isinstance(category.get("title"), str):
+            raise _invalid_read("categories.title", category.get("title"))
+        _read_id_list(category.get("channels"), "categories.channels")
+    return value, roles, categories
+
+
+async def api_fetch_server_view(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    server_id: str,
+) -> ServerReadView:
+    plain = await api_fetch_server(session, stoat_url, token, server_id)
+    expanded = await api_fetch_server_with_channels(session, stoat_url, token, server_id)
+    server, roles, categories = _read_server_metadata(plain, server_id)
+    visible_server, visible_roles, visible_categories = _read_server_metadata(expanded, server_id)
+    channel_ids = _read_id_list(server.get("channels"), "server.channels")
+    if len(set(channel_ids)) != len(channel_ids):
+        raise MigrationError("Duplicate response identity in server.channels")
+    channels = _index_read_objects(
+        _read_id_objects(visible_server.get("channels"), "channels", "_id"),
+        "_id",
+        "channels",
+    )
+    if not set(channels).issubset(channel_ids):
+        raise MigrationError("Inconsistent channel membership between server reads")
+    if roles != visible_roles:
+        raise MigrationError("Inconsistent roles between server reads")
+    if _index_read_objects(categories, "id", "categories") != _index_read_objects(
+        visible_categories, "id", "categories"
+    ):
+        raise MigrationError("Inconsistent categories between server reads")
+    return ServerReadView(
+        server_id, frozenset(channel_ids), deepcopy(channels), deepcopy(roles), deepcopy(categories)
+    )
 
 
 async def api_fetch_emoji_list(
@@ -1363,4 +1485,4 @@ async def api_fetch_emoji_list(
         raise MigrationError(
             f"Expected a JSON array of emoji from {redact_url(url)}, got {type(raw).__name__}"
         )
-    return raw
+    return _read_id_objects(raw, "emoji", "_id")

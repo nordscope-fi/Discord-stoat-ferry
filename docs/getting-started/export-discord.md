@@ -100,7 +100,6 @@ DiscordChatExporter.Cli exportguild \
   --token YOUR_TOKEN_HERE \
   -g YOUR_SERVER_ID \
   --media \
-  --reuse-media \
   --markdown false \
   --format Json \
   --include-threads All \
@@ -125,19 +124,26 @@ Replace:
 the entire command on a single line:
 
 ```
-DiscordChatExporter.Cli exportguild --token YOUR_TOKEN_HERE -g YOUR_SERVER_ID --media --reuse-media --markdown false --format Json --include-threads All --output ./export/
+DiscordChatExporter.Cli exportguild --token YOUR_TOKEN_HERE -g YOUR_SERVER_ID --media --markdown false --format Json --include-threads All --output ./export/
 ```
 
 !!! info "What each flag does"
     - `exportguild`: exports every channel in the server
     - `--media`: downloads all attachments, images, and files locally
-    - `--reuse-media`: skips re-downloading files already saved (useful if you resume a failed export)
     - `--markdown false`: preserves raw mention syntax needed for migration
     - `--format Json`: saves data as JSON (a standard data format), which Discord Ferry reads
     - `--include-threads All`: includes public and private thread history
     - `--output ./export/`: saves everything into a folder called `export` in the current directory
 
-The export will print progress to the terminal. Let it run until it prints a completion message.
+The export will print progress to the terminal. Let it run until it prints a completion message,
+then check that it did not report any failed channels or downloads.
+
+!!! warning "Use `--reuse-media` only after a completed export"
+    DCE trusts every existing media file when this flag is present, including a file left incomplete
+    by an interrupted download. If the previous export stopped, failed, or reported partial
+    channel failures, rerun without `--reuse-media` so DCE replaces those files. After an export
+    finishes without failed channels or downloads, you can add `--reuse-media` to a later
+    re-export into the same folder.
 
 <!-- screenshot: Terminal showing DCE export progress output -->
 
@@ -187,8 +193,8 @@ It depends on your server's size and activity level.
 - Large or media-heavy servers: potentially many hours
 
 DCE exports one channel at a time. If you stop it partway through, run it again with the same
-`--output` folder; the `--reuse-media` flag means already-downloaded files will not be
-re-fetched.
+`--output` folder and omit `--reuse-media`. DCE will replace any media file that the interrupted
+run may have left incomplete.
 
 ### Can I export just some channels?
 
@@ -201,7 +207,6 @@ DiscordChatExporter.Cli export \
   --token YOUR_TOKEN_HERE \
   -c CHANNEL_ID_1 CHANNEL_ID_2 CHANNEL_ID_3 \
   --media \
-  --reuse-media \
   --markdown false \
   --format Json \
   --output ./export/
@@ -222,8 +227,8 @@ rate limits or HTTP 429:
 
 1. Stop the export.
 2. Wait 10–15 minutes.
-3. Re-run the same command. The `--reuse-media` flag ensures already-downloaded content is not
-   re-fetched.
+3. Re-run the same command without `--reuse-media`, so a download interrupted by the rate limit
+   is replaced rather than trusted as complete.
 
 For very large servers, consider exporting in smaller batches using `export` with a subset
 of channel IDs at a time.

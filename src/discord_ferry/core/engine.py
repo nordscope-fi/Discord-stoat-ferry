@@ -8,6 +8,7 @@ import dataclasses
 import re
 import socket
 from collections.abc import Callable, Coroutine, Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -51,9 +52,10 @@ from discord_ferry.migrator.api import (
     api_edit_role,
     api_edit_role_ranks,
     api_edit_server,
+    api_fetch_root,
     api_fetch_self,
     api_fetch_server,
-    api_fetch_server_with_channels,
+    api_fetch_server_view,
     api_pin_message,
     api_search_pinned_messages,
     api_send_message,
@@ -115,10 +117,12 @@ from discord_ferry.state import (
     load_state,
     save_state,
 )
+from discord_ferry.uploader.autumn import configure_upload_limits
 
 if TYPE_CHECKING:
     from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
     from discord_ferry.discord.metadata import ChannelMeta
+    from discord_ferry.migrator.api import ServerReadView
 
     # Type-only: run_check itself is imported inside run_repair, matching how
     # check_cmd reaches it, so the verify module stays off the engine's import
@@ -207,6 +211,50 @@ def _warn_metadata(state: MigrationState, on_event: EventCallback, kind: str, me
     on_event(MigrationEvent(phase="export", status="warning", message=message))
 
 
+def _export_media_reuse_policy(
+    config: FerryConfig,
+    *,
+    previous_export_completed: bool,
+    previous_export_had_channel_failures: bool,
+    previous_export_started_at: str,
+) -> tuple[bool, str | None]:
+    """Decide whether DCE may trust files already in its media folder."""
+    if not previous_export_completed:
+        return False, None
+    if previous_export_had_channel_failures:
+        return False, "the saved export includes failed Discord channels"
+    if not config.discord_server_id:
+        return False, "the saved export cannot be tied to a Discord server"
+
+    expected_export_dir = config.output_dir / "dce_cache" / config.discord_server_id
+    if config.export_dir.resolve() != expected_export_dir.resolve():
+        return False, "the selected export folder is not Ferry's cache for this Discord server"
+    if not config.export_dir.is_dir():
+        return False, "the previously completed export folder no longer exists"
+
+    cached = read_cached_metadata(
+        config.output_dir,
+        configured_guild_id=config.discord_server_id,
+        check_keys=True,
+    )
+    if cached.problem is not None:
+        return False, "the saved Discord metadata does not match this export"
+    if cached.meta is None:
+        return False, "the completed export is not bound to this server cache"
+    try:
+        export_started_at = datetime.fromisoformat(previous_export_started_at)
+        metadata_fetched_at = datetime.fromisoformat(cached.meta.fetched_at)
+    except ValueError:
+        return False, "the completed export is not bound to this server cache"
+    if (
+        export_started_at.tzinfo is None
+        or metadata_fetched_at.tzinfo is None
+        or metadata_fetched_at < export_started_at
+    ):
+        return False, "the completed export is not bound to this server cache"
+    return True, None
+
+
 async def run_migration(
     config: FerryConfig,
     on_event: EventCallback,
@@ -236,15 +284,30 @@ async def run_migration(
     if config.resume and config.incremental:
         raise MigrationError("--resume and --incremental are mutually exclusive.")
 
+    previous_export_completed = False
+    previous_export_had_channel_failures = False
+    previous_export_started_at = ""
+    export_checkpoint_state: MigrationState | None = None
+    state_path = config.output_dir / "state.json"
+
     # Load or create state
     if config.resume:
         state = load_state(config.output_dir)
+        previous_export_completed = state.export_completed
+        previous_export_had_channel_failures = any(
+            warning.get("type") == "dce_channel_failed" for warning in state.warnings
+        )
+        previous_export_started_at = state.started_at
         if state.is_dry_run:
             raise MigrationError("Cannot resume from a dry-run state. Start a fresh migration.")
     elif config.incremental:
-        state_path = config.output_dir / "state.json"
         if state_path.exists():
             prior = load_state(config.output_dir)
+            previous_export_completed = prior.export_completed
+            previous_export_had_channel_failures = any(
+                warning.get("type") == "dce_channel_failed" for warning in prior.warnings
+            )
+            previous_export_started_at = prior.started_at
             if prior.is_dry_run:
                 # A dry run fills message_map with `dry-msg-<id>` sentinels for EVERY
                 # message, threads included, in the dry-run branch of run_messages, and
@@ -386,9 +449,21 @@ async def run_migration(
                 )
             )
     else:
+        if state_path.exists():
+            with contextlib.suppress(StateError):
+                export_checkpoint_state = load_state(config.output_dir)
+                previous_export_completed = export_checkpoint_state.export_completed
+                previous_export_had_channel_failures = any(
+                    warning.get("type") == "dce_channel_failed"
+                    for warning in export_checkpoint_state.warnings
+                )
+                previous_export_started_at = export_checkpoint_state.started_at
         state = MigrationState()
         state.started_at = datetime.now(UTC).isoformat()
         state.is_dry_run = config.dry_run
+
+    if config.resume or config.incremental:
+        export_checkpoint_state = state
 
     # Set AFTER the four state paths converge, deliberately, and not inside any
     # of them. --resume loads, --incremental either carries from a prior state or
@@ -439,12 +514,16 @@ async def run_migration(
             )
         )
 
+        export_had_channel_failures = False
+
         def record_export_event(event: MigrationEvent) -> None:
             """Persist DCE's partial channel failures through the existing warnings list."""
+            nonlocal export_had_channel_failures
             message = strip_control(_safe(config, event.message))
             channel_name = strip_control(_safe(config, event.channel_name))
             event = dataclasses.replace(event, message=message, channel_name=channel_name)
             if event.detail and event.detail.get("dce_channel_failure") is True:
+                export_had_channel_failures = True
                 state.warnings.append(
                     {
                         "phase": "export",
@@ -455,8 +534,32 @@ async def run_migration(
                 )
             on_event(event)
 
-        await run_dce_export(config, dce_path, record_export_event)
-        state.export_completed = True
+        reuse_media, reuse_media_reason = _export_media_reuse_policy(
+            config,
+            previous_export_completed=previous_export_completed,
+            previous_export_had_channel_failures=previous_export_had_channel_failures,
+            previous_export_started_at=previous_export_started_at,
+        )
+        if export_checkpoint_state is not None:
+            export_checkpoint_state.export_completed = False
+            save_state(export_checkpoint_state, config.output_dir)
+        if reuse_media:
+            await run_dce_export(
+                config,
+                dce_path,
+                record_export_event,
+                reuse_media=True,
+            )
+        elif reuse_media_reason is not None:
+            await run_dce_export(
+                config,
+                dce_path,
+                record_export_event,
+                reuse_media_reason=reuse_media_reason,
+            )
+        else:
+            await run_dce_export(config, dce_path, record_export_event)
+        state.export_completed = not export_had_channel_failures
         save_state(state, config.output_dir)
         on_event(MigrationEvent(phase="export", status="completed", message="Export complete."))
     else:
@@ -684,6 +787,7 @@ async def run_migration(
 
     async with new_session() as session:
         config.session = session
+        await _initialize_upload_limits(session, config)
 
         # S17: Acquire advisory migration lock on the target server (existing server only).
         lock_acquired = False
@@ -802,6 +906,45 @@ async def run_migration(
     on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
 
     return state
+
+
+async def _initialize_upload_limits(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+) -> str:
+    """Load this run's Autumn limits from Stoat and return the selected tier."""
+    if config.dry_run:
+        return configure_upload_limits({}, None)
+
+    try:
+        root = await api_fetch_root(session, config.stoat_url)
+    except TimeoutError:
+        root = {}
+
+    if not isinstance(root, dict):
+        root = {}
+
+    features = root.get("features")
+    limits = features.get("limits") if isinstance(features, dict) else None
+    global_limits = limits.get("global") if isinstance(limits, dict) else None
+    new_user_limits = limits.get("new_user") if isinstance(limits, dict) else None
+    tier_is_knowable = (
+        isinstance(global_limits, dict)
+        and isinstance(global_limits.get("new_user_hours"), int)
+        and isinstance(new_user_limits, dict)
+    )
+    if not tier_is_knowable:
+        return configure_upload_limits(root, None)
+
+    user_id: str | None = None
+    try:
+        user = await api_fetch_self(session, config.stoat_url, config.token)
+        raw_user_id = user.get("_id")
+        if isinstance(raw_user_id, str):
+            user_id = raw_user_id
+    except Exception:  # noqa: BLE001 - root limits still have a safe default tier
+        pass
+    return configure_upload_limits(root, user_id)
 
 
 async def _run_phases(
@@ -1493,6 +1636,8 @@ async def run_retry_failed(
     state: MigrationState,
     exports: list[DCEExport],
     on_event: EventCallback,
+    *,
+    _upload_limits_ready: bool = False,
 ) -> None:
     """Re-process failed messages from state.failed_messages.
 
@@ -1558,6 +1703,8 @@ async def run_retry_failed(
 
     async with get_session(config) as session:
         config.session = session
+        if not _upload_limits_ready:
+            await _initialize_upload_limits(session, config)
         retried = 0
         still_failed: list[FailedMessage] = []
         # Batch 3 (S1): iterate a snapshot — _process_message (channel_result=None) appends
@@ -1622,9 +1769,8 @@ async def run_retry_failed(
 
 #: The only structure kinds repair acts on.
 #:
-#: Membership against a literal set, NEVER a test on ``status``. A ``fail`` kind
-#: added after this batch would be swept into a status test silently, and repair
-#: has no way to handle a defect it has not seen.
+#: Failure status and membership in this set are both required. A new fail kind
+#: must not reach a repair path until that path explicitly supports it.
 _REPAIRABLE_STRUCTURE = frozenset({"channel_missing", "role_missing", "category_missing"})
 
 #: The only tail kinds repair acts on. ``tail_not_recorded`` and
@@ -1656,56 +1802,24 @@ async def _live_server_view(
     session: aiohttp.ClientSession,
     config: FerryConfig,
     state: MigrationState,
-) -> tuple[set[str], list[dict[str, Any]]]:
-    """One fetch, two things repair needs: the collision set and the categories.
-
-    Returns ``(channel_names, categories)``. Both come from the same response
-    because both are needed only when something is being recreated, and the
-    /servers bucket allows 5 requests per 10 seconds.
-
-    The categories half exists because ``api_upsert_categories`` is a FULL-ARRAY
-    PATCH: it sets the server's entire categories list. Recreating one missing
-    category by sending only that category would delete every other one. So the
-    current array has to come back first, and a test drives two survivors.
-
-    ``server.categories`` is Optional upstream and the key can be absent
-    entirely, which is why it is read through ``or []`` rather than indexed.
-
-    The channel-names half, for the collision set:
-
-    Repair names a recreated channel with ``make_unique_channel_name``, and what
-    differs from a migration is not the rule but its INPUT. ``run_channels``
-    builds its set across the whole export, because on a migration that is every
-    name about to exist. On a repair the correct set is what is on the server
-    NOW: a channel originally created as ``general-1``, whose collision partner
-    has since been deleted, should come back as ``general``.
-
-    Costs ONE request, on the ``/servers`` bucket at 5 per 10 seconds. It cannot
-    be taken from the ``CheckReport``, which is why repair pays for it
-    separately: ``visible_names`` is local to ``_check_structure`` and reaches a
-    ``CheckResult`` only through ``expected``/``found`` on a rename comparison,
-    so the far more common unchanged-name case carries no name at all.
-
-    Known limit, shared with ``ferry check`` itself and not introduced here: the
-    sibling ``channels`` array holds only what this token may ViewChannel, so a
-    channel it cannot see is absent from this set and a recreation could collide
-    with one. That is the same blindness ``channel_not_visible`` documents.
-    """
-    payload = await api_fetch_server_with_channels(
+) -> ServerReadView:
+    """Read validated server evidence before dependent structure writes."""
+    return await api_fetch_server_view(
         session, config.stoat_url, config.token, state.stoat_server_id
     )
-    names: set[str] = set()
-    for channel in payload.get("channels") or []:
-        # isinstance rather than a bare .get: the payload is dict[str, Any], so
-        # mypy cannot help, and an entry Ferry cannot read must be skipped rather
-        # than contribute None to a set[str]. verify.py guards the same way.
-        if isinstance(channel, dict):
-            name = channel.get("name")
-            if isinstance(name, str):
-                names.add(name)
-    server = payload.get("server") or {}
-    categories = [c for c in (server.get("categories") or []) if isinstance(c, dict)]
-    return names, categories
+
+
+def _structure_still_missing(result: CheckResult, view: ServerReadView) -> bool:
+    identity = result.stoat_id
+    if identity is None:
+        return False
+    if result.kind == "channel_missing":
+        return identity not in view.all_channel_ids
+    if result.kind == "role_missing":
+        return identity not in view.roles
+    if result.kind == "category_missing":
+        return all(category["id"] != identity for category in view.categories)
+    return False
 
 
 def _channel_message_ids(export: DCEExport) -> list[str]:
@@ -2506,6 +2620,7 @@ async def _recreate_category(
     await api_upsert_categories(
         session, config.stoat_url, config.token, state.stoat_server_id, rebuilt
     )
+    live_categories[:] = rebuilt
     state.category_map[discord_id] = new_id
     on_event(
         MigrationEvent(
@@ -2852,6 +2967,8 @@ async def run_repair(
     forum_index_work: list[CheckResult] = []
     forum_index_rebuild_work: list[CheckResult] = []
     for result in report.results:
+        if result.status != "fail":
+            continue
         is_structure = result.kind in _REPAIRABLE_STRUCTURE
         is_emoji = result.kind in _REPAIRABLE_EMOJI
         if not is_structure and not is_emoji and result.kind not in _REPAIRABLE_TAIL:
@@ -2954,6 +3071,14 @@ async def run_repair(
         outcome.declined = _repair_declined(state, warnings_start)
         return outcome
 
+    own_limits_session = session is None
+    limits_session = session or new_session()
+    try:
+        await _initialize_upload_limits(limits_session, config)
+    finally:
+        if own_limits_session:
+            await limits_session.close()
+
     # Emoji pass, ordered BEFORE structure and tail so channel_map, role_map and
     # author_names still hold their migration-time values when a referencing
     # message is re-rendered. That ordering is what keeps the rewrite scoped to
@@ -2980,7 +3105,12 @@ async def run_repair(
         own_session = session is None
         sess = session or new_session()
         try:
-            existing_names, live_categories = await _live_server_view(sess, config, state)
+            view = await _live_server_view(sess, config, state)
+            existing_names = view.channel_names
+            live_categories = deepcopy(view.categories)
+            structure_work = [
+                result for result in structure_work if _structure_still_missing(result, view)
+            ]
             on_event(
                 MigrationEvent(
                     phase="repair",
@@ -3255,7 +3385,12 @@ async def run_repair(
         fi_sess = session or new_session()
         try:
             if forum_index_work:
-                existing_names, live_categories = await _live_server_view(fi_sess, config, state)
+                view = await _live_server_view(fi_sess, config, state)
+                existing_names = view.channel_names
+                live_categories = deepcopy(view.categories)
+                forum_index_work = [
+                    result for result in forum_index_work if _structure_still_missing(result, view)
+                ]
                 for result in forum_index_work:
                     created = await _recreate_forum_index(
                         fi_sess, config, state, result, existing_names, live_categories, on_event
@@ -3335,7 +3470,13 @@ async def run_repair(
     # empty queue, so this costs nothing when there is nothing to drain.
     if state.failed_messages:
         before = len(state.failed_messages)
-        await run_retry_failed(config, state, exports, on_event)
+        await run_retry_failed(
+            config,
+            state,
+            exports,
+            on_event,
+            _upload_limits_ready=True,
+        )
         outcome.dead_letter = {
             "drained": before - len(state.failed_messages),
             "remaining": len(state.failed_messages),
@@ -3997,7 +4138,7 @@ async def _build_blueprint_channel(
     ch: BlueprintChannel,
     on_event: EventCallback,
 ) -> str:
-    """Create a blueprint channel, retrying a failed Voice channel as Text (Stoat Bug #194).
+    """Create a blueprint channel, retrying a failed Voice channel as Text.
 
     Mirrors the migration path's voice fallback (``structure.py``). Only a ``"Voice"``-type
     create failure is retried as ``"Text"``; any other ``MigrationError`` propagates. Returns
@@ -4012,6 +4153,7 @@ async def _build_blueprint_channel(
             name=truncate_name(ch.name),
             channel_type=ch.type,
             nsfw=ch.nsfw,
+            user_limit=ch.user_limit or None,
         )
     except MigrationError:
         if ch.type == "Voice":
@@ -4055,6 +4197,15 @@ async def run_build(
     ``run_rollback`` -- there is no recorded id map to undo.
     """
     import uuid
+
+    try:
+        for category in blueprint.categories:
+            for ch in category.channels:
+                ch.validate_user_limit()
+        for ch in blueprint.uncategorized_channels:
+            ch.validate_user_limit()
+    except ValueError as exc:
+        raise MigrationError(str(exc)) from exc
 
     own_session = session is None
     sess = session or new_session()

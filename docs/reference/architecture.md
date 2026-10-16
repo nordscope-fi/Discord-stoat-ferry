@@ -378,12 +378,14 @@ DiscordMetadata(  # Persisted to discord_metadata.json
 
 ```python
 BlueprintRole(name, colour, permissions, rank)
-BlueprintChannel(name, type, nsfw)  # type: "Text" or "Voice"
+BlueprintChannel(name, type, nsfw, user_limit=0)  # type: "Text" or "Voice"
 BlueprintCategory(name, channels)
 ServerBlueprint(name, description, roles, categories, uncategorized_channels)
 ```
 
 Blueprints use **names, not IDs**, making them portable across Stoat instances.
+
+Voice channels retain a positive `user_limit` in blueprint JSON. Missing or zero means unlimited; zero is omitted on export. Invalid caps are rejected before server creation.
 
 ---
 
@@ -742,29 +744,35 @@ categories array on the server.
 **Full parse** (`parse_export_directory(export_dir)`): Reads all `*.json` files in the
 directory, parses guild, channel, and message data into typed dataclasses.
 
-**Metadata-only parse** (`parse_export_directory(export_dir, metadata_only=True)`): Reads
-guild and channel data but **skips the messages array**. Sets `json_path` and `message_count`
-on each `DCEExport` so messages can be streamed later. This is the default mode, it keeps
-memory flat for large exports.
+**Metadata-only parse** (`parse_export_directory(export_dir, metadata_only=True)`): Streams through
+the file and retains direct scalar fields from `guild` and `channel`, plus `messageCount` and
+`exportedAt`. Message values are read as parser events and discarded instead of being collected
+into an array. Each `DCEExport` therefore has an empty `messages` list, with `json_path` and
+`message_count` set so messages can be streamed later. This is the default mode, and its memory use
+does not grow with the message count.
 
 **Streaming** (`stream_messages(json_path)`): Uses `ijson.items()` to iterate messages one at
 a time with O(1) memory per message. Used by VALIDATE (for scanning), EMOJI (for extraction),
 and MESSAGES (for import) when running in metadata-only mode.
 
-**Validation** (`validate_export(exports, export_dir, author_names)`): Single-pass scan that
-checks for rendered markdown detection (missing `--markdown false`), missing media files,
-duplicate channel IDs, and limit violations. Populates `author_names` dict to avoid a second
-scan.
+**Directory parse** (`parse_export_directory(export_dir)`): Refuses duplicate channel IDs before
+the validation scan. Its error names every file carrying each repeated ID so the operator can
+remove the older export.
+
+**Validation** (`validate_export(exports, export_dir, author_names)`): Single-pass scan that checks
+for rendered markdown detection (missing `--markdown false`), missing media files, and limit
+violations. Populates `author_names` dict to avoid a second scan.
 
 ### Thread Inference
 
-DCE does not include thread-to-parent relationships in JSON metadata. Ferry infers them from
-filenames:
+DCE 2.48 writes a thread's parent channel ID to `channel.categoryId` and its parent name to
+`channel.category`. Ferry uses the parsed `channel.type` as the authority on whether an export is a
+thread. A known non-thread type remains a regular channel even when its guild or channel name
+contains ` - `.
 
-- `{Guild} - {Channel} [{id}].json` → regular channel (2 dash-separated segments)
-- `{Guild} - {Parent} - {Thread} [{id}].json` → thread or forum post (3 segments)
-
-The `DCEExport` dataclass stores `is_thread` and `parent_channel_name` based on this inference.
+For a thread with a parent ID, Ferry takes the parent name from `channel.category`. It falls back to
+the parent segment in `{Guild} - {Parent} - {Thread} [{id}].json` only when the JSON has no parent
+ID. The `DCEExport` dataclass stores the resulting `is_thread` and `parent_channel_name` values.
 
 ### Content Transforms (`parser/transforms.py`)
 
@@ -1239,9 +1247,14 @@ or IDs. Useful for:
 # Export blueprint from DCE exports
 ferry export-blueprint --from ~/exports/my-server/ --output my-server.json
 
+# Include cached voice caps without a login
+ferry export-blueprint --from ./exports --metadata-dir ./migration-output --output server.json
+
 # Create server from blueprint
 ferry build --blueprint my-server.json --stoat-url ...
 ```
+
+Both export interfaces accept an optional folder containing `discord_metadata.json`. The cache must match the single exported server. A selected missing, malformed or mismatched cache stops export without replacing the output. No folder retains the existing offline behavior.
 
 ### Preset Templates
 
@@ -1357,18 +1370,18 @@ The `thread_strategy` config option controls how forum and thread channels are h
 |----------|-----------|
 | `flatten` | Each thread becomes its own standalone text channel (default pre-v2) |
 | `merge` | Thread messages are appended into the parent channel after it is processed; threads are NOT created as separate channels. Processed after all parent channels complete. |
-| `archive` | Threads are converted to a markdown attachment on a header message in the parent channel, no new channel is created |
+| `archive` | Thread messages are written only to local markdown files at `{output_dir}/threads/{parent_channel_name}/{thread_name}.md`; no API calls are made and nothing is posted to Stoat |
 
 `min_thread_messages` (default 0 = include all) filters out threads with fewer messages than
 the threshold, useful for suppressing near-empty auto-created threads.
 
-**Filename sanitisation (from v2.19.12, PR #443).** The `archive` and `merge` strategies write
-attachment filenames derived from free-form Discord parent-channel and thread names.
+**Filename sanitisation (from v2.19.12, PR #443).** The `archive` strategy derives its local parent
+folder and markdown filename from free-form Discord parent-channel and thread names.
 `sanitize_filename()` in `migrator/messages.py` strips characters that are illegal on Windows
 (`< > : " \ | ? *`). It collapses forward slashes so a thread called `wip/2026` does not create a
-subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). Two
-threads whose sanitised names collide are suffixed with the thread ID so neither file overwrites
-the other.
+subdirectory, and rewrites Win32 reserved device names (`CON`, `NUL`, etc.). During one run,
+threads whose sanitised names collide within a parent folder receive numeric suffixes such as
+`_2` and `_3`.
 
 ---
 

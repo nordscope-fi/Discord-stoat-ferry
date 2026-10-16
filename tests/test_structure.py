@@ -2178,7 +2178,7 @@ async def test_run_channels_truncates_long_topic(tmp_path: Path) -> None:
 
 
 async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
-    """CHANNELS phase PATCHes slowmode (text) and voice.max_users (voice)."""
+    """Slowmode needs an edit; a Voice cap is carried by creation."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -2220,17 +2220,21 @@ async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
             payload={"_id": "stoat-txt1"},
             callback=_capture,  # type: ignore[arg-type]
         )
-        m.patch(
-            f"{STOAT_URL}/channels/stoat-vc1",
-            payload={"_id": "stoat-vc1"},
-            callback=_capture,  # type: ignore[arg-type]
-        )
         await run_channels(config, state, exports, events.append)
+        posts = [
+            call.kwargs["json"]
+            for (method, _url), calls in m.requests.items()
+            if method == "POST"
+            for call in calls
+        ]
+        assert len(posts) == 2
+        assert posts[1]["voice"] == {"max_users": 5}
+        assert "voice" not in posts[0]
+        assert [method for method, _url in m.requests].count("PATCH") == 1
 
     assert edit_bodies["stoat-txt1"].get("slowmode") == 30
     assert "voice" not in edit_bodies["stoat-txt1"]
-    assert edit_bodies["stoat-vc1"].get("voice") == {"max_users": 5}
-    assert "slowmode" not in edit_bodies["stoat-vc1"]
+    assert "stoat-vc1" not in edit_bodies
     assert state.native_fidelity_counts == {"slowmode": 1, "user_limit": 1}
 
 
@@ -2274,8 +2278,57 @@ async def test_channel_slowmode_clamped_above_max(tmp_path: Path) -> None:
     assert any(w.get("type") == "slowmode_clamped" for w in state.warnings)
 
 
+async def test_voice_cap_resume_does_not_recount_carried_channels(tmp_path: Path) -> None:
+    exports = [
+        _make_export(channel_id=ch, channel_name=ch, channel_type=2, category_id="")
+        for ch in ("first", "second")
+    ]
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id="111",
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={
+                ch: ChannelMeta(nsfw=False, user_limit=5) for ch in ("first", "second")
+            },
+        ),
+        tmp_path,
+    )
+    state = MigrationState(stoat_server_id="srv1")
+    create = AsyncMock(side_effect=[{"_id": "s-first"}, asyncio.CancelledError()])
+    with (
+        patch.object(structure_module, "api_create_channel", create),
+        patch.object(structure_module, "api_edit_channel", AsyncMock()) as edit,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_channels(_make_config(tmp_path), state, exports, lambda event: None)
+    assert state.channel_map == {"first": "s-first"}
+    assert state.native_fidelity_counts == {"user_limit": 1}
+    assert create.await_args_list[0].kwargs["user_limit"] == 5
+    edit.assert_not_awaited()
+
+    resumed_create = AsyncMock(return_value={"_id": "s-second"})
+    with (
+        patch.object(structure_module, "api_create_channel", resumed_create),
+        patch.object(structure_module, "api_edit_channel", AsyncMock()) as edit,
+    ):
+        await run_channels(
+            _make_config(tmp_path, incremental=True), state, exports, lambda event: None
+        )
+        assert state.native_fidelity_counts == {"user_limit": 2}
+        resumed_create.assert_awaited_once()
+        assert resumed_create.await_args.kwargs["name"] == "second"
+        await run_channels(
+            _make_config(tmp_path, incremental=True), state, exports, lambda event: None
+        )
+    assert resumed_create.await_count == 1
+    assert state.native_fidelity_counts == {"user_limit": 2}
+    edit.assert_not_awaited()
+
+
 async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
-    """A voice channel that falls back to text (Bug #194) skips the voice PATCH.
+    """A voice channel that falls back to text skips the voice PATCH.
 
     slowmode is still applied to the text-fallback channel.
     """
@@ -2301,7 +2354,7 @@ async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
     edit_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
-        # First call (Voice) fails -> Bug #194 fallback to Text.
+        # First call (Voice) fails, then the channel falls back to Text.
         m.post(f"{STOAT_URL}/servers/srv1/channels", status=400)
         m.post(
             f"{STOAT_URL}/servers/srv1/channels",
@@ -2315,6 +2368,15 @@ async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
             ),
         )
         await run_channels(config, state, exports, events.append)
+        posts = [
+            call.kwargs["json"]
+            for (method, _url), calls in m.requests.items()
+            if method == "POST"
+            for call in calls
+        ]
+        assert posts[0]["voice"] == {"max_users": 8}
+        assert posts[1]["type"] == "Text"
+        assert "voice" not in posts[1]
 
     assert len(edit_bodies) == 1
     # created_as_voice is False, so the voice kwarg must be omitted.
@@ -5155,7 +5217,7 @@ async def test_a_collision_pair_records_distinct_suffixed_names(tmp_path: Path) 
 async def test_a_voice_retry_records_the_retrys_response(tmp_path: Path) -> None:
     """SC-2.6. The retry reassigns the response INSIDE an except block.
 
-    A voice channel that fails is retried as text (#194). The id-map write sits
+    A voice channel that fails is retried as text. The id-map write sits
     OUTSIDE the try, so `result` there is whichever attempt succeeded, and the
     name write belongs beside it.
 

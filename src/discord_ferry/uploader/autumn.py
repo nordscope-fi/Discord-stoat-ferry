@@ -6,6 +6,10 @@ import asyncio
 import contextlib
 import logging
 import math
+from collections.abc import Iterator, Mapping
+from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -31,14 +35,111 @@ _RETRYABLE_STATUSES = {429, 502, 503, 504}
 # Verified 2026-08-02
 # against `features.limits.default.file_upload_size_limits` on https://api.stoat.chat/;
 # `ferry probe` re-checks it against whatever instance you point it at.
-TAG_SIZE_LIMITS: dict[str, int] = {
-    "attachments": 20_000_000,
-    "avatars": 4_000_000,
-    "backgrounds": 6_000_000,
-    "icons": 2_500_000,
-    "banners": 6_000_000,
-    "emojis": 500_000,
-}
+_DEFAULT_TAG_SIZE_LIMITS: Mapping[str, int] = MappingProxyType(
+    {
+        "attachments": 20_000_000,
+        "avatars": 4_000_000,
+        "backgrounds": 6_000_000,
+        "icons": 2_500_000,
+        "banners": 6_000_000,
+        "emojis": 500_000,
+    }
+)
+_run_tag_size_limits: ContextVar[Mapping[str, int]] = ContextVar(
+    "run_tag_size_limits", default=_DEFAULT_TAG_SIZE_LIMITS
+)
+_CROCKFORD_VALUES = {char: index for index, char in enumerate("0123456789ABCDEFGHJKMNPQRSTVWXYZ")}
+
+
+def get_tag_size_limit(tag: str) -> int:
+    """Return the active run's limit for an Autumn tag."""
+    return _run_tag_size_limits.get()[tag]
+
+
+class _RuntimeTagSizeLimits(Mapping[str, int]):
+    """Read-only mapping that resolves values from the current async run."""
+
+    def __getitem__(self, tag: str) -> int:
+        return get_tag_size_limit(tag)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_DEFAULT_TAG_SIZE_LIMITS)
+
+    def __len__(self) -> int:
+        return len(_DEFAULT_TAG_SIZE_LIMITS)
+
+    def __eq__(self, other: object) -> bool:
+        return dict(self) == other
+
+
+TAG_SIZE_LIMITS: Mapping[str, int] = _RuntimeTagSizeLimits()
+
+
+def _ulid_created_at(user_id: str) -> datetime | None:
+    """Decode a Stoat ULID's 48-bit timestamp, or return None when invalid."""
+    if len(user_id) != 26 or user_id[0] > "7":
+        return None
+    value = 0
+    try:
+        normalized = user_id.upper()
+        for char in normalized:
+            _CROCKFORD_VALUES[char]
+        for char in normalized[:10]:
+            value = value * 32 + _CROCKFORD_VALUES[char]
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    except (KeyError, OverflowError, OSError, ValueError):
+        return None
+
+
+def configure_upload_limits(
+    root: object,
+    user_id: str | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Select and install the upload limits Stoat applies to this account.
+
+    Stoat v0.15.7 selects ``new_user`` when the account ULID is no older than
+    ``global.new_user_hours``. If that cannot be established, Ferry selects
+    ``default``. Missing or malformed advertised values retain Ferry's current
+    limits for those tags.
+
+    Returns the selected tier name.
+    """
+    tier = "default"
+    limits: object = {}
+    if isinstance(root, dict):
+        features = root.get("features")
+        if isinstance(features, dict):
+            limits = features.get("limits", {})
+
+    if isinstance(limits, dict) and user_id:
+        global_limits = limits.get("global")
+        new_user_hours = (
+            global_limits.get("new_user_hours") if isinstance(global_limits, dict) else None
+        )
+        created_at = _ulid_created_at(user_id)
+        current_time = now or datetime.now(UTC)
+        if (
+            isinstance(new_user_hours, int)
+            and not isinstance(new_user_hours, bool)
+            and new_user_hours >= 0
+            and created_at is not None
+            and timedelta(0) <= current_time - created_at <= timedelta(hours=new_user_hours)
+        ):
+            tier = "new_user"
+
+    selected = limits.get(tier) if isinstance(limits, dict) else None
+    advertised = selected.get("file_upload_size_limits") if isinstance(selected, dict) else None
+    active = dict(_DEFAULT_TAG_SIZE_LIMITS)
+    if isinstance(advertised, dict):
+        for tag in active:
+            value = advertised.get(tag)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                active[tag] = value
+    _run_tag_size_limits.set(MappingProxyType(active))
+    return tier
+
 
 # Stoat accepts JPEG XL but Pillow does not decode it. A JPEG XL codestream starts
 # with FF 0A; its container begins with the JXL box signature. Leave either form
@@ -434,8 +535,7 @@ async def upload_with_cache(
             present-and-mismatched size the upload raises ``AutumnUploadError`` and is never
             cached. Best-effort — not all Autumn responses include ``size``.
         skip_cache: When True, bypass the cache lookup and in-flight coalescing so a fresh
-            upload always runs. Required for attachment-tagged uploads because Autumn file
-            ids are single-use.
+            upload always runs. Use for consumers that may have attached an earlier id.
 
     Returns:
         Autumn file ID string.

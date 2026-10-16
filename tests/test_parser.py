@@ -373,6 +373,37 @@ def test_parse_export_directory_refuses_invalid_files(fixtures_dir: Path, tmp_pa
         parse_export_directory(temp_dir)
 
 
+def _write_export_with_channel_id(path: Path, channel_id: str, channel_name: str) -> None:
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    data["channel"]["id"] = channel_id
+    data["channel"]["name"] = channel_name
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_parse_export_directory_rejects_duplicate_channel_ids_with_both_filenames(
+    tmp_path: Path,
+) -> None:
+    old_path = tmp_path / "Guild before rename - general [222].json"
+    new_path = tmp_path / "Guild after rename - chat [222].json"
+    _write_export_with_channel_id(old_path, "222", "general")
+    _write_export_with_channel_id(new_path, "222", "chat")
+
+    with pytest.raises(ExportError) as caught:
+        parse_export_directory(tmp_path, metadata_only=True)
+
+    assert old_path.name in str(caught.value)
+    assert new_path.name in str(caught.value)
+
+
+def test_parse_export_directory_accepts_distinct_channel_ids(tmp_path: Path) -> None:
+    _write_export_with_channel_id(tmp_path / "old-name.json", "111", "general")
+    _write_export_with_channel_id(tmp_path / "new-name.json", "222", "chat")
+
+    exports = parse_export_directory(tmp_path, metadata_only=True)
+
+    assert {export.channel.id for export in exports} == {"111", "222"}
+
+
 # ---------------------------------------------------------------------------
 # Thread detection on full export
 # ---------------------------------------------------------------------------
@@ -391,6 +422,25 @@ def test_thread_parent_name(fixtures_dir: Path) -> None:
     export = parse_single_export(
         fixtures_dir / "Discord Ferry Test - general - Cool Thread [1506019505778987190].json"
     )
+    assert export.parent_channel_name == "general"
+
+
+def test_thread_parent_comes_from_json_when_guild_name_contains_separator(
+    tmp_path: Path,
+) -> None:
+    """DCE 2.48 writes the parent id and name in the channel object."""
+    source = (
+        FIXTURES_DIR
+        / "dce_2_48"
+        / "captured"
+        / "Discord Ferry Test - general - Cool Thread [1543572368977428611].json"
+    )
+    path = tmp_path / "Foo - Bar - general - Cool Thread [1543572368977428611].json"
+    path.write_bytes(source.read_bytes())
+
+    export = parse_single_export(path, metadata_only=True)
+
+    assert export.channel.category_id == "1543572361285083187"
     assert export.parent_channel_name == "general"
 
 
@@ -1179,6 +1229,53 @@ def test_parse_single_export_metadata_only(tmp_path: Path) -> None:
     assert export.message_count == 1
     assert len(export.messages) == 0
     assert export.json_path == json_path
+
+
+def test_metadata_only_does_not_use_the_whole_document_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    path = tmp_path / "channel.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    def refuse_whole_document_load(path: Path, max_bytes: int) -> object:
+        raise AssertionError("metadata-only parsing loaded the whole channel file")
+
+    monkeypatch.setattr(
+        "discord_ferry.parser.dce_parser.load_bounded_json", refuse_whole_document_load
+    )
+
+    export = parse_single_export(path, metadata_only=True)
+
+    assert export.message_count == len(data["messages"])
+    assert export.messages == []
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["metadata-dotted-top-level.json", "metadata-empty-name-object.json"],
+)
+def test_metadata_only_ignores_unknown_top_level_prefix_collisions(filename: str) -> None:
+    path = FIXTURES_DIR / "parser" / filename
+
+    eager = parse_single_export(path)
+    metadata = parse_single_export(path, metadata_only=True)
+
+    assert metadata.guild == eager.guild
+    assert metadata.channel == eager.channel
+    assert metadata.message_count == eager.message_count
+
+
+def test_eager_parse_still_returns_every_message(tmp_path: Path) -> None:
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    path = tmp_path / "channel.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    export = parse_single_export(path)
+
+    assert [message.id for message in export.messages] == [
+        message["id"] for message in data["messages"]
+    ]
 
 
 def _forbid_read_text(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -153,6 +153,24 @@ def test_validate_reports_a_malformed_message_without_a_traceback(
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
+def test_validate_names_both_files_with_the_same_channel_id(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    data = json.loads((Path(FIXTURES_DIR) / "simple_channel.json").read_text(encoding="utf-8"))
+    first = tmp_path / "Guild before rename - general [222].json"
+    second = tmp_path / "Guild after rename - chat [222].json"
+    first.write_text(json.dumps(data), encoding="utf-8")
+    second.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(main, ["validate", str(tmp_path)])
+
+    assert result.exit_code == 1
+    # Rich may have captured a narrow width before this test starts.
+    output = " ".join(result.output.split())
+    assert first.name in output
+    assert second.name in output
+
+
 # ---------------------------------------------------------------------------
 # Migrate — argument validation
 # ---------------------------------------------------------------------------
@@ -303,6 +321,69 @@ def test_migrate_env_vars(runner: CliRunner) -> None:
     config: FerryConfig = mock_engine.call_args[0][0]
     assert config.stoat_url == "http://env-url"
     assert config.token == "env-token"
+
+
+def test_migrate_offline_ignores_discord_token_from_environment(runner: CliRunner) -> None:
+    mock_engine = _make_mock_engine()
+    discord_token = "discord-env-token-AAAABBBBCCCC9876"
+    env = {
+        "DISCORD_TOKEN": discord_token,
+        "STOAT_URL": "http://env-url",
+        "STOAT_TOKEN": "stoat-env-token-AAAABBBBCCCC9876",
+    }
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            ["migrate", "--export-dir", FIXTURES_DIR],
+            env=env,
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert (
+        result.output.count("Ignoring DISCORD_TOKEN because --export-dir uses existing exports.")
+        == 1
+    )
+    assert discord_token not in result.output
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.discord_token is None
+    assert config.skip_export is True
+
+
+def test_migrate_offline_ignores_discord_token_loaded_from_dotenv(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mock_engine = _make_mock_engine()
+    discord_token = "discord-dotenv-token-AAAABBBBCCCC9876"
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+
+    def load_test_dotenv() -> None:
+        monkeypatch.setenv("DISCORD_TOKEN", discord_token)
+
+    env = {
+        "STOAT_URL": "http://env-url",
+        "STOAT_TOKEN": "stoat-env-token-AAAABBBBCCCC9876",
+    }
+    with (
+        patch("discord_ferry.cli.load_dotenv", side_effect=load_test_dotenv),
+        patch("discord_ferry.cli.run_migration", mock_engine),
+    ):
+        result = runner.invoke(
+            main,
+            ["migrate", "--export-dir", FIXTURES_DIR],
+            env=env,
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0
+    assert (
+        result.output.count("Ignoring DISCORD_TOKEN because --export-dir uses existing exports.")
+        == 1
+    )
+    assert discord_token not in result.output
+    config: FerryConfig = mock_engine.call_args[0][0]
+    assert config.discord_token is None
+    assert config.skip_export is True
 
 
 def test_migrate_engine_error(runner: CliRunner) -> None:
@@ -1382,6 +1463,57 @@ def test_build_non_voice_failure_aborts(runner: CliRunner, tmp_path: Path) -> No
     assert result.output.index("Build failed") < result.output.index("ferry feedback")
 
 
+@pytest.mark.parametrize("categorized", [False, True])
+@pytest.mark.parametrize(
+    "channel_type, cap",
+    [
+        ("Voice", -1),
+        ("Voice", True),
+        ("Voice", "bad-cap-marker"),
+        ("Voice", 1.5),
+        ("Voice", None),
+        ("Text", 5),
+    ],
+)
+def test_build_bad_cap_never_starts_engine(
+    runner: CliRunner,
+    tmp_path: Path,
+    categorized: bool,
+    channel_type: str,
+    cap: object,
+) -> None:
+    import json
+
+    data = {"name": "S"}
+    channel = {"name": "channel", "type": channel_type, "user_limit": cap}
+    data.update(
+        {"categories": [{"name": "V", "channels": [channel]}]}
+        if categorized
+        else {"uncategorized_channels": [channel]}
+    )
+    source = tmp_path / "bp.json"
+    source.write_text(json.dumps(data))
+    with patch("discord_ferry.core.engine.run_build") as build_engine:
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--blueprint",
+                str(source),
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                _BUILD_TOKEN,
+            ],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 1
+    assert "user_limit" in result.output
+    assert "bad-cap-marker" not in result.output
+    assert "Traceback" not in result.output
+    build_engine.assert_not_called()
+
+
 def test_build_empty_blueprint(runner: CliRunner, tmp_path: Path) -> None:  # SC-21
     from discord_ferry.blueprint import ServerBlueprint
 
@@ -1557,6 +1689,95 @@ def _write_dce_channel(dir_path: Path, fname: str, ch_id: str, ch_type: int, ch_
         "messageCount": 0,
     }
     (dir_path / fname).write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _write_voice_cap_metadata(folder: Path, *, guild_id: str = "111") -> None:
+    from discord_ferry.discord.metadata import ChannelMeta, DiscordMetadata, save_discord_metadata
+
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id=guild_id,
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={"201": ChannelMeta(nsfw=False, user_limit=5)},
+        ),
+        folder,
+    )
+
+
+def test_export_blueprint_metadata_cap(runner: CliRunner, tmp_path: Path) -> None:
+    import json
+
+    from aioresponses import aioresponses
+
+    source, metadata = tmp_path / "exports", tmp_path / "metadata"
+    source.mkdir()
+    _write_dce_channel(source, "voice.json", "201", 2, "Voice")
+    _write_voice_cap_metadata(metadata)
+    output = tmp_path / "bp.json"
+    with aioresponses() as requests:
+        result = runner.invoke(
+            main,
+            [
+                "export-blueprint",
+                "--from",
+                str(source),
+                "-o",
+                str(output),
+                "--metadata-dir",
+                str(metadata),
+            ],
+            catch_exceptions=False,
+        )
+        assert not requests.requests
+    assert result.exit_code == 0
+    assert json.loads(output.read_text())["categories"][0]["channels"][0]["user_limit"] == 5
+    assert "--metadata-dir" in runner.invoke(main, ["export-blueprint", "--help"]).output
+
+
+@pytest.mark.parametrize("failure", ["missing", "malformed", "wrong-guild", "bad-cap"])
+def test_export_blueprint_metadata_error_preserves_output(
+    runner: CliRunner,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    import json
+
+    source, metadata = tmp_path / "exports", tmp_path / "metadata"
+    source.mkdir()
+    metadata.mkdir()
+    _write_dce_channel(source, "voice.json", "201", 2, "Voice")
+    if failure == "wrong-guild":
+        _write_voice_cap_metadata(metadata, guild_id="222")
+    elif failure == "malformed":
+        (metadata / "discord_metadata.json").write_text("{")
+    elif failure == "bad-cap":
+        _write_voice_cap_metadata(metadata)
+        cache = metadata / "discord_metadata.json"
+        raw = json.loads(cache.read_text())
+        raw["channel_metadata"]["201"]["user_limit"] = "bad-cap-marker"
+        cache.write_text(json.dumps(raw))
+    output = tmp_path / "bp.json"
+    output.write_text("OLD")
+    result = runner.invoke(
+        main,
+        [
+            "export-blueprint",
+            "--from",
+            str(source),
+            "-o",
+            str(output),
+            "--metadata-dir",
+            str(metadata),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "bad-cap-marker" not in result.output
+    assert "Traceback" not in result.output
+    assert output.read_text() == "OLD"
 
 
 def test_export_blueprint_keeps_voice_type(runner: CliRunner, tmp_path: Path) -> None:  # SC-14

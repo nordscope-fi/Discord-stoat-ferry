@@ -85,7 +85,7 @@ ferry migrate [OPTIONS]
 | `--skip-emoji` | | false | Do not upload custom emoji |
 | `--skip-reactions` | | false | Do not add reactions |
 | `--skip-threads` | | false | Do not migrate threads or forum posts |
-| `--thread-strategy TEXT` | | `flatten` | Thread handling: `flatten` (each thread becomes a channel), `merge` (thread messages merged into parent channel), or `archive` (exported as markdown attachment) |
+| `--thread-strategy TEXT` | | `flatten` | Thread handling: `flatten` (each thread becomes a channel), `merge` (thread messages merged into its parent channel), or `archive` (local markdown only at `<output-dir>/threads/<parent channel>/<thread>.md`; nothing is posted to Stoat) |
 | `--rate-limit FLOAT` | | 1.0 | Seconds between messages (0.5–3.0 recommended) |
 | `--upload-delay FLOAT` | | 0.5 | Seconds between Autumn file uploads |
 | `--output-dir TEXT` | | `./ferry-output` | Directory for the migration report and state file |
@@ -292,6 +292,7 @@ ferry export-blueprint [OPTIONS]
 | `--from PATH` | Path to DCE export directory *(required)* |
 | `--output PATH` / `-o` | Output path for the blueprint JSON file *(required)* |
 | `--name TEXT` | Override the server name stored in the blueprint |
+| `--metadata-dir PATH` | Optional folder containing Ferry's cached discord_metadata.json; reads local settings without a login |
 
 **Example:**
 
@@ -299,9 +300,14 @@ ferry export-blueprint [OPTIONS]
 # Export a blueprint from an existing DCE export
 ferry export-blueprint --from ~/exports/my-discord-server/ --output my-server-blueprint.json
 
+# Include cached voice caps without a login
+ferry export-blueprint --from ./exports --metadata-dir ./migration-output --output server.json
+
 # Then use it to create a new server
 ferry build --blueprint my-server-blueprint.json --stoat-url https://api.stoat.chat
 ```
+
+The GUI export page offers the same optional metadata folder. A selected cache must match the single exported Discord server. Missing, malformed or mismatched selected metadata stops export without replacing an existing output. Without the option, export keeps its existing offline behavior.
 
 !!! tip "Blueprints use names, not IDs"
     Blueprints store role and channel names rather than Discord IDs, making them portable across different Stoat instances.
@@ -648,7 +654,7 @@ a request per channel checking first. Use `retry` when you already know messages
 
 ## `ferry probe`
 
-Check what a live Stoat instance actually supports before you migrate to it. Probe measures upload size limits, checks whether voice channels can be created (Stoat Bug #194), checks webhook availability, and inspects rate-limit behaviour. It is most useful for self-hosted instances, where limits differ from the official service.
+Check what a live Stoat instance actually supports before you migrate to it. Probe measures upload size limits, reads whether the instance has its voice service (LiveKit) enabled, tests voice-channel creation when enabled, checks webhook availability, and inspects rate-limit behaviour. It is most useful for self-hosted instances, where limits differ from the official service.
 
 ```
 ferry probe --test-server-id <id> [OPTIONS]
@@ -671,7 +677,7 @@ Probe creates its test entities (channels, uploads) on the server you point it a
 
 - **Upload size limits** — the limits the instance's file server (Autumn) advertises per upload category, compared against the values Ferry assumes. A mismatch is reported as a warning.
 - **Upload boundary enforcement** *(with `--deep`)* — uploads test files at the exact advertised limit and one byte over for each upload category. Reports whether the server accepts or rejects each. Non-attachment tags require valid image files, which the probe generates as padded PNGs. Probe entities are torn down afterwards, but uploaded bytes persist in Autumn.
-- **Voice channels** — creates a test voice channel and checks whether the instance actually supports voice (Stoat Bug #194). If not, Discord voice channels will become text channels.
+- **Voice channels:** reads `features.livekit.enabled` from the instance. When LiveKit is enabled, the probe creates and reads back a test voice channel. If creation fails during migration, Ferry retries the channel as text.
 - **Webhooks** — creates a test channel and checks whether webhooks can be created on the instance.
 - **Rate limiting** — what rate-limit information the instance exposes in its responses.
 

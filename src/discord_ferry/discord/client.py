@@ -19,6 +19,7 @@ from discord_ferry.discord.models import (
     normalize_channel_position,
 )
 from discord_ferry.errors import DiscordAuthError, MigrationError
+from discord_ferry.uploader.autumn import get_tag_size_limit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -216,9 +217,6 @@ async def _discord_get_object(
     return cast("dict[str, Any]", await _discord_request(session, token, path))
 
 
-_ROLE_ICON_MAX_BYTES = 2_500_000  # Autumn "icons" tag limit (stoatchat Revolt.toml)
-
-
 async def download_role_icon(
     session: aiohttp.ClientSession, role_id: str, icon_hash: str
 ) -> bytes | None:
@@ -235,7 +233,7 @@ async def download_role_icon(
         async with session.get(url, allow_redirects=False) as resp:
             if resp.status != 200:
                 return None
-            return await read_bounded(resp, _ROLE_ICON_MAX_BYTES)
+            return await read_bounded(resp, get_tag_size_limit("icons"))
     except (aiohttp.ClientError, TimeoutError) as exc:
         logger.warning("Role icon download failed for role %s: %s", role_id, exc)
         return None

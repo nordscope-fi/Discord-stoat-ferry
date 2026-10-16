@@ -86,7 +86,7 @@ def _make_export(
         id=channel_id,
         type=channel_type,
         name=channel_name,
-        category_id=category_id,
+        category_id="" if is_thread else category_id,
         category=category,
     )
     return DCEExport(

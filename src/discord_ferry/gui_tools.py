@@ -22,7 +22,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_build, run_repair, run_retry_failed
 from discord_ferry.core.http import describe_proxy, describe_trust, format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
-from discord_ferry.errors import CheckError, MigrationError, StateError
+from discord_ferry.errors import BlueprintValidationError, CheckError, MigrationError, StateError
 from discord_ferry.migrator.probe import run_probe
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
 from discord_ferry.parser.dce_parser import (
@@ -642,6 +642,9 @@ def blueprint_export_page() -> None:
             "w-96"
         )
         name_input = ui.input("Server name (optional, overrides the export's)").classes("w-96")
+        metadata_input = ui.input(
+            "Metadata folder (optional, contains discord_metadata.json)",
+        ).classes("w-96")
         overwrite_cb = ui.checkbox("Overwrite the output file if it already exists")
         results = ui.column().classes("w-full max-w-2xl")
 
@@ -690,8 +693,19 @@ def blueprint_export_page() -> None:
                         f"{output_path} already exists. Tick 'Overwrite' to replace it."
                     ).classes("text-amber-700")
                 return
-            bp = blueprint_from_exports(exports, name_input.value.strip() or None)
-            _write(bp, output_path)
+            try:
+                metadata_dir = metadata_input.value.strip()
+                bp = blueprint_from_exports(
+                    exports,
+                    name_input.value.strip() or None,
+                    metadata_dir=Path(metadata_dir) if metadata_dir else None,
+                )
+                _write(bp, output_path)
+            except BlueprintValidationError as exc:
+                with results:
+                    ui.label(f"Could not export blueprint: {sanitize_secrets(str(exc))}").classes(
+                        "text-red-600"
+                    )
 
         ui.button("Export blueprint", on_click=_run).classes("mt-2")
 

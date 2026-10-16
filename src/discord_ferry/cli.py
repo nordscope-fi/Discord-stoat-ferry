@@ -589,18 +589,31 @@ def _add_options(options: list[Any]) -> Callable[[F], F]:
     return decorator
 
 
-def _build_config(kwargs: dict[str, Any]) -> FerryConfig:
+def _build_config(
+    kwargs: dict[str, Any],
+    *,
+    discord_token_source: click.core.ParameterSource | None,
+) -> FerryConfig:
     """Build a FerryConfig from Click kwargs."""
     export_dir_str = kwargs.get("export_dir")
     discord_token = kwargs.get("discord_token")
     discord_server = kwargs.get("discord_server")
 
     # Mode detection: orchestrated vs offline
-    if export_dir_str and discord_token:
+    if (
+        export_dir_str
+        and discord_token
+        and discord_token_source is click.core.ParameterSource.COMMANDLINE
+    ):
         raise click.UsageError("Cannot use both --export-dir and --discord-token")
 
     if export_dir_str:
         # Offline mode
+        if discord_token and discord_token_source is click.core.ParameterSource.ENVIRONMENT:
+            console.print(
+                "[cyan]Note:[/] Ignoring DISCORD_TOKEN because --export-dir uses existing exports."
+            )
+        discord_token = None
         export_dir = Path(export_dir_str)
         skip_export = True
     elif discord_token and discord_server:
@@ -682,7 +695,8 @@ def feedback_command() -> None:
 
 @main.command()
 @_add_options(_common_options)
-def migrate(**kwargs: Any) -> None:
+@click.pass_context
+def migrate(ctx: click.Context, /, **kwargs: Any) -> None:
     """Run the full migration."""
     stoat_url = kwargs.get("stoat_url")
     token = kwargs.get("token")
@@ -695,7 +709,10 @@ def migrate(**kwargs: Any) -> None:
         sys.exit(1)
 
     try:
-        config = _build_config(kwargs)
+        config = _build_config(
+            kwargs,
+            discord_token_source=ctx.get_parameter_source("discord_token"),
+        )
     except click.UsageError as exc:
         console.print(f"[bold red]Error:[/] {_safe(exc)}")
         sys.exit(1)
@@ -833,7 +850,7 @@ def build(
     """Build a Stoat server from a template or blueprint."""
     import importlib.resources
 
-    from discord_ferry.blueprint import ServerBlueprint, import_blueprint
+    from discord_ferry.blueprint import BlueprintValidationError, ServerBlueprint, import_blueprint
     from discord_ferry.core.engine import run_build
 
     if not template and not blueprint:
@@ -844,11 +861,16 @@ def build(
         sys.exit(1)
 
     bp: ServerBlueprint
-    if template:
-        templates_dir = importlib.resources.files("discord_ferry.templates")
-        bp = import_blueprint(Path(str(templates_dir / f"{template}.json")))
-    else:
-        bp = import_blueprint(Path(blueprint))  # type: ignore[arg-type]
+    try:
+        if template:
+            templates_dir = importlib.resources.files("discord_ferry.templates")
+            bp = import_blueprint(Path(str(templates_dir / f"{template}.json")))
+        else:
+            bp = import_blueprint(Path(blueprint))  # type: ignore[arg-type]
+    except BlueprintValidationError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(sanitize_secrets(str(exc)))}")
+        _print_feedback_hint()
+        sys.exit(1)
 
     if name:
         bp.name = name
@@ -899,9 +921,24 @@ def build(
     help="Output path for the blueprint JSON file",
 )
 @click.option("--name", default=None, help="Override server name in blueprint")
-def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
+@click.option(
+    "--metadata-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Optional folder containing cached discord_metadata.json (offline)",
+)
+def export_blueprint_cmd(
+    from_dir: str,
+    output: str,
+    name: str | None,
+    metadata_dir: str | None,
+) -> None:
     """Export a DCE export directory as a reusable blueprint."""
-    from discord_ferry.blueprint import blueprint_from_exports, export_blueprint
+    from discord_ferry.blueprint import (
+        BlueprintValidationError,
+        blueprint_from_exports,
+        export_blueprint,
+    )
 
     try:
         exports = parse_export_directory(Path(from_dir))
@@ -914,9 +951,17 @@ def export_blueprint_cmd(from_dir: str, output: str, name: str | None) -> None:
         _print_feedback_hint()
         sys.exit(1)
 
-    bp = blueprint_from_exports(exports, name)
-
-    export_blueprint(bp, Path(output))
+    try:
+        bp = blueprint_from_exports(
+            exports,
+            name,
+            metadata_dir=Path(metadata_dir) if metadata_dir is not None else None,
+        )
+        export_blueprint(bp, Path(output))
+    except BlueprintValidationError as exc:
+        console.print(f"[bold red]Error:[/] {_safe(sanitize_secrets(str(exc)))}")
+        _print_feedback_hint()
+        sys.exit(1)
     console.print(
         f"[bold green]Blueprint exported[/] to {_safe(output)} "
         f"({len(bp.categories)} categories, "
@@ -1271,7 +1316,7 @@ def probe_cmd(
     as_json: bool,
     verbose: bool,
 ) -> None:
-    """Probe a live Stoat instance for Autumn limits, rate window, voice Bug #194, webhooks."""
+    """Probe a live Stoat instance for Autumn limits, rate window, voice, and webhooks."""
     load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")

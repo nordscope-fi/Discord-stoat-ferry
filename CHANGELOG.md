@@ -10,6 +10,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.19] - 2026-10-13
+
+### Fixed
+
+- Check reads flat Stoat server replies and distinguishes hidden channels from deleted ones (#1169).
+- Repair ignores unverifiable findings, rechecks missing structure and preserves surviving categories (#1169).
+- Malformed message and emoji entries cannot become confirmed missing content (#1169).
+
+## [2.43.18] - 2026-10-13
+
+### Fixed
+
+- Upload fresh emoji, server icons and banners when their cached Autumn IDs may already be attached (#1187).
+- Apply the Stoat instance's published upload limits for the account's tier, with the current limits as a fallback when unavailable (#1209).
+- Reuse exporter media only after a completed export into the same folder, and clear the completion flag before another attempt starts (#1223).
+- Check whether the Stoat instance enables its voice service before probing voice, and report unavailable feature information without claiming voice is disabled (#1210).
+
+### Changed
+
+- Describe voice as an instance capability and replace retired Autumn source citations with Stoat v0.15.7 references (#1210, #1261).
+
+## [2.43.17] - 2026-10-12
+
+### Fixed
+
+- Read thread parents from exported channel IDs, preserving filename fallback when the JSON lacks a parent ID (#1216).
+- Reject duplicate channel IDs before migration sends messages, name both export files, and ask the user to remove the older file (#1224).
+- Stream export metadata without retaining the message array, preserving normal parsing and preventing unknown JSON keys from replacing channel or guild IDs (#1244).
+- Ignore environment and `.env` Discord tokens for offline exports with a note naming `DISCORD_TOKEN`, while preserving explicit flag conflicts (#1197).
+- Report unusable HTTP and HTTPS proxy logins without exposing credentials or changing proxy selection (#1234).
+- Keep one browser migration running per Ferry process across page disconnects, block competing starts, and preserve pending resume prompts through temporary reconnects (#1237).
+
+### Changed
+
+- Describe local thread archive files and their output paths, correct export parsing documentation, and document HTTP 409 receipt replays after contact-key rotation (#1215, #1296).
+
+## [2.43.16] - 2026-10-12
+
+### Fixed
+
+- Create capped Voice channels in one request and preserve voice caps through blueprint export, import and build, with an optional offline metadata folder in both interfaces (#1246).
+
 ## [2.43.15] - 2026-10-12
 
 ### Fixed

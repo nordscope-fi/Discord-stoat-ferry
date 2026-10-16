@@ -135,7 +135,7 @@ Ferry 2.0 adds several options. Decide which apply to your migration before you 
 
 | Option | Purpose | When to use |
 |--------|---------|-------------|
-| `--thread-strategy flatten\|merge\|archive` | Controls how Discord threads are represented in Stoat | Default is `flatten` (each thread becomes a channel). Use `merge` to append thread messages to the parent channel, or `archive` to create read-only channels |
+| `--thread-strategy flatten\|merge\|archive` | Controls how Discord threads are handled | Default is `flatten` (each thread becomes a channel). Use `merge` to append thread messages to the parent channel. Use `archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; it posts nothing to Stoat. |
 | `--incremental` | Migrate only messages posted since the last run | Subsequent runs on a live-but-slowing server; requires a previous completed migration |
 | `--verify-uploads` | After each file upload, compare file sizes | Use when uploads may be silently corrupted (slow connections, large files) |
 | `--cleanup-orphans` | Detect and report files that were uploaded but never referenced (report-only, nothing is deleted) | Useful on self-hosted instances to find files worth cleaning up manually |

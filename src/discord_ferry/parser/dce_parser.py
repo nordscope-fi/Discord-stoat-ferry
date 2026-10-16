@@ -10,7 +10,11 @@ from urllib.parse import parse_qs, urlparse
 
 import ijson  # type: ignore[import-untyped]
 
-from discord_ferry.core.boundedjson import JsonLoadRefusedError, load_bounded_json
+from discord_ferry.core.boundedjson import (
+    JsonLoadRefusedError,
+    load_bounded_json,
+    load_bounded_json_metadata,
+)
 from discord_ferry.errors import ExportError
 from discord_ferry.parser.models import (
     DCEAttachment,
@@ -216,10 +220,12 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
         ExportError: If any channel file cannot be read as a DCE export.
     """
     exports: list[DCEExport] = []
+    channel_files: dict[str, list[str]] = {}
     for json_path in sorted(export_dir.glob("*.json")):
         try:
             export = parse_single_export(json_path, metadata_only=metadata_only)
             exports.append(export)
+            channel_files.setdefault(export.channel.id, []).append(json_path.name)
         except JsonLoadRefusedError as exc:
             # A refused channel is a real export Ferry cannot read, not a stray
             # file. Skipping it would report a finished migration with the
@@ -232,6 +238,22 @@ def parse_export_directory(export_dir: Path, *, metadata_only: bool = False) -> 
                 f"Could not parse '{json_path.name}' as a DCE export: {exc}. "
                 "Ferry stopped so that no channel is left out without notice."
             ) from exc
+
+    duplicate_channels = {
+        channel_id: filenames
+        for channel_id, filenames in channel_files.items()
+        if len(filenames) > 1
+    }
+    if duplicate_channels:
+        details = "; ".join(
+            f"channel ID {channel_id!r}: {', '.join(repr(name) for name in filenames)}"
+            for channel_id, filenames in duplicate_channels.items()
+        )
+        raise ExportError(
+            f"Multiple export files contain the same Discord channel ({details}). "
+            "This usually means the guild or channel was renamed between exports. "
+            "Remove the older file and try again."
+        )
     exports.sort(key=lambda e: e.channel.name)
     return exports
 
@@ -255,7 +277,10 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         ValueError: If the file is not a valid DCE export (missing required keys), is
             larger than ``MAX_EXPORT_JSON_BYTES``, or is nested too deeply.
     """
-    raw: Any = load_bounded_json(json_path, MAX_EXPORT_JSON_BYTES)
+    if metadata_only:
+        raw: Any = load_bounded_json_metadata(json_path, MAX_EXPORT_JSON_BYTES)
+    else:
+        raw = load_bounded_json(json_path, MAX_EXPORT_JSON_BYTES)
 
     if not isinstance(raw, dict):
         raise ValueError("The top-level JSON value must be an object")
@@ -280,7 +305,12 @@ def parse_single_export(json_path: Path, *, metadata_only: bool = False) -> DCEE
         ]
         messages.sort(key=lambda m: m.timestamp)
 
-    is_thread, parent_channel_name = _infer_thread_info(json_path.stem, channel.type)
+    is_thread, parent_channel_name = _infer_thread_info(
+        json_path.stem,
+        channel.type,
+        parent_channel_id=channel.category_id,
+        parent_channel_name=channel.category,
+    )
 
     return DCEExport(
         guild=guild,
@@ -503,7 +533,13 @@ def validate_export(
     return warnings
 
 
-def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[bool, str]:
+def _infer_thread_info(
+    filename: str,
+    channel_type: int | None = None,
+    *,
+    parent_channel_id: str = "",
+    parent_channel_name: str = "",
+) -> tuple[bool, str]:
     """Infer whether a filename represents a thread and return its parent channel name.
 
     Args:
@@ -512,6 +548,9 @@ def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[
             authoritative: a non-thread type is never a thread, regardless of
             " - " in the guild/channel name. When ``None`` (e.g. filename-only
             callers), the 3-segment filename heuristic alone is used.
+        parent_channel_id: DCE's ``channel.categoryId`` value. For a thread,
+            DCE writes the parent channel id here.
+        parent_channel_name: DCE's corresponding parent channel name.
 
     Returns:
         Tuple of (is_thread, parent_channel_name).
@@ -522,11 +561,13 @@ def _infer_thread_info(filename: str, channel_type: int | None = None) -> tuple[
     # thread, even if the guild/channel name contains " - ".
     if channel_type is not None and channel_type not in _THREAD_TYPE_CODES:
         return False, ""
+    if channel_type in _THREAD_TYPE_CODES and parent_channel_id:
+        return True, parent_channel_name
     match = _THREE_SEGMENT_RE.match(filename)
     if match:
         parent_channel_name = match.group(2)
         return True, parent_channel_name
-    return False, ""
+    return channel_type in _THREAD_TYPE_CODES, ""
 
 
 def _parse_guild(raw: Any) -> DCEGuild:

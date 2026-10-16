@@ -94,7 +94,7 @@ Rotate the GitHub App private key in GitHub and Coolify together, then redeploy 
 
 Changing `FERRY_FEEDBACK_CHALLENGE_KEY` invalidates outstanding 15-minute challenges. Changing `FERRY_FEEDBACK_SOURCE_HASH_KEY` starts fresh quota hash buckets. Schedule either change when that short disruption is acceptable.
 
-Changing `FERRY_FEEDBACK_CONTACT_KEY` makes existing retained contact unreadable. Keep the old key until those contacts expire or are deleted. If compromise requires an immediate rotation, accept the loss of unread contact, replace the key, and delete the affected contact rows by receipt.
+Changing `FERRY_FEEDBACK_CONTACT_KEY` makes existing retained contact unreadable. It also changes the keyed hashes used by receipts. Replaying a retained receipt hashed with the previous contact key returns HTTP 409 after rotation, even when the submitted feedback is unchanged. Keep the old key until affected contacts are gone and affected receipts have expired. If compromise requires an immediate rotation, accept the loss of unread contact and replay support, replace the key, and delete the affected contact rows by receipt.
 
 ## Audit logs without copying private data
 

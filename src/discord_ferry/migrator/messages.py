@@ -583,7 +583,10 @@ async def _merge_threads(
     async with get_session(config) as session:
         for export in thread_exports:
             parent_name = export.parent_channel_name or ""
-            parent_stoat_id = parent_name_to_stoat.get(parent_name)
+            if export.channel.category_id:
+                parent_stoat_id = state.channel_map.get(export.channel.category_id)
+            else:
+                parent_stoat_id = parent_name_to_stoat.get(parent_name)
 
             if parent_stoat_id is None:
                 state.warnings.append(

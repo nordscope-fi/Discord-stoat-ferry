@@ -1,0 +1,8 @@
+{
+  "guild": {"id": "111", "name": "Guild"},
+  "channel": {"id": "222", "name": "Channel", "type": "GuildTextChat"},
+  "guild.id": "999",
+  "channel.id": "888",
+  "messages": [],
+  "messageCount": 0
+}

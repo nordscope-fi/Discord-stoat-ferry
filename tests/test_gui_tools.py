@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from nicegui.testing import User
 
     from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.parser.models import DCEExport
 
 # The User-fixture tests below need the routes re-registered inside the
 # simulation; nicegui_app.py reloads both gui and gui_tools for that.
@@ -671,6 +672,87 @@ async def test_blueprint_export_page_confirms_before_overwrite(
         await user.should_see("Blueprint written")
 
     assert output.read_text(encoding="utf-8") != "OLD"  # overwritten after ticking Overwrite
+
+
+def _gui_voice_export() -> DCEExport:
+    export = _one_export()
+    export.guild.id = "111"
+    export.channel.id = "201"
+    export.channel.type = 2
+    return export
+
+
+def _write_gui_voice_metadata(folder: Path, *, guild_id: str = "111") -> None:
+    from discord_ferry.discord.metadata import ChannelMeta, DiscordMetadata, save_discord_metadata
+
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id=guild_id,
+            fetched_at="t",
+            server_default_permissions=0,
+            role_permissions={},
+            channel_metadata={"201": ChannelMeta(nsfw=False, user_limit=5)},
+        ),
+        folder,
+    )
+
+
+async def test_blueprint_export_metadata_cap_offline(user: User, tmp_path: Path) -> None:
+    import json
+
+    from aioresponses import aioresponses
+
+    metadata = tmp_path / "metadata"
+    _write_gui_voice_metadata(metadata)
+    output = tmp_path / "bp.json"
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[_gui_voice_export()]),
+        aioresponses() as requests,
+    ):
+        await user.open("/tools/blueprint-export")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Output path").elements.pop().set_value(str(output))
+        user.find("Metadata folder").elements.pop().set_value(str(metadata))
+        user.find("Export blueprint").click()
+        await user.should_see("Blueprint written")
+        assert not requests.requests
+    assert json.loads(output.read_text())["categories"][0]["channels"][0]["user_limit"] == 5
+
+
+@pytest.mark.parametrize("failure", ["missing", "malformed", "wrong-guild", "bad-cap"])
+async def test_blueprint_export_metadata_error_preserves_output(
+    user: User,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    import json
+
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    if failure == "wrong-guild":
+        _write_gui_voice_metadata(metadata, guild_id="222")
+    elif failure == "malformed":
+        (metadata / "discord_metadata.json").write_text("{")
+    elif failure == "bad-cap":
+        _write_gui_voice_metadata(metadata)
+        cache = metadata / "discord_metadata.json"
+        raw = json.loads(cache.read_text())
+        raw["channel_metadata"]["201"]["user_limit"] = "bad-cap-marker"
+        cache.write_text(json.dumps(raw))
+    output = tmp_path / "bp.json"
+    output.write_text("OLD")
+    with patch(
+        "discord_ferry.gui_tools.parse_export_directory", return_value=[_gui_voice_export()]
+    ):
+        await user.open("/tools/blueprint-export")
+        user.find("Export directory").elements.pop().set_value(str(tmp_path))
+        user.find("Output path").elements.pop().set_value(str(output))
+        user.find("Metadata folder").elements.pop().set_value(str(metadata))
+        user.find("Overwrite the output file").elements.pop().set_value(True)
+        user.find("Export blueprint").click()
+        await user.should_see("Could not export blueprint")
+        await user.should_not_see("bad-cap-marker")
+    assert output.read_text() == "OLD"
 
 
 async def test_build_page_bounces_without_token(

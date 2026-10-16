@@ -5,7 +5,7 @@
     "iconUrl": "media/guild_icon.png"
   },
   "channel": {
-    "id": "222222222222222222",
+    "id": "222222222222222225",
     "type": 0,
     "categoryId": "333333333333333333",
     "category": "Text Channels",
@@ -41,7 +41,7 @@
       "reference": {
         "type": "Forward",
         "messageId": "800000000000000001",
-        "channelId": "222222222222222222",
+        "channelId": "222222222222222225",
         "guildId": "111111111111111111"
       },
       "forwardedMessage": {
@@ -99,7 +99,7 @@
       "reference": {
         "type": "Default",
         "messageId": "900000000000000101",
-        "channelId": "222222222222222222",
+        "channelId": "222222222222222225",
         "guildId": "111111111111111111"
       },
       "interaction": null

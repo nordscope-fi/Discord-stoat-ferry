@@ -18,7 +18,7 @@ import aiohttp
 import pytest
 from aioresponses import aioresponses
 
-from discord_ferry.errors import CheckError
+from discord_ferry.errors import CheckError, MigrationError
 from discord_ferry.migrator.verify import (
     STATUSES,
     CheckReport,
@@ -121,6 +121,66 @@ def test_a_result_carries_the_entity_ids_a_repair_would_need() -> None:
 SRV = "01JSTOATSRV0000000000AAA"
 
 
+async def test_captured_healthy_structure_has_no_false_failures(mock_aiohttp: aioresponses) -> None:
+    root = pathlib.Path(__file__).parent / "fixtures" / "stoat_0_15_7"
+    server_id = "01M4T13BVE9P80WR51EWTAWMKQ"
+    state = MigrationState(stoat_server_id=server_id)
+    state.role_map = {"d-role": "01M4T13BVX18ECH3D281K6NGAC"}
+    state.category_map = {"d-cat-a": "fixture-visible", "d-cat-b": "fixture-hidden"}
+    state.category_names = {"d-cat-a": "Visible category", "d-cat-b": "Hidden category"}
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{server_id}", body=(root / "owner-plain.json").read_bytes()
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{server_id}?include_channels=true",
+        body=(root / "owner-expanded.json").read_bytes(),
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{server_id}/emojis", payload=[])
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    assert not any(r.kind in {"role_missing", "category_missing"} for r in report.results)
+    assert sum(r.kind == "role_present" for r in report.results) == 1
+    assert sum(r.kind == "category_present" for r in report.results) == 2
+
+
+async def test_captured_member_distinguishes_hidden_from_deleted(
+    mock_aiohttp: aioresponses,
+) -> None:
+    root = pathlib.Path(__file__).parent / "fixtures" / "stoat_0_15_7"
+    server_id = "01M4T13BVE9P80WR51EWTAWMKQ"
+    state = MigrationState(
+        stoat_server_id=server_id,
+        channel_map={
+            "d-visible": "01M4T13BVED8EKJ4KAHZ7HJDKT",
+            "d-hidden": "01M4T13BVTR4JFT1QM7QN1GFSG",
+            "d-gone": "01JSTOATDELETED0000000000AA",
+        },
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{server_id}", body=(root / "member-plain.json").read_bytes()
+    )
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{server_id}?include_channels=true",
+        body=(root / "member-expanded.json").read_bytes(),
+    )
+    mock_aiohttp.get(f"{BASE_URL}/servers/{server_id}/emojis", payload=[])
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/01M4T13BVED8EKJ4KAHZ7HJDKT/messages?limit=100&sort=Latest", payload=[]
+    )
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    verdicts = {
+        r.discord_id: (r.status, r.kind) for r in report.results if r.name.startswith("channel:")
+    }
+    assert verdicts == {
+        "d-visible": ("ok", "channel_present"),
+        "d-hidden": ("unverifiable", "channel_not_visible"),
+        "d-gone": ("fail", "channel_missing"),
+    }
+    tails = [str(url) for method, url in mock_aiohttp.requests if "/messages" in str(url)]
+    assert tails == [
+        f"{BASE_URL}/channels/01M4T13BVED8EKJ4KAHZ7HJDKT/messages?limit=100&sort=Latest"
+    ]
+
+
 def _state_with_channels(channel_map: dict[str, str]) -> MigrationState:
     state = MigrationState()
     state.stoat_server_id = SRV
@@ -129,13 +189,12 @@ def _state_with_channels(channel_map: dict[str, str]) -> MigrationState:
 
 
 def _server_payload(all_ids: list[str], visible: list[dict[str, str]]) -> dict[str, object]:
-    """A ServerWithChannels body.
+    """Two-read fixture data, not a response body.
 
-    The two lists are separate on purpose and that is the whole point of this
-    route: ``server.channels`` is returned unfiltered and names every channel
-    id, while the sibling array holds only objects the caller may ViewChannel.
+    The plain response carries every channel id; the expanded response carries
+    only objects the caller may view. The registration helper keeps them apart.
     """
-    return {"server": {"_id": SRV, "channels": all_ids}, "channels": visible}
+    return {"plain": {"_id": SRV, "channels": all_ids}, "channels": visible}
 
 
 def _allow_any_message_window(mock: aioresponses) -> None:
@@ -147,8 +206,22 @@ def _allow_any_message_window(mock: aioresponses) -> None:
     mock.get(re.compile(r".*/channels/.*/messages.*"), payload=[], repeat=True)
 
 
+def _register_server_reads(
+    mock: aioresponses, payload: dict[str, object], *, repeat: bool = False
+) -> None:
+    """Register flat plain and expanded responses, never a wrapped read body."""
+    plain = payload["plain"]
+    assert isinstance(plain, dict)
+    mock.get(f"{BASE_URL}/servers/{SRV}", payload=plain, repeat=repeat)
+    mock.get(
+        f"{BASE_URL}/servers/{SRV}?include_channels=true",
+        payload={**plain, "channels": payload["channels"]},
+        repeat=repeat,
+    )
+
+
 def _register(mock: aioresponses, payload: dict[str, object]) -> None:
-    """Register the two structure routes, plus an empty message window for every
+    """Register three structure reads, plus an empty message window for every
     channel id the payload mentions.
 
     The tail check runs for every entry in channel_map, so a structure-focused
@@ -156,9 +229,9 @@ def _register(mock: aioresponses, payload: dict[str, object]) -> None:
     on what it is testing. An empty window with a zero recorded count reports
     ok/nothing_expected, which these tests ignore.
     """
-    mock.get(f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=payload)
+    _register_server_reads(mock, payload)
     mock.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
-    server = payload.get("server") or {}
+    server = payload.get("plain") or {}
     ids = set(server.get("channels") or [])
     ids.update(
         c["_id"] for c in (payload.get("channels") or []) if isinstance(c, dict) and "_id" in c
@@ -338,9 +411,8 @@ async def test_a_missing_role_is_a_failure(mock_aiohttp: aioresponses) -> None:
     Unlike channels there is no second list and no permission filter, so an
     absence here is unambiguous and reports fail rather than unverifiable.
     """
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": [], "roles": {}}, "channels": []},
+    _register_server_reads(
+        mock_aiohttp, {"plain": {"_id": SRV, "channels": [], "roles": {}}, "channels": []}
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     _allow_any_message_window(mock_aiohttp)
@@ -357,10 +429,10 @@ async def test_a_present_role_is_ok(mock_aiohttp: aioresponses) -> None:
     """Kills an implementation reporting every role missing, which the failure
     test above cannot catch on its own."""
     role_id = "01JSTOATROLE0000000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={
-            "server": {"_id": SRV, "channels": [], "roles": {role_id: {"name": "mods"}}},
+    _register_server_reads(
+        mock_aiohttp,
+        {
+            "plain": {"_id": SRV, "channels": [], "roles": {role_id: {"name": "mods"}}},
             "channels": [],
         },
     )
@@ -375,10 +447,7 @@ async def test_a_present_role_is_ok(mock_aiohttp: aioresponses) -> None:
 
 async def test_a_missing_emoji_is_a_failure(mock_aiohttp: aioresponses) -> None:
     """Emoji come from their own route, because Server carries no emoji field."""
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     _allow_any_message_window(mock_aiohttp)
     state = MigrationState()
@@ -393,10 +462,7 @@ async def test_a_missing_emoji_is_a_failure(mock_aiohttp: aioresponses) -> None:
 async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
     """The emoji list is a list of objects keyed by _id, not a map."""
     emoji_id = "01JAUTUMNEMOJI00000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(
         f"{BASE_URL}/servers/{SRV}/emojis",
         payload=[{"_id": emoji_id, "name": "party"}],
@@ -412,10 +478,7 @@ async def test_a_present_emoji_is_ok(mock_aiohttp: aioresponses) -> None:
 async def test_a_renamed_emoji_warns(mock_aiohttp: aioresponses) -> None:
     """A renamed emoji reports warn with kind emoji_renamed, not ok."""
     emoji_id = "01JAUTUMNEMOJI00000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(
         f"{BASE_URL}/servers/{SRV}/emojis",
         payload=[{"_id": emoji_id, "name": "renamed"}],
@@ -437,10 +500,7 @@ async def test_a_renamed_emoji_warns(mock_aiohttp: aioresponses) -> None:
 async def test_a_matching_emoji_name_is_ok(mock_aiohttp: aioresponses) -> None:
     """When the server name matches the recorded name, the emoji reports ok."""
     emoji_id = "01JAUTUMNEMOJI00000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(
         f"{BASE_URL}/servers/{SRV}/emojis",
         payload=[{"_id": emoji_id, "name": "party"}],
@@ -461,10 +521,7 @@ async def test_emoji_with_no_recorded_name_degrades_to_ok(
 ) -> None:
     """A pre-change state file with no created_emoji_names skips the comparison."""
     emoji_id = "01JAUTUMNEMOJI00000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(
         f"{BASE_URL}/servers/{SRV}/emojis",
         payload=[{"_id": emoji_id, "name": "renamed"}],
@@ -507,10 +564,10 @@ async def test_a_renamed_category_warns_rather_than_failing(
     exit non-zero on a migration that is entirely intact.
     """
     cat_id = "01JSTOATCAT00000000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={
-            "server": {
+    _register_server_reads(
+        mock_aiohttp,
+        {
+            "plain": {
                 "_id": SRV,
                 "channels": [],
                 "categories": [{"id": cat_id, "title": "Renamed", "channels": []}],
@@ -532,10 +589,10 @@ async def test_a_renamed_category_warns_rather_than_failing(
 async def test_a_matching_category_title_is_ok(mock_aiohttp: aioresponses) -> None:
     """Kills an implementation that warns on every category regardless."""
     cat_id = "01JSTOATCAT00000000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={
-            "server": {
+    _register_server_reads(
+        mock_aiohttp,
+        {
+            "plain": {
                 "_id": SRV,
                 "channels": [],
                 "categories": [{"id": cat_id, "title": "Original", "channels": []}],
@@ -551,9 +608,8 @@ async def test_a_matching_category_title_is_ok(mock_aiohttp: aioresponses) -> No
 
 async def test_a_missing_category_is_a_failure(mock_aiohttp: aioresponses) -> None:
     """A category absent from the server is a real loss, not a cosmetic one."""
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": [], "categories": []}, "channels": []},
+    _register_server_reads(
+        mock_aiohttp, {"plain": {"_id": SRV, "channels": [], "categories": []}, "channels": []}
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     _allow_any_message_window(mock_aiohttp)
@@ -574,10 +630,7 @@ async def test_an_absent_categories_key_does_not_crash(
     Kills an implementation doing server["categories"] or assuming a list,
     which would raise on a server that has never had a category.
     """
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     _allow_any_message_window(mock_aiohttp)
     report = await run_check(
@@ -591,7 +644,7 @@ async def test_an_absent_categories_key_does_not_crash(
 # ---------------------------------------------------------------------------
 
 
-async def test_the_structure_family_costs_exactly_two_requests(
+async def test_the_structure_family_costs_exactly_three_requests(
     mock_aiohttp: aioresponses,
 ) -> None:
     """Cost is a separate property from correctness and needs its own assertion.
@@ -601,7 +654,7 @@ async def test_the_structure_family_costs_exactly_two_requests(
     test checking only outcomes passes against it. On a 200-channel server that
     is 200 extra round trips against a 5-per-10-second bucket.
 
-    Deliberately oversized fixture, 91 entities against 2 requests, so the two
+    Deliberately oversized fixture, 91 entities against 3 requests, so the two
     numbers cannot be confused for each other.
     """
     channels = {f"d-c{i}": f"01JSTOATCH{i:013d}" for i in range(40)}
@@ -610,7 +663,7 @@ async def test_the_structure_family_costs_exactly_two_requests(
     emoji = {f"d-e{i}": f"01JAUTUMNEM{i:012d}" for i in range(30)}
     assert len(channels) + len(roles) + len(cats) + len(emoji) == 91
 
-    # repeat=True on BOTH routes is load-bearing for this test's honesty.
+    # Repeated replies let the request-count assertion detect extra fetches.
     # aioresponses serves a registered route once by default, so an
     # implementation making extra calls would die on ClientConnectionError
     # before the count assertion below ever ran, and the test would "pass"
@@ -618,11 +671,10 @@ async def test_the_structure_family_costs_exactly_two_requests(
     # the over-fetching implementation succeed, so the count is the only thing
     # that can catch it. Verified by mutation: a duplicated server fetch now
     # fails on the count line, not on a connection error.
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        repeat=True,
-        payload={
-            "server": {
+    _register_server_reads(
+        mock_aiohttp,
+        {
+            "plain": {
                 "_id": SRV,
                 "channels": list(channels.values()),
                 "roles": dict.fromkeys(roles.values(), {"name": "r"}),
@@ -630,6 +682,7 @@ async def test_the_structure_family_costs_exactly_two_requests(
             },
             "channels": [{"_id": c, "name": "n"} for c in channels.values()],
         },
+        repeat=True,
     )
     mock_aiohttp.get(
         f"{BASE_URL}/servers/{SRV}/emojis",
@@ -654,8 +707,8 @@ async def test_the_structure_family_costs_exactly_two_requests(
     structure_calls = sum(
         len(v) for k, v in mock_aiohttp.requests.items() if "/servers/" in str(k[1])
     )
-    assert structure_calls == 2, (
-        f"expected 2 structure requests for 91 entities, made {structure_calls}"
+    assert structure_calls == 3, (
+        f"expected 3 structure requests for 91 entities, made {structure_calls}"
     )
     structure_results = [r for r in report.results if not r.name.startswith("tail:")]
     assert len(structure_results) == 91
@@ -674,10 +727,10 @@ async def test_a_category_with_no_recorded_title_is_unverifiable_not_ok(
     the degrade-rather-than-refuse rule serves.
     """
     cat_id = "01JSTOATCAT00000000000A"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={
-            "server": {
+    _register_server_reads(
+        mock_aiohttp,
+        {
+            "plain": {
                 "_id": SRV,
                 "channels": [],
                 "categories": [{"id": cat_id, "title": "Whatever", "channels": []}],
@@ -709,30 +762,15 @@ async def test_a_category_with_no_recorded_title_is_unverifiable_not_ok(
 async def test_a_malformed_channel_object_never_reports_a_false_deletion(
     mock_aiohttp: aioresponses, malformed: list[object]
 ) -> None:
-    """A property the three-way rule gives for free, pinned so it stays.
-
-    A chunk review predicted that the isinstance filter would make a real
-    channel look deleted. It cannot: the unfiltered server.channels id list is a
-    SECOND, independent witness, and a fail needs both witnesses to agree the
-    channel is absent. Whatever goes wrong with the object array degrades to
-    unverifiable instead.
-
-    Kills any refactor that drops the id list and decides from the objects
-    alone, which would turn every one of these into a false report of deletion.
-    """
+    """Malformed visible objects stop the command before absence classification."""
     stoat_id = "01JSTOATCH00000000000AAA"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": [stoat_id]}, "channels": malformed},
+    _register_server_reads(
+        mock_aiohttp, {"plain": {"_id": SRV, "channels": [stoat_id]}, "channels": malformed}
     )
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     _allow_any_message_window(mock_aiohttp)
-    report = await run_check(
-        BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event
-    )
-    result = next(r for r in report.results if r.name == "channel:d-100")
-    assert result.status == "unverifiable"
-    assert report.has_failures is False
+    with pytest.raises(MigrationError, match="Invalid response field channels"):
+        await run_check(BASE_URL, TOKEN, _state_with_channels({"d-100": stoat_id}), _noop_event)
 
 
 # ---------------------------------------------------------------------------
@@ -790,10 +828,10 @@ def _register_tail(mock: aioresponses, window: list[int], *, channel_id: str = C
     The window is served NEWEST FIRST, which is what MessageSort::Latest
     produces upstream: doc!{"_id": -1}, not reversed downstream.
     """
-    mock.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={
-            "server": {"_id": SRV, "channels": [channel_id]},
+    _register_server_reads(
+        mock,
+        {
+            "plain": {"_id": SRV, "channels": [channel_id]},
             "channels": [{"_id": channel_id, "name": "general"}],
         },
     )
@@ -806,6 +844,30 @@ def _register_tail(mock: aioresponses, window: list[int], *, channel_id: str = C
 
 def _tail_result(report: CheckReport) -> CheckResult:
     return next(r for r in report.results if r.name.startswith("tail:"))
+
+
+@pytest.mark.parametrize("bad_entry", [{"id": "ignored"}, None, {"_id": 7}])
+async def test_malformed_window_is_unverifiable_not_missing(
+    mock_aiohttp: aioresponses, bad_entry: object
+) -> None:
+    _register_server_reads(mock_aiohttp, _server_payload([CH1], [{"_id": CH1, "name": "general"}]))
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/{CH1}/messages?limit=100&sort=Latest",
+        payload=[{"_id": _sid(3)}, bad_entry, {"_id": _sid(7)}],
+    )
+    report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=5, count=3), _noop_event)
+    result = _tail_result(report)
+    assert (result.status, result.kind) == ("unverifiable", "check_error")
+    assert not report.has_failures
+
+
+async def test_malformed_emoji_evidence_stops_check(mock_aiohttp: aioresponses) -> None:
+    _register_server_reads(mock_aiohttp, _server_payload([], []))
+    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[{"id": "s-emoji"}])
+    state = MigrationState(stoat_server_id=SRV, emoji_map={"d-emoji": "s-emoji"})
+    with pytest.raises(MigrationError, match="Invalid response field emoji._id"):
+        await run_check(BASE_URL, TOKEN, state, _noop_event)
 
 
 async def test_the_tail_is_the_newest_message(mock_aiohttp: aioresponses) -> None:
@@ -1059,10 +1121,10 @@ async def test_a_forum_index_channel_resolves_through_its_own_map(
     """
     index_channel = "01JSTOATIDX00000000000AA"
     index_message = "01JSTOATIDXMSG0000000AA"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={
-            "server": {"_id": SRV, "channels": [index_channel]},
+    _register_server_reads(
+        mock_aiohttp,
+        {
+            "plain": {"_id": SRV, "channels": [index_channel]},
             "channels": [{"_id": index_channel, "name": "forum-index"}],
         },
     )
@@ -1099,10 +1161,7 @@ async def test_a_channel_that_failed_the_structure_check_is_not_checked_again(
     which doubles the apparent damage and sends a repair tool after a channel
     that does not exist.
     """
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": []}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": []}, "channels": []})
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
     for_channel = [r for r in report.results if r.discord_id == "d-100"]
@@ -1119,10 +1178,7 @@ async def test_an_unverifiable_channel_is_also_skipped(
     get a 403, and surface a second, confusing result for a cause already
     reported.
     """
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        payload={"server": {"_id": SRV, "channels": [CH1]}, "channels": []},
-    )
+    _register_server_reads(mock_aiohttp, {"plain": {"_id": SRV, "channels": [CH1]}, "channels": []})
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     report = await run_check(BASE_URL, TOKEN, _tail_state(high_water=9, count=10), _noop_event)
     for_channel = [r for r in report.results if r.discord_id == "d-100"]
@@ -1137,7 +1193,7 @@ async def test_an_unverifiable_channel_is_also_skipped(
 
 def _multi_server(visible: list[str], all_ids: list[str] | None = None) -> dict[str, object]:
     return {
-        "server": {"_id": SRV, "channels": all_ids if all_ids is not None else visible},
+        "plain": {"_id": SRV, "channels": all_ids if all_ids is not None else visible},
         "channels": [{"_id": c, "name": f"ch-{c[-3:]}"} for c in visible],
     }
 
@@ -1163,9 +1219,7 @@ async def test_a_whole_merge_migration_produces_zero_failures(
     )
     idx, empty = "01JSTOATIDX00000000000AA", "01JSTOATCH00000000000004"
     visible = [small, big, plain, idx, empty]
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server(visible)
-    )
+    _register_server_reads(mock_aiohttp, _multi_server(visible))
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
 
     def window(cid: str, ns: list[int]) -> None:
@@ -1233,9 +1287,7 @@ async def test_one_channel_failing_does_not_abort_the_others(
         "01JSTOATCH00000000000003",
     )
     visible = [good1, bad, good2]
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server(visible)
-    )
+    _register_server_reads(mock_aiohttp, _multi_server(visible))
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     for cid in (good1, good2):
         mock_aiohttp.get(
@@ -1275,9 +1327,7 @@ async def test_a_flatten_migration_with_later_activity_is_all_ok(
 ) -> None:
     """SC-I5. The third strategy, with humans having posted since."""
     a, b = "01JSTOATCH00000000000001", "01JSTOATCH00000000000002"
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server([a, b])
-    )
+    _register_server_reads(mock_aiohttp, _multi_server([a, b]))
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     for cid, extra in ((a, 30), (b, 5)):
         mock_aiohttp.get(
@@ -1314,12 +1364,7 @@ async def test_all_seven_populations_in_one_run(mock_aiohttp: aioresponses) -> N
     silent = "01JSTOATCH00000000000006"
 
     visible = [flat, merge_small, merge_big, idx, dupe, silent]
-    mock_aiohttp.get(
-        f"{BASE_URL}/servers/{SRV}?include_channels=true",
-        # `hidden` is in the unfiltered id list but NOT among the objects: the
-        # shape ViewChannel filtering produces.
-        payload=_multi_server(visible, all_ids=[*visible, hidden]),
-    )
+    _register_server_reads(mock_aiohttp, _multi_server(visible, all_ids=[*visible, hidden]))
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
 
     def window(cid: str, ns: list[int]) -> None:
@@ -1394,7 +1439,7 @@ async def test_tail_results_keep_channel_map_order_despite_the_fan_out(
     every run and make two reports of the same server impossible to diff.
     """
     ids = [f"01JSTOATCH0000000000000{n}" for n in range(6)]
-    mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}?include_channels=true", payload=_multi_server(ids))
+    _register_server_reads(mock_aiohttp, _multi_server(ids))
     mock_aiohttp.get(f"{BASE_URL}/servers/{SRV}/emojis", payload=[])
     for cid in ids:
         mock_aiohttp.get(
@@ -1697,7 +1742,7 @@ async def test_the_truncation_cases_report_ok_end_to_end(
 async def test_the_rename_comparison_costs_no_extra_request(
     mock_aiohttp: aioresponses,
 ) -> None:
-    """SC-3.11. The structure family is still two requests at any entity count.
+    """SC-3.11. The structure family is three requests at any entity count.
 
     The names were already in the response the check has always made, so the
     comparison is free. This drives several renamed channels and several renamed
@@ -1719,7 +1764,7 @@ async def test_the_rename_comparison_costs_no_extra_request(
         for key in mock_aiohttp.requests
         if "/servers/" in str(key[1]) and "/messages" not in str(key[1])
     ]
-    assert len(structure_calls) == 2, f"expected 2 structure requests, got {structure_calls}"
+    assert len(structure_calls) == 3, f"expected 3 structure requests, got {structure_calls}"
 
 
 # ---------------------------------------------------------------------------
@@ -1728,8 +1773,8 @@ async def test_the_rename_comparison_costs_no_extra_request(
 
 
 def _roles_payload(roles: dict[str, object]) -> dict[str, object]:
-    """A ServerWithChannels body carrying only roles."""
-    return {"server": {"_id": SRV, "channels": [], "roles": roles}, "channels": []}
+    """Plain server and visible objects for two separate registrations."""
+    return {"plain": {"_id": SRV, "channels": [], "roles": roles}, "channels": []}
 
 
 async def test_a_renamed_role_reports_warn(mock_aiohttp: aioresponses) -> None:
@@ -1787,21 +1832,10 @@ async def test_a_missing_role_is_not_also_renamed(mock_aiohttp: aioresponses) ->
     assert results[0].kind == "role_missing"
 
 
-async def test_a_malformed_role_value_degrades_rather_than_raising(
+async def test_a_malformed_role_value_is_refused_before_classification(
     mock_aiohttp: aioresponses,
 ) -> None:
-    """SC-3.9. Reading a name introduces a raise that does not exist today.
-
-    Before this change the roles map was consumed with `set(...)`, which takes
-    the KEYS and never touches a value, so a None or a bare string was harmless.
-    Calling .get("name") on one raises AttributeError, and `mypy --strict` cannot
-    catch it because the payload is typed dict[str, Any]. The channel and
-    category branches both hand-write the same isinstance guard for exactly this
-    reason.
-
-    A malformed value degrades to no-name-found and keeps role_present, so a
-    broken response cannot turn into an aborted check.
-    """
+    """Unreadable role records must not become claims of verified presence."""
     none_id = "01JSTOATRL0000000000AAA"
     str_id = "01JSTOATRL0000000000BBB"
     list_id = "01JSTOATRL0000000000CCC"
@@ -1814,12 +1848,8 @@ async def test_a_malformed_role_value_degrades_rather_than_raising(
     state.role_map = {"d-1": none_id, "d-2": str_id, "d-3": list_id}
     state.created_role_names = {"d-1": "mods", "d-2": "admins", "d-3": "helpers"}
 
-    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
-
-    role_results = [r for r in report.results if r.name.startswith("role:")]
-    assert len(role_results) == 3
-    assert {r.kind for r in role_results} == {"role_present"}
-    assert report.has_failures is False
+    with pytest.raises(MigrationError, match="Invalid response field roles.entry"):
+        await run_check(BASE_URL, TOKEN, state, _noop_event)
 
 
 async def test_a_channel_object_with_no_name_is_not_reported_renamed(
