@@ -9,7 +9,8 @@ import math
 import random
 import time
 from collections import deque
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -24,7 +25,13 @@ from discord_ferry.core.http import (
     redact_url,
     tls_hint,
 )
-from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.errors import (
+    DeliveryUnresolvedError,
+    DuplicateSendError,
+    MessageSendFailure,
+    MigrationError,
+)
+from discord_ferry.state import is_stoat_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -34,6 +41,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_API_RETRIES = 3
+MessageRecovery = Callable[[MessageSendFailure], Awaitable[dict[str, Any]]]
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
 
 _CIRCUIT_THRESHOLD = 5
@@ -131,6 +139,7 @@ async def _api_request(
     *,
     extra_headers: dict[str, str] | None = None,
     expected_404_ok: bool = False,
+    message_recovery: MessageRecovery | None = None,
 ) -> dict[str, Any]:
     """Make an authenticated API request with retry on 429/5xx.
 
@@ -158,6 +167,17 @@ async def _api_request(
     Raises:
         MigrationError: On non-retryable errors or when all retries are exhausted.
     """
+    if message_recovery is not None:
+        return await _api_request_inner(
+            session,
+            method,
+            url,
+            token,
+            json_data,
+            extra_headers=extra_headers,
+            expected_404_ok=expected_404_ok,
+            message_recovery=message_recovery,
+        )
     if _request_semaphore is not None:
         async with _request_semaphore:
             return await _api_request_inner(
@@ -282,6 +302,33 @@ def _update_pacer_state(url: str, headers: Mapping[str, str]) -> None:
     _url_to_bucket[url] = bucket_hash
 
 
+@asynccontextmanager
+async def _request_attempt(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    body: dict[str, Any] | None,
+    headers: dict[str, str],
+    *,
+    acquire_slot: bool,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """Hold an opted-in request slot only for one HTTP attempt, never recovery."""
+    async with (
+        _request_semaphore if acquire_slot and _request_semaphore else nullcontext(),
+        session.request(method, url, json=body, headers=headers, allow_redirects=False) as response,
+    ):
+        yield response
+
+
+async def _recover_message(
+    recovery: MessageRecovery, failure: MessageSendFailure
+) -> dict[str, Any]:
+    result = await recovery(failure)
+    if not isinstance(result, dict) or not is_stoat_id(result.get("_id")):
+        raise DeliveryUnresolvedError("Message recovery did not return a valid identifier")
+    return result
+
+
 async def _api_request_inner(
     session: aiohttp.ClientSession,
     method: str,
@@ -291,6 +338,7 @@ async def _api_request_inner(
     *,
     extra_headers: dict[str, str] | None = None,
     expected_404_ok: bool = False,
+    message_recovery: MessageRecovery | None = None,
 ) -> dict[str, Any]:
     """Core request logic with exponential backoff and circuit breaker."""
     global _rate_multiplier  # noqa: PLW0603
@@ -345,12 +393,13 @@ async def _api_request_inner(
                 state.remaining = max(state.remaining - 1, 0)
 
         try:
-            async with session.request(
+            async with _request_attempt(
+                session,
                 method,
                 url,
-                json=body,
-                headers=headers,
-                allow_redirects=False,
+                body,
+                headers,
+                acquire_slot=message_recovery is not None,
             ) as resp:
                 if resp.status in (200, 201):
                     _circuit_state.consecutive_failures = 0
@@ -361,12 +410,64 @@ async def _api_request_inner(
                     ):
                         _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
                     try:
-                        return await resp.json()  # type: ignore[no-any-return]
-                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                        result = await resp.json()
+                    except (
+                        aiohttp.ContentTypeError,
+                        json.JSONDecodeError,
+                        UnicodeDecodeError,
+                    ) as exc:
+                        if message_recovery is not None:
+                            raise MessageSendFailure(
+                                "Message response could not establish delivery",
+                                disposition="uncertain",
+                                http_status=resp.status,
+                            ) from None
+                        if isinstance(exc, UnicodeDecodeError):
+                            raise
                         raise MigrationError(
                             f"Unexpected non-JSON {resp.status} response "
                             f"(content-type: {resp.content_type})"
                         ) from exc
+                    if message_recovery is not None and (
+                        not isinstance(result, dict) or not is_stoat_id(result.get("_id"))
+                    ):
+                        raise MessageSendFailure(
+                            "Message response did not contain a valid identifier",
+                            disposition="uncertain",
+                            http_status=resp.status,
+                        )
+                    return result  # type: ignore[no-any-return]
+                if message_recovery is not None and resp.status != 429:
+                    if resp.status == 403:
+                        try:
+                            rejection = await resp.json()
+                        except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
+                            rejection = None
+                        if (
+                            isinstance(rejection, dict)
+                            and rejection.get("type") == "MissingPermission"
+                            and rejection.get("permission") == "SendMessage"
+                            and set(rejection) <= {"type", "permission", "location"}
+                            and (
+                                "location" not in rejection
+                                or isinstance(rejection["location"], str)
+                            )
+                        ):
+                            raise MessageSendFailure(
+                                "Message send permission was rejected before creation",
+                                disposition="confirmed_rejected",
+                                http_status=403,
+                                error_type="MissingPermission",
+                            )
+                    if 500 <= resp.status <= 599:
+                        _circuit_state.consecutive_failures += 1
+                        if charged_state is not None and prev_remaining is not None:
+                            charged_state.remaining = prev_remaining
+                    raise MessageSendFailure(
+                        "Message delivery outcome is uncertain",
+                        disposition="uncertain",
+                        http_status=resp.status,
+                    )
                 if resp.status == 204 or (resp.status == 404 and expected_404_ok):
                     _circuit_state.consecutive_failures = 0
                     _update_pacer_state(url, resp.headers)
@@ -379,6 +480,12 @@ async def _api_request_inner(
 
                 if resp.status in _RETRYABLE_STATUSES:
                     if attempt == MAX_API_RETRIES - 1:
+                        if message_recovery is not None and resp.status == 429:
+                            raise MessageSendFailure(
+                                "Message rate limit exhausted the request retry budget",
+                                disposition="confirmed_rejected",
+                                http_status=429,
+                            )
                         text = await resp.text()
                         # A 429 is rate-limiting, never a circuit-breaker failure — even on
                         # budget exhaustion. A 5xx still primes the breaker.
@@ -416,9 +523,9 @@ async def _api_request_inner(
                     continue
 
                 if resp.status == 409:
-                    # A still-cached Idempotency-Key. The message IS on the server;
-                    # Stoat answers DuplicateNonce and does not return it, so the caller
-                    # gets no message id. Only a request that CARRIED a key can reach
+                    # A still-cached Idempotency-Key does not prove creation.
+                    # Stoat answers DuplicateNonce without a message identifier.
+                    # Only a request that CARRIED a key can reach
                     # this, so "the caller opted in" and "the caller sent a key" are the
                     # same condition and no opt-in flag is needed.
                     #
@@ -431,8 +538,8 @@ async def _api_request_inner(
                     except (json.JSONDecodeError, ValueError):
                         dup_body = None
                     if isinstance(dup_body, dict) and dup_body.get("type") == "DuplicateNonce":
-                        # A delivered message, so this must not prime the breaker. Same
-                        # bookkeeping as the 204 branch above.
+                        # Preserve default conflict accounting. Recovery-aware sends
+                        # already took the uncertain-outcome branch above.
                         _circuit_state.consecutive_failures = 0
                         _update_pacer_state(url, resp.headers)
                         if _rate_multiplier > 1.0 and not any(
@@ -440,13 +547,18 @@ async def _api_request_inner(
                         ):
                             _rate_multiplier = max(_rate_multiplier * 0.75, 1.0)
                         raise DuplicateSendError(
-                            "Stoat rejected a duplicate Idempotency-Key; the message "
-                            "is already on the server"
+                            "Stoat rejected a cached Idempotency-Key without a message identifier"
                         )
 
                 text = await resp.text()
                 raise MigrationError(f"API error {resp.status}: {text}")
-        except aiohttp.ClientError as exc:
+        except MessageSendFailure as failure:
+            if message_recovery is None or failure.disposition == "confirmed_rejected":
+                raise
+            return await _recover_message(message_recovery, failure)
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            if message_recovery is None and not isinstance(exc, aiohttp.ClientError):
+                raise
             # Compute each hint ONCE. Message and control flow are separate
             # decisions over the same two values, which is why this is two
             # lines rather than one. Proxy wins over the certificate hint and
@@ -465,6 +577,14 @@ async def _api_request_inner(
                 # Gated on permanence: a proxy 502, 503, 504 or connect timeout
                 # CAN recover and must keep the retries it already had.
                 raise MigrationError(f"Network error: {exc}{hint}") from exc
+            if message_recovery is not None:
+                _circuit_state.consecutive_failures += 1
+                if charged_state is not None and prev_remaining is not None:
+                    charged_state.remaining = prev_remaining
+                return await _recover_message(
+                    message_recovery,
+                    MessageSendFailure("Message response was lost", disposition="uncertain"),
+                )
             if attempt == MAX_API_RETRIES - 1:
                 _circuit_state.consecutive_failures += 1
                 raise MigrationError(
@@ -942,6 +1062,7 @@ async def api_send_message(
     replies: list[dict[str, Any]] | None = None,
     idempotency_key: str | None = None,
     silent: bool = True,
+    message_recovery: MessageRecovery | None = None,
 ) -> dict[str, Any]:
     """Send a message to a channel.
 
@@ -978,6 +1099,16 @@ async def api_send_message(
     if silent:
         data["flags"] = 2
     extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+    if message_recovery is not None:
+        return await _api_request(
+            session,
+            "POST",
+            url,
+            token,
+            data,
+            extra_headers=extra,
+            message_recovery=message_recovery,
+        )
     return await _api_request(session, "POST", url, token, data, extra_headers=extra)
 
 
@@ -1272,6 +1403,7 @@ async def api_fetch_messages(
     *,
     limit: int,
     sort: str,
+    before: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read a channel's messages (GET /channels/{id}/messages).
 
@@ -1307,7 +1439,11 @@ async def api_fetch_messages(
         raise ValueError(f"limit must be between 1 and 100, got {limit}")
     if sort not in ("Latest", "Oldest"):
         raise ValueError(f"sort must be 'Latest' or 'Oldest', got {sort!r}")
+    if before is not None and not is_stoat_id(before):
+        raise ValueError("before must be a valid Stoat message identifier")
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/messages?limit={limit}&sort={sort}"
+    if before is not None:
+        url += f"&before={before}"
     # Annotated `object` on purpose. _api_request is declared -> dict[str, Any]
     # but its success path returns whatever JSON arrived, and this route returns
     # an array. Widening that shared helper would cost 28 callers their typing,

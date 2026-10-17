@@ -8,7 +8,6 @@ SC-6, SC-7, SC-9.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
 from aioresponses import aioresponses
@@ -21,7 +20,7 @@ from discord_ferry.discord.metadata import (
     RoleMeta,
     save_discord_metadata,
 )
-from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.errors import MigrationError
 from discord_ferry.migrator.messages import ChannelResult, _merge_channel_result, run_messages
 from discord_ferry.migrator.structure import (
     run_categories,
@@ -1082,59 +1081,77 @@ async def test_incremental_gate_does_not_touch_dry_run(tmp_path: Path) -> None:
 
 
 async def test_a_duplicate_does_not_become_a_real_duplicate_next_run(tmp_path: Path) -> None:
-    """SC-I1: the whole chain, and the only test that reaches the user-visible harm.
+    """A located lost response cannot become a second creation after cache eviction."""
+    import asyncio
 
-    Run 1: a send's response is lost, the retry hits the still-cached Idempotency-Key,
-    and Stoat answers 409 DuplicateNonce. The message IS on the server.
+    import aiohttp
+    from aioresponses import CallbackResult
 
-    Run 2 with --incremental: the self-heal set is built from state.failed_messages
-    (messages.py:914-919). If run 1 recorded the message as failed, run 2 re-sends it.
-    By then the 1000-entry LRU has evicted the key, so the re-send SUCCEEDS and the
-    user's channel holds the message twice.
+    from tests.stoat_ids import stoat_id
 
-    Every other test in this batch checks one link. This one checks that the chain
-    cannot close.
-    """
-    msg = DCEMessage(
-        id="1506019505778987190",
+    source_id = "1506019505778987190"
+    destination = stoat_id(222)
+    source = DCEMessage(
+        id=source_id,
         type="Default",
         timestamp="2024-01-15T12:00:00+00:00",
         content="hello",
-        author=DCEAuthor(id="u1", name="Alice"),
-        is_pinned=False,
-        attachments=[],
-        embeds=[],
-        stickers=[],
-        reactions=[],
-        reference=None,
+        author=DCEAuthor(id="1", name="Alice"),
     )
-    exports = [_make_export(channel_id="222", messages=[msg], message_count=1)]
+    exports = [_make_export(channel_id="222", messages=[source], message_count=1)]
+    state = MigrationState(channel_map={"222": destination}, autumn_url="https://autumn.test")
+    remote = []
+    cached_keys: set[str] = set()
 
-    state = MigrationState(channel_map={"222": "stoat-222"}, autumn_url="https://autumn.test")
+    async def create_then_lose(url, **kwargs):
+        key = kwargs["headers"]["Idempotency-Key"]
+        if key in cached_keys:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached_keys.add(key)
+        row = {
+            "_id": stoat_id(100 + len(remote)),
+            "channel": destination,
+            "nonce": key,
+            "content": kwargs["json"]["content"],
+        }
+        remote.append(row)
+        if len(remote) == 1:
+            await asyncio.sleep(0)
+            raise aiohttp.ServerDisconnectedError("created, response lost")
+        return CallbackResult(payload=row)
 
-    async def always_duplicate(*a: object, **k: object) -> dict[str, object]:
-        raise DuplicateSendError("already on the server")
+    async def history(url, **kwargs):
+        return CallbackResult(payload=remote)
 
-    config1 = _make_config(tmp_path, message_rate_limit=0.0, upload_delay=0.0)
-    with patch("discord_ferry.migrator.messages.api_send_message", always_duplicate):
-        await run_messages(config1, state, exports, lambda e: None)
-
-    # The mechanism. Everything below depends on this being empty.
-    assert not state.failed_messages, (
-        "run 1 recorded a landed message as failed, which is what run 2 re-sends"
-    )
-
-    sent_second_run: list[str] = []
-
-    async def capture(*a: object, **k: object) -> dict[str, object]:
-        sent_second_run.append(str(k.get("idempotency_key", "")))
-        return {"_id": "stoat-msg1"}
-
-    config2 = _make_config(tmp_path, incremental=True, message_rate_limit=0.0, upload_delay=0.0)
-    with patch("discord_ferry.migrator.messages.api_send_message", capture):
-        await run_messages(config2, state, exports, lambda e: None)
-
-    assert not any("1506019505778987190" in key for key in sent_second_run), (
-        "the incremental run re-sent a message that was already on the server, "
-        f"creating a real duplicate in the user's channel. sent: {sent_second_run}"
-    )
+    with aioresponses() as http:
+        http.post(
+            f"{STOAT_URL}/channels/{destination}/messages",
+            callback=create_then_lose,
+            repeat=True,
+        )
+        http.get(
+            f"{STOAT_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            callback=history,
+            repeat=True,
+        )
+        await run_messages(
+            _make_config(tmp_path, message_rate_limit=0.0, upload_delay=0.0),
+            state,
+            exports,
+            lambda event: None,
+        )
+        assert state.message_map == {source_id: stoat_id(100)}
+        assert not state.failed_messages
+        cached_keys.clear()
+        await run_messages(
+            _make_config(tmp_path, incremental=True, message_rate_limit=0.0, upload_delay=0.0),
+            state,
+            exports,
+            lambda event: None,
+        )
+        assert (
+            sum(len(calls) for (method, _), calls in http.requests.items() if method == "POST") == 1
+        )
+    assert len(remote) == 1
+    assert state.message_map == {source_id: stoat_id(100)}
+    assert not state.failed_messages

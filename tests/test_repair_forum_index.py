@@ -68,21 +68,27 @@ async def test_recreate_forum_index_creates_and_rebuilds(tmp_path: Path) -> None
     with aioresponses() as mock:
         mock.post(
             "https://api.test/servers/srv/channels",
-            payload={"_id": "new-idx", "name": "F-index"},
+            payload={"_id": "01J5T000000000000000008000", "name": "F-index"},
         )
         mock.patch("https://api.test/servers/srv", payload={})
-        mock.post("https://api.test/channels/new-idx/messages", payload={"_id": "msg-1"})
-        mock.post("https://api.test/channels/new-idx/messages/msg-1/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000008000/messages",
+            payload={"_id": "01J5T000000000000000008001"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000008000/messages/01J5T000000000000000008001/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             created = await _recreate_forum_index(
                 session, config, state, _result(), set(), live_categories, lambda e: None
             )
 
     assert created is True
-    assert state.channel_map["forum-index-f"] == "new-idx"
-    assert state.forum_index_message_ids["f"] == "msg-1"
+    assert state.channel_map["forum-index-f"] == "01J5T000000000000000008000"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000008001"
     # The recreated index sits at position 0 and the dead id is dropped.
-    assert live_categories[0]["channels"] == ["new-idx"]
+    assert live_categories[0]["channels"] == ["01J5T000000000000000008000"]
 
 
 async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_path: Path) -> None:
@@ -108,20 +114,28 @@ async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_
     with aioresponses() as mock:
         mock.post(
             "https://api.test/servers/srv/channels",
-            payload={"_id": "new-idx", "name": "F-index"},
+            payload={"_id": "01J5T000000000000000008000", "name": "F-index"},
         )
         mock.patch("https://api.test/servers/srv", payload={})
         # Only the SEND route is registered. If the code took the edit branch against the
         # stale id, the PATCH would have no route and the rebuild would fail silently.
-        mock.post("https://api.test/channels/new-idx/messages", payload={"_id": "fresh-msg"})
-        mock.post("https://api.test/channels/new-idx/messages/fresh-msg/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000008000/messages",
+            payload={"_id": "01J5T000000000000000008002"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000008000/messages/01J5T000000000000000008002/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             created = await _recreate_forum_index(
                 session, config, state, _result(), set(), live_categories, lambda e: None
             )
 
     assert created is True
-    assert state.forum_index_message_ids["f"] == "fresh-msg", "repair edited the stale id"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000008002", (
+        "repair edited the stale id"
+    )
 
 
 async def test_recreate_forum_index_clears_a_stale_present_unknown_mark(tmp_path: Path) -> None:
@@ -143,17 +157,23 @@ async def test_recreate_forum_index_clears_a_stale_present_unknown_mark(tmp_path
     with aioresponses() as mock:
         mock.post(
             "https://api.test/servers/srv/channels",
-            payload={"_id": "new-idx", "name": "F-index"},
+            payload={"_id": "01J5T000000000000000008000", "name": "F-index"},
         )
         mock.patch("https://api.test/servers/srv", payload={})
-        mock.post("https://api.test/channels/new-idx/messages", payload={"_id": "fresh-msg"})
-        mock.post("https://api.test/channels/new-idx/messages/fresh-msg/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000008000/messages",
+            payload={"_id": "01J5T000000000000000008002"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000008000/messages/01J5T000000000000000008002/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             created = await _recreate_forum_index(
                 session, config, state, _result(), set(), live_categories, lambda e: None
             )
     assert created is True
-    assert state.forum_index_message_ids["f"] == "fresh-msg"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000008002"
     assert "f" not in state.forum_index_present_unknown_id, "the stale mark suppressed the send"
 
 

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import json
 import re
 import shutil
@@ -24,7 +25,8 @@ from discord_ferry.core.engine import (
     run_retry_failed,
 )
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.errors import CheckError, DuplicateSendError, ExportError, MigrationError
+from discord_ferry.errors import CheckError, ExportError, MigrationError
+from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.api import ServerReadView
 from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
@@ -38,8 +40,22 @@ from discord_ferry.parser.models import (
     DCEMessage,
 )
 from discord_ferry.state import FailedMessage, MigrationState, load_state
+from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import seed_rejected_messages
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _valid_send_id(label: str) -> str:
+    return valid_stoat_id(int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "big"))
+
+
+@pytest.fixture(autouse=True)
+def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
+    async def send(*args, **kwargs):
+        return await messages_module.api_send_message(*args, **kwargs)
+
+    monkeypatch.setattr(delivery_module, "api_send_message", send)
 
 
 async def _noop_phase(
@@ -76,6 +92,51 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
     }
     defaults.update(overrides)
     return FerryConfig(**defaults)  # type: ignore[arg-type]
+
+
+async def test_delivery_namespace_exists_before_first_engine_phase(tmp_path: Path) -> None:
+    async def check_namespace(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        assert state.delivery_namespace, "Namespace must be saved before message-capable phases"
+        assert load_state(config.output_dir).delivery_namespace == state.delivery_namespace
+
+    overrides = {**_NOOP_OVERRIDES, "connect": check_namespace}
+    with patch("discord_ferry.core.engine._initialize_upload_limits", new_callable=AsyncMock):
+        await run_migration(_make_config(tmp_path), lambda event: None, phase_overrides=overrides)
+
+
+async def test_delivery_incremental_carries_identity_and_pending_followups(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+    from tests.stoat_ids import stoat_id
+
+    initialize = getattr(state_module, "ensure_delivery_namespace", None)
+    assert callable(initialize), "Incremental recovery must retain delivery identity"
+    prior = MigrationState()
+    initialize(prior, tmp_path, "https://api.test")
+    namespace = prior.delivery_namespace
+    prior.delivery_bookkeeping["c" * 64] = stoat_id(9)
+    prior.pending_delivery_replacements["d" * 64] = "e" * 32
+    prior.pending_pins = [(stoat_id(7), stoat_id(9))]
+    prior.pending_reactions = [
+        {"channel_id": stoat_id(7), "message_id": stoat_id(9), "emoji": "👍"}
+    ]
+    state_module.save_state(prior, tmp_path)
+
+    async def check_carry(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        assert state.delivery_namespace == namespace
+        assert state.delivery_bookkeeping == {"c" * 64: stoat_id(9)}
+        assert state.pending_delivery_replacements == {"d" * 64: "e" * 32}
+        assert state.pending_pins == prior.pending_pins
+        assert state.pending_reactions == prior.pending_reactions
+
+    overrides = {**_NOOP_OVERRIDES, "connect": check_carry}
+    with patch("discord_ferry.core.engine._initialize_upload_limits", new_callable=AsyncMock):
+        await run_migration(
+            _make_config(tmp_path, incremental=True), lambda event: None, phase_overrides=overrides
+        )
 
 
 async def test_run_migration_validates_exports(tmp_path: Path, proxy_env: Any) -> None:
@@ -1255,18 +1316,24 @@ async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
     exports = _make_exports_from_dir(config.export_dir)
 
     state = MigrationState(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_retry", stoat_channel_id="stoat_ch1", error="timeout")
+            FailedMessage(
+                discord_msg_id="msg_retry",
+                stoat_channel_id="01J5T013913344331853682639",
+                error="timeout",
+            )
         ],
     )
 
     events: list[MigrationEvent] = []
+    await seed_rejected_messages(config, state, exports)
     with aioresponses() as m:
+        m.get(f"{BASE_URL}/", payload={"features": {}})
         m.post(
-            f"{BASE_URL}/channels/stoat_ch1/messages",
-            payload={"_id": "stoat_retried"},
+            f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
+            payload={"_id": "01J5T011312040827099375552"},
         )
         await run_retry_failed(config, state, exports, events.append)
 
@@ -1368,19 +1435,25 @@ async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     exports = _make_exports_from_dir(config.export_dir)
 
     state = MigrationState(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_ok", stoat_channel_id="stoat_ch1", error="e"),
-            FailedMessage(discord_msg_id="msg_gone", stoat_channel_id="stoat_ch1", error="e"),
+            FailedMessage(
+                discord_msg_id="msg_ok", stoat_channel_id="01J5T013913344331853682639", error="e"
+            ),
+            FailedMessage(
+                discord_msg_id="msg_gone", stoat_channel_id="01J5T013913344331853682639", error="e"
+            ),
         ],
     )
 
     events: list[MigrationEvent] = []
+    await seed_rejected_messages(config, state, exports)
     with aioresponses() as m:
+        m.get(f"{BASE_URL}/", payload={"features": {}})
         m.post(
-            f"{BASE_URL}/channels/stoat_ch1/messages",
-            payload={"_id": "stoat_ok"},
+            f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
+            payload={"_id": "01J5T009296950391681521246"},
         )
         await run_retry_failed(config, state, exports, events.append)
 
@@ -1403,14 +1476,23 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
     _write_dce_json(config.export_dir, "ch1", [_dce_msg_dict("msg_fail")])
     exports = _make_exports_from_dir(config.export_dir)
     state = MigrationState(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_fail", stoat_channel_id="stoat_ch1", error="err")
+            FailedMessage(
+                discord_msg_id="msg_fail",
+                stoat_channel_id="01J5T013913344331853682639",
+                error="err",
+            )
         ],
     )
 
+    await seed_rejected_messages(config, state, exports)
+    send_calls = 0
+
     async def always_fail_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal send_calls
+        send_calls += 1
         # Yield + throttle: a true await suspension lets asyncio.wait_for enforce its
         # timeout (a synchronous raise would never yield, so a regression would hang
         # UNBOUNDED instead of timing out); the small sleep bounds a regression's growth.
@@ -1418,9 +1500,14 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
         raise RuntimeError("still broken")
 
     events: list[MigrationEvent] = []
-    with patch("discord_ferry.migrator.messages.api_send_message", always_fail_send):
+    with (
+        aioresponses() as http,
+        patch("discord_ferry.migrator.messages.api_send_message", always_fail_send),
+    ):
+        http.get(f"{BASE_URL}/", payload={"features": {}})
         await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
 
+    assert send_calls == 1
     assert len(state.failed_messages) == 1
     assert state.failed_messages[0].discord_msg_id == "msg_fail"
     assert state.failed_messages[0].retry_count == 1
@@ -1439,15 +1526,25 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
     _write_dce_json(config.export_dir, "ch_fail", [_dce_msg_dict("msg_fail")])
     exports = _make_exports_from_dir(config.export_dir)
     state = MigrationState(
-        channel_map={"ch_ok": "stoat_ch_ok", "ch_fail": "stoat_ch_fail"},
+        channel_map={
+            "ch_ok": "01J5T004638710821666785252",
+            "ch_fail": "01J5T002218886552333812741",
+        },
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_ok", stoat_channel_id="stoat_ch_ok", error="e"),
-            FailedMessage(discord_msg_id="msg_fail", stoat_channel_id="stoat_ch_fail", error="e"),
-            FailedMessage(discord_msg_id="msg_gone", stoat_channel_id="stoat_ch_ok", error="e"),
+            FailedMessage(
+                discord_msg_id="msg_ok", stoat_channel_id="01J5T004638710821666785252", error="e"
+            ),
+            FailedMessage(
+                discord_msg_id="msg_fail", stoat_channel_id="01J5T002218886552333812741", error="e"
+            ),
+            FailedMessage(
+                discord_msg_id="msg_gone", stoat_channel_id="01J5T004638710821666785252", error="e"
+            ),
         ],
     )
 
+    await seed_rejected_messages(config, state, exports)
     call = 0
 
     async def send(
@@ -1456,14 +1553,16 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
         nonlocal call
         call += 1
         await asyncio.sleep(0.01)  # yield so wait_for can bound a regression
-        if channel_id == "stoat_ch_fail":
+        if channel_id == "01J5T002218886552333812741":
             raise RuntimeError("still broken")
-        return {"_id": f"ok_{call}"}
+        return {"_id": _valid_send_id(f"ok_{call}")}
 
     events: list[MigrationEvent] = []
-    with patch("discord_ferry.migrator.messages.api_send_message", send):
+    with aioresponses() as http, patch("discord_ferry.migrator.messages.api_send_message", send):
+        http.get(f"{BASE_URL}/", payload={"features": {}})
         await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
 
+    assert call == 2
     ids = {fm.discord_msg_id for fm in state.failed_messages}
     assert ids == {"msg_fail", "msg_gone"}
     assert "msg_ok" in state.message_map
@@ -1925,6 +2024,99 @@ async def test_semaphore_initialized_during_migration(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("failure", ["response", "pin"])
+async def test_report_index_delivery_recovery_and_later_edit(tmp_path: Path, failure: str) -> None:
+    """Reload a lost create or failed pin, recover its identifier, then edit it."""
+    from discord_ferry.state import save_state
+
+    class Interrupted(BaseException):
+        pass
+
+    index_channel = valid_stoat_id(2100)
+    post_channel = valid_stoat_id(2101)
+    source = "900000000000000001"
+    forum = "forum-Ideas & help 🌱"
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={f"forum-index-{forum}": index_channel, source: post_channel},
+        forum_category_names={forum: "Ideas & help 🌱"},
+        forum_channel_members={forum: [source]},
+        channel_message_counts={source: 3},
+    )
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="tok",
+        upload_delay=0,
+    )
+    records: list[dict[str, str]] = []
+    edits: list[str] = []
+    pins: list[str] = []
+
+    def create(url, **kwargs):
+        row = {
+            "_id": valid_stoat_id(2200 + len(records)),
+            "channel": index_channel,
+            "nonce": kwargs["headers"]["Idempotency-Key"],
+            "content": kwargs["json"]["content"],
+        }
+        records.append(row)
+        if failure == "response" and len(records) == 1:
+            raise Interrupted("index created before process interruption")
+        return CallbackResult(payload=row)
+
+    url = f"https://api.test/channels/{index_channel}/messages"
+    with aioresponses() as http:
+        http.post(url, callback=create, repeat=True)
+        if failure == "pin":
+            http.post(
+                f"{url}/{valid_stoat_id(2200)}/pin",
+                status=403,
+                payload={"type": "MissingPermission"},
+            )
+            await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+        else:
+            with pytest.raises(Interrupted):
+                await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+    assert len(records) == 1
+    save_state(state, tmp_path)
+    state = load_state(tmp_path)
+    state.channel_message_counts[source] = 7
+
+    def edit(url, **kwargs):
+        edits.append(kwargs["json"]["content"])
+        return CallbackResult(payload={})
+
+    def pin(url, **kwargs):
+        pins.append(url.path.split("/")[-2])
+        return CallbackResult(payload={})
+
+    with aioresponses() as http:
+        http.get(f"{url}?limit=100&sort=Latest", payload=list(reversed(records)))
+        http.post(url, callback=create, repeat=True)
+        http.patch(f"{url}/{records[0]['_id']}", callback=edit, repeat=True)
+        http.post(f"{url}/{records[0]['_id']}/pin", callback=pin, repeat=True)
+        await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+    assert len(records) == 1
+    assert state.forum_index_message_ids[forum] == records[0]["_id"]
+    assert pins == [records[0]["_id"]]
+    assert len(edits) == 1
+    assert "7 messages migrated" in edits[0]
+    save_state(state, tmp_path)
+    state = load_state(tmp_path)
+    source_id = hashlib.sha256(forum.encode()).hexdigest()
+    ref = delivery_module.DeliveryRef(source_id, source_id, index_channel, "forum_index")
+    assert delivery_module.read_delivery_receipt(state, tmp_path, ref) is None
+    state.channel_message_counts[source] = 8
+    with aioresponses() as http:
+        http.patch(f"{url}/{records[0]['_id']}", callback=edit)
+        await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+        assert [method for method, _ in http.requests] == ["PATCH"]
+    assert len(edits) == 2
+    assert "8 messages migrated" in edits[-1]
+
+
 async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path) -> None:
     """_rebuild_forum_indexes is invoked during REPORT when forum_channel_members is non-empty."""
     events: list[MigrationEvent] = []
@@ -1948,6 +2140,689 @@ async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path)
         await run_migration(config, events.append, phase_overrides=overrides)
 
     mock_rebuild.assert_called_once()
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.parametrize("refail", [False, True])
+async def test_retry_delivery_uses_recorded_source_and_family(
+    tmp_path: Path, family: str, refail: bool
+) -> None:
+    """Retry the recorded source and only rejected parts despite a colliding identifier."""
+    from discord_ferry.errors import MessageSendFailure
+    from discord_ferry.state import save_state
+
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(2500)
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination, "300": valid_stoat_id(2501)},
+        channel_high_water={"100": "1000", "200": "1000"},
+    )
+    parent = _export_for("100", name="general")
+    selected = parent if family == "ordinary" else _export_for("200", name="thread")
+    if family == "merged":
+        selected.is_thread = True
+        selected.parent_channel_name = "general"
+    body = "selected ordinary body" if family == "ordinary" else "selected merged body " * 120
+    selected.messages.append(_text_msg("50", body, "2024-01-15T12:00:00+00:00"))
+    other = _export_for("300", name="other")
+    other.messages.append(_text_msg("50", "wrong colliding body", "2024-01-15T12:00:00+00:00"))
+    exports = [parent, selected, other] if family == "merged" else [selected, other]
+    expected = messages_module._split_message(
+        messages_module._build_content(selected.messages[0], state)
+    )
+    assert len(expected) == (1 if family == "ordinary" else 2)
+    records: list[dict[str, str]] = []
+    cached: set[str] = set()
+    rejected = 0
+
+    async def create(url, **kwargs):
+        nonlocal rejected
+        await asyncio.sleep(0)
+        key = kwargs["headers"]["Idempotency-Key"]
+        content = kwargs["json"]["content"]
+        if key in cached:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached.add(key)
+        if content == expected[-1] and rejected < (2 if refail else 1):
+            rejected += 1
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        row = {
+            "_id": valid_stoat_id(2600 + len(records)),
+            "channel": destination,
+            "nonce": key,
+            "content": content,
+        }
+        records.append(row)
+        return CallbackResult(payload=row)
+
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.post(url, callback=create, repeat=True)
+        http.get(f"{url}?limit=100&sort=Latest", payload=[], repeat=True)
+        http.get(f"{config.stoat_url}/", payload={"features": {}}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            if family == "ordinary":
+                with pytest.raises(MessageSendFailure):
+                    await messages_module._process_message(
+                        msg=selected.messages[0],
+                        stoat_channel_id=destination,
+                        config=config,
+                        state=state,
+                        session=session,
+                        on_event=lambda event: None,
+                        export_channel_id=selected.channel.id,
+                    )
+            else:
+                resolved = await messages_module._process_merged_message(
+                    export=selected,
+                    msg=selected.messages[0],
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                )
+                assert not resolved
+        assert len(state.failed_messages) == 1
+        ref = state.failed_messages[0].delivery_ref
+        assert ref is not None
+        assert ref.source_channel_id == selected.channel.id
+        assert ref.family == family
+        save_state(state, tmp_path)
+        state = load_state(tmp_path)
+        await asyncio.wait_for(run_retry_failed(config, state, exports, lambda event: None), 5)
+        if refail:
+            assert len(state.failed_messages) == 1
+            assert state.failed_messages[0].retry_count == 1
+            assert state.failed_messages[0].delivery_ref == ref
+            state = load_state(tmp_path)
+            await asyncio.wait_for(run_retry_failed(config, state, exports, lambda event: None), 5)
+    assert not state.failed_messages
+    assert [row["content"] for row in records] == expected
+    assert state.channel_high_water == {"100": "1000", "200": "1000"}
+    if family == "ordinary":
+        assert state.message_map["50"] == records[0]["_id"]
+        assert state.channel_message_counts["100"] == 1
+    else:
+        assert "50" not in state.message_map
+
+
+@pytest.mark.parametrize("case", ["positive", "missing", "ambiguous_source", "missing_receipt"])
+async def test_retry_legacy_delivery_requires_existing_evidence(tmp_path: Path, case: str) -> None:
+    """Old failure text and missing receipts never authorize a fresh message."""
+    from discord_ferry.state import DeliveryRef, ensure_delivery_namespace
+
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(2700)
+    export = _export_for("100")
+    export.messages.append(_text_msg("50", "legacy recovered body", "2024-01-15T12:00:00+00:00"))
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination},
+        failed_messages=[
+            FailedMessage("50", destination, "403 MissingPermission in old error text")
+        ],
+    )
+    exports = [export]
+    if case == "ambiguous_source":
+        other = _export_for("200")
+        other.messages.append(_text_msg("50", "other source body", "2024-01-15T12:00:00+00:00"))
+        exports.append(other)
+        state.channel_map["200"] = destination
+    if case == "missing_receipt":
+        state.failed_messages[0].delivery_ref = DeliveryRef("100", "50", destination, "ordinary")
+        ensure_delivery_namespace(state, tmp_path, config.stoat_url)
+    posted = []
+
+    def create(url, **kwargs):
+        posted.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(2702)})
+
+    rows = (
+        [
+            {
+                "_id": valid_stoat_id(2701),
+                "channel": destination,
+                "nonce": "ferry-50",
+                "content": messages_module._build_content(export.messages[0], state),
+                "attachments": [{"_id": "legacy_original_media"}],
+                "embeds": [{"type": "Text", "media": {"_id": "legacy_embed_media"}}],
+            }
+        ]
+        if case == "positive"
+        else []
+    )
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.get(f"{config.stoat_url}/", payload={"features": {}}, repeat=True)
+        http.get(f"{url}?limit=100&sort=Latest", payload=rows, repeat=True)
+        http.post(url, callback=create, repeat=True)
+        await asyncio.wait_for(run_retry_failed(config, state, exports, lambda event: None), 5)
+    assert posted == []
+    if case == "positive":
+        assert not state.failed_messages
+        assert state.message_map["50"] == valid_stoat_id(2701)
+        assert state.channel_message_counts["100"] == 1
+        assert state.referenced_autumn_ids == {"legacy_original_media", "legacy_embed_media"}
+    else:
+        assert len(state.failed_messages) == 1
+        assert not state.message_map
+        if case != "missing_receipt":
+            assert state.failed_messages[0].delivery_ref is None
+        assert not list((tmp_path / "delivery-receipts").rglob("*.json"))
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.parametrize("found", [False, True])
+async def test_incremental_legacy_delivery_requires_history(
+    tmp_path: Path, family: str, found: bool
+) -> None:
+    """Incremental selection recovers legacy evidence without guessing a new attempt."""
+    destination = valid_stoat_id(2800)
+    source = "100" if family == "ordinary" else "200"
+    config = _make_config(
+        tmp_path,
+        export_dir=tmp_path,
+        incremental=True,
+        message_rate_limit=0.0,
+        thread_strategy="flatten" if family == "ordinary" else "merge",
+    )
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination},
+        channel_high_water={source: "100"},
+        failed_messages=[FailedMessage("50", destination, "old failure without disposition")],
+    )
+    parent = _export_for("100", name="general")
+    selected = parent if family == "ordinary" else _export_for("200", name="thread")
+    selected.is_thread = family == "merged"
+    selected.parent_channel_name = "general" if family == "merged" else ""
+    selected.messages.extend(
+        [
+            _text_msg("50", "legacy selected body", "2024-01-15T12:00:00+00:00"),
+            _text_msg("100", "already passed source", "2024-01-15T12:01:00+00:00"),
+        ]
+    )
+    selected.message_count = 2
+    posted = []
+
+    def create(url, **kwargs):
+        posted.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(2802)})
+
+    nonce = "ferry-50" if family == "ordinary" else "ferry-merge-50"
+    rows = (
+        [
+            {
+                "_id": valid_stoat_id(2801),
+                "channel": destination,
+                "nonce": nonce,
+                "content": messages_module._build_content(selected.messages[0], state),
+            }
+        ]
+        if found
+        else []
+    )
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.get(f"{url}?limit=100&sort=Latest", payload=rows, repeat=True)
+        http.post(url, callback=create, repeat=True)
+        await messages_module.run_messages(
+            config,
+            state,
+            [parent, selected] if family == "merged" else [selected],
+            lambda event: None,
+        )
+    assert posted == []
+    assert state.channel_high_water[source] == "100"
+    assert len(state.failed_messages) == (0 if found else 1)
+    if not found:
+        assert state.failed_messages[0].delivery_ref is None
+    if family == "ordinary" and found:
+        assert state.message_map["50"] == valid_stoat_id(2801)
+    elif family == "merged":
+        assert "50" not in state.message_map
+
+
+async def test_retry_merged_delivery_preserves_skipped_source_types(tmp_path: Path) -> None:
+    """Explicit retry cannot bypass the merge loop's source-type exclusion."""
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(2900)
+    state = MigrationState(stoat_server_id=valid_stoat_id(900), channel_map={"100": destination})
+    parent = _export_for("100", name="general")
+    thread = _export_for("200", name="thread")
+    thread.is_thread = True
+    thread.parent_channel_name = "general"
+    msg = _text_msg("50", "source body", "2024-01-15T12:00:00+00:00")
+    thread.messages.append(msg)
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.post(
+            url, status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+        )
+        async with aiohttp.ClientSession() as session:
+            assert not await messages_module._process_merged_message(
+                export=thread,
+                msg=msg,
+                stoat_channel_id=destination,
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda event: None,
+            )
+    msg.type = "ThreadCreated"
+    posted = []
+
+    def create(url, **kwargs):
+        posted.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(2901)})
+
+    with aioresponses() as http:
+        http.get(f"{config.stoat_url}/", payload={"features": {}})
+        http.post(url, callback=create)
+        await run_retry_failed(config, state, [parent, thread], lambda event: None)
+    assert posted == []
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].retry_count == 1
+
+
+async def test_retry_delivery_duplicate_source_scan_keeps_bounded_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambiguity needs two candidates, not every duplicate in a streamed export."""
+    import weakref
+
+    destination = valid_stoat_id(2950)
+    config = _make_config(tmp_path, export_dir=tmp_path)
+    state = MigrationState(
+        channel_map={"100": destination},
+        failed_messages=[FailedMessage("50", destination, "old failure")],
+    )
+    export = _export_for("100")
+    export.json_path = tmp_path / "source.json"
+    observed = []
+
+    def messages(path):
+        for index in range(50):
+            msg = _text_msg("50", f"duplicate body {index}", "2024-01-15T12:00:00+00:00")
+            observed.append(weakref.ref(msg))
+            yield msg
+            assert sum(reference() is not None for reference in observed) <= 3, (
+                "Retry scan retained an unbounded set of duplicate source messages"
+            )
+
+    monkeypatch.setattr(engine_module, "stream_messages", messages)
+    with aioresponses() as http:
+        http.get(f"{config.stoat_url}/", payload={"features": {}})
+        await run_retry_failed(config, state, [export], lambda event: None)
+        assert all(method == "GET" for method, _ in http.requests)
+    assert len(observed) == 50
+    assert len(state.failed_messages) == 1
+    assert not state.message_map
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.parametrize("outcome", ["verified", "partial", "unresolved"])
+async def test_retry_delivery_outcome_counts_selected_source(
+    tmp_path: Path, family: str, outcome: str
+) -> None:
+    destination = valid_stoat_id(3750)
+    source = "100" if family == "ordinary" else "200"
+    export = _export_for(source)
+    export.is_thread = family == "merged"
+    export.parent_channel_name = "general" if family == "merged" else ""
+    export.messages.append(
+        _text_msg(
+            "20",
+            "source " + "p" * 2500 if outcome == "partial" else "source",
+            "2024-01-15T12:00:00+00:00",
+        )
+    )
+    exports = [export] if family == "ordinary" else [_export_for("100", name="general"), export]
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    state = MigrationState(
+        channel_map={"100": destination},
+        failed_messages=[FailedMessage("20", destination, "original failure")],
+    )
+    await seed_rejected_messages(config, state, exports, family=family)
+    events: list[MigrationEvent] = []
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if outcome == "unresolved" or (outcome == "partial" and content.startswith("[continued")):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        return CallbackResult(payload={"_id": valid_stoat_id(3751)})
+
+    with aioresponses() as http:
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        await run_retry_failed(config, state, exports, events.append, _upload_limits_ready=True)
+    completed = next(
+        event for event in events if event.phase == "retry" and event.status == "completed"
+    )
+    expected = {"verified": 0, "partial": 0, "unresolved": 0}
+    expected[outcome] = 1
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == expected
+    assert len(state.failed_messages) == (0 if outcome == "verified" else 1)
+
+
+@pytest.mark.parametrize("partial_then_drained", [False, True])
+async def test_repair_delivery_outcome_counts_real_tail_and_retry_drain(
+    tmp_path: Path, partial_then_drained: bool
+) -> None:
+    config = _make_repair_config(tmp_path)
+    destination = valid_stoat_id(3780)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: destination},
+        created_channel_names={R_D_CHANNEL: "general"},
+        channel_high_water={R_D_CHANNEL: "20"},
+        failed_messages=[FailedMessage("20", destination, "old failure")],
+    )
+    export = _export_for(R_D_CHANNEL)
+    export.messages.append(
+        _text_msg(
+            "20",
+            "tail body " + "p" * 2500 if partial_then_drained else "tail body",
+            "2024-01-15T12:00:00+00:00",
+        )
+    )
+    report = CheckReport()
+    report.add(
+        name=f"tail:{R_D_CHANNEL}",
+        status="fail",
+        kind="tail_absent",
+        detail="confirmed missing",
+        discord_id=R_D_CHANNEL,
+        stoat_id=destination,
+    )
+    events: list[MigrationEvent] = []
+    rejected = False
+    posts = []
+
+    def create(url, **kwargs):
+        nonlocal rejected
+        content = kwargs["json"]["content"]
+        if partial_then_drained and content.startswith("[continued") and not rejected:
+            rejected = True
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        posts.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3780 + len(posts))})
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
+        aioresponses() as http,
+    ):
+        _register_repair_server_reads(http, _server_with_channels(), repeat=True)
+        http.get(f"{BASE_URL}/", payload={"features": {}}, repeat=True)
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            callback=create,
+            repeat=True,
+        )
+        http.get(
+            f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            payload=[],
+            repeat=True,
+        )
+        outcome = await run_repair(config, state, [export], events.append)
+    assert not state.failed_messages
+    completed_events = [
+        event for event in events if event.phase == "repair" and event.status == "completed"
+    ]
+    assert len(completed_events) == 1
+    completed = completed_events[0]
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == {"verified": 1, "partial": 0, "unresolved": 0}
+    assert len(outcome.restored_tails) == (0 if partial_then_drained else 1)
+    expected_parts = messages_module._split_message(
+        messages_module._build_content(export.messages[0], state)
+    )
+    assert sorted(posts) == sorted(expected_parts)
+
+
+async def test_engine_delivery_outcome_preserves_visited_progress(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    messages = [
+        _dce_msg_dict("10", "verified-body"),
+        _dce_msg_dict("20", "partial-body " + "p" * 2500),
+        _dce_msg_dict("30", "unresolved-body"),
+    ]
+    for message in messages:
+        message["author"]["id"] = "900000000000000004"
+    _write_dce_json(export_dir, "100", messages)
+    destination = valid_stoat_id(3700)
+    records: list[str] = []
+    events: list[MigrationEvent] = []
+
+    async def channels(config, state, exports, emit):
+        state.stoat_server_id = valid_stoat_id(900)
+        state.channel_map["100"] = destination
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if "unresolved-body" in content or content.startswith("[continued"):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        records.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3710 + len(records))})
+
+    with aioresponses() as http:
+        http.get("https://api.test/", payload={"features": {}}, repeat=True)
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        state = await run_migration(
+            _make_config(
+                tmp_path,
+                export_dir=export_dir,
+                message_rate_limit=0.0,
+                create_invite=False,
+                validate_after=False,
+            ),
+            events.append,
+            phase_overrides={
+                **_NOOP_OVERRIDES,
+                "channels": channels,
+                "messages": messages_module.run_messages,
+            },
+        )
+    completed = next(
+        event for event in events if event.phase == "messages" and event.status == "completed"
+    )
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == {"verified": 1, "partial": 1, "unresolved": 1}
+    assert len(records) == 2
+    assert len(state.failed_messages) == 2
+    visited = [event for event in events if event.phase == "messages" and event.total > 0]
+    assert visited[-1].current == visited[-1].total == 3
+
+
+async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_path: Path) -> None:
+    """Real engine initialization carries a rejection, then unchanged incremental posts nothing."""
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    destination = valid_stoat_id(3000)
+    records: list[dict[str, str]] = []
+    cached: set[str] = set()
+    rejected = False
+
+    def source_message(message_id, body):
+        message = _dce_msg_dict(message_id, body)
+        message["author"]["id"] = "900000000000000004"
+        return message
+
+    original = [source_message("50", "rejected body"), source_message("100", "later body")]
+    _write_dce_json(export_dir, "100", original)
+
+    async def channels(config, state, exports, emit):
+        state.stoat_server_id = valid_stoat_id(900)
+        state.channel_map["100"] = destination
+
+    overrides = {**_NOOP_OVERRIDES, "channels": channels, "messages": messages_module.run_messages}
+
+    def create(url, **kwargs):
+        nonlocal rejected
+        key = kwargs["headers"]["Idempotency-Key"]
+        content = kwargs["json"]["content"]
+        if key in cached:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached.add(key)
+        if "rejected body" in content and not rejected:
+            rejected = True
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        row = {
+            "_id": valid_stoat_id(3100 + len(records)),
+            "channel": destination,
+            "nonce": key,
+            "content": content,
+        }
+        records.append(row)
+        return CallbackResult(payload=row)
+
+    with aioresponses() as http:
+        http.get("https://api.test/", payload={"features": {}}, repeat=True)
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        config = _make_config(
+            tmp_path,
+            export_dir=export_dir,
+            message_rate_limit=0.0,
+            create_invite=False,
+            validate_after=False,
+        )
+        first = await run_migration(config, lambda event: None, phase_overrides=overrides)
+        assert len(first.failed_messages) == 1
+        assert first.failed_messages[0].delivery_ref is not None
+        namespace = first.delivery_namespace
+        first_id = first.message_map["100"]
+        _write_dce_json(export_dir, "100", [*original, source_message("150", "new body")])
+        incremental = dataclasses.replace(config, incremental=True)
+        second = await run_migration(incremental, lambda event: None, phase_overrides=overrides)
+        assert not second.failed_messages
+        assert second.delivery_namespace == namespace
+        assert second.message_map["100"] == first_id
+        assert set(second.message_map) == {"50", "100", "150"}
+        assert second.channel_message_counts["100"] == 3
+        assert len(records) == 3
+        cached.clear()
+        third = await run_migration(incremental, lambda event: None, phase_overrides=overrides)
+    assert third.delivery_namespace == namespace
+    assert not third.failed_messages
+    assert third.channel_message_counts["100"] == 3
+    assert len(records) == 3
+    assert not cached
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+async def test_retry_delivery_checkpoint_removes_resolved_failure_before_retirement(
+    tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful mid-channel checkpoint cannot leave a failure whose receipt it retired."""
+    from discord_ferry.state import save_state
+
+    class Interrupted(BaseException):
+        pass
+
+    destination = valid_stoat_id(3200)
+    source = "100" if family == "ordinary" else "200"
+    config = _make_config(
+        tmp_path,
+        export_dir=tmp_path,
+        incremental=True,
+        checkpoint_interval=1,
+        message_rate_limit=0.0,
+    )
+    export = _export_for(source, name="general" if family == "ordinary" else "thread")
+    export.is_thread = family == "merged"
+    export.parent_channel_name = "general" if family == "merged" else ""
+    export.messages.extend(
+        [
+            _text_msg("20", "corrected body", "2024-01-15T12:00:00+00:00"),
+            _text_msg("30", "later body", "2024-01-15T12:01:00+00:00"),
+        ]
+    )
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination},
+        channel_high_water={source: "10"},
+        failed_messages=[FailedMessage("20", destination, "old failure")],
+    )
+    await seed_rejected_messages(config, state, [export], family=family)
+    ref = state.failed_messages[0].delivery_ref
+    assert ref is not None
+    unrelated = [
+        FailedMessage(
+            "20",
+            destination,
+            "other source",
+            delivery_ref=dataclasses.replace(ref, source_channel_id="999"),
+        ),
+        FailedMessage(
+            "20",
+            destination,
+            "other family",
+            delivery_ref=dataclasses.replace(
+                ref, family="merged" if family == "ordinary" else "ordinary"
+            ),
+        ),
+        FailedMessage(
+            "20",
+            valid_stoat_id(3202),
+            "other destination",
+            delivery_ref=dataclasses.replace(ref, destination_channel_id=valid_stoat_id(3202)),
+        ),
+    ]
+    state.failed_messages.extend(unrelated)
+
+    async def create(url, **kwargs):
+        if family == "merged":
+            await asyncio.sleep(5.01)  # Exercise the existing real five-second checkpoint floor.
+        return CallbackResult(payload={"_id": valid_stoat_id(3201)})
+
+    with aioresponses() as http:
+        http.post(f"{config.stoat_url}/channels/{destination}/messages", callback=create)
+        if family == "ordinary":
+            result = messages_module.ChannelResult(channel_id=source)
+            async with aiohttp.ClientSession() as session:
+                assert await messages_module._process_message(
+                    msg=export.messages[0],
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    channel_result=result,
+                    export_channel_id=source,
+                    retry_failure=state.failed_messages[0],
+                    allow_rejected_retry=True,
+                )
+            messages_module._merge_channel_result(state, result)
+            save_state(state, tmp_path)
+        else:
+
+            def checkpoint_then_interrupt(current, output_dir):
+                save_state(current, output_dir)
+                raise Interrupted("process stopped after durable mid-thread checkpoint")
+
+            monkeypatch.setattr(messages_module, "save_state", checkpoint_then_interrupt)
+            with pytest.raises(Interrupted):
+                await messages_module._merge_threads(
+                    [export], config, state, lambda event: None, {"general": destination}
+                )
+    resumed = load_state(tmp_path)
+    assert delivery_module.read_delivery_receipt(resumed, tmp_path, ref) is None
+    if family == "merged":
+        assert resumed.channel_message_offsets[source] == "20"
+    assert resumed.failed_messages == unrelated
 
 
 async def test_forum_index_rebuild_skipped_when_dry_run(tmp_path: Path) -> None:
@@ -1985,18 +2860,18 @@ async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) ->
         channel_map={
             "disc-ch1": "stoat-ch1",
             "disc-ch2": "stoat-ch2",
-            "forum-index-forum-news": "stoat-idx-news",
+            "forum-index-forum-news": "01J5T000000000000000002300",
         },
         channel_message_counts={"disc-ch1": 42, "disc-ch2": 7},
     )
 
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages",
-            payload={"_id": "new-idx-msg"},
+            "https://api.test/channels/01J5T000000000000000002300/messages",
+            payload={"_id": "01J5T000000000000000002301"},
         )
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002301/pin",
             payload={},
         )
         import aiohttp
@@ -2021,15 +2896,21 @@ async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
         stoat_server_id="stoat-srv",
         forum_channel_members={"forum-news": ["d1"]},
         forum_category_names={"forum-news": "News"},
-        channel_map={"d1": "s1", "forum-index-forum-news": "idx"},
+        channel_map={"d1": "s1", "forum-index-forum-news": "01J5T000000000000000002300"},
         channel_message_counts={"d1": 3},
     )
     with aioresponses() as mock:
-        mock.post("https://api.test/channels/idx/messages", payload={"_id": "m1"})
-        mock.post("https://api.test/channels/idx/messages/m1/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages",
+            payload={"_id": "01J5T000000000000000002302"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002302/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "forum-news", lambda e: None)
-    assert state.forum_index_message_ids["forum-news"] == "m1"
+    assert state.forum_index_message_ids["forum-news"] == "01J5T000000000000000002302"
 
 
 async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) -> None:
@@ -2050,8 +2931,8 @@ async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) ->
             await _rebuild_one_forum_index(session, config, state, "forum-empty", lambda e: None)
 
 
-async def test_rebuild_marks_forum_on_duplicate(tmp_path: Path) -> None:
-    """A DuplicateSendError with no pinned message to recover marks the forum."""
+async def test_rebuild_conflict_without_history_stays_unresolved(tmp_path: Path) -> None:
+    """A bare conflict cannot establish index presence or authorize a replacement."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
 
     config = _make_config(tmp_path)
@@ -2059,23 +2940,33 @@ async def test_rebuild_marks_forum_on_duplicate(tmp_path: Path) -> None:
         stoat_server_id="s",
         forum_channel_members={"f": ["d1"]},
         forum_category_names={"f": "F"},
-        channel_map={"d1": "s1", "forum-index-f": "idx"},
+        channel_map={"d1": "s1", "forum-index-f": "01J5T000000000000000002300"},
     )
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/idx/messages",
+            "https://api.test/channels/01J5T000000000000000002300/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "x:1:1"},
         )
-        mock.post("https://api.test/channels/idx/search", payload=[])
+        mock.get(
+            "https://api.test/channels/01J5T000000000000000002300/messages?limit=100&sort=Latest",
+            payload=[],
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
-    assert state.forum_index_present_unknown_id == {"f"}
+    assert not state.forum_index_present_unknown_id
     assert "f" not in state.forum_index_message_ids
+    source_id = hashlib.sha256(b"f").hexdigest()
+    ref = delivery_module.DeliveryRef(
+        source_id, source_id, "01J5T000000000000000002300", "forum_index"
+    )
+    receipt = delivery_module.read_delivery_receipt(state, tmp_path, ref)
+    assert receipt is not None
+    assert receipt.parts[0].status == "uncertain"
 
 
-async def test_rebuild_recovers_id_on_duplicate(tmp_path: Path) -> None:
-    """A DuplicateSendError recovers the id from pinned messages (#561)."""
+async def test_rebuild_recovers_id_from_unique_nonce_history(tmp_path: Path) -> None:
+    """A new-format conflict resolves through exact nonce history, then edits and pins."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
 
     config = _make_config(tmp_path)
@@ -2083,23 +2974,45 @@ async def test_rebuild_recovers_id_on_duplicate(tmp_path: Path) -> None:
         stoat_server_id="s",
         forum_channel_members={"f": ["d1"]},
         forum_category_names={"f": "F"},
-        channel_map={"d1": "s1", "forum-index-f": "idx"},
+        channel_map={"d1": "s1", "forum-index-f": "01J5T000000000000000002300"},
     )
+    source_id = hashlib.sha256(b"f").hexdigest()
+    ref = delivery_module.DeliveryRef(
+        source_id, source_id, "01J5T000000000000000002300", "forum_index"
+    )
+
+    def history(*args, **kwargs):
+        return CallbackResult(
+            payload=[
+                {
+                    "_id": "01J5T000000000000000002303",
+                    "channel": ref.destination_channel_id,
+                    "nonce": delivery_module.delivery_key(state.delivery_namespace, ref, 0, 0),
+                }
+            ]
+        )
+
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/idx/messages",
+            "https://api.test/channels/01J5T000000000000000002300/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "x:1:1"},
         )
-        mock.post(
-            "https://api.test/channels/idx/search",
-            payload=[{"_id": "recovered", "content": "**Forum: F** old content"}],
+        mock.get(
+            "https://api.test/channels/01J5T000000000000000002300/messages?limit=100&sort=Latest",
+            callback=history,
         )
-        mock.patch("https://api.test/channels/idx/messages/recovered", payload={})
-        mock.post("https://api.test/channels/idx/messages/recovered/pin", payload={})
+        mock.patch(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002303",
+            payload={},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002303/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
-    assert state.forum_index_message_ids["f"] == "recovered"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000002303"
     assert "f" not in state.forum_index_present_unknown_id
 
 
@@ -2164,14 +3077,20 @@ async def test_rebuild_success_never_leaves_forum_in_both(tmp_path: Path) -> Non
         stoat_server_id="s",
         forum_channel_members={"f": ["d1"]},
         forum_category_names={"f": "F"},
-        channel_map={"d1": "s1", "forum-index-f": "idx"},
+        channel_map={"d1": "s1", "forum-index-f": "01J5T000000000000000002300"},
     )
     with aioresponses() as mock:
-        mock.post("https://api.test/channels/idx/messages", payload={"_id": "m3"})
-        mock.post("https://api.test/channels/idx/messages/m3/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages",
+            payload={"_id": "01J5T000000000000000002304"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002304/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
-    assert state.forum_index_message_ids["f"] == "m3"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000002304"
     assert set(state.forum_index_message_ids) & state.forum_index_present_unknown_id == set()
 
 
@@ -2685,55 +3604,45 @@ async def test_preflight_emits_and_persists_a_proxy_notice(
 # ---------------------------------------------------------------------------
 
 
-async def test_retry_path_does_not_reraise_on_a_duplicate(tmp_path: Path) -> None:
-    """SC-2.9: a duplicate means the message landed, so the retry loop must terminate.
-
-    _process_message re-raises when channel_result is None, which is this path, because
-    the retry loop relies on an exception to mark a re-failure. A DuplicateSendError is
-    NOT a re-failure: the message is on the server. It never reaches that re-raise,
-    because the catch sits inside the send loop.
-
-    This test passes without a source change in this task. Its value is that it stays
-    true: moving the catch from inside the loop to around it makes it fail.
-    """
+async def test_retry_path_preserves_unresolved_duplicate(tmp_path: Path) -> None:
+    """A cached key without a matching message remains a failure and terminates."""
     config = _make_retry_config(tmp_path)
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    _write_dce_json(config.export_dir, "ch_dup", [_dce_msg_dict("msg_dup")])
+    _write_dce_json(config.export_dir, "123", [_dce_msg_dict("456")])
     exports = _make_exports_from_dir(config.export_dir)
+    destination = valid_stoat_id(1)
     state = MigrationState(
-        channel_map={"ch_dup": "stoat_ch_dup"},
+        channel_map={"123": destination},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_dup", stoat_channel_id="stoat_ch_dup", error="e"),
+            FailedMessage(discord_msg_id="456", stoat_channel_id=destination, error="timeout")
         ],
     )
-
-    async def always_duplicate(
-        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
-    ) -> dict[str, Any]:
-        await asyncio.sleep(0.01)  # yield so wait_for can bound a regression
-        raise DuplicateSendError("already on the server")
-
     events: list[MigrationEvent] = []
-    with patch("discord_ferry.migrator.messages.api_send_message", always_duplicate):
-        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
-
-    assert not any(fm.discord_msg_id == "msg_dup" for fm in state.failed_messages), (
-        "a message already on the server was left in failed_messages, so it stays "
-        "reported as a failure and --incremental will re-send it"
+    with aioresponses() as http:
+        http.get(f"{BASE_URL}/", payload={"features": {}})
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            status=409,
+            payload={"type": "DuplicateNonce"},
+        )
+        http.get(
+            f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            payload=[],
+            repeat=True,
+        )
+        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5)
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].discord_msg_id == "456"
+    assert state.failed_messages[0].retry_count == 1
+    assert not state.message_map
+    assert not state.pending_pins
+    assert any(
+        "0 succeeded" in event.message and "1 still failed" in event.message for event in events
     )
-    assert "msg_dup" not in state.message_map, (
-        "Stoat returns no id with a 409, so nothing may be mapped for it"
-    )
 
 
-async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> None:
-    """SC-2.7: three id consumers here, and the state write is the one that matters.
-
-    A bad forum_index_message_ids entry persists into state.json and is read back on
-    the next run, where it drives an api_edit_message against an id that does not
-    exist. Nothing may be written when Stoat returned no id.
-    """
+async def test_unresolved_index_conflict_writes_no_false_state_entry(tmp_path: Path) -> None:
+    """No history match means no saved index identifier, pin, or success event."""
     from discord_ferry.core.engine import _rebuild_forum_indexes
 
     events: list[MigrationEvent] = []
@@ -2744,7 +3653,7 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
         forum_category_names={"forum-news": "News"},
         channel_map={
             "disc-ch1": "stoat-ch1",
-            "forum-index-forum-news": "stoat-idx-news",
+            "forum-index-forum-news": "01J5T000000000000000002400",
         },
         channel_message_counts={"disc-ch1": 42},
     )
@@ -2753,13 +3662,17 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
 
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages",
+            "https://api.test/channels/01J5T000000000000000002400/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
         )
+        mock.get(
+            "https://api.test/channels/01J5T000000000000000002400/messages?limit=100&sort=Latest",
+            payload=[],
+        )
         # Registered so a stray pin is recorded rather than erroring out.
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
+            "https://api.test/channels/01J5T000000000000000002400/messages/01J5T000000000000000002401/pin",
             payload={},
             callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
         )
@@ -2775,13 +3688,9 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
         "this persists into state.json and drives an edit against a nonexistent id "
         f"on the next run. got: {state.forum_index_message_ids}"
     )
-    # The two above already hold, because the broad handler catches the duplicate before
-    # either statement runs. This one does not: it is the reason the task exists.
-    assert not [w for w in state.warnings if w.get("type") == "forum_index_rebuild_failed"], (
-        "the rebuild was reported as failed, but the index message is on the server. "
-        "Reporting a failure that did not happen is the same defect as the FailedMessage "
-        "on the message path, in a different place"
-    )
+    assert any(warning["type"] == "forum_index_rebuild_failed" for warning in state.warnings)
+    assert not state.forum_index_present_unknown_id
+    assert not any("Rebuilt forum index" in event.message for event in events)
 
 
 # ---------------------------------------------------------------------------
@@ -3069,7 +3978,7 @@ async def test_an_invalid_thread_strategy_is_recorded_as_the_effective_one(
 
 R_SERVER = "01JSTOATSRV000000000AAA"
 R_D_CHANNEL = "800000000000000001"
-R_S_CHANNEL = "01JSTOATCHN000000000OLD"
+R_S_CHANNEL = valid_stoat_id(9501)
 
 
 def _make_repair_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
@@ -3378,8 +4287,10 @@ async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path
         on_event: Any,
         *,
         _upload_limits_ready: bool,
+        _delivery_outcomes: messages_module.DeliveryOutcomes,
     ) -> None:
         assert _upload_limits_ready is True
+        assert isinstance(_delivery_outcomes, messages_module.DeliveryOutcomes)
         st.failed_messages = [st.failed_messages[0]]  # one now succeeds
 
     with (
@@ -4074,7 +4985,7 @@ async def test_an_interrupted_repair_keeps_what_it_already_recreated(tmp_path: P
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         m.post(f"{BASE_URL}/servers/{R_SERVER}/channels", status=500)
         with contextlib.suppress(Exception):
@@ -4085,7 +4996,7 @@ async def test_an_interrupted_repair_keeps_what_it_already_recreated(tmp_path: P
                 lambda _e: None,
             )
 
-    assert "01JSTOATCHN000000000NEW" in saved_ids, (
+    assert "01J5T000000000000000009500" in saved_ids, (
         "the first recreation was never persisted, so an interruption after it would "
         "leave state naming the deleted channel and the next run would duplicate it"
     )
@@ -4483,7 +5394,7 @@ async def _repair_recreating_channel(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload=create_payload
             if create_payload is not None
-            else {"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            else {"_id": "01J5T000000000000000009500", "name": "general"},
         )
         await run_repair(
             config,
@@ -4513,7 +5424,7 @@ async def test_repair_recreates_a_missing_channel_and_records_its_new_id(
 ) -> None:
     """channel_map moves to the new Stoat id under the UNCHANGED Discord key."""
     state, _, _ = await _repair_recreating_channel(tmp_path)
-    assert state.channel_map[R_D_CHANNEL] == "01JSTOATCHN000000000NEW"
+    assert state.channel_map[R_D_CHANNEL] == "01J5T000000000000000009500"
     assert state.created_channel_names[R_D_CHANNEL] == "general"
 
 
@@ -4727,7 +5638,7 @@ async def _repair_with_metadata(
 
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         m.post(f"{BASE_URL}/servers/{R_SERVER}/roles", payload={"id": S_ROLE_NEW})
         m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
@@ -4751,11 +5662,11 @@ async def test_repair_ignores_another_servers_metadata_file(tmp_path: Path) -> N
 async def test_a_recreated_channel_gets_its_recorded_overrides(tmp_path: Path) -> None:
     """SC-4.3. Both override kinds, through the chunk 1 helper."""
     _, urls, _ = await _repair_with_metadata(tmp_path, _report_with("channel_missing", "fail"))
-    assert any(u.endswith("/channels/01JSTOATCHN000000000NEW/permissions/default") for u in urls), (
-        f"the default override was not applied: {urls}"
-    )
     assert any(
-        u.endswith(f"/channels/01JSTOATCHN000000000NEW/permissions/{S_ROLE_OLD}") for u in urls
+        u.endswith("/channels/01J5T000000000000000009500/permissions/default") for u in urls
+    ), f"the default override was not applied: {urls}"
+    assert any(
+        u.endswith(f"/channels/01J5T000000000000000009500/permissions/{S_ROLE_OLD}") for u in urls
     ), f"the role override was not applied: {urls}"
 
 
@@ -4771,7 +5682,7 @@ async def test_repair_sends_no_allow_for_an_inflated_saved_overwrite(tmp_path: P
         write_metadata=False,
         bodies_out=bodies,
     )
-    new_channel = "/channels/01JSTOATCHN000000000NEW/permissions/"
+    new_channel = "/channels/01J5T000000000000000009500/permissions/"
     default_bodies = [b for u, b in bodies.items() if u.endswith(new_channel + "default")]
     role_bodies = [b for u, b in bodies.items() if u.endswith(new_channel + S_ROLE_OLD)]
     assert default_bodies == [{"permissions": {"allow": 0, "deny": 0}}]
@@ -4843,7 +5754,7 @@ async def test_a_repair_permission_failure_is_recorded_as_a_repair(tmp_path: Pat
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         m.put(re.compile(r".*/permissions/.*"), status=403, repeat=True)
         await run_repair(config, state, [_export_for(R_D_CHANNEL)], lambda _e: None)
@@ -5055,10 +5966,10 @@ async def _repair_with_state(
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         m.post(
-            re.compile(r".*/channels/01JSTOATCHN000000000NEW/messages"),
+            re.compile(r".*/channels/01J5T000000000000000009500/messages"),
             status=400,
             body="intentional resend failure",
             repeat=True,
@@ -5092,7 +6003,7 @@ async def test_a_recreated_channels_new_id_lands_under_the_unchanged_key(
 ) -> None:
     """Only one map VALUE moves. No key changes anywhere."""
     state, _ = await _repair_with_state(tmp_path, _state_for_rewrite(), [_export_for(R_D_CHANNEL)])
-    assert state.channel_map == {R_D_CHANNEL: "01JSTOATCHN000000000NEW"}
+    assert state.channel_map == {R_D_CHANNEL: "01J5T000000000000000009500"}
 
 
 async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
@@ -5244,19 +6155,20 @@ async def _repair_resending(
     async def _fake_send(*_a: Any, **kwargs: Any) -> dict[str, str]:
         content = str(kwargs.get("content", ""))
         bodies.append(content)
-        return {"_id": "01JSTOATMSG0000000000AA"}
+        return {"_id": valid_stoat_id(9600)}
 
     real_process = messages_module._process_message
 
-    async def _process(*, msg: Any, **kw: Any) -> None:
+    async def _process(*, msg: Any, **kw: Any) -> bool:
         if msg.id in fail_ids:
             raise MigrationError(f"send failed for {msg.id}")
         bodies.append(f"msg:{msg.id}")
+        return True
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
-        patch.object(engine_module, "api_send_message", _fake_send),
+        patch.object(messages_module, "api_send_message", _fake_send),
         patch.object(engine_module, "_process_message", _process),
         aioresponses() as m,
     ):
@@ -5264,7 +6176,7 @@ async def _repair_resending(
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         await run_repair(config, state, exports, events.append)
     return state, bodies, events
@@ -5356,7 +6268,7 @@ async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) 
     assert state.channel_high_water[R_D_CHANNEL] == "100000000000000001"
 
 
-R_NEW_CHANNEL = "01JSTOATCHN000000000NEW"
+R_NEW_CHANNEL = valid_stoat_id(9500)
 R_THREAD_A = "800000000000000077"
 R_THREAD_B = "800000000000000066"
 
@@ -5440,16 +6352,16 @@ async def _repair_merge_parent(
                 "key": str(kwargs.get("idempotency_key", "")),
             }
         )
-        return {"_id": f"01JSTOATMSG{len(sends):013d}"}
+        return {"_id": valid_stoat_id(9000 + len(sends))}
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         patch.object(messages_module, "save_state", lambda *a, **k: None),
-        patch.object(engine_module, "api_send_message", _record),
         patch.object(messages_module, "api_send_message", _record),
         aioresponses() as m,
     ):
+        m.get(re.compile(r".*/channels/.+/messages\?.*"), payload=[], repeat=True)
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
@@ -5522,29 +6434,31 @@ async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
 async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
     tmp_path: Path,
 ) -> None:
-    """A repair key must not collide with the one the migration used.
-
-    The migration's keys are ferry-merge-{id} and ferry-thread-sep-{thread id},
-    built from Discord ids a recreated channel does not change, and Stoat's store
-    is a 1000-entry LRU with no TTL. A cached key answers 409 DuplicateNonce with
-    no message id, which would drop the message from a channel that is new. The
-    new channel id salts them, as it already does for the parent's own messages.
-    """
-    _, sends, _ = await _repair_merge_parent(
+    """The existing replacement identity changes the opaque merged attempt key."""
+    state, sends, _ = await _repair_merge_parent(
         tmp_path,
         exports=_merge_fixture(),
         merged_thread_ids=(R_THREAD_A, R_THREAD_B),
     )
     keys = [s["key"] for s in sends]
-    assert f"ferry-thread-sep-{R_THREAD_A}-{R_NEW_CHANNEL}" in keys
-    assert f"ferry-merge-900000000000000011-{R_NEW_CHANNEL}" in keys
-    unsalted = [
-        k
-        for k in keys
-        if k.startswith(("ferry-merge-", "ferry-thread-sep-"))
-        and not k.endswith(f"-{R_NEW_CHANNEL}")
-    ]
-    assert not unsalted, f"an unsalted merge key would be swallowed by Stoat's cache: {unsalted}"
+    base = delivery_module.DeliveryRef(R_THREAD_A, "900000000000000011", R_NEW_CHANNEL, "merged")
+    generation = state.pending_delivery_replacements[delivery_module.delivery_receipt_id(base)]
+    replacement = delivery_module.DeliveryRef(
+        R_THREAD_A, "900000000000000011", R_NEW_CHANNEL, "merged", generation
+    )
+    base = dataclasses.replace(replacement, generation="base")
+    assert delivery_module.delivery_key(state.delivery_namespace, replacement, 0, 0) in keys
+    assert delivery_module.delivery_key(state.delivery_namespace, base, 0, 0) not in keys
+    base_separator = dataclasses.replace(base, source_message_id=R_THREAD_A, family="separator")
+    separator = dataclasses.replace(
+        base_separator,
+        generation=state.pending_delivery_replacements[
+            delivery_module.delivery_receipt_id(base_separator)
+        ],
+    )
+    base_separator = dataclasses.replace(separator, generation="base")
+    assert delivery_module.delivery_key(state.delivery_namespace, separator, 0, 0) in keys
+    assert delivery_module.delivery_key(state.delivery_namespace, base_separator, 0, 0) not in keys
 
 
 async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) -> None:
@@ -5764,42 +6678,49 @@ async def test_a_resend_sends_in_timestamp_order_not_list_order(tmp_path: Path) 
     ], f"the resend followed list order rather than timestamp order: {sent}"
 
 
-def test_the_migration_idempotency_key_is_unchanged_without_a_salt() -> None:
-    """The salt is additive: an unsalted call produces exactly the old key.
-
-    Every migration send goes through this path, and a changed key would make
-    Stoat treat a resumed migration's messages as new and duplicate them all.
-    """
-    import inspect
-
-    source = inspect.getsource(messages_module._process_message)
-    assert 'f"ferry-{msg.id}{_salt}"' in source
-    assert '_salt = f"-{idempotency_salt}" if idempotency_salt else ""' in source
-    signature = inspect.signature(messages_module._process_message)
-    assert signature.parameters["idempotency_salt"].default == "", (
-        "the salt must default to empty, or every migration key changes"
+async def test_unsalted_migration_reuses_base_delivery_without_reposting(tmp_path: Path) -> None:
+    """An ordinary send with no repair salt keeps its base identity on recovery."""
+    config = _make_config(tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(1)
+    state = MigrationState(channel_map={"123": destination})
+    source = DCEMessage(
+        id="456",
+        type="Default",
+        timestamp="2026-10-17T00:00:00Z",
+        content="one",
+        author=DCEAuthor(id="789", name="Author"),
     )
+    keys = []
+
+    async def send(*args, **kwargs):
+        keys.append(kwargs["idempotency_key"])
+        return {"_id": valid_stoat_id(7)}
+
+    async with aiohttp.ClientSession() as session:
+        with patch.object(messages_module, "api_send_message", send):
+            for _ in range(2):
+                await messages_module._process_message(
+                    msg=source,
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    export_channel_id="123",
+                )
+    ref = delivery_module.DeliveryRef("123", "456", destination, "ordinary")
+    assert keys == [delivery_module.delivery_key(state.delivery_namespace, ref, 0, 0)]
+    assert state.message_map == {"456": valid_stoat_id(7)}
+    assert state.channel_message_counts == {"123": 1}
 
 
-async def test_a_resend_salts_its_idempotency_keys_with_the_new_channel(
+async def test_a_resend_passes_persisted_replacement_identity(
     tmp_path: Path,
 ) -> None:
-    """Otherwise Stoat's LRU silently swallows the whole resend.
-
-    The per-message key is built from the DISCORD message id, which a recreated
-    channel does not change, and Stoat's Idempotency-Key store is a 1000-entry
-    in-memory LRU with NO TTL. A repair running while those keys are still
-    cached is answered 409 DuplicateNonce, and _process_message treats that as
-    "already on the server" and moves on. The channel holding those messages was
-    deleted, so it is not there at all: the repair would report success and
-    restore nothing.
-
-    Salting with the new Stoat channel id makes the key unique to the
-    recreation. Asserts the salt reached the call, not that a send succeeded.
-    """
+    """Recreation passes a saved generation bound to the new destination."""
     export = _export_for(R_D_CHANNEL)
     export.messages.append(_dce_msg("100000000000000001"))
-    seen: list[str] = []
+    seen: list[Any] = []
 
     config = _make_repair_config(tmp_path)
     state = MigrationState(
@@ -5811,8 +6732,9 @@ async def test_a_resend_salts_its_idempotency_keys_with_the_new_channel(
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
         return _report_with("channel_missing", "fail")
 
-    async def _capture(*, msg: Any, idempotency_salt: str = "", **_kw: Any) -> None:
-        seen.append(idempotency_salt)
+    async def _capture(*, msg: Any, **kwargs: Any) -> bool:
+        seen.append(kwargs["delivery_ref"])
+        return True
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
@@ -5823,24 +6745,26 @@ async def test_a_resend_salts_its_idempotency_keys_with_the_new_channel(
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         await run_repair(config, state, [export], lambda _e: None)
 
-    assert seen == ["01JSTOATCHN000000000NEW"], (
-        f"the resend did not salt its keys with the new channel id: {seen}"
-    )
+    assert len(seen) == 1
+    ref = seen[0]
+    assert ref.destination_channel_id == valid_stoat_id(9500)
+    assert ref.generation in state.pending_delivery_replacements.values()
+    assert ref.generation != "base"
 
 
-async def test_the_origin_header_key_is_salted_too(tmp_path: Path) -> None:
-    """The header has the same exposure and the same fix."""
+async def test_origin_header_uses_persisted_replacement_identity(tmp_path: Path) -> None:
+    """The header uses its own saved generation and current destination."""
     export = _thread_export(R_D_CHANNEL, parent="general")
     export.messages.append(_dce_msg("100000000000000001"))
     keys: list[str] = []
 
     async def _fake_send(*_a: Any, **kwargs: Any) -> dict[str, str]:
         keys.append(str(kwargs.get("idempotency_key", "")))
-        return {"_id": "01JSTOATMSG0000000000AA"}
+        return {"_id": valid_stoat_id(9601)}
 
     config = _make_repair_config(tmp_path)
     state = MigrationState(
@@ -5855,25 +6779,312 @@ async def test_the_origin_header_key_is_salted_too(tmp_path: Path) -> None:
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
-        patch.object(engine_module, "api_send_message", _fake_send),
+        patch.object(messages_module, "api_send_message", _fake_send),
         patch.object(engine_module, "_process_message", _noop_process),
         aioresponses() as m,
     ):
         _register_repair_server_reads(m, _server_with_channels(), repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         await run_repair(config, state, [export], lambda _e: None)
 
-    assert keys == ["ferry-header-800000000000000001-01JSTOATCHN000000000NEW"], (
-        f"the header key was not salted with the new channel: {keys}"
+    base = delivery_module.DeliveryRef(R_D_CHANNEL, R_D_CHANNEL, valid_stoat_id(9500), "header")
+    ref = dataclasses.replace(
+        base,
+        generation=state.pending_delivery_replacements[delivery_module.delivery_receipt_id(base)],
     )
+    assert keys == [delivery_module.delivery_key(state.delivery_namespace, ref, 0, 0)]
 
 
 async def _noop_process(**_kw: Any) -> None:
     """A _process_message stand-in that sends nothing."""
     return None
+
+
+def test_repair_generation_is_saved_and_reused(tmp_path: Path) -> None:
+    from discord_ferry.state import DeliveryRef, ensure_delivery_namespace
+
+    begin = getattr(engine_module, "begin_delivery_replacement", None)
+    assert callable(begin), "Authorized repair needs a persisted replacement identity"
+    state = MigrationState(channel_map={"123": valid_stoat_id(1)})
+    ensure_delivery_namespace(state, tmp_path, BASE_URL)
+    base = DeliveryRef("123", "456", valid_stoat_id(1), "ordinary")
+    first = begin(state, tmp_path, base)
+    second = begin(load_state(tmp_path), tmp_path, base)
+    assert re.fullmatch("[0-9a-f]{32}", first.generation)
+    assert first == second
+
+
+async def test_repair_tail_generation_recovers_interruption_and_repeated_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.state import save_state
+
+    class Interrupted(BaseException):
+        pass
+
+    channel = valid_stoat_id(3300)
+    old_id = valid_stoat_id(3301)
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    export = _export_for("100")
+    export.messages.append(_text_msg("20", "tail", "2024-01-15T12:00:00+00:00"))
+    state = MigrationState(
+        channel_map={"100": channel},
+        message_map={"20": old_id},
+        channel_high_water={"100": "20"},
+    )
+    save_state(state, tmp_path)
+    finding = CheckResult(
+        name="tail:100",
+        status="fail",
+        kind="tail_absent",
+        detail="confirmed missing",
+        discord_id="100",
+        stoat_id=channel,
+    )
+    keys: list[str] = []
+
+    async def create(url, **kwargs):
+        persisted = load_state(tmp_path)
+        assert persisted.pending_delivery_replacements, "Replacement intent must precede POST"
+        keys.append(kwargs["headers"]["Idempotency-Key"])
+        return CallbackResult(payload={"_id": valid_stoat_id(3301 + len(keys))})
+
+    def interrupt(*args, **kwargs):
+        raise Interrupted("replacement acknowledged before bookkeeping checkpoint")
+
+    with aioresponses() as http:
+        http.post(f"{config.stoat_url}/channels/{channel}/messages", callback=create, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with monkeypatch.context() as patcher:
+                patcher.setattr(messages_module, "consume_delivery", interrupt)
+                with pytest.raises(Interrupted):
+                    await engine_module._repair_tail(
+                        session, config, state, finding, [export], lambda event: None
+                    )
+                    pytest.fail(f"Repair returned before interruption: {state.errors}")
+            restarted = load_state(tmp_path)
+            assert restarted.message_map["20"] == old_id
+            assert await engine_module._repair_tail(
+                session, config, restarted, finding, [export], lambda event: None
+            )
+            assert len(keys) == 1
+            assert restarted.message_map["20"] == valid_stoat_id(3302)
+            save_state(restarted, tmp_path)
+            completed = load_state(tmp_path)
+            assert not completed.pending_delivery_replacements
+            # The replacement is now deleted remotely and the existing check
+            # authorizes another repair of the same logical source.
+            assert await engine_module._repair_tail(
+                session, config, completed, finding, [export], lambda event: None
+            )
+            save_state(completed, tmp_path)
+    assert len(keys) == len(set(keys)) == 2
+    assert completed.channel_high_water == {"100": "20"}
+    assert completed.message_map["20"] == valid_stoat_id(3303)
+    assert not completed.failed_messages
+
+
+def test_repair_generation_save_failure_cannot_authorize_later_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.errors import StateError
+    from discord_ferry.state import DeliveryRef, ensure_delivery_namespace
+
+    state = MigrationState()
+    ensure_delivery_namespace(state, tmp_path, BASE_URL)
+    ref = DeliveryRef("100", "20", valid_stoat_id(3350), "ordinary")
+
+    def failed_save(*args, **kwargs):
+        raise StateError("checkpoint unavailable")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(engine_module, "save_state", failed_save)
+        with pytest.raises(StateError, match="checkpoint unavailable"):
+            engine_module.begin_delivery_replacement(state, tmp_path, ref)
+    replacement = engine_module.begin_delivery_replacement(state, tmp_path, ref)
+    assert replacement.generation in load_state(tmp_path).pending_delivery_replacements.values()
+
+
+@pytest.mark.parametrize("family", ["header", "forum_index"])
+async def test_repair_generated_receipt_replacement_recovery(
+    tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Interrupted(BaseException):
+        pass
+
+    destination = valid_stoat_id(3400)
+    config = _make_config(tmp_path, message_rate_limit=0.0, upload_delay=0.0)
+    export = _export_for("100")
+    export.is_thread = True
+    export.parent_channel_name = "general"
+    export.messages.append(_text_msg("20", "body", "2024-01-15T12:00:00+00:00"))
+    state = MigrationState(channel_map={"100": destination, "forum-index-news": destination})
+    posts: list[str] = []
+
+    async def create(url, **kwargs):
+        assert load_state(tmp_path).pending_delivery_replacements
+        posts.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(3400 + len(posts))})
+
+    def interrupt(*args, **kwargs):
+        raise Interrupted("generated replacement acknowledged before checkpoint")
+
+    async def repair(session, current):
+        if family == "header":
+            return await engine_module._resend_channel(
+                session, config, current, export, lambda event: None
+            )
+        return await engine_module._rebuild_one_forum_index(
+            session,
+            config,
+            current,
+            "news",
+            lambda event: None,
+            phase="repair",
+            force_new=True,
+        )
+
+    with aioresponses() as http:
+        http.post(
+            f"{config.stoat_url}/channels/{destination}/messages", callback=create, repeat=True
+        )
+        http.post(
+            re.compile(r"https://api.test/channels/.+/messages/.+/pin"), payload={}, repeat=True
+        )
+        http.patch(re.compile(r"https://api.test/channels/.+/messages/.+"), payload={}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with monkeypatch.context() as patcher:
+                patcher.setattr(engine_module, "consume_delivery", interrupt)
+                with pytest.raises(Interrupted):
+                    await repair(session, state)
+            restarted = load_state(tmp_path)
+            await repair(session, restarted)
+            from discord_ferry.state import save_state
+
+            save_state(restarted, tmp_path)
+    assert len(posts) == (2 if family == "header" else 1)
+    assert not load_state(tmp_path).pending_delivery_replacements
+    if family == "header":
+        assert restarted.channel_high_water["100"] == "20"
+    else:
+        assert restarted.forum_index_message_ids["news"] == valid_stoat_id(3401)
+
+
+async def test_repair_merged_receipt_replacement_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Interrupted(BaseException):
+        pass
+
+    destination = valid_stoat_id(3450)
+    config = _make_config(tmp_path, message_rate_limit=0.0)
+    parent = _export_for("100", name="general")
+    thread = _export_for("200", name="thread")
+    thread.is_thread = True
+    thread.parent_channel_name = "general"
+    thread.messages.append(_text_msg("20", "body", "2024-01-15T12:00:00+00:00"))
+    state = MigrationState(channel_map={"100": destination}, channel_high_water={"200": "20"})
+    posts: list[str] = []
+
+    async def create(url, **kwargs):
+        assert load_state(tmp_path).pending_delivery_replacements
+        posts.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(3450 + len(posts))})
+
+    def interrupt(*args, **kwargs):
+        raise Interrupted("merged replacement acknowledged before checkpoint")
+
+    with aioresponses() as http:
+        http.post(
+            f"{config.stoat_url}/channels/{destination}/messages", callback=create, repeat=True
+        )
+        with monkeypatch.context() as patcher:
+            patcher.setattr(messages_module, "consume_delivery", interrupt)
+            with pytest.raises(Interrupted):
+                await engine_module._restore_merged_threads(
+                    config, state, parent, [parent, thread], lambda event: None
+                )
+        restarted = load_state(tmp_path)
+        assert (
+            await engine_module._restore_merged_threads(
+                config, restarted, parent, [parent, thread], lambda event: None
+            )
+            == 1
+        )
+    assert len(posts) == 2  # One separator and one merged message.
+    assert not load_state(tmp_path).pending_delivery_replacements
+    assert not restarted.message_map
+    assert restarted.channel_high_water["200"] == "20"
+
+
+async def test_repair_merged_generation_checkpoint_keeps_completed_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Interrupted(BaseException):
+        pass
+
+    destination = valid_stoat_id(3470)
+    config = _make_config(tmp_path, message_rate_limit=0.0)
+    parent = _export_for("100", name="general")
+    thread = _export_for("200", name="thread")
+    thread.is_thread = True
+    thread.parent_channel_name = "general"
+    thread.messages.extend(
+        [
+            _text_msg("20", "first", "2024-01-15T12:00:00+00:00"),
+            _text_msg("30", "second", "2024-01-15T12:01:00+00:00"),
+        ]
+    )
+    state = MigrationState(channel_map={"100": destination}, channel_high_water={"200": "30"})
+    posts: list[str] = []
+
+    async def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if content.endswith("second") and "second" not in posts:
+            posts.append("second")
+            raise Interrupted("next intent saved after completed first message")
+        posts.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3470 + len(posts))})
+
+    with aioresponses() as http:
+        http.post(
+            f"{config.stoat_url}/channels/{destination}/messages", callback=create, repeat=True
+        )
+        # The interrupted second request has no history match. The restart must
+        # preserve that uncertainty, without duplicating its completed prefix.
+        http.get(re.compile(r"https://api.test/channels/.+/messages\?.*"), payload=[], repeat=True)
+        with pytest.raises(Interrupted):
+            await engine_module._restore_merged_threads(
+                config, state, parent, [parent, thread], lambda event: None
+            )
+        restarted = load_state(tmp_path)
+        await engine_module._restore_merged_threads(
+            config, restarted, parent, [parent, thread], lambda event: None
+        )
+    assert len([content for content in posts if content.endswith("first")]) == 1
+    assert len([content for content in posts if content.endswith("second")]) == 1
+    assert len(restarted.failed_messages) == 1
+
+
+def test_repair_remaps_failure_reference_without_reusing_old_ack(tmp_path: Path) -> None:
+    from discord_ferry.state import DeliveryRef, ensure_delivery_namespace, save_state
+
+    old, new = valid_stoat_id(3500), valid_stoat_id(3501)
+    ref = DeliveryRef("100", "20", old, "ordinary")
+    state = MigrationState(
+        channel_map={"100": new},
+        failed_messages=[FailedMessage("20", old, "failed", delivery_ref=ref)],
+    )
+    ensure_delivery_namespace(state, tmp_path, BASE_URL)
+    engine_module._clear_channel_state(state, "100", ["20"], old, new)
+    save_state(state, tmp_path)
+    resumed = load_state(tmp_path)
+    assert resumed.failed_messages[0].delivery_ref == dataclasses.replace(
+        ref, destination_channel_id=new, generation="base"
+    )
 
 
 async def _repair_tail_run(
@@ -5912,16 +7123,17 @@ async def _repair_tail_run(
     async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
         return report
 
-    async def _capture(*, msg: Any, **kw: Any) -> None:
+    async def _capture(*, msg: Any, **kw: Any) -> bool:
         calls.append(
             {
                 "id": msg.id,
                 "channel": kw.get("stoat_channel_id"),
-                "salt": kw.get("idempotency_salt", ""),
+                "ref": kw.get("delivery_ref"),
             }
         )
         if fail:
             raise MigrationError("send refused")
+        return True
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
@@ -5950,19 +7162,13 @@ async def test_a_lost_tail_is_re_sent(tmp_path: Path, kind: str) -> None:
     assert calls[0]["channel"] == R_S_CHANNEL, "it went to the wrong channel"
 
 
-async def test_a_tail_repair_salts_its_key_with_the_channel(tmp_path: Path) -> None:
-    """The need is SHARPER here than for a recreation.
-
-    This channel was not recreated, so its Stoat id is unchanged and the
-    original send's key is exactly ferry-{msg.id}. Unsalted, Stoat's 1000-entry
-    idempotency LRU would answer 409 and _process_message would treat a message
-    the server has LOST as already delivered: the repair would report success
-    and restore nothing.
-    """
-    _, calls, _ = await _repair_tail_run(tmp_path)
-    assert calls[0]["salt"] == R_S_CHANNEL, (
-        f"the tail repair did not salt its idempotency key: {calls}"
-    )
+async def test_tail_repair_passes_persisted_replacement_identity(tmp_path: Path) -> None:
+    """Same-channel replacement cannot reuse an earlier delivery acknowledgement."""
+    state, calls, _ = await _repair_tail_run(tmp_path)
+    ref = calls[0]["ref"]
+    assert ref.destination_channel_id == R_S_CHANNEL
+    assert ref.generation != "base"
+    assert ref.generation in state.pending_delivery_replacements.values()
 
 
 async def test_a_tail_repair_declines_a_message_the_export_lacks(tmp_path: Path) -> None:
@@ -6038,8 +7244,10 @@ async def test_repair_drains_the_dead_letter_queue(tmp_path: Path) -> None:
         _on: Any,
         *,
         _upload_limits_ready: bool,
+        _delivery_outcomes: messages_module.DeliveryOutcomes,
     ) -> None:
         seen["exports"] = exps
+        assert isinstance(_delivery_outcomes, messages_module.DeliveryOutcomes)
         seen["queued"] = len(st.failed_messages)
         seen["upload_limits_ready"] = _upload_limits_ready
 
@@ -6111,7 +7319,7 @@ async def test_a_recreated_channels_backlog_is_pointed_at_the_new_channel(
     state, _ = await _repair_with_state(tmp_path, state, [_export_for(R_D_CHANNEL)])
 
     targets = {fm.discord_msg_id: fm.stoat_channel_id for fm in state.failed_messages}
-    assert targets["100000000000000001"] == "01JSTOATCHN000000000NEW", (
+    assert targets["100000000000000001"] == "01J5T000000000000000009500", (
         "the backlog still points at the deleted channel, so the drain would 404"
     )
     assert targets["999000000000000009"] == "01JSTOATCHN0000000OTHER", (
@@ -6161,12 +7369,14 @@ async def test_a_resent_message_is_dropped_from_the_dead_letter_queue(
         _on: Any,
         *,
         _upload_limits_ready: bool,
+        _delivery_outcomes: messages_module.DeliveryOutcomes,
     ) -> None:
         assert _upload_limits_ready is True
+        assert isinstance(_delivery_outcomes, messages_module.DeliveryOutcomes)
         drained.extend(fm.discord_msg_id for fm in st.failed_messages)
 
-    async def _sends_fine(**_kw: Any) -> None:
-        return None
+    async def _sends_fine(**_kw: Any) -> bool:
+        return True
 
     with (
         patch.object(engine_module, "run_retry_failed", _fake_retry),
@@ -6245,7 +7455,7 @@ async def _repair_with_live_categories(
         _register_repair_server_reads(m, payload, repeat=True)
         m.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
-            payload={"_id": "01JSTOATCHN000000000NEW", "name": "general"},
+            payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         m.patch(f"{BASE_URL}/servers/{R_SERVER}", payload={}, repeat=True)
         m.patch(re.compile(r".*/channels/.*"), payload={}, repeat=True)
@@ -6290,7 +7500,7 @@ async def test_a_recreated_channel_goes_back_into_its_category(tmp_path: Path) -
     assert patches, "no categories PATCH was sent, so the channel is outside every category"
     cats = patches[-1]["categories"]
     mine = next(c for c in cats if c["id"] == "01JSTOATCAT000000000AAA")
-    assert "01JSTOATCHN000000000NEW" in mine["channels"], (
+    assert "01J5T000000000000000009500" in mine["channels"], (
         f"the recreated channel was not put back in its category: {mine}"
     )
     assert "01JSTOATCHN0000000OTHER" in mine["channels"], (
@@ -6451,7 +7661,7 @@ async def test_re_attaching_removes_the_dead_channel_id(tmp_path: Path) -> None:
     assert R_S_CHANNEL not in mine["channels"], (
         f"the category still names the deleted channel: {mine['channels']}"
     )
-    assert "01JSTOATCHN000000000NEW" in mine["channels"]
+    assert "01J5T000000000000000009500" in mine["channels"]
     assert "01JSTOATCHN0000000OTHER" in mine["channels"], "an unrelated channel was evicted"
 
 

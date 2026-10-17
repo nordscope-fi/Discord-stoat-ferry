@@ -11,6 +11,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.20] - 2026-10-17
+
+### Fixed
+
+- Keep repeat migrations independent and retry corrected messages after a confirmed rejection, including multipart and merged-thread content (#1171).
+- Recover created message identifiers after lost responses, preserve original media and follow-up work, and retain uncertainty when history cannot prove delivery (#1171).
+- Recover generated headers, separators, and forum indexes, and reuse authorized repair replacements after interruption (#1171).
+- Show verified, partial, and unresolved source deliveries separately from progress in both interfaces, with remaining failed records visible after resumed or skipped message work (#1171).
+
 ## [2.43.19] - 2026-10-13
 
 ### Fixed

@@ -600,6 +600,248 @@ def test_resume_and_incremental_conflict_detected() -> None:
     assert _resume_incremental_conflict({}) is False
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "mixed",
+        "failed",
+        "legacy",
+        "malformed_bool",
+        "malformed_negative",
+        "malformed_missing",
+    ],
+)
+@pytest.mark.nicegui_main_file("tests/nicegui_app.py")
+async def test_gui_verified_delivery_summary_preserves_source_progress(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    from nicegui import ui
+
+    from discord_ferry.core.events import MigrationEvent
+
+    expected = {"verified": 1, "partial": 1, "unresolved": 1}
+    if mode == "failed":
+        expected = {"verified": 0, "partial": 0, "unresolved": 3}
+    if mode == "legacy":
+        expected = {"verified": 0, "partial": 0, "unresolved": 0}
+    remaining = 0 if mode == "legacy" else 3 if mode == "failed" else 2
+    ready, finish = asyncio.Event(), asyncio.Event()
+    user_store.update(export_dir=str(tmp_path), stoat_url="https://example.invalid")
+    tab_store["token"] = "synthetic-session-token"
+    monkeypatch.setattr("discord_ferry.gui._default_gui_output_dir", lambda: tmp_path / "ui-output")
+
+    async def fake_run_migration(config, *, on_event):
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="progress",
+                message="visited three sources",
+                current=3,
+                total=3,
+                detail=None if mode == "legacy" else {"delivery": expected},
+            )
+        )
+        if mode.startswith("malformed"):
+            bad = {
+                "verified": True if mode == "malformed_bool" else -1,
+                "partial": 1,
+                "unresolved": 1,
+            }
+            if mode == "malformed_missing":
+                bad.pop("unresolved")
+            on_event(
+                MigrationEvent(
+                    phase="messages",
+                    status="progress",
+                    message="malformed outcome",
+                    current=3,
+                    total=3,
+                    detail={"delivery": bad},
+                )
+            )
+        on_event(
+            MigrationEvent(
+                phase="report",
+                status="progress",
+                message="not source progress",
+                current=900,
+                total=1000,
+                detail={"delivery": {"verified": 900, "partial": 0, "unresolved": 0}},
+            )
+        )
+        on_event(MigrationEvent(phase="messages", status="error", message="retained error"))
+        on_event(MigrationEvent(phase="messages", status="warning", message="retained warning"))
+        ready.set()
+        await finish.wait()
+        on_event(
+            MigrationEvent(
+                phase="report",
+                status="completed",
+                message="finished processing",
+                detail={"remaining_failed": remaining},
+            )
+        )
+
+    monkeypatch.setattr("discord_ferry.gui.run_migration", fake_run_migration)
+    await user.open("/migrate")
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=3)
+        await user.should_see(f"Verified: {expected['verified']}")
+        await user.should_see(f"Partial: {expected['partial']}")
+        await user.should_see(f"Unresolved: {expected['unresolved']}")
+        await user.should_see("Errors: 1")
+        await user.should_see("Warnings: 1")
+        await user.should_see("ETA: ~0m")
+        bars = user.find(ui.linear_progress).elements
+        assert len(bars) == 1
+        assert bars.pop().value == pytest.approx(1.0)
+    finally:
+        finish.set()
+    await user.should_see(f"Failed records: {remaining}")
+    if remaining:
+        await user.should_see("Migration finished with unresolved messages")
+
+
+async def _real_delivery_events_for_shells(tmp_path: Path, skipped: bool):
+    from aioresponses import CallbackResult, aioresponses
+
+    from discord_ferry.core.engine import run_migration
+    from discord_ferry.migrator.messages import run_messages
+    from discord_ferry.state import FailedMessage, MigrationState, save_state
+    from tests.stoat_ids import stoat_id
+    from tests.test_engine import _NOOP_OVERRIDES, _dce_msg_dict, _make_config, _write_dce_json
+
+    output = tmp_path / "backend"
+    exports = output / "exports"
+    exports.mkdir(parents=True)
+    source_messages = [
+        _dce_msg_dict("10", "verified-body"),
+        _dce_msg_dict("20", "partial-body " + "p" * 2500),
+        _dce_msg_dict("30", "unresolved-body"),
+    ]
+    for message in source_messages:
+        message["author"]["id"] = "900000000000000004"
+    _write_dce_json(exports, "100", source_messages)
+    destination = stoat_id(3900)
+    if skipped:
+        save_state(
+            MigrationState(
+                stoat_server_id=stoat_id(900),
+                channel_map={"100": destination},
+                current_phase="messages",
+                failed_messages=[
+                    FailedMessage(source, destination, "parked failure") for source in ("20", "30")
+                ],
+            ),
+            output,
+        )
+
+    async def channels(config, state, parsed, emit):
+        state.stoat_server_id = stoat_id(900)
+        state.channel_map["100"] = destination
+
+    records = []
+    events = []
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if "unresolved-body" in content or content.startswith("[continued"):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        records.append(content)
+        return CallbackResult(payload={"_id": stoat_id(3910 + len(records))})
+
+    with aioresponses() as http:
+        http.get("https://api.test/", payload={"features": {}}, repeat=True)
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        state = await run_migration(
+            _make_config(
+                output,
+                export_dir=exports,
+                message_rate_limit=0.0,
+                resume=skipped,
+                skip_messages=skipped,
+                create_invite=False,
+                validate_after=False,
+            ),
+            events.append,
+            phase_overrides={**_NOOP_OVERRIDES, "channels": channels, "messages": run_messages},
+        )
+    assert len(records) == (0 if skipped else 2)
+    return events, state
+
+
+@pytest.mark.parametrize("skipped", [False, True])
+@pytest.mark.nicegui_main_file("tests/nicegui_app.py")
+async def test_gui_cli_delivery_summary_parity_from_real_engine_events(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    skipped: bool,
+) -> None:
+    import io
+
+    from rich.console import Console
+
+    from discord_ferry import cli
+
+    events, state = await _real_delivery_events_for_shells(tmp_path, skipped)
+    report = next(
+        event for event in events if event.phase == "report" and event.status == "completed"
+    )
+    assert report.detail is not None
+    assert report.detail["remaining_failed"] == len(state.failed_messages) == 2
+    expected = (
+        {"verified": 0, "partial": 0, "unresolved": 0}
+        if skipped
+        else {
+            "verified": 1,
+            "partial": 1,
+            "unresolved": 1,
+        }
+    )
+    captured = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=captured, force_terminal=False, width=160))
+    tracker = cli._ProgressTracker()
+    for event in events:
+        tracker.on_event(event)
+    tracker.print_summary()
+    output = captured.getvalue()
+    assert f"Verified: {expected['verified']}" in output
+    assert f"Partial: {expected['partial']}" in output
+    assert f"Unresolved: {expected['unresolved']}" in output
+    assert "Failed records: 2" in output
+    if not skipped:
+        assert tracker._msg_progress.tasks[0].completed == 3
+
+    user_store.update(
+        export_dir=str(tmp_path / "backend" / "exports"), stoat_url="https://api.test"
+    )
+    tab_store["token"] = "synthetic-session-token"
+    monkeypatch.setattr("discord_ferry.gui._default_gui_output_dir", lambda: tmp_path / "ui-output")
+
+    async def replay_actual_engine_events(config, *, on_event):
+        for event in events:
+            on_event(event)
+        return state
+
+    monkeypatch.setattr("discord_ferry.gui.run_migration", replay_actual_engine_events)
+    await user.open("/migrate")
+    await user.should_see(f"Verified: {expected['verified']}")
+    await user.should_see(f"Partial: {expected['partial']}")
+    await user.should_see(f"Unresolved: {expected['unresolved']}")
+    await user.should_see("Failed records: 2")
+    await user.should_see("Migration finished with unresolved messages")
+
+
 # ---------------------------------------------------------------------------
 # #518 — completion-card deep-links to Verify and Repair
 # ---------------------------------------------------------------------------

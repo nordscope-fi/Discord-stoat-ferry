@@ -32,6 +32,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader import autumn as autumn_module
+from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -228,14 +229,23 @@ async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Pa
         messages=[message],
     )
     state = _state()
-    state.channel_map["channel1"] = "stoat-channel-1"
+    state.channel_map["channel1"] = "01J5T006480276736221970060"
     state.failed_messages.append(
         FailedMessage(
             discord_msg_id=message.id,
-            stoat_channel_id="stoat-channel-1",
+            stoat_channel_id="01J5T006480276736221970060",
             error="first send failed",
         )
     )
+
+    # Arrange a real rejected attempt without uploading this fixture first.
+    # Retry must replace the limit from the fresh root response below.
+    autumn_module.configure_upload_limits(
+        {"features": {"limits": {"default": {"file_upload_size_limits": {"attachments": 3}}}}},
+        None,
+    )
+    await seed_rejected_messages(config, state, [export])
+    autumn_module.configure_upload_limits({}, None)
 
     with aioresponses() as mocked:
         mocked.get(
@@ -245,8 +255,8 @@ async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Pa
             },
         )
         mocked.post(
-            f"{STOAT_URL}/channels/stoat-channel-1/messages",
-            payload={"_id": "stoat-message-1"},
+            f"{STOAT_URL}/channels/01J5T006480276736221970060/messages",
+            payload={"_id": "01J5T009660122104522437779"},
         )
 
         await run_retry_failed(config, state, [export], lambda event: None)
@@ -268,7 +278,7 @@ async def test_repair_nested_retry_reuses_initialized_limits(tmp_path: Path) -> 
         failed_messages=[
             FailedMessage(
                 discord_msg_id="message-1",
-                stoat_channel_id="stoat-channel-1",
+                stoat_channel_id="01J5T006480276736221970060",
                 error="first send failed",
             )
         ],
@@ -292,12 +302,15 @@ async def test_repair_nested_retry_reuses_initialized_limits(tmp_path: Path) -> 
         await engine_module.run_repair(config, state, [], emit)
 
     initialize.assert_awaited_once()
+    counts = retry.await_args.kwargs["_delivery_outcomes"]
+    assert isinstance(counts, engine_module.DeliveryOutcomes)
     retry.assert_awaited_once_with(
         config,
         state,
         [],
         emit,
         _upload_limits_ready=True,
+        _delivery_outcomes=counts,
     )
 
 

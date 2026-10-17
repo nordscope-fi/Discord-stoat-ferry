@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -11,7 +13,9 @@ import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
-from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.errors import MigrationError
+from discord_ferry.migrator import delivery as delivery_module
+from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.messages import (
     ChannelResult,
     _build_content,
@@ -37,6 +41,8 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
+from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
@@ -44,7 +50,7 @@ if TYPE_CHECKING:
 BASE_URL = "https://stoat.test"
 AUTUMN_URL = "https://autumn.test"
 TOKEN = "test-token"
-CHANNEL_MSG_URL = f"{BASE_URL}/channels/stoat_ch1/messages"
+CHANNEL_MSG_URL = f"{BASE_URL}/channels/01J5T013913344331853682639/messages"
 _VALID_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
     "0000000d49444154789c6360606060000000050001a5f645400000000049454e44ae426082"
@@ -54,6 +60,414 @@ _VALID_PNG = bytes.fromhex(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _valid_id(label: str) -> str:
+    return valid_stoat_id(int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "big"))
+
+
+@pytest.fixture(autouse=True)
+def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
+    async def send(*args, **kwargs):
+        return await messages_module.api_send_message(*args, **kwargs)
+
+    monkeypatch.setattr(delivery_module, "api_send_message", send)
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+async def test_delivery_outcome_counts_complete_partial_and_unresolved_sources(
+    tmp_path: Path, family: str
+) -> None:
+    from aioresponses import CallbackResult
+
+    destination = valid_stoat_id(3600)
+    source = "100" if family == "ordinary" else "200"
+    export = _make_export(
+        channel_id=source,
+        messages=[
+            _make_message(id="10", content="verified-body"),
+            _make_message(id="20", content="partial-body " + "p" * 2500),
+            _make_message(id="30", content="unresolved-body"),
+        ],
+    )
+    export.message_count = 3
+    if family == "merged":
+        export.is_thread = True
+        export.parent_channel_name = "general"
+    exports = [export] if family == "ordinary" else [_make_export(channel_id="100"), export]
+    config = _make_config(tmp_path, thread_strategy="merge" if family == "merged" else "flatten")
+    state = _make_state(channel_map={"100": destination})
+    records: list[str] = []
+    events: list[MigrationEvent] = []
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if "unresolved-body" in content or content.startswith("[continued"):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        records.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3610 + len(records))})
+
+    with aioresponses() as http:
+        http.post(f"{BASE_URL}/channels/{destination}/messages", callback=create, repeat=True)
+        await run_messages(config, state, exports, events.append)
+    completed = [
+        event for event in events if event.phase == "messages" and event.status == "completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].detail is not None
+    assert completed[0].detail["delivery"] == {"verified": 1, "partial": 1, "unresolved": 1}
+    assert len(state.failed_messages) == 2
+    assert len(records) == (2 if family == "ordinary" else 3)
+    progress = [event for event in events if event.phase == "messages" and event.total > 0]
+    if family == "ordinary":
+        assert progress[-1].current == progress[-1].total == 3
+
+
+async def test_delivery_outcome_cached_conflict_without_match_is_unresolved(tmp_path: Path) -> None:
+    destination = valid_stoat_id(3650)
+    state = _make_state(channel_map={"100": destination})
+    events: list[MigrationEvent] = []
+    with aioresponses() as http:
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            status=409,
+            payload={"type": "DuplicateNonce"},
+        )
+        http.get(f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest", payload=[])
+        await run_messages(
+            _make_config(tmp_path),
+            state,
+            [_make_export(channel_id="100", messages=[_make_message(id="10")])],
+            events.append,
+        )
+    completed = next(event for event in events if event.status == "completed")
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == {"verified": 0, "partial": 0, "unresolved": 1}
+    assert not state.message_map
+    assert len(state.failed_messages) == 1
+
+
+async def test_fresh_destination_uses_independent_delivery_receipt_identity(tmp_path: Path) -> None:
+    from aioresponses import CallbackResult
+
+    from tests.stoat_ids import stoat_id
+
+    keys: set[str] = set()
+    remote: list[dict[str, str]] = []
+    states: list[MigrationState] = []
+    destinations = [stoat_id(1), stoat_id(2)]
+
+    async def create(url, **kwargs):
+        key = kwargs["headers"]["Idempotency-Key"]
+        if key in keys:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        keys.add(key)
+        row = {
+            "_id": stoat_id(100 + len(remote)),
+            "channel": url.path.split("/")[2],
+            "nonce": key,
+            "content": kwargs["json"]["content"],
+        }
+        remote.append(row)
+        return CallbackResult(payload=row)
+
+    with aioresponses() as http:
+        for destination in destinations:
+            http.post(f"{BASE_URL}/channels/{destination}/messages", callback=create, repeat=True)
+        for index, destination in enumerate(destinations):
+            config = _make_config(tmp_path / f"migration-{index}")
+            state = _make_state(channel_map={"ch1": destination})
+            await run_messages(
+                config,
+                state,
+                [_make_export(messages=[_make_message(content="original text")])],
+                lambda event: None,
+            )
+            states.append(state)
+    assert [row["channel"] for row in remote] == destinations
+    assert all("original text" in row["content"] for row in remote)
+    assert [state.message_map["msg1"] for state in states] == [row["_id"] for row in remote]
+    assert states[0].delivery_namespace != states[1].delivery_namespace
+
+
+async def test_lost_response_delivery_receipt_uses_normal_bookkeeping(tmp_path: Path) -> None:
+    import asyncio
+
+    from aioresponses import CallbackResult
+
+    from tests.stoat_ids import stoat_id
+
+    destination = stoat_id(1)
+    remote: list[dict[str, str]] = []
+    keys: set[str] = set()
+
+    async def create_then_lose(url, **kwargs):
+        key = kwargs["headers"]["Idempotency-Key"]
+        if key in keys:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        keys.add(key)
+        remote.append(
+            {
+                "_id": stoat_id(100),
+                "channel": destination,
+                "nonce": key,
+                "content": kwargs["json"]["content"],
+            }
+        )
+        await asyncio.sleep(0)
+        raise aiohttp.ServerDisconnectedError("created, response lost")
+
+    async def history(url, **kwargs):
+        return CallbackResult(payload=remote)
+
+    config = _make_config(tmp_path, reaction_mode="native")
+    state = _make_state(channel_map={"ch1": destination})
+    source = _make_message(
+        content="original text",
+        is_pinned=True,
+        reactions=[DCEReaction(emoji=DCEEmoji(id="", name="👍"), count=1)],
+    )
+    with aioresponses() as http:
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            callback=create_then_lose,
+            repeat=True,
+        )
+        http.get(
+            f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            callback=history,
+            repeat=True,
+        )
+        await run_messages(config, state, [_make_export(messages=[source])], lambda event: None)
+    assert len(remote) == 1
+    assert "original text" in remote[0]["content"]
+    assert state.message_map == {"msg1": stoat_id(100)}
+    assert state.pending_pins == [(destination, stoat_id(100))]
+    assert state.pending_reactions == [
+        {"channel_id": destination, "message_id": stoat_id(100), "emoji": "👍"}
+    ]
+    assert state.channel_message_counts == {"ch1": 1}
+    assert not state.failed_messages
+    assert not list(tmp_path.glob("delivery-receipts/*/*.json"))
+
+
+@pytest.mark.parametrize("discard_receipt_control", [False, True])
+async def test_delivery_receipt_restart_after_two_file_checkpoint_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    discard_receipt_control: bool,
+) -> None:
+    import json
+
+    from aioresponses import CallbackResult
+
+    from discord_ferry import state as state_module
+    from tests.stoat_ids import stoat_id
+
+    destination = stoat_id(1)
+    remote: list[dict[str, str]] = []
+    cached_keys: set[str] = set()
+
+    async def create(url, **kwargs):
+        key = kwargs["headers"]["Idempotency-Key"]
+        if key in cached_keys:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached_keys.add(key)
+        row = {
+            "_id": stoat_id(100 + len(remote)),
+            "channel": destination,
+            "nonce": key,
+            "content": kwargs["json"]["content"],
+        }
+        remote.append(row)
+        return CallbackResult(payload=row)
+
+    writer = state_module.atomic_write_text
+    snapshot_fault = False
+
+    def interrupted_snapshot(path, text):
+        nonlocal snapshot_fault
+        receipts = list(tmp_path.glob("delivery-receipts/*/*.json"))
+        if (
+            path.name == "state.json"
+            and not snapshot_fault
+            and receipts
+            and all(
+                part["status"] == "acknowledged"
+                for part in json.loads(receipts[0].read_text())["parts"]
+            )
+        ):
+            snapshot_fault = True
+            raise OSError("state snapshot fault")
+        return writer(path, text)
+
+    source = _make_message(
+        id="200",
+        content="original text",
+        is_pinned=True,
+        reactions=[DCEReaction(emoji=DCEEmoji(id="", name="👍"))],
+    )
+    state = _make_state(channel_map={"123": destination})
+    export = _make_export(channel_id="123", messages=[source])
+    with aioresponses() as http:
+        http.post(f"{BASE_URL}/channels/{destination}/messages", callback=create, repeat=True)
+        with monkeypatch.context() as scoped:
+            scoped.setattr(state_module, "atomic_write_text", interrupted_snapshot)
+            with pytest.raises(OSError, match="state snapshot fault"):
+                await run_messages(
+                    _make_config(tmp_path, reaction_mode="native"),
+                    state,
+                    [export],
+                    lambda event: None,
+                )
+        assert len(remote) == 1
+        restarted = state_module.load_state(tmp_path)
+        assert restarted.message_map == {"200": stoat_id(100)}
+        assert not restarted.delivery_bookkeeping
+        assert not restarted.pending_pins
+        assert not restarted.channel_message_counts
+        receipts = list(tmp_path.glob("delivery-receipts/*/*.json"))
+        assert len(receipts) == 1
+        if discard_receipt_control:
+            receipts[0].unlink()
+        # Upstream cache eviction must not matter while acknowledged evidence remains.
+        cached_keys.clear()
+        await run_messages(
+            _make_config(tmp_path, resume=True, reaction_mode="native"),
+            restarted,
+            [export],
+            lambda event: None,
+        )
+    if discard_receipt_control:
+        assert len(remote) == 2, "The early-cleanup control must expose duplicate remote creation"
+    else:
+        assert len(remote) == 1
+        assert restarted.message_map == {"200": stoat_id(100)}
+        assert restarted.pending_pins == [(destination, stoat_id(100))]
+        assert restarted.pending_reactions == [
+            {"channel_id": destination, "message_id": stoat_id(100), "emoji": "👍"}
+        ]
+        assert restarted.channel_message_counts == {"123": 1}
+        assert not restarted.failed_messages
+        assert not list(tmp_path.glob("delivery-receipts/*/*.json"))
+
+
+@pytest.mark.parametrize("repeated_rejection", [False, True])
+async def test_delivery_receipt_incremental_retry_preserves_partial_bookkeeping_and_media(
+    tmp_path: Path,
+    repeated_rejection: bool,
+) -> None:
+    from aioresponses import CallbackResult
+
+    from discord_ferry.state import load_state
+    from tests.stoat_ids import stoat_id
+
+    (tmp_path / "image.png").write_bytes(_VALID_PNG)
+    destination = stoat_id(1)
+    remote: list[dict[str, Any]] = []
+    keys: set[str] = set()
+    posts: list[str] = []
+    uploads: list[str] = []
+    rejections_left = 2 if repeated_rejection else 1
+    rejected_content: str | None = None
+
+    async def upload(url, **kwargs):
+        identifier = f"upload_{len(uploads) + 1}"
+        uploads.append(identifier)
+        return CallbackResult(payload={"id": identifier})
+
+    async def create(url, **kwargs):
+        nonlocal rejections_left, rejected_content
+        key = kwargs["headers"]["Idempotency-Key"]
+        posts.append(key)
+        if key in keys:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        keys.add(key)
+        if len(posts) == 2:
+            rejected_content = kwargs["json"]["content"]
+        if rejections_left and kwargs["json"]["content"] == rejected_content:
+            rejections_left -= 1
+            return CallbackResult(
+                status=403,
+                payload={"type": "MissingPermission", "permission": "SendMessage"},
+            )
+        row = {
+            "_id": stoat_id(100 + len(remote)),
+            "channel": destination,
+            "nonce": key,
+            "content": kwargs["json"]["content"],
+            "attachments": kwargs["json"].get("attachments", []),
+        }
+        remote.append(row)
+        return CallbackResult(payload=row)
+
+    source = _make_message(
+        id="200",
+        content="B" * 5000,
+        is_pinned=True,
+        attachments=[
+            DCEAttachment(
+                id="300",
+                url="image.png",
+                file_name="image.png",
+                file_size_bytes=len(_VALID_PNG),
+            )
+        ],
+        reactions=[DCEReaction(emoji=DCEEmoji(id="", name="👍"))],
+    )
+    export = _make_export(channel_id="123", messages=[source])
+    state = _make_state(channel_map={"123": destination})
+    with aioresponses() as http:
+        http.post(f"{AUTUMN_URL}/attachments", callback=upload, repeat=True)
+        http.post(f"{BASE_URL}/channels/{destination}/messages", callback=create, repeat=True)
+        await run_messages(
+            _make_config(tmp_path, reaction_mode="native"),
+            state,
+            [export],
+            lambda event: None,
+        )
+        initial_posts = len(posts)
+        assert initial_posts >= 3
+        assert len(remote) == initial_posts - 1
+        assert len(state.failed_messages) == 1
+        assert state.message_map == {"200": stoat_id(100)}
+        assert state.channel_message_counts == {"123": 1}
+        assert state.pending_pins == [(destination, stoat_id(100))]
+        assert state.referenced_autumn_ids == {"upload_1"}
+        assert len(list(tmp_path.glob("delivery-receipts/*/*.json"))) == 1
+
+        retry_runs = 2 if repeated_rejection else 1
+        for retry_index in range(retry_runs):
+            restarted = load_state(tmp_path)
+            await run_messages(
+                _make_config(tmp_path, incremental=True, reaction_mode="native"),
+                restarted,
+                [export],
+                lambda event: None,
+            )
+            if repeated_rejection and retry_index == 0:
+                assert len(restarted.failed_messages) == 1
+                assert restarted.channel_message_counts == {"123": 1}
+                assert restarted.pending_pins == [(destination, stoat_id(100))]
+                assert len(list(tmp_path.glob("delivery-receipts/*/*.json"))) == 1
+    assert len(posts) == initial_posts + retry_runs
+    assert posts[-1] != posts[1]
+    assert len(remote) == initial_posts
+    assert all(row["content"] for row in remote)
+    assert restarted.message_map == {"200": stoat_id(100)}
+    assert restarted.channel_message_counts == {"123": 1}
+    assert restarted.pending_pins == [(destination, stoat_id(100))]
+    assert restarted.pending_reactions == [
+        {"channel_id": destination, "message_id": stoat_id(100), "emoji": "👍"}
+    ]
+    assert uploads == [f"upload_{i + 1}" for i in range(retry_runs + 1)]
+    assert restarted.attachments_uploaded == retry_runs + 1
+    assert restarted.referenced_autumn_ids == {"upload_1"}
+    assert set(restarted.autumn_uploads) - restarted.referenced_autumn_ids == set(uploads[1:])
+    assert not restarted.failed_messages
+    assert not list(tmp_path.glob("delivery-receipts/*/*.json"))
 
 
 def _make_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
@@ -76,7 +490,7 @@ def test_make_config_isolates_output_under_tmp_path(tmp_path: Path) -> None:
 
 def _make_state(**overrides: Any) -> MigrationState:
     defaults: dict[str, Any] = {
-        "channel_map": {"ch1": "stoat_ch1"},
+        "channel_map": {"ch1": "01J5T013913344331853682639"},
         "autumn_url": AUTUMN_URL,
     }
     defaults.update(overrides)
@@ -146,17 +560,34 @@ def _capture_sends(sent: list[dict[str, Any]]) -> Any:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent.append(kwargs)
-        return {"_id": f"stoat-{kwargs.get('idempotency_key', 'x')}"}
+        return {"_id": _valid_id(str(kwargs.get("idempotency_key", "x")))}
 
     return _send
 
 
-def _sent_message_ids(sent: list[dict[str, Any]]) -> list[str]:
-    """Discord ids of captured MESSAGE sends (excludes the thread/forum header)."""
+def _sent_message_ids(sent: list[dict[str, Any]], state: MigrationState) -> list[str]:
+    """Identify observed sends from their real opaque keys, not a legacy prefix."""
+    if not sent:
+        return []
+    candidates = set(state.message_map) | {item.discord_msg_id for item in state.failed_messages}
+    identities = {
+        delivery_module.delivery_key(
+            state.delivery_namespace,
+            delivery_module.DeliveryRef(channel, source, destination, "ordinary"),
+            attempt,
+            part,
+        ): source
+        for channel, destination in state.channel_map.items()
+        for source in candidates
+        for part in range(max(1, len(sent)))
+        for attempt in (0, 1)  # Fresh sends and these fixtures' first selected retry.
+    }
     return [
-        k["idempotency_key"].removeprefix("ferry-")
-        for k in sent
-        if not k["idempotency_key"].startswith("ferry-header-")
+        identities.get(item["idempotency_key"], "unrecognized delivery key")
+        for item in sent
+        if not item.get("content", "").startswith(
+            ("[Thread migrated from #", "[Forum post migrated from #")
+        )
     ]
 
 
@@ -204,7 +635,7 @@ def test_resolve_attachment_path_https_returns_none(tmp_path: Path) -> None:
 def test_build_content_applies_transforms_in_order(tmp_path: Path) -> None:
     """Content transforms are applied: spoilers, underline, mentions, emoji, timestamp."""
     state = _make_state(
-        channel_map={"123456789": "stoat_ch99"},
+        channel_map={"123456789": "01J5T008494813763730424607"},
         role_map={},
         emoji_map={},
         author_names={"111222333": "Bob"},
@@ -337,6 +768,8 @@ async def test_interaction_context_appears_once_across_split_parts(tmp_path: Pat
 
 
 async def test_interaction_context_is_not_duplicated_after_failed_retry(tmp_path: Path) -> None:
+    from discord_ferry.errors import MessageSendFailure
+
     first_attempt: list[dict[str, Any]] = []
     interaction = DCEInteraction(
         id="interaction-id",
@@ -349,7 +782,7 @@ async def test_interaction_context_is_not_duplicated_after_failed_retry(tmp_path
 
     async def fail_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
         first_attempt.append(kwargs)
-        raise RuntimeError("retry me")
+        raise MessageSendFailure("Send permission rejected", disposition="confirmed_rejected")
 
     with patch("discord_ferry.migrator.messages.api_send_message", fail_send):
         await run_messages(
@@ -503,21 +936,23 @@ async def test_skip_types_are_not_sent(tmp_path: Path, mock_aiohttp: aioresponse
 
 async def test_default_message_is_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A Default type message is sent and mapped."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg_1"})
+    from tests.stoat_ids import stoat_id
 
-    state = _make_state()
+    mock_aiohttp.post(f"{BASE_URL}/channels/{stoat_id(1)}/messages", payload={"_id": stoat_id(2)})
+
+    state = _make_state(channel_map={"ch1": stoat_id(1)})
     config = _make_config(tmp_path)
     msg = _make_message(id="msg1", content="hello world")
     export = _make_export(messages=[msg])
 
     await run_messages(config, state, [export], lambda e: None)
 
-    assert state.message_map["msg1"] == "stoat_msg_1"
+    assert state.message_map["msg1"] == stoat_id(2)
 
 
 async def test_reply_type_is_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A Reply type message is imported (not skipped)."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_reply"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T007427233507120849206"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -573,7 +1008,7 @@ async def test_non_forwarded_empty_content_with_attachment_not_skipped(
     att_file = tmp_path / "file.png"
     att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "att_id"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -604,7 +1039,7 @@ async def test_attachment_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> N
         f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -624,7 +1059,7 @@ async def test_attachment_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> N
 
 async def test_http_attachment_skipped(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """An attachment with an http URL is skipped and increments attachments_skipped."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -640,7 +1075,7 @@ async def test_http_attachment_skipped(tmp_path: Path, mock_aiohttp: aioresponse
 
 async def test_missing_local_attachment_skipped(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A locally referenced attachment that doesn't exist is skipped gracefully."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -660,7 +1095,7 @@ async def test_attachment_upload_cache_used(tmp_path: Path, mock_aiohttp: aiores
     att_file.write_bytes(_VALID_PNG)
     cache_key = f"attachments:{att_file}"
 
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
     # No upload mock — if upload is attempted it will raise.
 
     state = _make_state(upload_cache={cache_key: "already_uploaded_id"})
@@ -683,7 +1118,7 @@ async def test_attachment_upload_cache_used(tmp_path: Path, mock_aiohttp: aiores
 
 async def test_embeds_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Only first 5 embeds with title/description are included."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -700,7 +1135,7 @@ async def test_embed_without_title_or_description_excluded(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
     """Embeds that flatten to no title and no description are excluded."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -718,7 +1153,7 @@ async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
     """Embed titles, descriptions, and fields use the message remapping tables."""
     sent: list[dict[str, Any]] = []
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1", "456": "stoat_channel"},
+        channel_map={"ch1": "01J5T013913344331853682639", "456": "01J5T007054896543067026524"},
         role_map={"321": "stoat_role"},
         emoji_map={"999": "stoat_emoji"},
         author_names={"123": "Alice"},
@@ -746,7 +1181,7 @@ async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
 
     embed = sent[0]["embeds"][0]
     assert embed["title"] == "Hello @Alice :stoat_emoji:"
-    assert "See <#stoat_channel>" in embed["description"]
+    assert "See <#01J5T007054896543067026524>" in embed["description"]
     assert "**Role <@&stoat_role>**" in embed["description"]
     assert "Emoji :stoat_emoji:" in embed["description"]
 
@@ -758,7 +1193,7 @@ async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
 
 async def test_reply_reference_found_in_map(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """When the referenced message is in message_map, replies list is populated."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_reply"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T007427233507120849206"})
 
     state = _make_state(message_map={"orig_discord_id": "orig_stoat_id"})
     config = _make_config(tmp_path)
@@ -778,7 +1213,7 @@ async def test_reply_reference_found_in_map(tmp_path: Path, mock_aiohttp: aiores
 async def test_reply_reference_allows_deleted_stoat_target(tmp_path: Path) -> None:
     """A reply is still sent when its target disappeared after Ferry mapped it."""
     sent: list[dict[str, Any]] = []
-    state = _make_state(message_map={"discord_deleted": "stoat_deleted"})
+    state = _make_state(message_map={"discord_deleted": "01J5T016294985545194145051"})
     config = _make_config(tmp_path)
     msg = _make_message(
         id="reply1",
@@ -792,7 +1227,7 @@ async def test_reply_reference_allows_deleted_stoat_target(tmp_path: Path) -> No
         await run_messages(config, state, [export], lambda e: None)
 
     assert sent[0]["replies"] == [
-        {"id": "stoat_deleted", "mention": False, "fail_if_not_exists": False}
+        {"id": "01J5T016294985545194145051", "mention": False, "fail_if_not_exists": False}
     ]
 
 
@@ -800,7 +1235,7 @@ async def test_reply_reference_not_in_map_is_silently_skipped(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
     """When the referenced message is not in message_map, message is still sent."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_reply"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T007427233507120849206"})
 
     state = _make_state(message_map={})  # Empty — no known messages.
     config = _make_config(tmp_path)
@@ -862,7 +1297,7 @@ async def test_content_split_at_2001_chars(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
@@ -882,14 +1317,14 @@ async def test_content_split_at_2001_chars(tmp_path: Path) -> None:
 
 
 async def test_idempotency_key_format(tmp_path: Path) -> None:
-    """The idempotency_key sent to the API matches the f'ferry-{msg.id}' pattern."""
+    """The key binds the namespace, destination, source, family, attempt, and part."""
     sent_kwargs: list[dict[str, Any]] = []
 
     async def capture_send(
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -899,7 +1334,14 @@ async def test_idempotency_key_format(tmp_path: Path) -> None:
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
 
-    assert sent_kwargs[0]["idempotency_key"] == "ferry-discord_abc123"
+    expected = delivery_module.delivery_key(
+        state.delivery_namespace,
+        delivery_module.DeliveryRef("ch1", msg.id, state.channel_map["ch1"], "ordinary"),
+        0,
+        0,
+    )
+    assert sent_kwargs[0]["idempotency_key"] == expected
+    assert len(expected.encode("ascii")) == 49
 
 
 # ---------------------------------------------------------------------------
@@ -909,7 +1351,7 @@ async def test_idempotency_key_format(tmp_path: Path) -> None:
 
 async def test_pinned_message_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A pinned message has its (channel_id, msg_id) tuple added to pending_pins."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_pinned"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T012697957824840534750"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -918,12 +1360,12 @@ async def test_pinned_message_queued(tmp_path: Path, mock_aiohttp: aioresponses)
 
     await run_messages(config, state, [export], lambda e: None)
 
-    assert ("stoat_ch1", "stoat_pinned") in state.pending_pins
+    assert ("01J5T013913344331853682639", "01J5T012697957824840534750") in state.pending_pins
 
 
 async def test_unpinned_message_not_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """An unpinned message does not appear in pending_pins."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -942,7 +1384,7 @@ async def test_unpinned_message_not_queued(tmp_path: Path, mock_aiohttp: aioresp
 
 async def test_custom_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Custom emoji reactions are queued via emoji_map lookup."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state(emoji_map={"discord_emoji_1": "stoat_emoji_1"})
     config = _make_config(tmp_path, reaction_mode="native")
@@ -960,7 +1402,7 @@ async def test_custom_emoji_not_in_map_not_queued(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
     """Custom emoji missing from emoji_map is not queued."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state(emoji_map={})
     config = _make_config(tmp_path, reaction_mode="native")
@@ -975,7 +1417,7 @@ async def test_custom_emoji_not_in_map_not_queued(
 
 async def test_unicode_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Unicode emoji reactions are queued with the emoji name directly."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="native")
@@ -997,10 +1439,13 @@ async def test_unicode_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aiore
 async def test_resume_skips_completed_channels(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Channels in completed_channel_ids are skipped on resume."""
     # Only ch 200 should be processed (ch 100 is in completed_channel_ids).
-    mock_aiohttp.post(f"{BASE_URL}/channels/stoat_ch200/messages", payload={"_id": "stoat_msg2"})
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/01J5T011500443805919960547/messages",
+        payload={"_id": "01J5T012837302560510041812"},
+    )
 
     state = _make_state(
-        channel_map={"100": "stoat_ch100", "200": "stoat_ch200"},
+        channel_map={"100": "01J5T012300447226969249060", "200": "01J5T011500443805919960547"},
         completed_channel_ids={"100"},
     )
     config = _make_config(tmp_path, resume=True)
@@ -1026,10 +1471,13 @@ async def test_resume_skips_completed_messages_within_channel(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
     """Messages with ID <= channel_message_offsets entry are skipped on resume."""
-    mock_aiohttp.post(f"{BASE_URL}/channels/stoat_ch500/messages", payload={"_id": "stoat_msg2"})
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/01J5T003277910002836196806/messages",
+        payload={"_id": "01J5T012837302560510041812"},
+    )
 
     state = _make_state(
-        channel_map={"500": "stoat_ch500"},
+        channel_map={"500": "01J5T003277910002836196806"},
         channel_message_offsets={"500": "1000"},
     )
     config = _make_config(tmp_path, resume=True)
@@ -1060,7 +1508,7 @@ async def test_api_failure_does_not_stop_other_messages(tmp_path: Path) -> None:
         call_count += 1
         if call_count == 1:
             raise RuntimeError("Temporary failure")
-        return {"_id": f"stoat_msg_{call_count}"}
+        return {"_id": _valid_id(f"stoat_msg_{call_count}")}
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1118,11 +1566,11 @@ async def test_channel_not_in_channel_map_skipped(tmp_path: Path) -> None:
 
 async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """End-to-end: two messages sent, state.message_map populated, pins and reactions queued."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg_1"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg_2"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T010382523376509579641"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T016607174817411829988"})
 
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         emoji_map={"emoji1": "stoat_emoji1"},
     )
     config = _make_config(tmp_path, reaction_mode="native")
@@ -1146,11 +1594,11 @@ async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> N
     await run_messages(config, state, [export], _collect_events(events))
 
     # Both messages mapped.
-    assert state.message_map["msg1"] == "stoat_msg_1"
-    assert state.message_map["msg2"] == "stoat_msg_2"
+    assert state.message_map["msg1"] == "01J5T010382523376509579641"
+    assert state.message_map["msg2"] == "01J5T016607174817411829988"
 
     # Pin queued for msg1.
-    assert ("stoat_ch1", "stoat_msg_1") in state.pending_pins
+    assert ("01J5T013913344331853682639", "01J5T010382523376509579641") in state.pending_pins
 
     # Reaction queued for msg2.
     assert len(state.pending_reactions) == 1
@@ -1199,7 +1647,7 @@ async def test_channel_pinned_message_adds_to_pending_pins(
 ) -> None:
     """ChannelPinnedMessage marks referenced message for pinning, not sent as content."""
     # Send a normal message first so the reference target exists in message_map.
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_original"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T005831275483271841773"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1220,7 +1668,7 @@ async def test_channel_pinned_message_adds_to_pending_pins(
     assert "original1" in state.message_map
     assert "pinmsg1" not in state.message_map
     # The referenced message was queued for pinning.
-    assert ("stoat_ch1", "stoat_original") in state.pending_pins
+    assert ("01J5T013913344331853682639", "01J5T005831275483271841773") in state.pending_pins
 
 
 async def test_channel_pinned_message_unknown_ref(
@@ -1261,7 +1709,7 @@ async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aio
     For the resolved shape, see `tests/fixtures/dce_2_48/captured/` and
     test_flatten_resolves_the_post_bump_collision_to_the_parent.
     """
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_starter"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T017978883145630816207"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1286,9 +1734,9 @@ async def test_thread_header_injected(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_contents.append(kwargs.get("content", ""))
-        return {"_id": f"stoat_msg_{len(sent_contents)}"}
+        return {"_id": _valid_id(f"stoat_msg_{len(sent_contents)}")}
 
-    state = _make_state(channel_map={"th1": "stoat_th1"})
+    state = _make_state(channel_map={"th1": "01J5T007360430737600659419"})
     config = _make_config(tmp_path)
     msg = _make_message(id="msg1", content="hello thread")
     export = DCEExport(
@@ -1315,7 +1763,7 @@ async def test_non_thread_no_header(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_contents.append(kwargs.get("content", ""))
-        return {"_id": f"stoat_msg_{len(sent_contents)}"}
+        return {"_id": _valid_id(f"stoat_msg_{len(sent_contents)}")}
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1367,7 +1815,7 @@ async def test_api_send_message_includes_silent(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1389,7 +1837,7 @@ async def test_attachments_uploaded_counter_increments(
     att_file = tmp_path / "file.png"
     att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "att_id"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1406,9 +1854,11 @@ async def test_skip_threads_skips_thread_exports(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
     """When skip_threads=True, thread exports are not processed in messages phase."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
-    state = _make_state(channel_map={"ch1": "stoat_ch1", "th1": "stoat_th1"})
+    state = _make_state(
+        channel_map={"ch1": "01J5T013913344331853682639", "th1": "01J5T007360430737600659419"}
+    )
     config = _make_config(tmp_path, skip_threads=True)
 
     msg_main = _make_message(id="main1", content="main channel msg")
@@ -1460,7 +1910,7 @@ async def test_embed_media_upload(tmp_path: Path, mock_aiohttp: aioresponses) ->
         repeat=True,
     )
     # Mock message send
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_embed_msg"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T012915308757833241275"}, repeat=True)
 
     await run_messages(config, state, [export], events.append)
     assert "msg_embed" in state.message_map
@@ -1496,7 +1946,7 @@ async def test_sticker_image_upload(tmp_path: Path, mock_aiohttp: aioresponses) 
         payload={"id": "autumn_sticker1"},
         repeat=True,
     )
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_sticker_msg"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009409327933312484226"}, repeat=True)
 
     await run_messages(config, state, [export], events.append)
     assert "msg_sticker" in state.message_map
@@ -1804,11 +2254,11 @@ async def test_empty_url_attachment_no_crash(tmp_path: Path) -> None:
 
 async def test_checkpoint_interval_zero_clamped(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """checkpoint_interval=0 does not cause ZeroDivisionError."""
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg1"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg2"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg3"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg4"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg5"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T014271608871363207460"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T012837302560510041812"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T015499581878702057735"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T014724239518549883031"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T014323210238302802811"})
 
     state = _make_state()
     config = _make_config(tmp_path, checkpoint_interval=0)
@@ -1836,7 +2286,7 @@ async def test_checkpoint_saves_are_time_throttled(
     # Create enough messages to trigger multiple checkpoint intervals
     num_msgs = 10
     for _ in range(num_msgs):
-        mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+        mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path, checkpoint_interval=3)
@@ -1874,7 +2324,7 @@ async def test_checkpoint_interval_from_config(tmp_path: Path, mock_aiohttp: aio
     """checkpoint_interval config field is respected in the modulo check."""
     # With checkpoint_interval=2 and 4 messages, indices 1 and 3 hit modulo.
     for _ in range(4):
-        mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+        mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path, checkpoint_interval=2)
@@ -1911,7 +2361,7 @@ async def test_successful_send_marks_referenced(tmp_path: Path, mock_aiohttp: ai
     att_file = tmp_path / "file.png"
     att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_att1"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg1"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T014271608871363207460"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -1984,7 +2434,7 @@ async def test_message_failure_creates_failed_message(tmp_path: Path) -> None:
     fm = state.failed_messages[0]
     assert isinstance(fm, FailedMessage)
     assert fm.discord_msg_id == "msg_fail"
-    assert fm.stoat_channel_id == "stoat_ch1"
+    assert fm.stoat_channel_id == "01J5T013913344331853682639"
     assert "API down" in fm.error
     assert fm.retry_count == 0
 
@@ -2053,7 +2503,7 @@ async def test_text_mode_appends_reaction_summary(
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="text")
@@ -2077,7 +2527,7 @@ async def test_native_mode_queues_reactions(tmp_path: Path, mock_aiohttp: aiores
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="native")
@@ -2100,7 +2550,7 @@ async def test_skip_mode_no_reactions(tmp_path: Path, mock_aiohttp: aioresponses
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="skip")
@@ -2125,7 +2575,7 @@ async def test_invalid_reaction_mode_defaults_to_text(
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="bogus")
@@ -2200,7 +2650,7 @@ async def test_five_attachments_no_overflow(tmp_path: Path, mock_aiohttp: aiores
         f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -2216,7 +2666,7 @@ async def test_five_attachments_no_overflow(tmp_path: Path, mock_aiohttp: aiores
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
@@ -2234,7 +2684,7 @@ async def test_seven_attachments_overflow_text(tmp_path: Path, mock_aiohttp: aio
         f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -2250,7 +2700,7 @@ async def test_seven_attachments_overflow_text(tmp_path: Path, mock_aiohttp: aio
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
@@ -2271,7 +2721,7 @@ async def test_ten_attachments_overflow(tmp_path: Path, mock_aiohttp: aiorespons
         f.write_bytes(_VALID_PNG)
         mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": f"att_id_{i}"})
 
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -2287,7 +2737,7 @@ async def test_ten_attachments_overflow(tmp_path: Path, mock_aiohttp: aiorespons
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [export], lambda e: None)
@@ -2306,14 +2756,14 @@ async def test_ten_attachments_overflow(tmp_path: Path, mock_aiohttp: aiorespons
 def test_discord_links_rewritten_in_content() -> None:
     """Discord jump links and invite links are rewritten in _build_content pipeline."""
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1", "456": "stoat_ch_mapped"},
+        channel_map={"ch1": "01J5T013913344331853682639", "456": "01J5T010434761787742046251"},
     )
     msg = _make_message(
         content=("Check https://discord.com/channels/111/456/789 and https://discord.gg/invite1"),
     )
     result = _build_content(msg, state)
     # Jump link rewritten to channel mention
-    assert "<#stoat_ch_mapped>" in result
+    assert "<#01J5T010434761787742046251>" in result
     # Invite annotated
     assert "[Discord invite — no longer valid]" in result
     # Original Discord URL should not remain for the mapped link
@@ -2336,7 +2786,7 @@ async def test_embed_overflow_fallback_text(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     # Create embeds with no title or description — flatten_embed returns empty dicts,
     # so none pass the `flat.get("description") or flat.get("title")` guard.
@@ -2367,7 +2817,7 @@ async def test_cross_channel_reply_fallback(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state(message_map={})  # Referenced message not in map.
     config = _make_config(tmp_path)
@@ -2401,7 +2851,7 @@ async def test_same_channel_missing_reply_no_annotation(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state(message_map={})
     config = _make_config(tmp_path)
@@ -2432,11 +2882,14 @@ async def test_mapped_different_destination_reply_uses_channel_fallback(tmp_path
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1", "discord_source_id": "stoat_destination_id"},
-        message_map={"orig_in_other_ch": "stoat_orig"},
+        channel_map={
+            "ch1": "01J5T013913344331853682639",
+            "discord_source_id": "stoat_destination_id",
+        },
+        message_map={"orig_in_other_ch": "01J5T005451806239455985230"},
     )
     config = _make_config(tmp_path)
 
@@ -2467,13 +2920,16 @@ async def test_flattened_thread_same_destination_reply_stays_native(tmp_path: Pa
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_kwargs.append(kwargs)
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     # Discord uses the origin message id as the thread id. A flattened thread can
     # therefore have a different Discord channel id while sharing the parent target.
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1", "thread-origin": "stoat_ch1"},
-        message_map={"thread-origin": "stoat_orig"},
+        channel_map={
+            "ch1": "01J5T013913344331853682639",
+            "thread-origin": "01J5T013913344331853682639",
+        },
+        message_map={"thread-origin": "01J5T005451806239455985230"},
     )
     config = _make_config(tmp_path)
     ref = DCEReference(message_id="thread-origin", channel_id="thread-origin")
@@ -2489,7 +2945,7 @@ async def test_flattened_thread_same_destination_reply_stays_native(tmp_path: Pa
         await run_messages(config, state, [export], lambda e: None)
 
     assert sent_kwargs[0]["replies"] == [
-        {"id": "stoat_orig", "mention": False, "fail_if_not_exists": False}
+        {"id": "01J5T005451806239455985230", "mention": False, "fail_if_not_exists": False}
     ]
     assert "[Replying to message in" not in sent_kwargs[0]["content"]
     assert state.replies_total == 1
@@ -2509,7 +2965,7 @@ async def test_reaction_count_native_mode_annotation(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="native")
@@ -2537,7 +2993,7 @@ async def test_reaction_count_single_no_annotation(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="native")
@@ -2562,7 +3018,7 @@ async def test_reaction_count_mixed_some_over_one(tmp_path: Path) -> None:
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sent_content.append(kwargs.get("content", ""))
-        return {"_id": "stoat_msg"}
+        return {"_id": "01J5T009463559210097755981"}
 
     state = _make_state()
     config = _make_config(tmp_path, reaction_mode="native")
@@ -2596,7 +3052,7 @@ async def test_incremental_skips_at_or_below_high_water(tmp_path: Path) -> None:
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["300", "400"]
+    assert _sent_message_ids(sent, state) == ["300", "400"]
 
 
 async def test_marker_written_at_completion_is_max_id(tmp_path: Path) -> None:
@@ -2650,7 +3106,7 @@ async def test_incremental_crashed_prior_falls_back_to_offset(tmp_path: Path) ->
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["300"]
+    assert _sent_message_ids(sent, state) == ["300"]
 
 
 async def test_incremental_new_channel_full_copy(tmp_path: Path) -> None:
@@ -2663,7 +3119,7 @@ async def test_incremental_new_channel_full_copy(tmp_path: Path) -> None:
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["100", "200", "300"]
+    assert _sent_message_ids(sent, state) == ["100", "200", "300"]
 
 
 async def test_incremental_no_new_messages_count_not_inflated(tmp_path: Path) -> None:
@@ -2685,7 +3141,7 @@ async def test_incremental_no_new_messages_count_not_inflated(tmp_path: Path) ->
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == []
+    assert _sent_message_ids(sent, state) == []
     assert state.channel_message_counts["ch1"] == 800
 
 
@@ -2719,7 +3175,7 @@ async def test_incremental_old_state_degrades_to_full_copy(tmp_path: Path) -> No
     export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["100", "200"]
+    assert _sent_message_ids(sent, state) == ["100", "200"]
 
 
 async def test_resume_uses_transient_offset_unchanged(tmp_path: Path) -> None:
@@ -2732,7 +3188,7 @@ async def test_resume_uses_transient_offset_unchanged(tmp_path: Path) -> None:
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["300"]
+    assert _sent_message_ids(sent, state) == ["300"]
 
 
 async def test_incremental_completion_event_reports_new_and_skipped(tmp_path: Path) -> None:
@@ -2778,7 +3234,7 @@ async def test_non_numeric_message_id_not_skipped_or_marked(tmp_path: Path) -> N
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["system-msg"]  # non-numeric id is not skipped
+    assert _sent_message_ids(sent, state) == ["system-msg"]  # non-numeric id is not skipped
     assert state.channel_high_water["ch1"] == "200"  # marker unchanged (non-numeric ignored)
 
 
@@ -2816,7 +3272,7 @@ async def test_new_thread_posts_header(tmp_path: Path) -> None:
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     headers = [
-        k.get("content") for k in sent if k.get("idempotency_key", "").startswith("ferry-header-")
+        k.get("content") for k in sent if k.get("content", "").startswith("[Thread migrated from #")
     ]
     assert headers == ["[Thread migrated from #general]"]
 
@@ -2853,13 +3309,18 @@ async def test_merge_uses_parent_id_when_two_channels_share_a_name(tmp_path: Pat
         is_thread=True,
         parent_channel_name="general",
     )
-    state = _make_state(channel_map={"parent-1": "stoat-parent-1", "parent-2": "stoat-parent-2"})
+    state = _make_state(
+        channel_map={
+            "parent-1": "01J5T007915908829596483954",
+            "parent-2": "01J5T008092420226252880464",
+        }
+    )
     config = _make_config(tmp_path, thread_strategy="merge")
 
     with patch("discord_ferry.migrator.messages.api_send_message", capture_send):
         await run_messages(config, state, [first_parent, second_parent, thread], lambda e: None)
 
-    assert sent_channels == ["stoat-parent-1", "stoat-parent-1"]
+    assert sent_channels == ["01J5T007915908829596483954", "01J5T007915908829596483954"]
 
 
 async def test_unchanged_forum_makes_zero_posts(tmp_path: Path) -> None:
@@ -2887,7 +3348,7 @@ async def test_new_forum_posts_forum_header(tmp_path: Path) -> None:
         headers = [
             k.get("content")
             for k in sent
-            if k.get("idempotency_key", "").startswith("ferry-header-")
+            if k.get("content", "").startswith("[Forum post migrated from #")
         ]
         assert headers == ["[Forum post migrated from #general]"], f"type={forum_type}"
 
@@ -2905,7 +3366,7 @@ async def test_incremental_non_numeric_offset_does_not_crash(tmp_path: Path) -> 
     export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"100", "200"}  # no threshold -> both copied
+    assert set(_sent_message_ids(sent, state)) == {"100", "200"}  # no threshold -> both copied
 
 
 async def test_resume_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
@@ -2916,7 +3377,7 @@ async def test_resume_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
     export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"100", "200"}
+    assert set(_sent_message_ids(sent, state)) == {"100", "200"}
 
 
 async def test_incremental_numeric_high_water_still_governs(tmp_path: Path) -> None:
@@ -2929,7 +3390,7 @@ async def test_incremental_numeric_high_water_still_governs(tmp_path: Path) -> N
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"300"}
+    assert set(_sent_message_ids(sent, state)) == {"300"}
 
 
 async def test_incremental_non_numeric_offset_with_numeric_high_water(tmp_path: Path) -> None:
@@ -2944,7 +3405,7 @@ async def test_incremental_non_numeric_offset_with_numeric_high_water(tmp_path: 
     )
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"300"}
+    assert set(_sent_message_ids(sent, state)) == {"300"}
 
 
 # ---------------------------------------------------------------------------
@@ -2958,12 +3419,13 @@ async def test_incremental_reattempts_failed_id(tmp_path: Path) -> None:
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"200", "400"}
+    assert set(_sent_message_ids(sent, state)) == {"200", "400"}
 
 
 async def test_incremental_unchanged_channel_no_failures_zero_posts(tmp_path: Path) -> None:
@@ -2974,7 +3436,7 @@ async def test_incremental_unchanged_channel_no_failures_zero_posts(tmp_path: Pa
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == []
+    assert _sent_message_ids(sent, state) == []
 
 
 async def test_resume_does_not_reattempt_failed_id(tmp_path: Path) -> None:
@@ -2983,12 +3445,12 @@ async def test_resume_does_not_reattempt_failed_id(tmp_path: Path) -> None:
     config = _make_config(tmp_path, resume=True, output_dir=tmp_path)
     state = _make_state(
         channel_message_offsets={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == []  # 200 NOT re-attempted under resume
+    assert _sent_message_ids(sent, state) == []  # 200 NOT re-attempted under resume
 
 
 async def test_incremental_marker_monotonicity(tmp_path: Path) -> None:
@@ -2997,7 +3459,7 @@ async def test_incremental_marker_monotonicity(tmp_path: Path) -> None:
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
@@ -3011,12 +3473,13 @@ async def test_incremental_failed_id_equals_marker_boundary(tmp_path: Path) -> N
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "200"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert _sent_message_ids(sent) == ["200"]
+    assert _sent_message_ids(sent, state) == ["200"]
     assert state.channel_high_water["ch1"] == "200"
 
 
@@ -3028,7 +3491,7 @@ async def test_incremental_empty_failed_is_pure_v263(tmp_path: Path) -> None:
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"400"}
+    assert set(_sent_message_ids(sent, state)) == {"400"}
 
 
 async def test_incremental_multiple_failed_ids_one_channel(tmp_path: Path) -> None:
@@ -3038,16 +3501,17 @@ async def test_incremental_multiple_failed_ids_one_channel(tmp_path: Path) -> No
     state = _make_state(
         channel_high_water={"ch1": "300"},
         failed_messages=[
-            FailedMessage("150", "stoat_ch1", "boom"),
-            FailedMessage("250", "stoat_ch1", "boom"),
+            FailedMessage("150", "01J5T013913344331853682639", "boom"),
+            FailedMessage("250", "01J5T013913344331853682639", "boom"),
         ],
     )
     export = _make_export(
         messages=[_make_message(id=i) for i in ("100", "150", "200", "250", "300", "400")]
     )
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert set(_sent_message_ids(sent)) == {"150", "250", "400"}
+    assert set(_sent_message_ids(sent, state)) == {"150", "250", "400"}
 
 
 # ---------------------------------------------------------------------------
@@ -3076,9 +3540,10 @@ async def test_reconcile_drops_succeeded_failed_id(tmp_path: Path) -> None:
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     assert all(fm.discord_msg_id != "200" for fm in state.failed_messages)
@@ -3090,7 +3555,7 @@ async def test_reconcile_collapses_refailed_id(tmp_path: Path) -> None:
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
 
     def _ids(s: MigrationState) -> list[str]:
@@ -3119,15 +3584,20 @@ async def test_reconcile_isolation_across_channels(tmp_path: Path) -> None:
     sent: list[dict[str, Any]] = []
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1", "ch2": "stoat_ch2"},
+        channel_map={"ch1": "01J5T013913344331853682639", "ch2": "01J5T007424028392063927646"},
         channel_high_water={"ch1": "300", "ch2": "600"},
         failed_messages=[
-            FailedMessage("100", "stoat_ch1", "boom"),  # in ch1 export -> succeeds -> drop
-            FailedMessage("500", "stoat_ch2", "boom"),  # absent from ch2 export -> retained
+            FailedMessage(
+                "100", "01J5T013913344331853682639", "boom"
+            ),  # in ch1 export -> succeeds -> drop
+            FailedMessage(
+                "500", "01J5T007424028392063927646", "boom"
+            ),  # absent from ch2 export -> retained
         ],
     )
     export1 = _make_export(channel_id="ch1", messages=[_make_message(id="100")])
     export2 = _make_export(channel_id="ch2", messages=[_make_message(id="550")])
+    await seed_rejected_messages(config, state, [export1, export2])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export1, export2], lambda e: None)
     remaining = {fm.discord_msg_id for fm in state.failed_messages}
@@ -3138,7 +3608,9 @@ async def test_reconcile_isolation_across_channels(tmp_path: Path) -> None:
 async def test_dry_run_incremental_does_not_touch_failed_messages(tmp_path: Path) -> None:
     """SC-22: reconcile is unreachable in dry-run (run_messages returns early)."""
     config = _make_config(tmp_path, incremental=True, dry_run=True, output_dir=tmp_path)
-    state = _make_state(failed_messages=[FailedMessage("200", "stoat_ch1", "boom")])
+    state = _make_state(
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")]
+    )
     export = _make_export(messages=[_make_message(id="200")])
     await run_messages(config, state, [export], lambda e: None)
     assert [fm.discord_msg_id for fm in state.failed_messages] == ["200"]
@@ -3150,12 +3622,12 @@ async def test_reconcile_keeps_deleted_unrecoverable_failed_id(tmp_path: Path) -
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "300", "400")])  # no 200
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
-    assert "200" not in _sent_message_ids(sent)
+    assert "200" not in _sent_message_ids(sent, state)
     assert any(fm.discord_msg_id == "200" for fm in state.failed_messages)
 
 
@@ -3170,7 +3642,7 @@ async def test_incremental_complete_event_reports_retried(tmp_path: Path) -> Non
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
     state = _make_state(
         channel_high_water={"ch1": "300"},
-        failed_messages=[FailedMessage("200", "stoat_ch1", "boom")],
+        failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends([])):
@@ -3453,7 +3925,7 @@ async def test_sticker_registered_in_autumn_uploads(
     config = _make_config(tmp_path)
     state = _make_state()
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_s1"}, repeat=True)
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_s"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T006715349144928612199"}, repeat=True)
 
     await run_messages(config, state, [export], lambda e: None)
 
@@ -3477,7 +3949,7 @@ async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: ai
     config = _make_config(tmp_path, verify_uploads=True)
     state = _make_state()
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "s", "size": 999}, repeat=True)
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_s2"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T005103281852964868661"}, repeat=True)
 
     await run_messages(config, state, [export], lambda e: None)
 
@@ -3501,7 +3973,7 @@ async def test_embed_media_registered_and_referenced_not_orphan(
     config = _make_config(tmp_path)
     state = _make_state()
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "autumn_m1"}, repeat=True)
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_e"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T007876386195911593557"}, repeat=True)
 
     await run_messages(config, state, [export], lambda e: None)
 
@@ -3579,7 +4051,7 @@ async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aior
     config = _make_config(tmp_path, verify_uploads=True)
     state = _make_state()
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "m", "size": 999}, repeat=True)
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_e4"}, repeat=True)
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T002681317886999106896"}, repeat=True)
 
     await run_messages(config, state, [export], lambda e: None)
 
@@ -3594,7 +4066,7 @@ async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Pa
     This is the S1 contract guard — only the retry path (channel_result=None) must raise; the
     parallel per-channel path (channel_result set) must keep degrade-in-loop.
     """
-    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    state = _make_state(channel_map={"ch1": "01J5T013913344331853682639"})
     config = _make_config(tmp_path)
     msg = _make_message(id="m1", content="hi", timestamp="2024-06-01T08:30:00+00:00")
 
@@ -3607,7 +4079,7 @@ async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Pa
             with pytest.raises(RuntimeError):
                 await _process_message(
                     msg=msg,
-                    stoat_channel_id="stoat_ch1",
+                    stoat_channel_id="01J5T013913344331853682639",
                     config=config,
                     state=state,
                     session=session,
@@ -3620,7 +4092,7 @@ async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Pa
             result = ChannelResult(channel_id="ch1")
             await _process_message(
                 msg=msg,
-                stoat_channel_id="stoat_ch1",
+                stoat_channel_id="01J5T013913344331853682639",
                 config=config,
                 state=state,
                 session=session,
@@ -3634,7 +4106,7 @@ async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Pa
 async def test_process_message_unmapped_reaction_direct_state_counts(tmp_path: Path) -> None:
     """SC-4: on the direct-state path (channel_result is None), an unmapped-emoji reaction
     increments state.reactions_dropped directly (no ChannelResult to fold)."""
-    state = _make_state(channel_map={"ch1": "stoat_ch1"})  # emoji_map empty
+    state = _make_state(channel_map={"ch1": "01J5T013913344331853682639"})  # emoji_map empty
     config = _make_config(tmp_path, reaction_mode="native")
     msg = _make_message(
         id="m1",
@@ -3645,11 +4117,11 @@ async def test_process_message_unmapped_reaction_direct_state_counts(tmp_path: P
     async with aiohttp.ClientSession() as session:
         with patch(
             "discord_ferry.migrator.messages.api_send_message",
-            AsyncMock(return_value={"_id": "x"}),
+            AsyncMock(return_value={"_id": _valid_id("x")}),
         ):
             await _process_message(
                 msg=msg,
-                stoat_channel_id="stoat_ch1",
+                stoat_channel_id="01J5T013913344331853682639",
                 config=config,
                 state=state,
                 session=session,
@@ -3678,7 +4150,7 @@ async def test_zero_concurrent_channels_does_not_deadlock(
     """
     import asyncio
 
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg_1"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T010382523376509579641"})
 
     state = _make_state()
     config = _make_config(tmp_path, max_concurrent_channels=0)
@@ -3690,7 +4162,7 @@ async def test_zero_concurrent_channels_does_not_deadlock(
         timeout=5.0,
     )
 
-    assert state.message_map["msg1"] == "stoat_msg_1"
+    assert state.message_map["msg1"] == "01J5T010382523376509579641"
 
 
 # ---------------------------------------------------------------------------
@@ -3850,7 +4322,7 @@ async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: ai
     att_file = tmp_path / "fwd.png"
     att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "fwd_att_id"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -3882,7 +4354,7 @@ async def test_forwarded_with_empty_content_but_attachment_still_sends(
     att_file = tmp_path / "only.png"
     att_file.write_bytes(_VALID_PNG)
     mock_aiohttp.post(f"{AUTUMN_URL}/attachments", payload={"id": "only_id"})
-    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "stoat_msg"})
+    mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
 
     state = _make_state()
     config = _make_config(tmp_path)
@@ -3982,7 +4454,7 @@ async def test_recovered_forward_is_not_treated_as_a_reply(tmp_path: Path) -> No
     state = _make_state()
     # The forward's source IS in the map — the same-server forward case, which is when
     # the reply payload would actually be emitted.
-    state.message_map["orig1"] = "stoat_orig1"
+    state.message_map["orig1"] = "01J5T011533876599941979492"
     config = _make_config(tmp_path)
     msg = _make_message(
         id="fwd_ref",
@@ -4089,273 +4561,223 @@ async def test_pre_247_export_still_skips_and_warns(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_duplicate_on_later_part_does_not_truncate(tmp_path: Path) -> None:
-    """SC-2.3: every part after a duplicate must still be sent.
+@contextmanager
+def _part_transport(
+    state: MigrationState,
+    *,
+    duplicate_parts=(),
+    failed_parts=(),
+    missing_parts=(),
+):
+    """Model the API boundary while real receipt lookup and bookkeeping still run."""
+    from aioresponses import CallbackResult
 
-    The catch has to be PER PART. A catch around the loop aborts it, so the parts
-    after the duplicate are never sent and their content is lost with no warning.
-    Each part carries its own Idempotency-Key, so they are not duplicates.
-    """
+    from discord_ferry.errors import MessageSendFailure
+
+    seen: list[str] = []
+    remote: list[dict[str, str]] = []
+
+    async def send(session, base, token, channel_id, **kwargs):
+        index = len(seen)
+        key = kwargs["idempotency_key"]
+        seen.append(key)
+        if index in failed_parts:
+            raise MigrationError("network timeout")
+        row = {
+            "_id": valid_stoat_id(100 + index),
+            "channel": channel_id,
+            "nonce": key,
+            "content": kwargs["content"],
+        }
+        if index not in missing_parts:
+            remote.append(row)
+        if index in duplicate_parts:
+            return await kwargs["message_recovery"](
+                MessageSendFailure(
+                    "Cached key needs lookup", disposition="uncertain", http_status=409
+                )
+            )
+        return row
+
+    async def history(url, **kwargs):
+        return CallbackResult(payload=sorted(remote, key=lambda row: row["_id"], reverse=True))
+
+    destination = next(iter(state.channel_map.values()))
+    with aioresponses() as http, patch("discord_ferry.migrator.messages.api_send_message", send):
+        http.get(
+            f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            callback=history,
+            repeat=True,
+        )
+        yield seen, remote
+
+
+async def test_duplicate_on_later_part_does_not_truncate(tmp_path: Path) -> None:
+    """A recovered later part preserves all following parts and the first mapping."""
     state = _make_state()
     config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
-    seen: list[str] = []
-
-    async def dup_on_second(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        seen.append(key)
-        if key.endswith("_p2"):
-            raise DuplicateSendError("already on the server")
-        return {"_id": f"stoat-{key}"}
-
-    with patch("discord_ferry.migrator.messages.api_send_message", dup_on_second):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    # Assert "everything after the duplicate was attempted", not a hardcoded count:
-    # the sent content is longer than the raw body once continuation markers are added.
-    assert any(k.endswith("_p3") for k in seen), (
-        f"part 3 was never attempted, so the duplicate truncated the message. keys={seen}"
-    )
-    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    export = _make_export(messages=[_make_message(content="B" * 5000)])
+    with _part_transport(state, duplicate_parts=(1,)) as (seen, remote):
+        await run_messages(config, state, [export], lambda event: None)
+    assert len(seen) >= 3
+    assert len(seen) == len(set(seen)) == len(remote)
+    assert state.message_map["msg1"] == remote[0]["_id"]
     assert not state.failed_messages
-    assert "duplicate_send_unmapped" not in [w.get("type") for w in state.warnings], (
-        "a later-part duplicate must not claim the message is unmapped: part 1 mapped fine"
-    )
+    assert not any(w["type"] == "duplicate_send_unmapped" for w in state.warnings)
 
 
 async def test_duplicate_on_first_part_still_sends_the_rest(tmp_path: Path) -> None:
-    """SC-2.4: a duplicate on part 1 costs the map entry, not the remaining parts."""
+    """A recovered first identifier follows the ordinary mapping path."""
     state = _make_state()
     config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="C" * 5000)])
-    seen: list[str] = []
-
-    async def dup_on_first(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        seen.append(key)
-        if key.endswith("_p1"):
-            raise DuplicateSendError("already on the server")
-        return {"_id": f"stoat-{key}"}
-
-    with patch("discord_ferry.migrator.messages.api_send_message", dup_on_first):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert any(k.endswith("_p2") for k in seen), (
-        f"a duplicate on part 1 stopped the remaining parts being sent. keys={seen}"
-    )
+    export = _make_export(messages=[_make_message(content="C" * 5000)])
+    with _part_transport(state, duplicate_parts=(0,)) as (seen, remote):
+        await run_messages(config, state, [export], lambda event: None)
+    assert len(seen) >= 3
+    assert state.message_map["msg1"] == remote[0]["_id"]
+    assert state.message_map["msg1"] != remote[1]["_id"]
+    assert len(remote) == len(seen)
     assert not state.failed_messages
-    # The map entry is task #204's concern: part 1 produced no id, so nothing may be
-    # written. Asserted in test_single_part_duplicate_leaves_clean_state.
-    assert state.message_map.get("msg1") != "stoat-ferry-msg1_p2", (
-        "a later part's id must never stand in for the first part's"
-    )
 
 
-async def test_single_part_duplicate_leaves_clean_state(tmp_path: Path) -> None:
-    """SC-2.1: no empty map entry, no failure, no pin, no reaction, counters intact."""
+async def test_single_part_duplicate_without_match_remains_failed(tmp_path: Path) -> None:
+    """Cached consumption without a match cannot produce maps or success counters."""
     state = _make_state()
-    config = _make_config(tmp_path, reaction_mode="native")
-    msg = _make_message(id="msg1", content="hello", is_pinned=True)
-    msg.reactions = [DCEReaction(emoji=DCEEmoji(id=None, name="thumbsup"), count=2)]
-    exp = _make_export(messages=[msg])
-
-    async def always_duplicate(*a: Any, **k: Any) -> dict[str, Any]:
-        raise DuplicateSendError("already on the server")
-
-    with patch("discord_ferry.migrator.messages.api_send_message", always_duplicate):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert "msg1" not in state.message_map, (
-        "an empty-valued map entry was written; a reply resolving to '' is worse than "
-        "one that does not resolve at all"
-    )
-    assert not state.failed_messages
-    assert not state.pending_pins, "a pin was queued against an empty message id"
-    assert not state.pending_reactions, "a reaction was queued against an empty message id"
-    assert "duplicate_send_unmapped" in [w.get("type") for w in state.warnings]
+    source = _make_message(is_pinned=True)
+    source.reactions = [DCEReaction(emoji=DCEEmoji(id="", name="thumbsup"))]
+    with _part_transport(state, duplicate_parts=(0,), missing_parts=(0,)) as (seen, remote):
+        await run_messages(
+            _make_config(tmp_path, reaction_mode="native"),
+            state,
+            [_make_export(messages=[source])],
+            lambda event: None,
+        )
+    assert len(seen) == 1
+    assert not remote
+    assert not state.message_map
+    assert len(state.failed_messages) == 1
+    assert not state.pending_pins
+    assert not state.pending_reactions
+    assert state.channel_message_counts.get("ch1", 0) == 0
+    assert any(error["type"] == "message_send_failed" for error in state.errors)
 
 
-async def test_duplicate_runs_the_parallel_branch_not_the_retry_branch(tmp_path: Path) -> None:
-    """SC-2.2: MANDATORY. The only check that catches the folded-condition mistake.
-
-    Guarding `if channel_result is not None and stoat_msg_id:` looks equivalent to
-    guarding the map write inside the branch. It is not. `else` means "not the
-    condition above", so an empty id sends a parallel-path message down the RETRY
-    path, which writes state.message_map directly and bypasses ChannelResult and the
-    save_lock discipline.
-
-    State-level assertions cannot see this: both branches leave
-    channel_message_counts == 1, by different routes. Only the real ChannelResult,
-    captured at the merge, distinguishes them. This mutant survived five other probes.
-    """
-    import discord_ferry.migrator.messages as mm
-
+async def test_recovered_duplicate_uses_parallel_accumulator(tmp_path: Path) -> None:
+    """A recovered id must reach ChannelResult before shared maps are changed."""
     state = _make_state()
-    config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="hello")])
+    seen = []
+    real_merge = messages_module._merge_channel_result
 
-    seen: list[tuple[int, dict[str, str]]] = []
-    real_merge = mm._merge_channel_result
-
-    def spy_merge(st: Any, result: Any) -> None:
-        seen.append((result.messages_migrated, dict(result.message_map_updates)))
-        real_merge(st, result)
-
-    async def always_duplicate(*a: Any, **k: Any) -> dict[str, Any]:
-        raise DuplicateSendError("already on the server")
+    def spy_merge(current, result, outcomes=None):
+        if result.message_map_updates:
+            assert "msg1" not in current.message_map
+            seen.append((result.messages_migrated, dict(result.message_map_updates)))
+        real_merge(current, result, outcomes)
 
     with (
-        patch("discord_ferry.migrator.messages.api_send_message", always_duplicate),
+        _part_transport(state, duplicate_parts=(0,)),
         patch("discord_ferry.migrator.messages._merge_channel_result", spy_merge),
     ):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert max((m for m, _ in seen), default=0) == 1, (
-        "the parallel branch did not run. The id check was folded into the "
-        "`channel_result is not None` condition, so control fell into the retry else "
-        f"and ChannelResult never saw the message. merges observed: {seen}"
-    )
-    assert not {k: v for _, d in seen for k, v in d.items()}, (
-        "an empty-valued map entry was accumulated on the ChannelResult"
-    )
-    assert not state.message_map, (
-        "the retry branch wrote directly to state.message_map, bypassing ChannelResult "
-        "and the save_lock discipline the parallel merge design depends on"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Partial send on split messages (#381)
-# ---------------------------------------------------------------------------
+        await run_messages(
+            _make_config(tmp_path),
+            state,
+            [_make_export(messages=[_make_message()])],
+            lambda event: None,
+        )
+    assert seen == [(1, {"msg1": valid_stoat_id(100)})]
+    assert state.message_map == {"msg1": valid_stoat_id(100)}
 
 
 async def test_partial_send_commits_delivered_parts(tmp_path: Path) -> None:
-    """SC-1.1/2.1/3.1: part 1 succeeds, part 2 raises, commit and warning."""
+    """Part one is committed while a later uncertainty remains a failure."""
     state = _make_state()
     config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
-    seen: list[str] = []
-
-    async def fail_on_second(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        seen.append(key)
-        if key.endswith("_p2"):
-            raise MigrationError("network timeout")
-        return {"_id": f"stoat-{key}"}
-
-    with patch("discord_ferry.migrator.messages.api_send_message", fail_on_second):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
-    assert any(k.endswith("_p3") for k in seen), (
-        f"parts after the failure were not attempted. keys={seen}"
-    )
+    export = _make_export(messages=[_make_message(content="B" * 5000)])
+    with _part_transport(state, failed_parts=(1,)) as (seen, remote):
+        await run_messages(config, state, [export], lambda event: None)
+    assert state.message_map["msg1"] == valid_stoat_id(100)
+    assert len(seen) >= 3
+    assert len(remote) == len(seen) - 1
     assert len(state.failed_messages) == 1
     assert state.failed_messages[0].discord_msg_id == "msg1"
-    assert any(e.get("type") == "message_send_failed" for e in state.errors)
-    partial_warns = [w for w in state.warnings if w.get("type") == "message_partial_send"]
-    assert len(partial_warns) == 1
+    assert any(error["type"] == "message_send_failed" for error in state.errors)
+    assert len([w for w in state.warnings if w["type"] == "message_partial_send"]) == 1
 
 
 async def test_partial_send_retry_path_commits_then_reraises(tmp_path: Path) -> None:
-    """SC-1.2/2.2: retry path commits delivered state then re-raises."""
-    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    """The direct-state path commits the first identifier before propagating failure."""
+    state = _make_state()
     config = _make_config(tmp_path)
-    msg = _make_message(id="msg1", content="B" * 5000, timestamp="2024-06-01T08:30:00+00:00")
-
-    async def fail_on_second(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        if key.endswith("_p2"):
-            raise MigrationError("network timeout")
-        return {"_id": f"stoat-{key}"}
-
-    async with aiohttp.ClientSession() as session:
-        with (
-            patch("discord_ferry.migrator.messages.api_send_message", fail_on_second),
-            pytest.raises(MigrationError),
-        ):
-            await _process_message(
-                msg=msg,
-                stoat_channel_id="stoat_ch1",
-                config=config,
-                state=state,
-                session=session,
-                on_event=lambda e: None,
-                channel_result=None,
-            )
-
-    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    with _part_transport(state, failed_parts=(1,)):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(MigrationError, match="network timeout"):
+                await _process_message(
+                    msg=_make_message(content="B" * 5000),
+                    stoat_channel_id=state.channel_map["ch1"],
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                )
+    assert state.message_map["msg1"] == valid_stoat_id(100)
     assert len(state.failed_messages) == 1
 
 
 async def test_all_parts_fail_no_partial_commit(tmp_path: Path) -> None:
-    """SC-1.3/3.2: every part fails, nothing to commit, no partial warning."""
+    """Every part is attempted, but no creation is inferred from a failed send."""
     state = _make_state()
-    config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
-    seen: list[str] = []
-
-    async def always_fail(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        seen.append(key)
-        raise MigrationError("total failure")
-
-    with patch("discord_ferry.migrator.messages.api_send_message", always_fail):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert "msg1" not in state.message_map
+    with _part_transport(state, failed_parts=range(20)) as (seen, remote):
+        await run_messages(
+            _make_config(tmp_path),
+            state,
+            [_make_export(messages=[_make_message(content="B" * 5000)])],
+            lambda event: None,
+        )
+    assert len(seen) >= 3
+    assert not remote
+    assert not state.message_map
     assert len(state.failed_messages) == 1
-    assert any(k.endswith("_p3") for k in seen), (
-        f"not all parts were attempted after first failure. keys={seen}"
-    )
-    assert not any(w.get("type") == "message_partial_send" for w in state.warnings)
-    assert any(e.get("type") == "message_send_failed" for e in state.errors)
+    assert not any(w["type"] == "message_partial_send" for w in state.warnings)
+    assert any(error["type"] == "message_send_failed" for error in state.errors)
 
 
 async def test_duplicate_part1_error_part2_commits_autumn_refs(tmp_path: Path) -> None:
-    """SC-1.4: part 1 duplicate + part 2 error still commits autumn refs."""
+    """A positively recovered first part retains its original attached media."""
     state = _make_state()
-    config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 5000)])
-
-    async def dup_then_fail(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        if key.endswith("_p1"):
-            raise DuplicateSendError("already on the server")
-        if key.endswith("_p2"):
-            raise MigrationError("network timeout")
-        return {"_id": f"stoat-{key}"}
-
-    with patch("discord_ferry.migrator.messages.api_send_message", dup_then_fail):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert "msg1" not in state.message_map
-    assert any(w.get("type") == "duplicate_send_unmapped" for w in state.warnings)
+    with (
+        _part_transport(state, duplicate_parts=(0,), failed_parts=(1,)),
+        patch(
+            "discord_ferry.migrator.messages._upload_attachments",
+            AsyncMock(return_value=(["autumn_attached"], [])),
+        ),
+    ):
+        await run_messages(
+            _make_config(tmp_path),
+            state,
+            [_make_export(messages=[_make_message(content="B" * 5000)])],
+            lambda event: None,
+        )
+    assert state.message_map["msg1"] == valid_stoat_id(100)
+    assert "autumn_attached" in state.referenced_autumn_ids
     assert len(state.failed_messages) == 1
 
 
 async def test_multi_failure_warning_counts_are_correct(tmp_path: Path) -> None:
-    """SC-3.4: parts 2 and 4 fail, parts 1 and 3 succeed, counts add up."""
+    """Two failed parts produce one source failure with the actual part counts."""
     state = _make_state()
-    config = _make_config(tmp_path)
-    exp = _make_export(messages=[_make_message(id="msg1", content="B" * 8000)])
-
-    async def fail_even_parts(*a: Any, **k: Any) -> dict[str, Any]:
-        key = str(k.get("idempotency_key", ""))
-        for suffix in ("_p2", "_p4"):
-            if key.endswith(suffix):
-                raise MigrationError(f"fail on {suffix}")
-        return {"_id": f"stoat-{key}"}
-
-    with patch("discord_ferry.migrator.messages.api_send_message", fail_even_parts):
-        await run_messages(config, state, [exp], lambda e: None)
-
-    assert state.message_map["msg1"] == "stoat-ferry-msg1_p1"
+    with _part_transport(state, failed_parts=(1, 3)) as (seen, remote):
+        await run_messages(
+            _make_config(tmp_path),
+            state,
+            [_make_export(messages=[_make_message(content="B" * 8000)])],
+            lambda event: None,
+        )
+    assert state.message_map["msg1"] == valid_stoat_id(100)
     assert len(state.failed_messages) == 1
-    partial_warns = [w for w in state.warnings if w.get("type") == "message_partial_send"]
-    assert len(partial_warns) == 1
-    warn_msg = partial_warns[0]["message"]
-    assert "2 failed" in warn_msg
+    warnings = [w for w in state.warnings if w["type"] == "message_partial_send"]
+    assert len(warnings) == 1
+    assert f"{len(remote)} of {len(seen)} parts sent" in warnings[0]["message"]
+    assert "2 failed" in warnings[0]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -4381,7 +4803,7 @@ async def test_a_reply_resolves_against_the_channel_local_map_first(tmp_path: Pa
 
     async def capture(*a: Any, **k: Any) -> dict[str, Any]:
         sent.append(k)
-        return {"_id": "stoat_new"}
+        return {"_id": "01J5T011649588249373696537"}
 
     msg = _make_message(id="m2", content="a reply")
     msg.reference = DCEReference(message_id="ref_id")
@@ -4390,7 +4812,7 @@ async def test_a_reply_resolves_against_the_channel_local_map_first(tmp_path: Pa
         with patch("discord_ferry.migrator.messages.api_send_message", capture):
             await _process_message(
                 msg=msg,
-                stoat_channel_id="stoat_ch1",
+                stoat_channel_id="01J5T013913344331853682639",
                 config=config,
                 state=state,
                 session=session,
@@ -4415,13 +4837,13 @@ async def test_a_pin_resolves_against_the_channel_local_map_first(tmp_path: Path
     msg.reference = DCEReference(message_id="ref_id")
 
     async def capture(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"_id": "stoat_new"}
+        return {"_id": "01J5T011649588249373696537"}
 
     async with aiohttp.ClientSession() as session:
         with patch("discord_ferry.migrator.messages.api_send_message", capture):
             await _process_message(
                 msg=msg,
-                stoat_channel_id="stoat_ch1",
+                stoat_channel_id="01J5T013913344331853682639",
                 config=config,
                 state=state,
                 session=session,
@@ -4429,7 +4851,7 @@ async def test_a_pin_resolves_against_the_channel_local_map_first(tmp_path: Path
                 channel_result=result,
             )
 
-    assert result.pending_pins == [("stoat_ch1", "LOCAL")], (
+    assert result.pending_pins == [("01J5T013913344331853682639", "LOCAL")], (
         f"the pin resolved against the shared map, not the channel's own. got {result.pending_pins}"
     )
 
@@ -4443,7 +4865,7 @@ async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> N
 
     async def capture(*a: Any, **k: Any) -> dict[str, Any]:
         sent.append(k)
-        return {"_id": "stoat_new"}
+        return {"_id": "01J5T011649588249373696537"}
 
     msg = _make_message(id="m4", content="a reply")
     msg.reference = DCEReference(message_id="ref_id")
@@ -4452,7 +4874,7 @@ async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> N
         with patch("discord_ferry.migrator.messages.api_send_message", capture):
             await _process_message(
                 msg=msg,
-                stoat_channel_id="stoat_ch1",
+                stoat_channel_id="01J5T013913344331853682639",
                 config=config,
                 state=state,
                 session=session,

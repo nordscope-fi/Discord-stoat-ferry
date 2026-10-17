@@ -624,6 +624,161 @@ def test_export_blueprint_help(runner: CliRunner) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_verified_delivery_is_not_visited_progress() -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    tracker = _ProgressTracker()
+    tracker.on_event(
+        MigrationEvent(
+            phase="messages",
+            status="progress",
+            message="visited three sources",
+            current=3,
+            total=3,
+            detail={"delivery": {"verified": 1, "partial": 1, "unresolved": 1}},
+        )
+    )
+    assert tracker.messages_sent == 1
+    assert tracker.messages_partial == 1
+    assert tracker.messages_unresolved == 1
+    assert tracker._msg_progress.tasks[0].completed == 3
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"verified": 1, "partial": 1, "unresolved": 1},
+        {"verified": 0, "partial": 0, "unresolved": 3},
+    ],
+)
+def test_cli_delivery_summary_keeps_outcomes_across_completion_and_other_phases(counts) -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, fake = _b5_console()
+    with patch("discord_ferry.cli.console", fake):
+        tracker = _ProgressTracker()
+        tracker.on_event(
+            MigrationEvent(
+                phase="messages",
+                status="progress",
+                message="visited three",
+                current=3,
+                total=3,
+                detail={"delivery": counts},
+            )
+        )
+        tracker.on_event(
+            MigrationEvent(phase="messages", status="warning", message="retained failure")
+        )
+        tracker.on_event(MigrationEvent(phase="messages", status="error", message="retained error"))
+        tracker.on_event(
+            MigrationEvent(phase="messages", status="completed", message="phase completed")
+        )
+        tracker.on_event(
+            MigrationEvent(
+                phase="report",
+                status="progress",
+                message="not source progress",
+                current=900,
+                total=900,
+                detail={"delivery": {"verified": 900, "partial": 0, "unresolved": 0}},
+            )
+        )
+        fake.print(tracker._make_display())
+        tracker.print_summary()
+    output = buf.getvalue()
+    assert f"Verified: {counts['verified']}" in output
+    assert f"Partial: {counts['partial']}" in output
+    assert f"Unresolved: {counts['unresolved']}" in output
+    assert "Errors: 1" in output and "Warnings: 1" in output
+    assert "Messages: 3" not in output
+    assert tracker.messages_sent == counts["verified"]
+    assert tracker._msg_progress.tasks[0].completed == 3
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        None,
+        {},
+        {"delivery": None},
+        {"delivery": []},
+        {"delivery": {"verified": 1}},
+        *[
+            {"delivery": {"verified": value, "partial": 1, "unresolved": 1}}
+            for value in (True, -1, 1.5, "1", None)
+        ],
+    ],
+)
+def test_cli_delivery_summary_rejects_missing_or_malformed_detail(detail) -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    tracker = _ProgressTracker()
+    tracker.on_event(
+        MigrationEvent(
+            phase="messages",
+            status="progress",
+            message="verified source",
+            current=3,
+            total=9,
+            detail={"delivery": {"verified": 1, "partial": 1, "unresolved": 1}},
+        )
+    )
+    tracker.on_event(
+        MigrationEvent(
+            phase="messages",
+            status="progress",
+            message="legacy or malformed event",
+            current=9,
+            total=9,
+            detail=detail,
+        )
+    )
+    assert tracker.messages_sent == tracker.messages_partial == tracker.messages_unresolved == 1
+    assert tracker._msg_progress.tasks[0].completed == 9
+
+
+def test_cli_delivery_summary_legacy_progress_does_not_claim_delivery() -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    tracker = _ProgressTracker()
+    tracker.on_event(
+        MigrationEvent(
+            phase="messages",
+            status="progress",
+            message="visited three sources",
+            current=3,
+            total=3,
+        )
+    )
+    assert tracker.messages_sent == 0
+    assert tracker._msg_progress.tasks[0].completed == 3
+
+
+def test_cli_delivery_summary_exposes_parked_failure_records() -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, fake = _b5_console()
+    with patch("discord_ferry.cli.console", fake):
+        tracker = _ProgressTracker()
+        tracker.on_event(
+            MigrationEvent(
+                phase="report",
+                status="completed",
+                message="continued without visiting messages",
+                detail={"remaining_failed": 2},
+            )
+        )
+        tracker.print_summary()
+    assert "Failed records: 2" in buf.getvalue()
+    assert tracker.messages_sent == 0
+
+
 def test_confirm_event_handled() -> None:
     """Sending a confirm event to _ProgressTracker must not raise."""
     from discord_ferry.cli import _ProgressTracker

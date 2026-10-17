@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import ensure_output_subdir, write_text_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
-from discord_ferry.errors import DuplicateSendError
-from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
+from discord_ferry.errors import DeliveryUnresolvedError, StateError
+from discord_ferry.migrator.api import api_send_message as api_send_message
+from discord_ferry.migrator.api import get_rate_multiplier, get_session
+from discord_ferry.migrator.delivery import deliver_part, retry_delivery_context
 from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
 from discord_ferry.parser.media_paths import contained_media_path, is_media_escape
@@ -26,16 +30,26 @@ from discord_ferry.parser.transforms import (
     rewrite_discord_links,
     strip_underline,
 )
-from discord_ferry.state import FailedMessage, save_state
+from discord_ferry.state import (
+    DeliveryRef,
+    DeliveryToken,
+    FailedMessage,
+    consume_delivery,
+    delivery_receipt_id,
+    read_delivery_receipt,
+    save_state,
+)
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_with_cache
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import aiohttp
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
+    from discord_ferry.migrator.delivery import DeliveryResult
     from discord_ferry.parser.models import (
         DCEAuthor,
         DCEEmoji,
@@ -169,6 +183,55 @@ _SKIP_TYPES = frozenset(
 
 
 @dataclass
+class DeliveryOutcomes:
+    """Run-local source counts, merged by the existing message owners."""
+
+    verified: int = 0
+    partial: int = 0
+    unresolved: int = 0
+    revision: int = field(default=0, init=False, repr=False)
+    _pending: dict[DeliveryRef | tuple[str, str], str] = field(default_factory=dict, repr=False)
+
+    def record(
+        self, ref: DeliveryRef | tuple[str, str], *, acknowledged: bool, complete: bool
+    ) -> None:
+        """Count one selected logical source, never an individual part."""
+        self.revision += 1
+        key = replace(ref, generation="base") if isinstance(ref, DeliveryRef) else ref
+        prior = self._pending.pop(key, None)
+        if prior == "partial":
+            self.partial -= 1
+            acknowledged = True
+        elif prior == "unresolved":
+            self.unresolved -= 1
+        if complete:
+            self.verified += 1
+        elif acknowledged:
+            self.partial += 1
+            self._pending[key] = "partial"
+        else:
+            self.unresolved += 1
+            self._pending[key] = "unresolved"
+
+    def merge(self, other: DeliveryOutcomes) -> None:
+        """Fold a channel result into this run's totals."""
+        self.verified += other.verified
+        for ref, category in other._pending.items():
+            self.record(ref, acknowledged=category == "partial", complete=False)
+        self.revision += 1
+
+    def detail(self) -> dict[str, object]:
+        """Return an independent event snapshot of these counters."""
+        return {
+            "delivery": {
+                "verified": self.verified,
+                "partial": self.partial,
+                "unresolved": self.unresolved,
+            }
+        }
+
+
+@dataclass
 class ChannelResult:
     """Per-channel accumulator — merged into main state after completion."""
 
@@ -184,6 +247,10 @@ class ChannelResult:
     #: suppress the fallback, resolving the reference to nothing. The write site is
     #: guarded on ``if stoat_msg_id:`` for exactly this reason.
     message_map_updates: dict[str, str] = field(default_factory=dict)
+    delivery_markers: dict[str, str] = field(default_factory=dict)
+    delivery_tokens: dict[str, str] = field(default_factory=dict)
+    resolved_deliveries: set[tuple[str, str]] = field(default_factory=set)
+    delivery_outcomes: DeliveryOutcomes = field(default_factory=DeliveryOutcomes)
     pending_pins: list[tuple[str, str]] = field(default_factory=list)
     pending_reactions: list[dict[str, object]] = field(default_factory=list)
     attachments_uploaded: int = 0
@@ -198,7 +265,11 @@ class ChannelResult:
     reactions_dropped: int = 0  # Batch 4 (S1): unmapped-emoji reactions silently dropped
 
 
-def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
+def _merge_channel_result(
+    state: MigrationState,
+    result: ChannelResult,
+    delivery_outcomes: DeliveryOutcomes | None = None,
+) -> None:
     """Merge a per-channel result into the shared migration state."""
     state.warnings.extend(result.warnings)
     state.errors.extend(result.errors)
@@ -241,6 +312,29 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
     state.replies_linked += result.replies_linked
     state.replies_total += result.replies_total
     state.reactions_dropped += result.reactions_dropped
+    # Clear fully resolved failures before checkpointing can retire their receipts.
+    # A first-part map entry alone cannot prove a multipart delivery finished.
+    state.failed_messages = [
+        fm
+        for fm in state.failed_messages
+        if not (
+            (fm.discord_msg_id, fm.stoat_channel_id) in result.resolved_deliveries
+            and (
+                fm.delivery_ref is None
+                or (
+                    fm.delivery_ref.source_channel_id == result.channel_id
+                    and fm.delivery_ref.family == "ordinary"
+                )
+            )
+        )
+    ]
+    state.delivery_bookkeeping.update(result.delivery_markers)
+    for receipt_id, digest in result.delivery_tokens.items():
+        consume_delivery(
+            state, DeliveryToken(receipt_id, digest), result.delivery_markers[receipt_id]
+        )
+    if delivery_outcomes is not None:
+        delivery_outcomes.merge(result.delivery_outcomes)
 
 
 def _skip_attachment(
@@ -350,6 +444,7 @@ async def run_messages(
         exports: Parsed DCE export files (one per channel/thread).
         on_event: Callback for progress events.
     """
+    delivery_outcomes = DeliveryOutcomes()
     # Validate reaction_mode — fall back to "text" on unrecognised values.
     if config.reaction_mode not in _VALID_REACTION_MODES:
         state.warnings.append(
@@ -400,6 +495,7 @@ async def run_messages(
                 phase="messages",
                 status="completed",
                 message=f"[DRY RUN] Mapped {total_msgs} messages",
+                detail=delivery_outcomes.detail(),
             )
         )
         return
@@ -467,6 +563,7 @@ async def run_messages(
                     channel_sem=channel_sem,
                     save_lock=save_lock,
                     source_channel_names=source_channel_names,
+                    delivery_outcomes=delivery_outcomes,
                 ),
                 name=f"channel-{export.channel.id}",
             )
@@ -511,7 +608,7 @@ async def run_messages(
                 continue
             # Success — merge + mark complete (idempotent with the worker's own self-merge +
             # result-reset; kept defensively, NOT load-bearing).
-            _merge_channel_result(state, result)
+            _merge_channel_result(state, result, delivery_outcomes)
             state.completed_channel_ids.add(export.channel.id)
 
         # Cancel takes precedence over a concurrent crash: a user cancel must reach the
@@ -534,7 +631,14 @@ async def run_messages(
                 stoat_id = state.channel_map.get(exp.channel.id)
                 if stoat_id:
                     parent_name_to_stoat[exp.channel.name] = stoat_id
-        await _merge_threads(thread_exports, config, state, on_event, parent_name_to_stoat)
+        await _merge_threads(
+            thread_exports,
+            config,
+            state,
+            on_event,
+            parent_name_to_stoat,
+            delivery_outcomes=delivery_outcomes,
+        )
     elif thread_strategy == "archive" and thread_exports:
         _archive_threads(thread_exports, config, state, on_event)
 
@@ -543,6 +647,7 @@ async def run_messages(
             phase="messages",
             status="completed",
             message="Message import complete.",
+            detail={**delivery_outcomes.detail(), "remaining_failed": len(state.failed_messages)},
         )
     )
 
@@ -552,6 +657,135 @@ async def run_messages(
 # ---------------------------------------------------------------------------
 
 
+async def _process_merged_message(
+    *,
+    export: DCEExport,
+    msg: DCEMessage,
+    stoat_channel_id: str,
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+    delivery_ref: DeliveryRef | None = None,
+    allow_rejected_retry: bool = False,
+    retry_failure: FailedMessage | None = None,
+    delivery_outcomes: DeliveryOutcomes | None = None,
+) -> bool:
+    """Render one selected merged message and return full delivery resolution."""
+    if msg.type in _SKIP_TYPES:
+        return False
+    content = _build_content(_merge_forwarded(msg), state)
+    masquerade, masq_escaped = await _build_masquerade(msg.author, session, state, config)
+    if masq_escaped:
+        state.warnings.append(
+            {
+                "phase": "messages",
+                "type": "unsafe_media_path",
+                "message": (
+                    f"Masquerade avatar for {msg.author.name} failed the "
+                    "export-root containment check; skipped."
+                ),
+            }
+        )
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="warning",
+                message=f"Masquerade avatar for {msg.author.name} unsafe path; skipped.",
+            )
+        )
+    parts = _split_message(content)
+    ref = delivery_ref or DeliveryRef(export.channel.id, msg.id, stoat_channel_id, "merged")
+    legacy_keys: tuple[str, ...] = ()
+    context_error: Exception | None = None
+    if retry_failure is not None:
+        try:
+            ref, legacy_keys = retry_delivery_context(state, config.output_dir, ref, retry_failure)
+        except Exception as exc:  # noqa: BLE001
+            context_error = exc
+    render_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "parts": parts,
+                "masquerade": {key: value for key, value in masquerade.items() if key != "avatar"},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    failed = False
+    first_id = ""
+    latest_token: DeliveryToken | None = None
+    fully_resolved = False
+    acknowledged_parts = 0
+    for part_index, part_content in enumerate(parts):
+        try:
+            if context_error is not None:
+                raise context_error
+            result = await deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=part_index,
+                part_count=len(parts),
+                render_digest=render_digest,
+                content=part_content,
+                masquerade=masquerade,
+                allow_rejected_retry=allow_rejected_retry,
+                legacy_keys=legacy_keys,
+            )
+            latest_token = result.token
+            fully_resolved = result.fully_resolved
+            acknowledged_parts += 1
+            if part_index == 0:
+                first_id = result.message_id
+        except Exception as exc:  # noqa: BLE001
+            safe_exc = safe_sanitize(config.token_store, str(exc))
+            state.warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "merge_message_failed",
+                    "message": f"Merge message {msg.id} failed: {safe_exc}",
+                }
+            )
+            if not failed:
+                failed = True
+                failure_ref: DeliveryRef | None = ref
+                if retry_failure is not None and retry_failure.delivery_ref is None:
+                    failure_ref = None
+                    try:
+                        if (
+                            state.delivery_namespace
+                            and read_delivery_receipt(state, config.output_dir, ref) is not None
+                        ):
+                            failure_ref = ref
+                    except StateError:
+                        pass
+                state.failed_messages.append(
+                    FailedMessage(
+                        discord_msg_id=msg.id,
+                        stoat_channel_id=stoat_channel_id,
+                        error=safe_exc,
+                        content_preview=content[:50] if content else "",
+                        delivery_ref=failure_ref,
+                    )
+                )
+    if delivery_outcomes is not None:
+        delivery_outcomes.record(
+            ref,
+            acknowledged=acknowledged_parts > 0,
+            complete=not failed and fully_resolved and bool(first_id),
+        )
+    if failed or not fully_resolved or latest_token is None or not first_id:
+        return False
+    # The merge loop still owns source progress and its checkpoint. Consumption
+    # becomes durable only when that owner saves its normal state successfully.
+    state.delivery_bookkeeping[latest_token.receipt_id] = first_id
+    consume_delivery(state, latest_token, first_id)
+    return True
+
+
 async def _merge_threads(
     thread_exports: list[DCEExport],
     config: FerryConfig,
@@ -559,8 +793,9 @@ async def _merge_threads(
     on_event: EventCallback,
     parent_name_to_stoat: dict[str, str],
     *,
-    idempotency_salt: str = "",
+    replacement_ref: Callable[[DeliveryRef], DeliveryRef] | None = None,
     reconcile_failed: bool = False,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> None:
     """Merge thread messages into their parent channels with separators.
 
@@ -573,13 +808,9 @@ async def _merge_threads(
         state: Migration state.
         on_event: Event callback.
         parent_name_to_stoat: Mapping of parent channel name to Stoat channel ID.
-        idempotency_salt: Appended to every Idempotency-Key. Empty for the migration,
-            so its keys are unchanged. ``ferry repair`` passes the recreated channel's
-            id (#310): the keys are built from Discord ids that a recreated channel
-            does not change, and a key still in Stoat's cache answers 409 with no
-            message id, which would drop the message from a channel that is new.
+        replacement_ref: Existing repair owner saves identity for selected
+            replacement messages and separators. Does not select source work.
     """
-    _salt = f"-{idempotency_salt}" if idempotency_salt else ""
     async with get_session(config) as session:
         for export in thread_exports:
             parent_name = export.parent_channel_name or ""
@@ -601,19 +832,26 @@ async def _merge_threads(
                 )
                 continue
 
-            # These two markers are the ONLY thing preventing a re-run from
-            # duplicating this thread into the parent channel. The Idempotency-Key
-            # header does not help: Stoat's store is a 1000-entry in-memory LRU with
-            # no TTL, cleared on restart, and a hit returns 409 rather than the
-            # original message. And unlike flatten, the merge path never writes
-            # `message_map`, so there is no second line of defence here.
+            # These markers select continuation work. Receipts recover selected
+            # sends, but do not reopen work below a resume marker. The merge path
+            # does not write the parent-owned message_map.
             #
             # Batch 6 (#107): mirrors the flatten read at :808-826.
             # --resume reads the TRANSIENT per-thread offset, which is where a crashed
             # run stopped inside this thread and is cleared once the thread completes.
             # --incremental reads the DURABLE high-water mark, taking the transient
             # offset too in case a crash left it ahead. Plain runs skip nothing.
-            if config.resume:
+            replacement_continuation = (
+                replacement_ref is not None
+                and delivery_receipt_id(
+                    DeliveryRef(export.channel.id, export.channel.id, parent_stoat_id, "separator")
+                )
+                in state.pending_delivery_replacements
+            )
+            if replacement_ref is not None and not replacement_continuation:
+                # Old-channel offsets cannot cover a newly authorized replacement.
+                state.channel_message_offsets.pop(export.channel.id, None)
+            if replacement_continuation or config.resume:
                 _thread_skip_below = state.channel_message_offsets.get(export.channel.id, "")
             elif config.incremental:
                 _thread_skip_below = max(
@@ -646,15 +884,23 @@ async def _merge_threads(
             # is a pure continuation. The message is not lost -- it stays in
             # `state.failed_messages`, is reported as a failure, and an --incremental run
             # self-heals it. See `test_resume_keeps_a_failed_merge_message_recoverable`.
-            _failed_ids_here = (
-                {
-                    fm.discord_msg_id
-                    for fm in state.failed_messages
-                    if fm.stoat_channel_id == parent_stoat_id
-                }
-                if config.incremental or reconcile_failed
-                else set()
-            )
+            _failures_here: dict[str, FailedMessage] = {}
+            if config.incremental or reconcile_failed:
+                for failure in state.failed_messages:
+                    recorded = failure.delivery_ref
+                    if (
+                        failure.stoat_channel_id == parent_stoat_id
+                        and (
+                            recorded is None
+                            or (
+                                recorded.source_channel_id == export.channel.id
+                                and recorded.family == "merged"
+                            )
+                        )
+                        and (failure.discord_msg_id not in _failures_here or recorded is not None)
+                    ):
+                        _failures_here[failure.discord_msg_id] = failure
+            _failed_ids_here = set(_failures_here)
             _succeeded_ids: set[str] = set()
             _thread_max_id = 0
             _posted = 0
@@ -668,25 +914,30 @@ async def _merge_threads(
             _already_started = export.channel.id in state.channel_high_water or (
                 export.channel.id in state.channel_message_offsets
             )
+            separator_result: DeliveryResult | None = None
             if not ((config.incremental or config.resume) and _already_started):
                 separator = (
                     f"\u2500\u2500 Thread: {export.channel.name} "
                     f"({export.message_count} messages) \u2500\u2500"
                 )
                 try:
-                    await api_send_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        parent_stoat_id,
+                    separator_ref = DeliveryRef(
+                        export.channel.id, export.channel.id, parent_stoat_id, "separator"
+                    )
+                    if replacement_ref is not None:
+                        separator_ref = replacement_ref(separator_ref)
+                    separator_result = await deliver_part(
+                        session=session,
+                        config=config,
+                        state=state,
+                        ref=separator_ref,
+                        part_index=0,
+                        part_count=1,
+                        render_digest=hashlib.sha256(separator.encode()).hexdigest(),
                         content=separator,
                         masquerade={"name": "Discord Ferry"},
-                        idempotency_key=f"ferry-thread-sep-{export.channel.id}{_salt}",
+                        allow_rejected_retry=config.incremental or reconcile_failed,
                     )
-                except DuplicateSendError:
-                    # Already on the server. The return value is discarded here, so a
-                    # duplicate is indistinguishable from a success.
-                    pass
                 except Exception as exc:  # noqa: BLE001
                     safe_exc = safe_sanitize(config.token_store, str(exc))
                     state.warnings.append(
@@ -753,11 +1004,8 @@ async def _merge_threads(
                 # so incremental gating is untouched. Above _build_masquerade so a
                 # suppressed message costs no Autumn avatar upload.
                 #
-                # Known miss, deferred as #240: a parent send that landed under a 409
-                # DuplicateNonce sets `duplicate_unmapped` in _process_message and writes
-                # no map entry, so it is invisible here and that one case still
-                # duplicates. Pinned by
-                # test_merge_still_duplicates_after_a_parent_duplicate_nonce.
+                # Ordinary receipt recovery restores the parent map before this
+                # loop, so a recovered origin is suppressed by the same rule.
                 if msg.id in state.message_map:
                     # NOT counted in _posted: nothing was sent, and _posted feeds the
                     # user-facing "Merged thread X (N messages)" event. Pinned by
@@ -785,88 +1033,45 @@ async def _merge_threads(
                     )
                     continue
 
-                # This path never enters _process_message, so the forwarded payload has
-                # to be promoted here too -- otherwise a forward inside a merged thread
-                # is sent as an empty message with no warning.
-                content = _build_content(_merge_forwarded(msg), state)
-                masquerade, masq_escaped = await _build_masquerade(
-                    msg.author, session, state, config
-                )
-                if masq_escaped:
-                    state.warnings.append(
-                        {
-                            "phase": "messages",
-                            "type": "unsafe_media_path",
-                            "message": (
-                                f"Masquerade avatar for {msg.author.name} failed the "
-                                "export-root containment check; skipped."
-                            ),
-                        }
-                    )
-                    on_event(
-                        MigrationEvent(
-                            phase="messages",
-                            status="warning",
-                            message=(
-                                f"Masquerade avatar for {msg.author.name} unsafe path; skipped."
-                            ),
-                        )
-                    )
-                parts = _split_message(content)
-
-                _msg_failed = False
-                for part_idx, part_content in enumerate(parts):
-                    idem_key = (
-                        f"ferry-merge-{msg.id}{_salt}"
-                        if len(parts) == 1
-                        else f"ferry-merge-{msg.id}{_salt}_p{part_idx + 1}"
-                    )
-                    try:
-                        await api_send_message(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            parent_stoat_id,
-                            content=part_content,
-                            masquerade=masquerade,
-                            idempotency_key=idem_key,
-                        )
-                    except DuplicateSendError:
-                        # Already on the server. _msg_failed deliberately stays False so
-                        # the message still reaches _succeeded_ids and drives
-                        # reconciliation. Recording a FailedMessage here is the defect
-                        # this batch fixes: --incremental re-attempts previously-failed
-                        # ids, the idempotency LRU has evicted the key by then, and the
-                        # re-send succeeds, leaving a real duplicate in the channel.
-                        continue
-                    except Exception as exc:  # noqa: BLE001
-                        safe_exc = safe_sanitize(config.token_store, str(exc))
-                        state.warnings.append(
-                            {
-                                "phase": "messages",
-                                "type": "merge_message_failed",
-                                "message": f"Merge message {msg.id} failed: {safe_exc}",
-                            }
-                        )
-                        # Batch 7 S1: record the failure ONCE per message (a multi-part
-                        # message strands on the first failing part) so it lands in
-                        # failed_messages — recoverable via incremental re-attempt / retry.
-                        if not _msg_failed:
-                            _msg_failed = True
-                            state.failed_messages.append(
-                                FailedMessage(
-                                    discord_msg_id=msg.id,
-                                    stoat_channel_id=parent_stoat_id,
-                                    error=safe_exc,
-                                    content_preview=content[:50] if content else "",
+                message_ref = DeliveryRef(export.channel.id, msg.id, parent_stoat_id, "merged")
+                if replacement_ref is not None:
+                    message_ref = replacement_ref(message_ref)
+                if await _process_merged_message(
+                    export=export,
+                    msg=msg,
+                    stoat_channel_id=parent_stoat_id,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=on_event,
+                    delivery_ref=message_ref,
+                    allow_rejected_retry=config.incremental or reconcile_failed,
+                    retry_failure=_failures_here.get(msg.id) if replacement_ref is None else None,
+                    delivery_outcomes=delivery_outcomes,
+                ):
+                    _succeeded_ids.add(msg.id)
+                    # Reconcile before the mid-thread checkpoint can retire the
+                    # acknowledged receipt. Keep sibling and partial failures.
+                    state.failed_messages = [
+                        fm
+                        for fm in state.failed_messages
+                        if not (
+                            fm.discord_msg_id == msg.id
+                            and fm.stoat_channel_id == parent_stoat_id
+                            and (
+                                fm.delivery_ref is None
+                                or (
+                                    fm.delivery_ref.source_channel_id == export.channel.id
+                                    and fm.delivery_ref.family == "merged"
                                 )
                             )
-
-                # A message that POSTed all parts cleanly drives reconciliation (drop on
-                # success); a failed one is left in failed_messages for the next run.
-                if not _msg_failed:
-                    _succeeded_ids.add(msg.id)
+                        )
+                    ]
                 _posted += 1
+                if replacement_ref is not None and msg.id.isdigit():
+                    # Saving the next replacement intent may retire this receipt.
+                    # Carry its normal progress in that same successful snapshot.
+                    state.channel_message_offsets[export.channel.id] = msg.id
 
                 # Batch 6 (#107): checkpoint inside the thread. Without this a crash
                 # loses the record of everything sent since the phase began, and the
@@ -904,18 +1109,31 @@ async def _merge_threads(
             # succeeded message still recorded as failed — an inaccurate durable
             # record, and a duplicate send the next time it is re-attempted.
             if (config.incremental or reconcile_failed) and _failed_ids_here:
-                _seen: set[str] = set()
+                _seen: dict[str, int] = {}
                 _reconciled: list[FailedMessage] = []
                 for fm in state.failed_messages:
                     if (
                         fm.stoat_channel_id == parent_stoat_id
                         and fm.discord_msg_id in _failed_ids_here
+                        and (
+                            fm.delivery_ref is None
+                            or (
+                                fm.delivery_ref.source_channel_id == export.channel.id
+                                and fm.delivery_ref.family == "merged"
+                            )
+                        )
                     ):
                         if fm.discord_msg_id in _succeeded_ids:
                             continue  # succeeded this run -> drop
                         if fm.discord_msg_id in _seen:
+                            prior_index = _seen[fm.discord_msg_id]
+                            prior = _reconciled[prior_index]
+                            if prior.delivery_ref is None and fm.delivery_ref is not None:
+                                _reconciled[prior_index] = replace(
+                                    prior, delivery_ref=fm.delivery_ref
+                                )
                             continue  # carried + re-fail dup -> collapse
-                        _seen.add(fm.discord_msg_id)
+                        _seen[fm.discord_msg_id] = len(_reconciled)
                     _reconciled.append(fm)
                 state.failed_messages = _reconciled
 
@@ -923,6 +1141,8 @@ async def _merge_threads(
             # so the transient offset has nothing left to say. Clearing it is what
             # makes the separator gate distinguish "mid-flight" from "finished".
             state.channel_message_offsets.pop(export.channel.id, None)
+            if separator_result is not None and _thread_max_id:
+                consume_delivery(state, separator_result.token, separator_result.message_id)
             save_state(state, config.output_dir)
 
             on_event(
@@ -934,6 +1154,7 @@ async def _merge_threads(
                         f"({_posted} messages) into parent channel."
                     ),
                     channel_name=export.channel.name,
+                    detail=delivery_outcomes.detail() if delivery_outcomes is not None else None,
                 )
             )
 
@@ -1039,6 +1260,7 @@ async def _process_single_channel(
     channel_sem: asyncio.Semaphore,
     save_lock: asyncio.Lock,
     source_channel_names: dict[str, str],
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> ChannelResult:
     """Process all messages in a single channel, returning a ChannelResult.
 
@@ -1061,6 +1283,7 @@ async def _process_single_channel(
         # Inject a system header for flattened threads/forum posts.
         # Gate on a missing durable marker so an unchanged (previously-completed)
         # thread/forum channel makes zero POSTs on an incremental run.
+        header_result: DeliveryResult | None = None
         if (
             export.is_thread
             and export.parent_channel_name
@@ -1071,18 +1294,20 @@ async def _process_single_channel(
             else:
                 header = f"[Thread migrated from #{export.parent_channel_name}]"
             try:
-                await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    stoat_channel_id,
+                header_result = await deliver_part(
+                    session=session,
+                    config=config,
+                    state=state,
+                    ref=DeliveryRef(
+                        export.channel.id, export.channel.id, stoat_channel_id, "header"
+                    ),
+                    part_index=0,
+                    part_count=1,
+                    render_digest=hashlib.sha256(header.encode()).hexdigest(),
                     content=header,
                     masquerade={"name": "Discord Ferry"},
-                    idempotency_key=f"ferry-header-{export.channel.id}",
+                    allow_rejected_retry=config.incremental,
                 )
-            except DuplicateSendError:
-                # Already on the server. The return value is discarded here.
-                pass
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(
                     {
@@ -1146,15 +1371,25 @@ async def _process_single_channel(
         # and an --incremental run self-heals it. Re-sending under resume would risk
         # duplicating a message that actually landed before the response was lost,
         # which is a trade-off only the opt-in delta mode makes.
+        _failures_here: dict[str, FailedMessage] = {}
         if config.incremental:
-            _failed_ids_here = {
-                fm.discord_msg_id
-                for fm in state.failed_messages
-                if fm.stoat_channel_id == stoat_channel_id
-            }
-        else:
-            _failed_ids_here = set()
+            for failure in state.failed_messages:
+                recorded = failure.delivery_ref
+                if (
+                    failure.stoat_channel_id == stoat_channel_id
+                    and (
+                        recorded is None
+                        or (
+                            recorded.source_channel_id == export.channel.id
+                            and recorded.family == "ordinary"
+                        )
+                    )
+                    and (failure.discord_msg_id not in _failures_here or recorded is not None)
+                ):
+                    _failures_here[failure.discord_msg_id] = failure
+        _failed_ids_here = set(_failures_here)
         _channel_max_id = 0
+        _resolved_deliveries: set[tuple[str, str]] = set()
         _skipped = 0
         _copied = 0
         _retried = 0
@@ -1194,7 +1429,9 @@ async def _process_single_channel(
                 channel_result=result,
                 export_channel_id=export.channel.id,
                 source_channel_names=source_channel_names,
+                retry_failure=_failures_here.get(msg.id),
             )
+            _resolved_deliveries.update(result.resolved_deliveries)
 
             # Periodic progress event and state save.
             if (idx + 1) % _checkpoint_interval == 0:
@@ -1206,7 +1443,7 @@ async def _process_single_channel(
                         if msg.id.isdigit():
                             state.channel_message_offsets[export.channel.id] = msg.id
                         # Merge partial result before saving so checkpoint includes progress.
-                        _merge_channel_result(state, result)
+                        _merge_channel_result(state, result, delivery_outcomes)
                         save_state(state, config.output_dir)
                         # Reset result to avoid double-counting on next merge.
                         result = ChannelResult(channel_id=export.channel.id)
@@ -1219,6 +1456,9 @@ async def _process_single_channel(
                         current=idx + 1,
                         total=total,
                         channel_name=export.channel.name,
+                        detail=delivery_outcomes.detail()
+                        if delivery_outcomes is not None
+                        else None,
                     )
                 )
 
@@ -1227,32 +1467,47 @@ async def _process_single_channel(
 
         # Channel complete — save state for crash recovery.
         async with save_lock:
-            _merge_channel_result(state, result)
+            _merge_channel_result(state, result, delivery_outcomes)
             state.completed_channel_ids.add(export.channel.id)
             # Durable high-water mark — survives completion (unlike the transient
             # offset below) so a later --incremental run skips already-copied messages.
             if _channel_max_id:
                 state.channel_high_water[export.channel.id] = str(_channel_max_id)
+                if header_result is not None:
+                    consume_delivery(state, header_result.token, header_result.message_id)
             state.channel_message_offsets.pop(export.channel.id, None)
-            # #76 reconcile this channel's previously-failed ids: drop any that
-            # succeeded this run (now in message_map), and collapse the carried +
-            # fresh-re-fail duplicate to a single entry. Scoped to this channel so
+            # Reconcile this channel's previously-failed ids only after every
+            # required part resolves, not merely its first-part map entry. Collapse
+            # carried and fresh re-failures to one entry. Scoped to this channel so
             # other channels' and brand-new failures are untouched.
             #
             # This gate MUST match the one building _failed_ids_here above.
             if config.incremental and _failed_ids_here:
-                _seen: set[str] = set()
+                _seen: dict[str, int] = {}
                 _reconciled: list[FailedMessage] = []
                 for fm in state.failed_messages:
                     if (
                         fm.stoat_channel_id == stoat_channel_id
                         and fm.discord_msg_id in _failed_ids_here
+                        and (
+                            fm.delivery_ref is None
+                            or (
+                                fm.delivery_ref.source_channel_id == export.channel.id
+                                and fm.delivery_ref.family == "ordinary"
+                            )
+                        )
                     ):
-                        if fm.discord_msg_id in state.message_map:
+                        if (fm.discord_msg_id, fm.stoat_channel_id) in _resolved_deliveries:
                             continue  # succeeded this run -> drop (S2-AC6)
                         if fm.discord_msg_id in _seen:
+                            prior_index = _seen[fm.discord_msg_id]
+                            prior = _reconciled[prior_index]
+                            if prior.delivery_ref is None and fm.delivery_ref is not None:
+                                _reconciled[prior_index] = replace(
+                                    prior, delivery_ref=fm.delivery_ref
+                                )
                             continue  # carried + re-fail dup -> collapse (S2-AC7)
-                        _seen.add(fm.discord_msg_id)
+                        _seen[fm.discord_msg_id] = len(_reconciled)
                     _reconciled.append(fm)
                 state.failed_messages = _reconciled
             save_state(state, config.output_dir)
@@ -1274,6 +1529,7 @@ async def _process_single_channel(
                 current=total,
                 total=total,
                 channel_name=export.channel.name,
+                detail=delivery_outcomes.detail() if delivery_outcomes is not None else None,
             )
         )
 
@@ -1297,7 +1553,11 @@ async def _process_message(
     export_channel_id: str = "",
     idempotency_salt: str = "",
     source_channel_names: dict[str, str] | None = None,
-) -> None:
+    allow_rejected_retry: bool = False,
+    delivery_ref: DeliveryRef | None = None,
+    retry_failure: FailedMessage | None = None,
+    delivery_outcomes: DeliveryOutcomes | None = None,
+) -> bool:
     """Process and send a single message.
 
     When *channel_result* is provided, accumulators (warnings, errors, counters)
@@ -1329,7 +1589,7 @@ async def _process_message(
 
     # Step 0: Filter by type.
     if msg.type in _SKIP_TYPES:
-        return
+        return False
 
     # ChannelPinnedMessage: mark the referenced message for re-pinning, don't send.
     if msg.type == "ChannelPinnedMessage":
@@ -1356,7 +1616,7 @@ async def _process_message(
                         ),
                     }
                 )
-        return
+        return False
 
     # DCE 2.47+ exports carry the forwarded payload; recover it rather than skip.
     if msg.forwarded_message is not None:
@@ -1380,7 +1640,7 @@ async def _process_message(
                 message=f"Forwarded message {msg.id} skipped.",
             )
         )
-        return
+        return False
 
     # Step 0b: Detect attachment overflow (Stoat limit: 5 per message).
     overflow_text = ""
@@ -1714,60 +1974,94 @@ async def _process_message(
 
     # Step 8: Send the message (all parts).
     stoat_msg_id: str = ""
-    duplicate_unmapped = False
+    source_channel = export_channel_id or (
+        channel_result.channel_id if channel_result is not None else ""
+    )
+    if not source_channel:
+        candidates = [key for key, value in state.channel_map.items() if value == stoat_channel_id]
+        if len(candidates) != 1:
+            raise DeliveryUnresolvedError("Selected delivery lacks a unique source channel")
+        source_channel = candidates[0]
+    ref = DeliveryRef(source_channel, msg.id, stoat_channel_id, "ordinary")
+    if delivery_ref is not None:
+        if (
+            delivery_ref.source_channel_id != source_channel
+            or delivery_ref.source_message_id != msg.id
+            or delivery_ref.destination_channel_id != stoat_channel_id
+            or delivery_ref.family != "ordinary"
+        ):
+            raise DeliveryUnresolvedError("Selected ordinary delivery has a mismatched reference")
+        ref = delivery_ref
+    legacy_keys: tuple[str, ...] = ()
+    context_error: Exception | None = None
+    if retry_failure is not None:
+        try:
+            ref, legacy_keys = retry_delivery_context(state, config.output_dir, ref, retry_failure)
+            if legacy_keys and idempotency_salt:
+                legacy_keys = (*legacy_keys, f"ferry-{msg.id}-{idempotency_salt}")
+        except Exception as exc:  # noqa: BLE001
+            context_error = exc
+    receipt_id = delivery_receipt_id(ref)
+    render = {
+        "parts": parts,
+        "embeds": [
+            {key: value for key, value in embed.items() if key != "media"} for embed in stoat_embeds
+        ],
+        "masquerade": {key: value for key, value in masquerade.items() if key != "avatar"},
+        "replies": replies,
+        "attachments": [asdict(item) for item in msg.attachments],
+        "source_embeds": msg.embeds,
+        "stickers": msg.stickers,
+    }
+    render_digest = hashlib.sha256(
+        json.dumps(render, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    confirmed_autumn_ids: tuple[str, ...] = ()
+    latest_token: DeliveryToken | None = None
+    fully_resolved = False
     _send_failed = False
     _send_exc: Exception | None = None
     _send_exc_str = ""
     _parts_failed = 0
     for part_idx, part_content in enumerate(parts):
         is_first = part_idx == 0
-        # The salt exists for ferry repair. Stoat's Idempotency-Key store is a
-        # 1000-entry in-memory LRU with no TTL, and this key is built from the
-        # DISCORD message id, which a recreated channel does not change. So a
-        # repair running while those keys are still cached would be answered
-        # 409 DuplicateNonce and treat the message as already delivered, when
-        # the channel holding it was deleted and it is not there at all.
-        # Repair passes the new Stoat channel id, which makes the key unique
-        # to that recreation. Empty for the migration, so its keys are
-        # unchanged.
-        _salt = f"-{idempotency_salt}" if idempotency_salt else ""
-        idem_key = (
-            f"ferry-{msg.id}{_salt}"
-            if len(parts) == 1
-            else f"ferry-{msg.id}{_salt}_p{part_idx + 1}"
-        )
         try:
-            result = await api_send_message(
-                session,
-                config.stoat_url,
-                config.token,
-                stoat_channel_id,
+            if context_error is not None:
+                raise context_error
+            result = await deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=part_idx,
+                part_count=len(parts),
+                render_digest=render_digest,
                 content=part_content,
                 # Attachments, embeds, and replies only on the first part.
                 attachments=(autumn_ids if autumn_ids and is_first else None),
                 embeds=(stoat_embeds if stoat_embeds and is_first else None),
                 masquerade=masquerade,
                 replies=(replies if replies and is_first else None),
-                idempotency_key=idem_key,
+                allow_rejected_retry=allow_rejected_retry or config.incremental,
+                legacy_keys=legacy_keys,
             )
-        except DuplicateSendError:
-            # This part is already on the server. The catch is PER PART, not around
-            # the loop: every part carries its own Idempotency-Key, so the parts
-            # after a duplicate are NOT duplicates and must still be sent. Catching
-            # at the loop truncates the message and loses their content with no
-            # warning, which is worse than the bug this batch fixes.
-            #
-            # Only the first part's id reaches message_map, so only it is worth
-            # noting. Stoat returns no id with the 409, so that entry is lost.
-            if is_first:
-                duplicate_unmapped = True
-            continue
         except Exception as exc:  # noqa: BLE001
             _parts_failed += 1
             if not _send_failed:
                 _send_failed = True
                 _send_exc = exc
                 _send_exc_str = safe_sanitize(config.token_store, str(exc))
+                failure_ref: DeliveryRef | None = ref
+                if retry_failure is not None and retry_failure.delivery_ref is None:
+                    failure_ref = None
+                    try:
+                        if (
+                            state.delivery_namespace
+                            and read_delivery_receipt(state, config.output_dir, ref) is not None
+                        ):
+                            failure_ref = ref
+                    except StateError:
+                        pass
                 acc_errors.append(
                     {
                         "phase": "messages",
@@ -1781,6 +2075,7 @@ async def _process_message(
                         stoat_channel_id=stoat_channel_id,
                         error=_send_exc_str,
                         content_preview=content[:50] if content else "",
+                        delivery_ref=failure_ref,
                     )
                 )
                 on_event(
@@ -1791,9 +2086,12 @@ async def _process_message(
                     )
                 )
             continue
-        part_stoat_id: str = result["_id"]
+        part_stoat_id = result.message_id
+        latest_token = result.token
+        fully_resolved = result.fully_resolved
         if is_first:
             stoat_msg_id = part_stoat_id
+            confirmed_autumn_ids = result.autumn_ids
 
     # Step 8a: Commit delivered state and queue pins/reactions.
     #
@@ -1801,31 +2099,21 @@ async def _process_message(
     # outer try provided for this region. An unexpected exception here is caught,
     # recorded, and (on the retry path) re-raised rather than propagating unguarded.
     try:
-        if stoat_msg_id or duplicate_unmapped:
-            # Only the statements that CONSUME the id are guarded. The counters and the
-            # reference-set updates run either way, because the message IS on the server.
-            #
-            # Do NOT fold `stoat_msg_id` into the branch condition above. `else` means
-            # "not the condition above", not "the retry path", so a parallel-path message
-            # with an empty id would fall into the retry branch and write
-            # state.message_map directly, bypassing ChannelResult and the save_lock
-            # discipline. Both branches leave the same channel_message_counts, so no
-            # state-level test can see that mistake.
-            # Pinned by test_duplicate_runs_the_parallel_branch_not_the_retry_branch.
+        bookkeeping_done = state.delivery_bookkeeping.get(receipt_id) == stoat_msg_id or (
+            channel_result is not None
+            and channel_result.delivery_markers.get(receipt_id) == stoat_msg_id
+        )
+        if stoat_msg_id:
             if channel_result is not None:
-                # This guard is load-bearing twice over: it keeps an empty id out of the
-                # map, and it upholds the ChannelResult.message_map_updates invariant
-                # that the reply and pin lookups rely on. See the field's own comment.
-                if stoat_msg_id:
-                    channel_result.message_map_updates[msg.id] = stoat_msg_id
-                channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
-                channel_result.messages_migrated += 1  # S15: track for forum index rebuild
+                channel_result.message_map_updates[msg.id] = stoat_msg_id
+                channel_result.referenced_autumn_ids.update(confirmed_autumn_ids)
+                if not bookkeeping_done:
+                    channel_result.messages_migrated += 1
             else:
-                if stoat_msg_id:
-                    state.message_map[msg.id] = stoat_msg_id
-                state.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
+                state.message_map[msg.id] = stoat_msg_id
+                state.referenced_autumn_ids.update(confirmed_autumn_ids)
                 # S15: Track per-channel message count (direct-state path, e.g. retry).
-                if export_channel_id:
+                if export_channel_id and not bookkeeping_done:
                     state.channel_message_counts[export_channel_id] = (
                         state.channel_message_counts.get(export_channel_id, 0) + 1
                     )
@@ -1844,28 +2132,12 @@ async def _process_message(
                 }
             )
 
-        if duplicate_unmapped:
-            # The message is on the server but Stoat returned no id with the 409, so
-            # nothing can reference it: replies to it will not resolve, and its pin and
-            # reactions are skipped above. Say so rather than reporting a clean run.
-            acc_warnings.append(
-                {
-                    "phase": "messages",
-                    "type": "duplicate_send_unmapped",
-                    "message": (
-                        f"Message {msg.id} was already on the server (duplicate send); "
-                        "its Stoat id could not be recovered, so replies to it and its "
-                        "pins and reactions were skipped"
-                    ),
-                }
-            )
-
-        if msg.is_pinned and stoat_msg_id:
+        if msg.is_pinned and stoat_msg_id and not bookkeeping_done:
             acc_pins.append((stoat_channel_id, stoat_msg_id))
 
         # Step 8b: Queue reactions (only in native mode). Guarded at the block, which
         # covers BOTH append sites, the custom-emoji one and the Unicode one.
-        if _effective_mode == "native" and stoat_msg_id:
+        if _effective_mode == "native" and stoat_msg_id and not bookkeeping_done:
             for reaction in msg.reactions:
                 if reaction.emoji.id:  # Custom emoji.
                     stoat_emoji = state.emoji_map.get(reaction.emoji.id)
@@ -1906,6 +2178,17 @@ async def _process_message(
                         }
                     )
 
+        if stoat_msg_id:
+            if channel_result is not None:
+                channel_result.delivery_markers[receipt_id] = stoat_msg_id
+                if fully_resolved and not _send_failed and latest_token is not None:
+                    channel_result.delivery_tokens[receipt_id] = latest_token.receipt_digest
+                    channel_result.resolved_deliveries.add((msg.id, stoat_channel_id))
+            else:
+                state.delivery_bookkeeping[receipt_id] = stoat_msg_id
+                if fully_resolved and not _send_failed and latest_token is not None:
+                    consume_delivery(state, latest_token, stoat_msg_id)
+
     except Exception as exc:  # noqa: BLE001
         safe_exc = safe_sanitize(config.token_store, str(exc))
         if not _send_failed:
@@ -1922,6 +2205,7 @@ async def _process_message(
                     stoat_channel_id=stoat_channel_id,
                     error=safe_exc,
                     content_preview=content[:50] if content else "",
+                    delivery_ref=ref,
                 )
             )
             on_event(
@@ -1935,6 +2219,16 @@ async def _process_message(
             _send_exc = exc
         if channel_result is None:
             raise
+    finally:
+        outcomes = (
+            channel_result.delivery_outcomes if channel_result is not None else delivery_outcomes
+        )
+        if outcomes is not None:
+            outcomes.record(
+                ref,
+                acknowledged=_parts_failed < len(parts),
+                complete=fully_resolved and _parts_failed == 0,
+            )
 
     # Batch 3 (S1): the retry path (engine.run_retry_failed) calls this with
     # channel_result=None and relies on an exception to mark a re-failure. Re-raise
@@ -1945,6 +2239,7 @@ async def _process_message(
         raise _send_exc
 
     # Step 9: Resume checkpoint handled in the caller's periodic save loop.
+    return bool(stoat_msg_id and fully_resolved and not _send_failed)
 
 
 # ---------------------------------------------------------------------------

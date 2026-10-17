@@ -272,6 +272,9 @@ class _ProgressTracker:
         self.verbose = verbose
         self.phase_status: dict[str, str] = {p: "pending" for p in PHASE_ORDER}
         self.messages_sent = 0
+        self.messages_partial = 0
+        self.messages_unresolved = 0
+        self.failed_records = 0
         self.error_count = 0
         self.warning_count = 0
 
@@ -307,7 +310,10 @@ class _ProgressTracker:
         grid.add_row(self._phase_progress)
         grid.add_row(self._msg_progress)
         stats = (
-            f"Messages: {self.messages_sent:,}  "
+            f"Verified: {self.messages_sent:,}  "
+            f"Partial: {self.messages_partial:,}  "
+            f"Unresolved: {self.messages_unresolved:,}  "
+            f"Failed records: {self.failed_records:,}  "
             f"Errors: {self.error_count}  "
             f"Warnings: {self.warning_count}"
         )
@@ -326,6 +332,23 @@ class _ProgressTracker:
     def on_event(self, event: MigrationEvent) -> None:
         """Handle a migration event — update state and progress bars."""
         self.phase_status[event.phase] = event.status
+        if event.phase == "messages" and isinstance(event.detail, dict):
+            delivery = event.detail.get("delivery")
+            if isinstance(delivery, dict) and all(
+                type(delivery.get(key)) is int and delivery[key] >= 0
+                for key in ("verified", "partial", "unresolved")
+            ):
+                self.messages_sent = delivery["verified"]
+                self.messages_partial = delivery["partial"]
+                self.messages_unresolved = delivery["unresolved"]
+        if (
+            event.phase in ("messages", "report")
+            and event.status == "completed"
+            and isinstance(event.detail, dict)
+        ):
+            remaining = event.detail.get("remaining_failed")
+            if type(remaining) is int and remaining >= 0:
+                self.failed_records = remaining
 
         # User-controlled values (event.message, channel_name, server_name, warnings) are escaped
         # before interpolation into Rich markup. The whole render is additionally guarded against
@@ -389,8 +412,7 @@ class _ProgressTracker:
                             self._log(f"  [yellow]Warning: {_safe(w)}[/]")
                     self._log("")
                 case "progress":
-                    if event.total > 0:
-                        self.messages_sent = event.current
+                    if event.phase == "messages" and event.total > 0:
                         self._msg_progress.update(
                             self._msg_task_id,
                             total=event.total,
@@ -417,7 +439,10 @@ class _ProgressTracker:
         """Print a final summary line."""
         console.print()
         console.print(
-            f"[bold]Done.[/] Messages: {self.messages_sent:,}  "
+            f"[bold]Done.[/] Verified: {self.messages_sent:,}  "
+            f"Partial: {self.messages_partial:,}  "
+            f"Unresolved: {self.messages_unresolved:,}  "
+            f"Failed records: {self.failed_records:,}  "
             f"Errors: {self.error_count}  Warnings: {self.warning_count}"
         )
 
