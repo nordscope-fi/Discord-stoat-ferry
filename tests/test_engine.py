@@ -78,6 +78,51 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
     return FerryConfig(**defaults)  # type: ignore[arg-type]
 
 
+async def test_delivery_namespace_exists_before_first_engine_phase(tmp_path: Path) -> None:
+    async def check_namespace(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        assert state.delivery_namespace, "Namespace must be saved before message-capable phases"
+        assert load_state(config.output_dir).delivery_namespace == state.delivery_namespace
+
+    overrides = {**_NOOP_OVERRIDES, "connect": check_namespace}
+    with patch("discord_ferry.core.engine._initialize_upload_limits", new_callable=AsyncMock):
+        await run_migration(_make_config(tmp_path), lambda event: None, phase_overrides=overrides)
+
+
+async def test_delivery_incremental_carries_identity_and_pending_followups(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+    from tests.stoat_ids import stoat_id
+
+    initialize = getattr(state_module, "ensure_delivery_namespace", None)
+    assert callable(initialize), "Incremental recovery must retain delivery identity"
+    prior = MigrationState()
+    initialize(prior, tmp_path, "https://api.test")
+    namespace = prior.delivery_namespace
+    prior.delivery_bookkeeping["c" * 64] = stoat_id(9)
+    prior.pending_delivery_replacements["d" * 64] = "e" * 32
+    prior.pending_pins = [(stoat_id(7), stoat_id(9))]
+    prior.pending_reactions = [
+        {"channel_id": stoat_id(7), "message_id": stoat_id(9), "emoji": "👍"}
+    ]
+    state_module.save_state(prior, tmp_path)
+
+    async def check_carry(
+        config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
+    ) -> None:
+        assert state.delivery_namespace == namespace
+        assert state.delivery_bookkeeping == {"c" * 64: stoat_id(9)}
+        assert state.pending_delivery_replacements == {"d" * 64: "e" * 32}
+        assert state.pending_pins == prior.pending_pins
+        assert state.pending_reactions == prior.pending_reactions
+
+    overrides = {**_NOOP_OVERRIDES, "connect": check_carry}
+    with patch("discord_ferry.core.engine._initialize_upload_limits", new_callable=AsyncMock):
+        await run_migration(
+            _make_config(tmp_path, incremental=True), lambda event: None, phase_overrides=overrides
+        )
+
+
 async def test_run_migration_validates_exports(tmp_path: Path, proxy_env: Any) -> None:
     """Engine parses exports and emits validate events.
 

@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - Add validated structural delivery-receipt storage and optional failure references for recovery work (#1171).
+- Bind receipt identity across incremental runs and retire consumed evidence only after successful state snapshots (#1171).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
 ## [2.43.19] - 2026-10-13

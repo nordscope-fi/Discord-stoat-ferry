@@ -114,6 +114,7 @@ from discord_ferry.state import (
     MigrationState,
     RollbackFailure,
     RollbackProgress,
+    ensure_delivery_namespace,
     load_state,
     save_state,
 )
@@ -331,6 +332,18 @@ async def run_migration(
             # Carry over ID maps so structure phases are skipped / reused
             state.channel_map = dict(prior.channel_map)
             state.role_map = dict(prior.role_map)
+            state.delivery_namespace = prior.delivery_namespace
+            state.delivery_service_digest = prior.delivery_service_digest
+            state.delivery_bookkeeping = dict(prior.delivery_bookkeeping)
+            state.pending_delivery_replacements = dict(prior.pending_delivery_replacements)
+            # Carry only follow-ups backed by delivery bookkeeping; legacy resets stay unchanged.
+            pending_delivery_ids = set(prior.delivery_bookkeeping.values())
+            state.pending_pins = [p for p in prior.pending_pins if p[1] in pending_delivery_ids]
+            state.pending_reactions = [
+                dict(r)
+                for r in prior.pending_reactions
+                if r.get("message_id") in pending_delivery_ids
+            ]
             # Beside their id maps, and mandatory rather than tidy. A carried
             # channel skips creation entirely (run_channels snapshots
             # pre_existing_channel_ids before its create loop), and roles do the
@@ -415,7 +428,8 @@ async def run_migration(
             #     here from len(prior.message_map).
             #   RESET each run: completed_channel_ids (re-enter every channel for
             #     new msgs); pending_pins / pending_reactions (consumed by the
-            #     reactions/pins phases — carrying a stale list would re-pin/re-react);
+            #     reactions/pins phases, except follow-ups bound to a delivery
+            #     bookkeeping marker that must survive interrupted handoff);
             #     warnings / errors, validation_results, embeds_* / replies_*
             #     / merge_duplicates_suppressed (per-run merge counter, #239);
             #     (per-run fidelity counters); current_phase, started_at,
@@ -782,6 +796,9 @@ async def run_migration(
 
     # Phases 2-10: run in order, skipping as appropriate
     runnable_phases = [p for p in PHASE_ORDER if p not in ("export", "validate", "report")]
+
+    if not config.dry_run:
+        ensure_delivery_namespace(state, config.output_dir, config.stoat_url)
 
     init_request_semaphore(config.max_concurrent_requests)
 

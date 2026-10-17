@@ -230,6 +230,242 @@ def test_old_state_has_no_invented_delivery_reference(tmp_path: Path) -> None:
     assert loaded.delivery_service_digest == ""
 
 
+def test_delivery_namespace_is_saved_once_and_bound_to_service(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    initialize = getattr(state_module, "ensure_delivery_namespace", None)
+    assert callable(initialize), "Delivery namespace must be durable before dispatch"
+    state = MigrationState()
+    initialize(state, tmp_path, "https://API.test/")
+    original = (tmp_path / "state.json").read_bytes()
+    loaded = load_state(tmp_path)
+    initialize(loaded, tmp_path, "https://api.test:443")
+    assert loaded.delivery_namespace == state.delivery_namespace
+    assert len(loaded.delivery_namespace) == 32
+    assert (tmp_path / "state.json").read_bytes() == original
+    with pytest.raises(StateError):
+        initialize(loaded, tmp_path, "https://other.test")
+
+
+def test_delivery_namespace_failed_save_cannot_authorize_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import state as state_module
+
+    initialize = getattr(state_module, "ensure_delivery_namespace", None)
+    assert callable(initialize), "Delivery namespace must be durable before dispatch"
+    state = MigrationState()
+
+    def fail_save(state: MigrationState, output: Path) -> None:
+        raise OSError("snapshot fault")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(state_module, "save_state", fail_save)
+        with pytest.raises(OSError, match="snapshot fault"):
+            initialize(state, tmp_path, "https://api.test")
+    assert state.delivery_namespace == state.delivery_service_digest == ""
+    initialize(state, tmp_path, "https://api.test")
+    assert load_state(tmp_path).delivery_namespace == state.delivery_namespace
+
+
+def test_delivery_namespace_dry_run_creates_no_receipts(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    initialize = getattr(state_module, "ensure_delivery_namespace", None)
+    assert callable(initialize), "Delivery namespace must support the existing dry-run boundary"
+    state = MigrationState(is_dry_run=True)
+    initialize(state, tmp_path, "https://api.test")
+    assert state.delivery_namespace == ""
+    assert list(tmp_path.iterdir()) == []
+
+
+def _acknowledged_delivery(tmp_path: Path) -> tuple[MigrationState, Any, Any, Path]:
+    from discord_ferry import state as state_module
+
+    consume = getattr(state_module, "consume_delivery", None)
+    assert callable(consume), "Only successful normal snapshots may retire delivery receipts"
+    state, receipt, path = _delivery_fixture(tmp_path)
+    receipt.parts[0].status = "acknowledged"
+    receipt.parts[0].message_id = stoat_id(9)
+    token = state_module.write_delivery_receipt(state, tmp_path, receipt)
+    save_state(state, tmp_path)
+    state.message_map["456"] = stoat_id(9)
+    state.pending_pins = [(stoat_id(7), stoat_id(9))]
+    state.channel_message_counts["123"] = 1
+    consume(state, token, stoat_id(9))
+    return state, receipt, token, path
+
+
+@pytest.mark.parametrize("failed_file", ["message_map.json", "state.json"])
+def test_delivery_snapshot_failure_retains_receipt_and_bookkeeping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_file: str
+) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, token, path = _acknowledged_delivery(tmp_path)
+    original_writer = state_module.atomic_write_text
+
+    def fail_snapshot(path: Path, text: str) -> None:
+        if path.name == failed_file:
+            raise OSError("snapshot fault")
+        original_writer(path, text)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(state_module, "atomic_write_text", fail_snapshot)
+        with pytest.raises(OSError, match="snapshot fault"):
+            save_state(state, tmp_path)
+    assert path.exists()
+    interrupted = load_state(tmp_path)
+    assert token.receipt_id not in interrupted.delivery_bookkeeping
+    if failed_file == "state.json":
+        assert interrupted.message_map["456"] == stoat_id(9)
+        assert interrupted.pending_pins == []
+    assert state.delivery_bookkeeping[token.receipt_id] == stoat_id(9)
+    assert state_module.read_delivery_receipt(state, tmp_path, receipt.ref) == receipt
+    save_state(state, tmp_path)
+    assert not path.exists()
+    loaded = load_state(tmp_path)
+    assert loaded.message_map["456"] == stoat_id(9)
+    assert loaded.pending_pins == [(stoat_id(7), stoat_id(9))]
+    assert loaded.channel_message_counts == {"123": 1}
+    assert loaded.delivery_ready == {}
+    assert "delivery_ready" not in json.loads((tmp_path / "state.json").read_text())
+
+
+def test_delivery_stale_token_does_not_retire_newer_receipt(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, _, path = _acknowledged_delivery(tmp_path)
+    receipt.render_digest = "e" * 64
+    newer = state_module.write_delivery_receipt(state, tmp_path, receipt)
+    save_state(state, tmp_path)
+    assert path.exists()
+    state_module.consume_delivery(state, newer, stoat_id(9))
+    save_state(state, tmp_path)
+    assert not path.exists()
+
+
+def test_delivery_partial_receipt_is_not_retired(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, _, path = _acknowledged_delivery(tmp_path)
+    receipt.parts.append(state_module.DeliveryPart(1, "ferry-v2-" + "e" * 40))
+    partial = state_module.write_delivery_receipt(state, tmp_path, receipt)
+    state_module.consume_delivery(state, partial, stoat_id(9))
+    save_state(state, tmp_path)
+    assert path.exists()
+    assert state.delivery_bookkeeping[partial.receipt_id] == stoat_id(9)
+
+
+def test_delivery_cleanup_failure_retains_evidence_without_send_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, _, token, path = _acknowledged_delivery(tmp_path)
+    original_unlink = Path.unlink
+
+    def fail_receipt_unlink(candidate: Path, *args: Any, **kwargs: Any) -> None:
+        if candidate == path:
+            raise PermissionError("held receipt")
+        original_unlink(candidate, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "unlink", fail_receipt_unlink)
+        save_state(state, tmp_path)
+    assert path.exists()
+    assert state.delivery_bookkeeping[token.receipt_id] == stoat_id(9)
+    assert load_state(tmp_path).pending_pins == state.pending_pins
+    save_state(state, tmp_path)
+    assert not path.exists()
+
+
+def test_delivery_replacement_retirement_survives_crash_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    from discord_ferry import state as state_module
+
+    state, receipt, _, _ = _acknowledged_delivery(tmp_path)
+    generation = "f" * 32
+    receipt.ref = dataclasses.replace(receipt.ref, generation=generation)
+    token = state_module.write_delivery_receipt(state, tmp_path, receipt)
+    base = state_module.delivery_receipt_id(dataclasses.replace(receipt.ref, generation="base"))
+    state.pending_delivery_replacements[base] = generation
+    state_module.consume_delivery(state, token, stoat_id(9))
+
+    def crash_after_snapshot(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("process stopped after snapshot")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(state_module, "_retire_consumed_deliveries", crash_after_snapshot)
+        with pytest.raises(RuntimeError, match="process stopped"):
+            save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert base not in loaded.pending_delivery_replacements
+    assert loaded.delivery_bookkeeping[token.receipt_id] == stoat_id(9)
+    assert state_module.read_delivery_receipt(loaded, tmp_path, receipt.ref) == receipt
+
+
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        ("delivery_bookkeeping", []),
+        ("delivery_bookkeeping", {"bad": stoat_id(9)}),
+        ("delivery_bookkeeping", {"c" * 64: "not-an-id"}),
+        ("pending_delivery_replacements", []),
+        ("pending_delivery_replacements", {"c" * 64: "not-a-generation"}),
+    ],
+)
+def test_delivery_snapshot_rejects_malformed_markers(
+    tmp_path: Path, member: str, value: object
+) -> None:
+    raw = {member: value}
+    (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError):
+        load_state(tmp_path)
+
+
+def test_delivery_snapshot_rejects_unbound_bookkeeping(tmp_path: Path) -> None:
+    raw = {"delivery_bookkeeping": {"c" * 64: stoat_id(9)}}
+    (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError):
+        load_state(tmp_path)
+
+
+def test_delivery_newer_receipt_between_snapshot_and_cleanup_is_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, _, path = _acknowledged_delivery(tmp_path)
+    original_writer = state_module.atomic_write_text
+
+    def replace_after_snapshot(target: Path, text: str) -> None:
+        original_writer(target, text)
+        if target.name == "state.json":
+            receipt.render_digest = "f" * 64
+            state_module.write_delivery_receipt(state, tmp_path, receipt)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(state_module, "atomic_write_text", replace_after_snapshot)
+        save_state(state, tmp_path)
+    assert path.exists()
+    assert state_module.read_delivery_receipt(state, tmp_path, receipt.ref) == receipt
+
+
+def test_delivery_acknowledgement_and_map_alone_never_authorize_cleanup(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    receipt.parts[0].status = "acknowledged"
+    receipt.parts[0].message_id = stoat_id(9)
+    state_module.write_delivery_receipt(state, tmp_path, receipt)
+    state.message_map["456"] = stoat_id(9)
+    save_state(state, tmp_path)
+    assert path.exists()
+    assert load_state(tmp_path).delivery_bookkeeping == {}
+
+
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     """State survives a save/load round-trip."""
     state = MigrationState(
@@ -1059,6 +1295,8 @@ _KNOWN_STATE_FIELDS = frozenset(
     {
         "delivery_namespace",  # Generated structural namespace, no free text.
         "delivery_service_digest",  # Target binding digest, no URL or credential.
+        "delivery_bookkeeping",  # Receipt digest to acknowledged first-part identifier.
+        "pending_delivery_replacements",  # Reference digest to generated replacement token.
         "role_map",
         "channel_map",
         "category_map",
