@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Retry the recorded source and message family, recover complete legacy deliveries, and clear resolved failures before retiring their receipts (#1171).
 - Save and reuse authorized repair replacement identities across interruptions, preserving message progress and channel remapping (#1171).
 - Emit verified, partial, and unresolved source-delivery counts without treating visited progress as delivery, and reconcile carried failures after complete retry resolution (#1171).
+- Show validated verified, partial, and unresolved delivery totals in CLI progress and final summaries (#1171).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
 ## [2.43.19] - 2026-10-13
