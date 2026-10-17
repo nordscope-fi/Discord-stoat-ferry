@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +12,8 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.security import SecureTokenStore
+from discord_ferry.migrator import delivery as delivery_module
+from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.messages import (
     ChannelResult,
     _merge_channel_result,
@@ -26,6 +29,7 @@ from discord_ferry.parser.models import (
     DCEReaction,
 )
 from discord_ferry.state import FailedMessage, MigrationState
+from tests.stoat_ids import stoat_id as valid_stoat_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,6 +44,18 @@ TOKEN = "test-token"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _valid_id(label: str) -> str:
+    return valid_stoat_id(int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "big"))
+
+
+@pytest.fixture(autouse=True)
+def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
+    async def send(*args, **kwargs):
+        return await messages_module.api_send_message(*args, **kwargs)
+
+    monkeypatch.setattr(delivery_module, "api_send_message", send)
 
 
 def _make_config(tmp_path: Path, **overrides: Any) -> FerryConfig:
@@ -148,12 +164,16 @@ async def test_parallel_channels_all_complete(tmp_path: Path, mock_aiohttp: aior
     """3 channels processed in parallel, all messages sent and mapped correctly."""
     # Set up 3 channels with 1 message each.
     channel_ids = ["ch1", "ch2", "ch3"]
-    stoat_ids = ["stoat_ch1", "stoat_ch2", "stoat_ch3"]
+    stoat_ids = [
+        "01J5T013913344331853682639",
+        "01J5T007424028392063927646",
+        "01J5T013639235308912868993",
+    ]
 
     for stoat_id in stoat_ids:
         mock_aiohttp.post(
             f"{BASE_URL}/channels/{stoat_id}/messages",
-            payload={"_id": f"stoat_msg_{stoat_id}"},
+            payload={"_id": _valid_id(f"stoat_msg_{stoat_id}")},
         )
 
     channel_map = dict(zip(channel_ids, stoat_ids, strict=True))
@@ -211,13 +231,22 @@ def test_channel_result_merged_correctly() -> None:
         failed_messages=[
             FailedMessage(
                 discord_msg_id="fm1",
-                stoat_channel_id="stoat_ch1",
+                stoat_channel_id="01J5T013913344331853682639",
                 error="fail",
             )
         ],
-        message_map_updates={"msg1": "stoat_msg1", "msg2": "stoat_msg2"},
-        pending_pins=[("stoat_ch1", "stoat_msg1")],
-        pending_reactions=[{"channel_id": "stoat_ch1", "message_id": "stoat_msg1", "emoji": "x"}],
+        message_map_updates={
+            "msg1": "01J5T014271608871363207460",
+            "msg2": "01J5T012837302560510041812",
+        },
+        pending_pins=[("01J5T013913344331853682639", "01J5T014271608871363207460")],
+        pending_reactions=[
+            {
+                "channel_id": "01J5T013913344331853682639",
+                "message_id": "01J5T014271608871363207460",
+                "emoji": "x",
+            }
+        ],
         attachments_uploaded=3,
         attachments_skipped=2,
         referenced_autumn_ids={"aut1", "aut2"},
@@ -237,11 +266,11 @@ def test_channel_result_merged_correctly() -> None:
     assert state.failed_messages[0].discord_msg_id == "fm1"
 
     # Message map merged.
-    assert state.message_map["msg1"] == "stoat_msg1"
-    assert state.message_map["msg2"] == "stoat_msg2"
+    assert state.message_map["msg1"] == "01J5T014271608871363207460"
+    assert state.message_map["msg2"] == "01J5T012837302560510041812"
 
     # Pins and reactions merged.
-    assert ("stoat_ch1", "stoat_msg1") in state.pending_pins
+    assert ("01J5T013913344331853682639", "01J5T014271608871363207460") in state.pending_pins
     assert len(state.pending_reactions) == 1
 
     # Counters accumulated.
@@ -266,14 +295,14 @@ async def test_error_in_one_channel_others_continue(tmp_path: Path) -> None:
     ) -> dict[str, Any]:
         nonlocal call_count
         call_count += 1
-        if channel_id == "stoat_ch_bad":
+        if channel_id == "01J5T014402647207447627060":
             raise RuntimeError("Channel-specific API failure")
-        return {"_id": f"stoat_msg_{call_count}"}
+        return {"_id": _valid_id(f"stoat_msg_{call_count}")}
 
     channel_map = {
-        "ch_good1": "stoat_ch_good1",
-        "ch_bad": "stoat_ch_bad",
-        "ch_good2": "stoat_ch_good2",
+        "ch_good1": "01J5T000163430474185323936",
+        "ch_bad": "01J5T014402647207447627060",
+        "ch_good2": "01J5T002554795083028873529",
     }
     state = _make_state(channel_map=channel_map)
     config = _make_config(tmp_path, max_concurrent_channels=3)
@@ -333,16 +362,16 @@ async def test_error_in_one_channel_others_continue(tmp_path: Path) -> None:
 async def test_single_channel_works(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Single channel backward compatibility — same behavior as before parallelism."""
     mock_aiohttp.post(
-        f"{BASE_URL}/channels/stoat_ch1/messages",
-        payload={"_id": "stoat_msg_1"},
+        f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
+        payload={"_id": "01J5T010382523376509579641"},
     )
     mock_aiohttp.post(
-        f"{BASE_URL}/channels/stoat_ch1/messages",
-        payload={"_id": "stoat_msg_2"},
+        f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
+        payload={"_id": "01J5T016607174817411829988"},
     )
 
     state = _make_state(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         emoji_map={"emoji1": "stoat_emoji1"},
     )
     config = _make_config(tmp_path, reaction_mode="native", max_concurrent_channels=1)
@@ -366,11 +395,11 @@ async def test_single_channel_works(tmp_path: Path, mock_aiohttp: aioresponses) 
     await run_messages(config, state, [export], _collect_events(events))
 
     # Both messages mapped.
-    assert state.message_map["msg1"] == "stoat_msg_1"
-    assert state.message_map["msg2"] == "stoat_msg_2"
+    assert state.message_map["msg1"] == "01J5T010382523376509579641"
+    assert state.message_map["msg2"] == "01J5T016607174817411829988"
 
     # Pin queued for msg1.
-    assert ("stoat_ch1", "stoat_msg_1") in state.pending_pins
+    assert ("01J5T013913344331853682639", "01J5T010382523376509579641") in state.pending_pins
 
     # Reaction queued for msg2.
     assert len(state.pending_reactions) == 1
@@ -403,9 +432,9 @@ async def test_cancel_event_stops_all_workers(tmp_path: Path) -> None:
         # Cancel after the first message is sent.
         if sent_count >= 1:
             cancel_event.set()
-        return {"_id": f"stoat_msg_{sent_count}"}
+        return {"_id": _valid_id(f"stoat_msg_{sent_count}")}
 
-    channel_map = {"ch1": "stoat_ch1", "ch2": "stoat_ch2"}
+    channel_map = {"ch1": "01J5T013913344331853682639", "ch2": "01J5T007424028392063927646"}
     state = _make_state(channel_map=channel_map)
     config = _make_config(
         tmp_path,
@@ -461,9 +490,9 @@ async def test_max_concurrent_channels_respected(tmp_path: Path) -> None:
         await asyncio.sleep(0.01)
         async with lock:
             current_concurrent -= 1
-        return {"_id": f"stoat_msg_{channel_id}"}
+        return {"_id": _valid_id(f"stoat_msg_{channel_id}")}
 
-    channel_map = {f"ch{i}": f"stoat_ch{i}" for i in range(5)}
+    channel_map = {f"ch{i}": _valid_id(f"stoat_ch{i}") for i in range(5)}
     state = _make_state(channel_map=channel_map)
     config = _make_config(tmp_path, max_concurrent_channels=2)
 
@@ -502,9 +531,11 @@ async def test_run_messages_raises_on_cancel(tmp_path: Path) -> None:
         nonlocal sent
         sent += 1
         cancel_event.set()  # cancel after the first send
-        return {"_id": f"id_{sent}"}
+        return {"_id": _valid_id(f"id_{sent}")}
 
-    state = _make_state(channel_map={"ch1": "stoat_ch1", "ch2": "stoat_ch2"})
+    state = _make_state(
+        channel_map={"ch1": "01J5T013913344331853682639", "ch2": "01J5T007424028392063927646"}
+    )
     config = _make_config(tmp_path, max_concurrent_channels=1, cancel_event=cancel_event)
     exports = [
         _make_export(
@@ -540,11 +571,13 @@ async def test_cancel_preserves_completed_channels(tmp_path: Path) -> None:
     ) -> dict[str, Any]:
         nonlocal sent
         sent += 1
-        if channel_id == "stoat_ch2":
+        if channel_id == "01J5T007424028392063927646":
             cancel_event.set()  # cancel once ch2 (processed after ch1) starts sending
-        return {"_id": f"id_{sent}"}
+        return {"_id": _valid_id(f"id_{sent}")}
 
-    state = _make_state(channel_map={"ch1": "stoat_ch1", "ch2": "stoat_ch2"})
+    state = _make_state(
+        channel_map={"ch1": "01J5T013913344331853682639", "ch2": "01J5T007424028392063927646"}
+    )
     config = _make_config(tmp_path, max_concurrent_channels=1, cancel_event=cancel_event)
     exports = [
         _make_export(channel_id="ch1", name="ch1", messages=[_make_message(id="a1", content="m")]),
@@ -576,7 +609,7 @@ async def test_cancel_before_first_send_not_marked_complete(tmp_path: Path) -> N
     ) -> dict[str, Any]:
         raise AssertionError("should not send when cancelled before the loop starts")
 
-    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    state = _make_state(channel_map={"ch1": "01J5T013913344331853682639"})
     config = _make_config(tmp_path, max_concurrent_channels=1, cancel_event=cancel_event)
     exports = [
         _make_export(channel_id="ch1", name="ch1", messages=[_make_message(id="a1", content="m")])
@@ -618,9 +651,9 @@ async def test_pre_loop_crash_reraises_first_exception(tmp_path: Path) -> None:
     marked complete and is recorded as a channel_worker_failed error."""
     state = _make_state(
         channel_map={
-            "ch_good1": "stoat_good1",
-            "ch_bad": "stoat_bad",
-            "ch_good2": "stoat_good2",
+            "ch_good1": "01J5T003297767898969821688",
+            "ch_bad": "01J5T012365211652235942804",
+            "ch_good2": "01J5T017150062882095091221",
         }
     )
     config = _make_config(tmp_path, max_concurrent_channels=3)
@@ -643,7 +676,7 @@ async def test_pre_loop_crash_reraises_first_exception(tmp_path: Path) -> None:
     async def ok_send(
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
-        return {"_id": f"id_{channel_id}"}
+        return {"_id": _valid_id(f"id_{channel_id}")}
 
     with (
         patch("discord_ferry.migrator.messages.api_send_message", ok_send),
@@ -670,9 +703,14 @@ async def test_pre_loop_crash_resume_reruns_only_failed_channel(tmp_path: Path) 
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
     ) -> dict[str, Any]:
         sends.append(channel_id)
-        return {"_id": f"id_{len(sends)}"}
+        return {"_id": _valid_id(f"id_{len(sends)}")}
 
-    state = _make_state(channel_map={"ch_bad": "stoat_bad", "ch_good": "stoat_good"})
+    state = _make_state(
+        channel_map={
+            "ch_bad": "01J5T012365211652235942804",
+            "ch_good": "01J5T011624428546769918842",
+        }
+    )
     state.completed_channel_ids.add("ch_good")  # good channel already done in a prior run
     config = _make_config(tmp_path, max_concurrent_channels=2, resume=True)
     exports = [
@@ -688,8 +726,8 @@ async def test_pre_loop_crash_resume_reruns_only_failed_channel(tmp_path: Path) 
     with patch("discord_ferry.migrator.messages.api_send_message", record):
         await run_messages(config, state, exports, lambda e: None)
 
-    assert "stoat_bad" in sends  # crashed channel re-run
-    assert "stoat_good" not in sends  # completed channel skipped (resume gate)
+    assert "01J5T012365211652235942804" in sends  # crashed channel re-run
+    assert "01J5T011624428546769918842" not in sends  # completed channel skipped (resume gate)
     assert "ch_bad" in state.completed_channel_ids
 
 
@@ -707,7 +745,7 @@ async def test_channel_worker_failure_is_token_safe(tmp_path: Path) -> None:
         captured.append(event)
         crash_with_token(event)
 
-    state = _make_state(channel_map={"ch_bad": "stoat_bad"})
+    state = _make_state(channel_map={"ch_bad": "01J5T012365211652235942804"})
     config = _make_config(tmp_path, token_store=SecureTokenStore({"stoat": secret}))
     exports = [
         _make_export(channel_id="ch_bad", name="bad", messages=[_make_message(id="b", content="m")])
@@ -729,9 +767,14 @@ async def test_cancel_precedence_over_crash(tmp_path: Path) -> None:
     cancel_event.set()  # the non-crashing channel will hit the loop-top cancel check
 
     async def noop_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"_id": "x"}
+        return {"_id": _valid_id("x")}
 
-    state = _make_state(channel_map={"ch_cancel": "stoat_cancel", "ch_crash": "stoat_crash"})
+    state = _make_state(
+        channel_map={
+            "ch_cancel": "01J5T014250268173019105611",
+            "ch_crash": "01J5T011461495538521945085",
+        }
+    )
     config = _make_config(tmp_path, max_concurrent_channels=2, cancel_event=cancel_event)
     exports = [
         _make_export(
@@ -760,7 +803,7 @@ async def test_cancel_precedence_over_crash(tmp_path: Path) -> None:
 async def test_unmapped_emoji_reaction_dropped_counted(tmp_path: Path) -> None:
     """SC-1/3: a custom reaction whose emoji is not in emoji_map increments reactions_dropped
     (folded once from the per-channel ChannelResult) and records a structured warning."""
-    state = _make_state(channel_map={"ch1": "stoat_ch1"})  # emoji_map empty
+    state = _make_state(channel_map={"ch1": "01J5T013913344331853682639"})  # emoji_map empty
     config = _make_config(tmp_path, reaction_mode="native")
     msg = _make_message(
         id="m1",
@@ -770,7 +813,7 @@ async def test_unmapped_emoji_reaction_dropped_counted(tmp_path: Path) -> None:
     export = _make_export(channel_id="ch1", name="ch1", messages=[msg])
     with patch(
         "discord_ferry.migrator.messages.api_send_message",
-        AsyncMock(return_value={"_id": "x"}),
+        AsyncMock(return_value={"_id": _valid_id("x")}),
     ):
         await run_messages(config, state, [export], lambda e: None)
 
@@ -780,7 +823,9 @@ async def test_unmapped_emoji_reaction_dropped_counted(tmp_path: Path) -> None:
 
 async def test_mapped_and_unicode_reactions_not_dropped(tmp_path: Path) -> None:
     """SC-2: a mapped custom reaction and a Unicode reaction are queued, not counted dropped."""
-    state = _make_state(channel_map={"ch1": "stoat_ch1"}, emoji_map={"123": "stoat_emoji_1"})
+    state = _make_state(
+        channel_map={"ch1": "01J5T013913344331853682639"}, emoji_map={"123": "stoat_emoji_1"}
+    )
     config = _make_config(tmp_path, reaction_mode="native")
     msg = _make_message(
         id="m1",
@@ -793,7 +838,7 @@ async def test_mapped_and_unicode_reactions_not_dropped(tmp_path: Path) -> None:
     export = _make_export(channel_id="ch1", name="ch1", messages=[msg])
     with patch(
         "discord_ferry.migrator.messages.api_send_message",
-        AsyncMock(return_value={"_id": "x"}),
+        AsyncMock(return_value={"_id": _valid_id("x")}),
     ):
         await run_messages(config, state, [export], lambda e: None)
 
@@ -805,7 +850,7 @@ async def test_mapped_and_unicode_reactions_not_dropped(tmp_path: Path) -> None:
 async def test_unmapped_emoji_reaction_warning_token_safe(tmp_path: Path) -> None:
     """SC-5: the dropped-reaction warning is safe_sanitize'd (no registered token leaks)."""
     secret = "stoat_secret_token_value"
-    state = _make_state(channel_map={"ch1": "stoat_ch1"})
+    state = _make_state(channel_map={"ch1": "01J5T013913344331853682639"})
     config = _make_config(
         tmp_path, reaction_mode="native", token_store=SecureTokenStore({"stoat": secret})
     )
@@ -818,7 +863,7 @@ async def test_unmapped_emoji_reaction_warning_token_safe(tmp_path: Path) -> Non
     export = _make_export(channel_id="ch1", name="ch1", messages=[msg])
     with patch(
         "discord_ferry.migrator.messages.api_send_message",
-        AsyncMock(return_value={"_id": "x"}),
+        AsyncMock(return_value={"_id": _valid_id("x")}),
     ):
         await run_messages(config, state, [export], lambda e: None)
 
@@ -846,11 +891,11 @@ def _collision_pair() -> tuple[ChannelResult, ChannelResult]:
     origin_id = "1506019505778987190"
     parent = ChannelResult(
         channel_id="parent_ch",
-        message_map_updates={origin_id: "stoat_parent_copy"},
+        message_map_updates={origin_id: "01J5T016118538225846310829"},
     )
     thread = ChannelResult(
         channel_id=origin_id,  # a thread's channel id IS its origin message id
-        message_map_updates={origin_id: "stoat_thread_copy"},
+        message_map_updates={origin_id: "01J5T013603851384346954864"},
     )
     return parent, thread
 
@@ -861,7 +906,7 @@ def test_parent_wins_when_the_parent_merges_first() -> None:
     parent, thread = _collision_pair()
     _merge_channel_result(state, parent)
     _merge_channel_result(state, thread)
-    assert state.message_map["1506019505778987190"] == "stoat_parent_copy"
+    assert state.message_map["1506019505778987190"] == "01J5T016118538225846310829"
 
 
 def test_parent_wins_when_the_thread_merges_first() -> None:
@@ -874,7 +919,7 @@ def test_parent_wins_when_the_thread_merges_first() -> None:
     parent, thread = _collision_pair()
     _merge_channel_result(state, thread)
     _merge_channel_result(state, parent)
-    assert state.message_map["1506019505778987190"] == "stoat_parent_copy"
+    assert state.message_map["1506019505778987190"] == "01J5T016118538225846310829"
 
 
 def test_a_key_already_present_but_not_the_channel_id_is_still_written() -> None:
@@ -901,9 +946,11 @@ def test_a_thread_key_is_written_when_the_parent_has_not_merged_yet() -> None:
     origin_id = "1506019505778987190"
     _merge_channel_result(
         state,
-        ChannelResult(channel_id=origin_id, message_map_updates={origin_id: "stoat_thread_copy"}),
+        ChannelResult(
+            channel_id=origin_id, message_map_updates={origin_id: "01J5T013603851384346954864"}
+        ),
     )
-    assert state.message_map[origin_id] == "stoat_thread_copy"
+    assert state.message_map[origin_id] == "01J5T013603851384346954864"
 
 
 # ---------------------------------------------------------------------------
@@ -932,11 +979,11 @@ def test_the_guard_is_inert_at_the_2_47_1_pin() -> None:
     state = MigrationState()
     parent = ChannelResult(
         channel_id="parent_ch",
-        message_map_updates={synthetic_starter_id: "stoat_placeholder"},
+        message_map_updates={synthetic_starter_id: "01J5T005252290206084537616"},
     )
     thread = ChannelResult(
         channel_id=thread_channel_id,
-        message_map_updates={thread_channel_id: "stoat_thread_first"},
+        message_map_updates={thread_channel_id: "01J5T005959520961808098829"},
     )
     _merge_channel_result(state, parent)
     _merge_channel_result(state, thread)
@@ -944,8 +991,8 @@ def test_the_guard_is_inert_at_the_2_47_1_pin() -> None:
     # Every key written, nothing suppressed. This is what "batch 7 changes nothing
     # before the bump" means concretely.
     assert state.message_map == {
-        synthetic_starter_id: "stoat_placeholder",
-        thread_channel_id: "stoat_thread_first",
+        synthetic_starter_id: "01J5T005252290206084537616",
+        thread_channel_id: "01J5T005959520961808098829",
     }
 
 
@@ -961,17 +1008,17 @@ def test_the_guard_is_active_in_the_post_bump_shape() -> None:
         state = MigrationState()
         parent = ChannelResult(
             channel_id="parent_ch",
-            message_map_updates={origin_id: "stoat_parent_copy"},
+            message_map_updates={origin_id: "01J5T016118538225846310829"},
         )
         thread = ChannelResult(
             channel_id=origin_id,
-            message_map_updates={origin_id: "stoat_thread_copy"},
+            message_map_updates={origin_id: "01J5T013603851384346954864"},
         )
         pair = (parent, thread) if order == "parent_first" else (thread, parent)
         for result in pair:
             _merge_channel_result(state, result)
 
-        assert state.message_map[origin_id] == "stoat_parent_copy", (
+        assert state.message_map[origin_id] == "01J5T016118538225846310829", (
             f"the thread's copy won in the {order} order; a reply in the parent would "
             "then be sent against the wrong message, and a sent reply cannot be unsent"
         )
@@ -999,26 +1046,35 @@ def test_a_forum_post_already_has_key_equal_to_its_channel_id_today() -> None:
         state,
         ChannelResult(
             channel_id=post_id,
-            message_map_updates={post_id: "stoat_starter", "999": "stoat_second"},
+            message_map_updates={
+                post_id: "01J5T017978883145630816207",
+                "999": "01J5T010813537961985632992",
+            },
         ),
     )
-    assert state.message_map[post_id] == "stoat_starter"
+    assert state.message_map[post_id] == "01J5T017978883145630816207"
 
     # Completion merge. Workers reset their own result, so this carries only new keys.
     _merge_channel_result(
-        state, ChannelResult(channel_id=post_id, message_map_updates={"1000": "stoat_third"})
+        state,
+        ChannelResult(
+            channel_id=post_id, message_map_updates={"1000": "01J5T000175705340624438896"}
+        ),
     )
 
     # Re-merging the SAME result is the harsher case: the key repeats and is now present.
     _merge_channel_result(
-        state, ChannelResult(channel_id=post_id, message_map_updates={post_id: "stoat_starter"})
+        state,
+        ChannelResult(
+            channel_id=post_id, message_map_updates={post_id: "01J5T017978883145630816207"}
+        ),
     )
 
-    assert state.message_map[post_id] == "stoat_starter", (
+    assert state.message_map[post_id] == "01J5T017978883145630816207", (
         "the forum post's own starter entry was dropped by the guard"
     )
-    assert state.message_map["999"] == "stoat_second"
-    assert state.message_map["1000"] == "stoat_third"
+    assert state.message_map["999"] == "01J5T010813537961985632992"
+    assert state.message_map["1000"] == "01J5T000175705340624438896"
 
 
 # ---------------------------------------------------------------------------
@@ -1035,7 +1091,9 @@ _CAPTURED_2_48_THREAD_NAME = "Discord Ferry Test - general - Cool Thread [154357
 _ORIGIN = "1543572368977428611"
 
 
-@pytest.mark.parametrize("slow_channel", ["stoat-parent", "stoat-thread"])
+@pytest.mark.parametrize(
+    "slow_channel", ["01J5T009775846032768230090", "01J5T014012495600676674034"]
+)
 async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
     tmp_path: Path, slow_channel: str
 ) -> None:
@@ -1074,7 +1132,11 @@ async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
 
     config = _make_config(tmp_path, thread_strategy="flatten", message_rate_limit=0.0)
     state = _make_state()
-    state.channel_map = {parent.channel.id: "stoat-parent", thread.channel.id: "stoat-thread"}
+    state.channel_map = {
+        parent.channel.id: "01J5T009775846032768230090",
+        thread.channel.id: "01J5T014012495600676674034",
+    }
+    accepted_channels: dict[str, str] = {}
 
     async def _send(
         session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
@@ -1084,14 +1146,14 @@ async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
             # its message count.
             for _ in range(50):
                 await asyncio.sleep(0)
-        # The Stoat id records which CHANNEL accepted it, which is what the assertion
-        # below needs to distinguish.
-        return {"_id": f"{channel_id}::{kwargs.get('idempotency_key', '')}"}
+        identifier = _valid_id(f"{channel_id}::{kwargs.get('idempotency_key', '')}")
+        accepted_channels[identifier] = channel_id
+        return {"_id": identifier}
 
     with patch("discord_ferry.migrator.messages.api_send_message", _send):
         await run_messages(config, state, [parent, thread], lambda e: None)
 
-    assert state.message_map[_ORIGIN].startswith("stoat-parent::"), (
+    assert accepted_channels[state.message_map[_ORIGIN]] == "01J5T009775846032768230090", (
         f"with {slow_channel} completing last, the thread's copy won the collision: "
         f"{state.message_map[_ORIGIN]!r}. A reply in the parent channel would then be "
         f"sent against the thread's message, and a sent reply cannot be unsent"

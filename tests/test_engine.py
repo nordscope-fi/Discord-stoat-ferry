@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import json
 import re
 import shutil
@@ -24,7 +25,8 @@ from discord_ferry.core.engine import (
     run_retry_failed,
 )
 from discord_ferry.core.events import EventCallback, MigrationEvent
-from discord_ferry.errors import CheckError, DuplicateSendError, ExportError, MigrationError
+from discord_ferry.errors import CheckError, ExportError, MigrationError
+from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.api import ServerReadView
 from discord_ferry.migrator.structure import FERRY_MIN_PERMISSIONS
@@ -38,8 +40,21 @@ from discord_ferry.parser.models import (
     DCEMessage,
 )
 from discord_ferry.state import FailedMessage, MigrationState, load_state
+from tests.stoat_ids import stoat_id as valid_stoat_id
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _valid_send_id(label: str) -> str:
+    return valid_stoat_id(int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "big"))
+
+
+@pytest.fixture(autouse=True)
+def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
+    async def send(*args, **kwargs):
+        return await messages_module.api_send_message(*args, **kwargs)
+
+    monkeypatch.setattr(delivery_module, "api_send_message", send)
 
 
 async def _noop_phase(
@@ -1300,18 +1315,22 @@ async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
     exports = _make_exports_from_dir(config.export_dir)
 
     state = MigrationState(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_retry", stoat_channel_id="stoat_ch1", error="timeout")
+            FailedMessage(
+                discord_msg_id="msg_retry",
+                stoat_channel_id="01J5T013913344331853682639",
+                error="timeout",
+            )
         ],
     )
 
     events: list[MigrationEvent] = []
     with aioresponses() as m:
         m.post(
-            f"{BASE_URL}/channels/stoat_ch1/messages",
-            payload={"_id": "stoat_retried"},
+            f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
+            payload={"_id": "01J5T011312040827099375552"},
         )
         await run_retry_failed(config, state, exports, events.append)
 
@@ -1413,19 +1432,23 @@ async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     exports = _make_exports_from_dir(config.export_dir)
 
     state = MigrationState(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_ok", stoat_channel_id="stoat_ch1", error="e"),
-            FailedMessage(discord_msg_id="msg_gone", stoat_channel_id="stoat_ch1", error="e"),
+            FailedMessage(
+                discord_msg_id="msg_ok", stoat_channel_id="01J5T013913344331853682639", error="e"
+            ),
+            FailedMessage(
+                discord_msg_id="msg_gone", stoat_channel_id="01J5T013913344331853682639", error="e"
+            ),
         ],
     )
 
     events: list[MigrationEvent] = []
     with aioresponses() as m:
         m.post(
-            f"{BASE_URL}/channels/stoat_ch1/messages",
-            payload={"_id": "stoat_ok"},
+            f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
+            payload={"_id": "01J5T009296950391681521246"},
         )
         await run_retry_failed(config, state, exports, events.append)
 
@@ -1448,10 +1471,14 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
     _write_dce_json(config.export_dir, "ch1", [_dce_msg_dict("msg_fail")])
     exports = _make_exports_from_dir(config.export_dir)
     state = MigrationState(
-        channel_map={"ch1": "stoat_ch1"},
+        channel_map={"ch1": "01J5T013913344331853682639"},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_fail", stoat_channel_id="stoat_ch1", error="err")
+            FailedMessage(
+                discord_msg_id="msg_fail",
+                stoat_channel_id="01J5T013913344331853682639",
+                error="err",
+            )
         ],
     )
 
@@ -1484,12 +1511,21 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
     _write_dce_json(config.export_dir, "ch_fail", [_dce_msg_dict("msg_fail")])
     exports = _make_exports_from_dir(config.export_dir)
     state = MigrationState(
-        channel_map={"ch_ok": "stoat_ch_ok", "ch_fail": "stoat_ch_fail"},
+        channel_map={
+            "ch_ok": "01J5T004638710821666785252",
+            "ch_fail": "01J5T002218886552333812741",
+        },
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_ok", stoat_channel_id="stoat_ch_ok", error="e"),
-            FailedMessage(discord_msg_id="msg_fail", stoat_channel_id="stoat_ch_fail", error="e"),
-            FailedMessage(discord_msg_id="msg_gone", stoat_channel_id="stoat_ch_ok", error="e"),
+            FailedMessage(
+                discord_msg_id="msg_ok", stoat_channel_id="01J5T004638710821666785252", error="e"
+            ),
+            FailedMessage(
+                discord_msg_id="msg_fail", stoat_channel_id="01J5T002218886552333812741", error="e"
+            ),
+            FailedMessage(
+                discord_msg_id="msg_gone", stoat_channel_id="01J5T004638710821666785252", error="e"
+            ),
         ],
     )
 
@@ -1501,9 +1537,9 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
         nonlocal call
         call += 1
         await asyncio.sleep(0.01)  # yield so wait_for can bound a regression
-        if channel_id == "stoat_ch_fail":
+        if channel_id == "01J5T002218886552333812741":
             raise RuntimeError("still broken")
-        return {"_id": f"ok_{call}"}
+        return {"_id": _valid_send_id(f"ok_{call}")}
 
     events: list[MigrationEvent] = []
     with patch("discord_ferry.migrator.messages.api_send_message", send):
@@ -2730,45 +2766,40 @@ async def test_preflight_emits_and_persists_a_proxy_notice(
 # ---------------------------------------------------------------------------
 
 
-async def test_retry_path_does_not_reraise_on_a_duplicate(tmp_path: Path) -> None:
-    """SC-2.9: a duplicate means the message landed, so the retry loop must terminate.
-
-    _process_message re-raises when channel_result is None, which is this path, because
-    the retry loop relies on an exception to mark a re-failure. A DuplicateSendError is
-    NOT a re-failure: the message is on the server. It never reaches that re-raise,
-    because the catch sits inside the send loop.
-
-    This test passes without a source change in this task. Its value is that it stays
-    true: moving the catch from inside the loop to around it makes it fail.
-    """
+async def test_retry_path_preserves_unresolved_duplicate(tmp_path: Path) -> None:
+    """A cached key without a matching message remains a failure and terminates."""
     config = _make_retry_config(tmp_path)
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    _write_dce_json(config.export_dir, "ch_dup", [_dce_msg_dict("msg_dup")])
+    _write_dce_json(config.export_dir, "123", [_dce_msg_dict("456")])
     exports = _make_exports_from_dir(config.export_dir)
+    destination = valid_stoat_id(1)
     state = MigrationState(
-        channel_map={"ch_dup": "stoat_ch_dup"},
+        channel_map={"123": destination},
         autumn_url=AUTUMN_URL,
         failed_messages=[
-            FailedMessage(discord_msg_id="msg_dup", stoat_channel_id="stoat_ch_dup", error="e"),
+            FailedMessage(discord_msg_id="456", stoat_channel_id=destination, error="timeout")
         ],
     )
-
-    async def always_duplicate(
-        session: Any, stoat_url: Any, token: Any, channel_id: Any, **kwargs: Any
-    ) -> dict[str, Any]:
-        await asyncio.sleep(0.01)  # yield so wait_for can bound a regression
-        raise DuplicateSendError("already on the server")
-
     events: list[MigrationEvent] = []
-    with patch("discord_ferry.migrator.messages.api_send_message", always_duplicate):
-        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
-
-    assert not any(fm.discord_msg_id == "msg_dup" for fm in state.failed_messages), (
-        "a message already on the server was left in failed_messages, so it stays "
-        "reported as a failure and --incremental will re-send it"
-    )
-    assert "msg_dup" not in state.message_map, (
-        "Stoat returns no id with a 409, so nothing may be mapped for it"
+    with aioresponses() as http:
+        http.get(f"{BASE_URL}/", payload={"features": {}})
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            status=409,
+            payload={"type": "DuplicateNonce"},
+        )
+        http.get(
+            f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            payload=[],
+            repeat=True,
+        )
+        await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5)
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].discord_msg_id == "456"
+    assert state.failed_messages[0].retry_count == 1
+    assert not state.message_map
+    assert not state.pending_pins
+    assert any(
+        "0 succeeded" in event.message and "1 still failed" in event.message for event in events
     )
 
 
@@ -5401,7 +5432,7 @@ async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) 
     assert state.channel_high_water[R_D_CHANNEL] == "100000000000000001"
 
 
-R_NEW_CHANNEL = "01JSTOATCHN000000000NEW"
+R_NEW_CHANNEL = valid_stoat_id(9500)
 R_THREAD_A = "800000000000000077"
 R_THREAD_B = "800000000000000066"
 
@@ -5485,7 +5516,7 @@ async def _repair_merge_parent(
                 "key": str(kwargs.get("idempotency_key", "")),
             }
         )
-        return {"_id": f"01JSTOATMSG{len(sends):013d}"}
+        return {"_id": valid_stoat_id(9000 + len(sends))}
 
     with (
         patch("discord_ferry.migrator.verify.run_check", new=_check),
@@ -5809,21 +5840,40 @@ async def test_a_resend_sends_in_timestamp_order_not_list_order(tmp_path: Path) 
     ], f"the resend followed list order rather than timestamp order: {sent}"
 
 
-def test_the_migration_idempotency_key_is_unchanged_without_a_salt() -> None:
-    """The salt is additive: an unsalted call produces exactly the old key.
-
-    Every migration send goes through this path, and a changed key would make
-    Stoat treat a resumed migration's messages as new and duplicate them all.
-    """
-    import inspect
-
-    source = inspect.getsource(messages_module._process_message)
-    assert 'f"ferry-{msg.id}{_salt}"' in source
-    assert '_salt = f"-{idempotency_salt}" if idempotency_salt else ""' in source
-    signature = inspect.signature(messages_module._process_message)
-    assert signature.parameters["idempotency_salt"].default == "", (
-        "the salt must default to empty, or every migration key changes"
+async def test_unsalted_migration_reuses_base_delivery_without_reposting(tmp_path: Path) -> None:
+    """An ordinary send with no repair salt keeps its base identity on recovery."""
+    config = _make_config(tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(1)
+    state = MigrationState(channel_map={"123": destination})
+    source = DCEMessage(
+        id="456",
+        type="Default",
+        timestamp="2026-10-17T00:00:00Z",
+        content="one",
+        author=DCEAuthor(id="789", name="Author"),
     )
+    keys = []
+
+    async def send(*args, **kwargs):
+        keys.append(kwargs["idempotency_key"])
+        return {"_id": valid_stoat_id(7)}
+
+    async with aiohttp.ClientSession() as session:
+        with patch.object(messages_module, "api_send_message", send):
+            for _ in range(2):
+                await messages_module._process_message(
+                    msg=source,
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    export_channel_id="123",
+                )
+    ref = delivery_module.DeliveryRef("123", "456", destination, "ordinary")
+    assert keys == [delivery_module.delivery_key(state.delivery_namespace, ref, 0, 0)]
+    assert state.message_map == {"456": valid_stoat_id(7)}
+    assert state.channel_message_counts == {"123": 1}
 
 
 async def test_a_resend_salts_its_idempotency_keys_with_the_new_channel(

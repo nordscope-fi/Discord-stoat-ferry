@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import ensure_output_subdir, write_text_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
-from discord_ferry.errors import DuplicateSendError
+from discord_ferry.errors import DeliveryUnresolvedError, DuplicateSendError
 from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
+from discord_ferry.migrator.delivery import deliver_part
 from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
 from discord_ferry.parser.media_paths import contained_media_path, is_media_escape
@@ -26,7 +29,14 @@ from discord_ferry.parser.transforms import (
     rewrite_discord_links,
     strip_underline,
 )
-from discord_ferry.state import FailedMessage, save_state
+from discord_ferry.state import (
+    DeliveryRef,
+    DeliveryToken,
+    FailedMessage,
+    consume_delivery,
+    delivery_receipt_id,
+    save_state,
+)
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_with_cache
 
 if TYPE_CHECKING:
@@ -184,6 +194,9 @@ class ChannelResult:
     #: suppress the fallback, resolving the reference to nothing. The write site is
     #: guarded on ``if stoat_msg_id:`` for exactly this reason.
     message_map_updates: dict[str, str] = field(default_factory=dict)
+    delivery_markers: dict[str, str] = field(default_factory=dict)
+    delivery_tokens: dict[str, str] = field(default_factory=dict)
+    resolved_deliveries: set[tuple[str, str]] = field(default_factory=set)
     pending_pins: list[tuple[str, str]] = field(default_factory=list)
     pending_reactions: list[dict[str, object]] = field(default_factory=list)
     attachments_uploaded: int = 0
@@ -241,6 +254,11 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
     state.replies_linked += result.replies_linked
     state.replies_total += result.replies_total
     state.reactions_dropped += result.reactions_dropped
+    state.delivery_bookkeeping.update(result.delivery_markers)
+    for receipt_id, digest in result.delivery_tokens.items():
+        consume_delivery(
+            state, DeliveryToken(receipt_id, digest), result.delivery_markers[receipt_id]
+        )
 
 
 def _skip_attachment(
@@ -1155,6 +1173,7 @@ async def _process_single_channel(
         else:
             _failed_ids_here = set()
         _channel_max_id = 0
+        _resolved_deliveries: set[tuple[str, str]] = set()
         _skipped = 0
         _copied = 0
         _retried = 0
@@ -1195,6 +1214,7 @@ async def _process_single_channel(
                 export_channel_id=export.channel.id,
                 source_channel_names=source_channel_names,
             )
+            _resolved_deliveries.update(result.resolved_deliveries)
 
             # Periodic progress event and state save.
             if (idx + 1) % _checkpoint_interval == 0:
@@ -1234,9 +1254,9 @@ async def _process_single_channel(
             if _channel_max_id:
                 state.channel_high_water[export.channel.id] = str(_channel_max_id)
             state.channel_message_offsets.pop(export.channel.id, None)
-            # #76 reconcile this channel's previously-failed ids: drop any that
-            # succeeded this run (now in message_map), and collapse the carried +
-            # fresh-re-fail duplicate to a single entry. Scoped to this channel so
+            # Reconcile this channel's previously-failed ids only after every
+            # required part resolves, not merely its first-part map entry. Collapse
+            # carried and fresh re-failures to one entry. Scoped to this channel so
             # other channels' and brand-new failures are untouched.
             #
             # This gate MUST match the one building _failed_ids_here above.
@@ -1248,7 +1268,7 @@ async def _process_single_channel(
                         fm.stoat_channel_id == stoat_channel_id
                         and fm.discord_msg_id in _failed_ids_here
                     ):
-                        if fm.discord_msg_id in state.message_map:
+                        if (fm.discord_msg_id, fm.stoat_channel_id) in _resolved_deliveries:
                             continue  # succeeded this run -> drop (S2-AC6)
                         if fm.discord_msg_id in _seen:
                             continue  # carried + re-fail dup -> collapse (S2-AC7)
@@ -1297,6 +1317,7 @@ async def _process_message(
     export_channel_id: str = "",
     idempotency_salt: str = "",
     source_channel_names: dict[str, str] | None = None,
+    allow_rejected_retry: bool = False,
 ) -> None:
     """Process and send a single message.
 
@@ -1714,54 +1735,61 @@ async def _process_message(
 
     # Step 8: Send the message (all parts).
     stoat_msg_id: str = ""
-    duplicate_unmapped = False
+    source_channel = export_channel_id or (
+        channel_result.channel_id if channel_result is not None else ""
+    )
+    if not source_channel:
+        candidates = [key for key, value in state.channel_map.items() if value == stoat_channel_id]
+        if len(candidates) != 1:
+            raise DeliveryUnresolvedError("Selected delivery lacks a unique source channel")
+        source_channel = candidates[0]
+    generation = (
+        hashlib.sha256(idempotency_salt.encode()).hexdigest()[:32] if idempotency_salt else "base"
+    )
+    ref = DeliveryRef(source_channel, msg.id, stoat_channel_id, "ordinary", generation)
+    receipt_id = delivery_receipt_id(ref)
+    render = {
+        "parts": parts,
+        "embeds": [
+            {key: value for key, value in embed.items() if key != "media"} for embed in stoat_embeds
+        ],
+        "masquerade": {key: value for key, value in masquerade.items() if key != "avatar"},
+        "replies": replies,
+        "attachments": [asdict(item) for item in msg.attachments],
+        "source_embeds": msg.embeds,
+        "stickers": msg.stickers,
+    }
+    render_digest = hashlib.sha256(
+        json.dumps(render, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    confirmed_autumn_ids: tuple[str, ...] = ()
+    latest_token: DeliveryToken | None = None
+    fully_resolved = False
     _send_failed = False
     _send_exc: Exception | None = None
     _send_exc_str = ""
     _parts_failed = 0
     for part_idx, part_content in enumerate(parts):
         is_first = part_idx == 0
-        # The salt exists for ferry repair. Stoat's Idempotency-Key store is a
-        # 1000-entry in-memory LRU with no TTL, and this key is built from the
-        # DISCORD message id, which a recreated channel does not change. So a
-        # repair running while those keys are still cached would be answered
-        # 409 DuplicateNonce and treat the message as already delivered, when
-        # the channel holding it was deleted and it is not there at all.
-        # Repair passes the new Stoat channel id, which makes the key unique
-        # to that recreation. Empty for the migration, so its keys are
-        # unchanged.
-        _salt = f"-{idempotency_salt}" if idempotency_salt else ""
-        idem_key = (
-            f"ferry-{msg.id}{_salt}"
-            if len(parts) == 1
-            else f"ferry-{msg.id}{_salt}_p{part_idx + 1}"
-        )
         try:
-            result = await api_send_message(
-                session,
-                config.stoat_url,
-                config.token,
-                stoat_channel_id,
+            result = await deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=part_idx,
+                part_count=len(parts),
+                render_digest=render_digest,
                 content=part_content,
                 # Attachments, embeds, and replies only on the first part.
                 attachments=(autumn_ids if autumn_ids and is_first else None),
                 embeds=(stoat_embeds if stoat_embeds and is_first else None),
                 masquerade=masquerade,
                 replies=(replies if replies and is_first else None),
-                idempotency_key=idem_key,
+                allow_rejected_retry=allow_rejected_retry
+                or config.incremental
+                or bool(idempotency_salt),
             )
-        except DuplicateSendError:
-            # This part is already on the server. The catch is PER PART, not around
-            # the loop: every part carries its own Idempotency-Key, so the parts
-            # after a duplicate are NOT duplicates and must still be sent. Catching
-            # at the loop truncates the message and loses their content with no
-            # warning, which is worse than the bug this batch fixes.
-            #
-            # Only the first part's id reaches message_map, so only it is worth
-            # noting. Stoat returns no id with the 409, so that entry is lost.
-            if is_first:
-                duplicate_unmapped = True
-            continue
         except Exception as exc:  # noqa: BLE001
             _parts_failed += 1
             if not _send_failed:
@@ -1781,6 +1809,7 @@ async def _process_message(
                         stoat_channel_id=stoat_channel_id,
                         error=_send_exc_str,
                         content_preview=content[:50] if content else "",
+                        delivery_ref=ref,
                     )
                 )
                 on_event(
@@ -1791,9 +1820,12 @@ async def _process_message(
                     )
                 )
             continue
-        part_stoat_id: str = result["_id"]
+        part_stoat_id = result.message_id
+        latest_token = result.token
+        fully_resolved = result.fully_resolved
         if is_first:
             stoat_msg_id = part_stoat_id
+            confirmed_autumn_ids = result.autumn_ids
 
     # Step 8a: Commit delivered state and queue pins/reactions.
     #
@@ -1801,31 +1833,21 @@ async def _process_message(
     # outer try provided for this region. An unexpected exception here is caught,
     # recorded, and (on the retry path) re-raised rather than propagating unguarded.
     try:
-        if stoat_msg_id or duplicate_unmapped:
-            # Only the statements that CONSUME the id are guarded. The counters and the
-            # reference-set updates run either way, because the message IS on the server.
-            #
-            # Do NOT fold `stoat_msg_id` into the branch condition above. `else` means
-            # "not the condition above", not "the retry path", so a parallel-path message
-            # with an empty id would fall into the retry branch and write
-            # state.message_map directly, bypassing ChannelResult and the save_lock
-            # discipline. Both branches leave the same channel_message_counts, so no
-            # state-level test can see that mistake.
-            # Pinned by test_duplicate_runs_the_parallel_branch_not_the_retry_branch.
+        bookkeeping_done = state.delivery_bookkeeping.get(receipt_id) == stoat_msg_id or (
+            channel_result is not None
+            and channel_result.delivery_markers.get(receipt_id) == stoat_msg_id
+        )
+        if stoat_msg_id:
             if channel_result is not None:
-                # This guard is load-bearing twice over: it keeps an empty id out of the
-                # map, and it upholds the ChannelResult.message_map_updates invariant
-                # that the reply and pin lookups rely on. See the field's own comment.
-                if stoat_msg_id:
-                    channel_result.message_map_updates[msg.id] = stoat_msg_id
-                channel_result.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
-                channel_result.messages_migrated += 1  # S15: track for forum index rebuild
+                channel_result.message_map_updates[msg.id] = stoat_msg_id
+                channel_result.referenced_autumn_ids.update(confirmed_autumn_ids)
+                if not bookkeeping_done:
+                    channel_result.messages_migrated += 1
             else:
-                if stoat_msg_id:
-                    state.message_map[msg.id] = stoat_msg_id
-                state.referenced_autumn_ids.update(autumn_ids, embed_media_ids)
+                state.message_map[msg.id] = stoat_msg_id
+                state.referenced_autumn_ids.update(confirmed_autumn_ids)
                 # S15: Track per-channel message count (direct-state path, e.g. retry).
-                if export_channel_id:
+                if export_channel_id and not bookkeeping_done:
                     state.channel_message_counts[export_channel_id] = (
                         state.channel_message_counts.get(export_channel_id, 0) + 1
                     )
@@ -1844,28 +1866,12 @@ async def _process_message(
                 }
             )
 
-        if duplicate_unmapped:
-            # The message is on the server but Stoat returned no id with the 409, so
-            # nothing can reference it: replies to it will not resolve, and its pin and
-            # reactions are skipped above. Say so rather than reporting a clean run.
-            acc_warnings.append(
-                {
-                    "phase": "messages",
-                    "type": "duplicate_send_unmapped",
-                    "message": (
-                        f"Message {msg.id} was already on the server (duplicate send); "
-                        "its Stoat id could not be recovered, so replies to it and its "
-                        "pins and reactions were skipped"
-                    ),
-                }
-            )
-
-        if msg.is_pinned and stoat_msg_id:
+        if msg.is_pinned and stoat_msg_id and not bookkeeping_done:
             acc_pins.append((stoat_channel_id, stoat_msg_id))
 
         # Step 8b: Queue reactions (only in native mode). Guarded at the block, which
         # covers BOTH append sites, the custom-emoji one and the Unicode one.
-        if _effective_mode == "native" and stoat_msg_id:
+        if _effective_mode == "native" and stoat_msg_id and not bookkeeping_done:
             for reaction in msg.reactions:
                 if reaction.emoji.id:  # Custom emoji.
                     stoat_emoji = state.emoji_map.get(reaction.emoji.id)
@@ -1906,6 +1912,17 @@ async def _process_message(
                         }
                     )
 
+        if stoat_msg_id:
+            if channel_result is not None:
+                channel_result.delivery_markers[receipt_id] = stoat_msg_id
+                if fully_resolved and not _send_failed and latest_token is not None:
+                    channel_result.delivery_tokens[receipt_id] = latest_token.receipt_digest
+                    channel_result.resolved_deliveries.add((msg.id, stoat_channel_id))
+            else:
+                state.delivery_bookkeeping[receipt_id] = stoat_msg_id
+                if fully_resolved and not _send_failed and latest_token is not None:
+                    consume_delivery(state, latest_token, stoat_msg_id)
+
     except Exception as exc:  # noqa: BLE001
         safe_exc = safe_sanitize(config.token_store, str(exc))
         if not _send_failed:
@@ -1922,6 +1939,7 @@ async def _process_message(
                     stoat_channel_id=stoat_channel_id,
                     error=safe_exc,
                     content_preview=content[:50] if content else "",
+                    delivery_ref=ref,
                 )
             )
             on_event(

@@ -228,11 +228,11 @@ async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Pa
         messages=[message],
     )
     state = _state()
-    state.channel_map["channel1"] = "stoat-channel-1"
+    state.channel_map["channel1"] = "01J5T006480276736221970060"
     state.failed_messages.append(
         FailedMessage(
             discord_msg_id=message.id,
-            stoat_channel_id="stoat-channel-1",
+            stoat_channel_id="01J5T006480276736221970060",
             error="first send failed",
         )
     )
@@ -245,8 +245,8 @@ async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Pa
             },
         )
         mocked.post(
-            f"{STOAT_URL}/channels/stoat-channel-1/messages",
-            payload={"_id": "stoat-message-1"},
+            f"{STOAT_URL}/channels/01J5T006480276736221970060/messages",
+            payload={"_id": "01J5T009660122104522437779"},
         )
 
         await run_retry_failed(config, state, [export], lambda event: None)
@@ -268,7 +268,7 @@ async def test_repair_nested_retry_reuses_initialized_limits(tmp_path: Path) -> 
         failed_messages=[
             FailedMessage(
                 discord_msg_id="message-1",
-                stoat_channel_id="stoat-channel-1",
+                stoat_channel_id="01J5T006480276736221970060",
                 error="first send failed",
             )
         ],
