@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,217 @@ from discord_ferry.state import (
     save_state,
 )
 from tests.stoat_ids import SERVER_ID, stoat_id
+
+
+def test_delivery_receipt_roundtrip_is_structural(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    writer = getattr(state_module, "write_delivery_receipt", None)
+    assert callable(writer), "State must persist delivery evidence before a send"
+    ref = state_module.DeliveryRef("123", "456", stoat_id(7), "ordinary")
+    state = MigrationState(delivery_namespace="a" * 32, delivery_service_digest="b" * 64)
+    receipt = state_module.DeliveryReceipt(
+        1,
+        state.delivery_namespace,
+        state.delivery_service_digest,
+        ref,
+        "c" * 64,
+        [state_module.DeliveryPart(0, "ferry-v2-" + "d" * 40)],
+    )
+    token = writer(state, tmp_path, receipt)
+    assert len(token.receipt_id) == 64
+    assert state_module.read_delivery_receipt(state, tmp_path, ref) == receipt
+    path = tmp_path / "delivery-receipts" / state.delivery_namespace / f"{token.receipt_id}.json"
+    raw = json.loads(path.read_text())
+    assert set(raw) == {"version", "namespace", "service_digest", "ref", "render_digest", "parts"}
+    assert raw["ref"]["destination_channel_id"] == stoat_id(7)
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.delivery_namespace == state.delivery_namespace
+    assert loaded.delivery_service_digest == state.delivery_service_digest
+
+
+def _delivery_fixture(tmp_path: Path) -> tuple[MigrationState, Any, Path]:
+    from discord_ferry import state as state_module
+
+    writer = getattr(state_module, "write_delivery_receipt", None)
+    assert callable(writer), "State must persist delivery evidence before a send"
+    state = MigrationState(delivery_namespace="a" * 32, delivery_service_digest="b" * 64)
+    ref = state_module.DeliveryRef("123", "456", stoat_id(7), "ordinary")
+    receipt = state_module.DeliveryReceipt(
+        1,
+        state.delivery_namespace,
+        state.delivery_service_digest,
+        ref,
+        "c" * 64,
+        [state_module.DeliveryPart(0, "ferry-v2-" + "d" * 40)],
+    )
+    token = writer(state, tmp_path, receipt)
+    path = tmp_path / "delivery-receipts" / state.delivery_namespace / f"{token.receipt_id}.json"
+    return state, receipt, path
+
+
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        ("version", True),
+        ("version", 2),
+        ("namespace", "../escape"),
+        ("namespace", "e" * 32),
+        ("service_digest", "e" * 64),
+        ("render_digest", "body-secret-marker"),
+        ("parts", []),
+        ("parts", [None]),
+        ("ref", []),
+        ("unknown", "body-secret-marker"),
+        ("parts.0.index", True),
+        ("parts.0.index", 1),
+        ("parts.0.attempt", -1),
+        ("parts.0.attempt", True),
+        ("parts.0.key", "ferry-old"),
+        ("parts.0.status", "delivered"),
+        ("parts.0.status", []),
+        ("parts.0.status", "acknowledged"),
+        ("parts.0.message_id", stoat_id(1)),
+        ("parts.0.autumn_ids", "not-a-list"),
+        ("parts.0.autumn_ids", ["../private-file"]),
+        ("parts.0.autumn_ids", [False]),
+        ("parts.0.extra", "body-secret-marker"),
+        ("ref.family", "new-family"),
+        ("ref.family", []),
+        ("ref.source_channel_id", "../private-file"),
+        ("ref.destination_channel_id", stoat_id(8)),
+        ("ref.generation", "unknown-generation"),
+    ],
+)
+def test_delivery_receipt_rejects_malformed_evidence(
+    tmp_path: Path, member: str, value: object
+) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    raw = json.loads(path.read_text())
+    container = raw
+    fields = member.split(".")
+    for name in fields[:-1]:
+        container = container[int(name)] if isinstance(container, list) else container[name]
+    container[fields[-1]] = value
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError) as failure:
+        state_module.read_delivery_receipt(state, tmp_path, receipt.ref)
+    assert "body-secret-marker" not in str(failure.value)
+
+
+@pytest.mark.parametrize("raw", ["{", "[]", "null", "123", '"body-secret-marker"'])
+def test_delivery_receipt_rejects_non_record_json(tmp_path: Path, raw: str) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    path.write_text(raw, encoding="utf-8")
+    with pytest.raises(StateError):
+        state_module.read_delivery_receipt(state, tmp_path, receipt.ref)
+
+
+def test_delivery_receipt_write_failure_preserves_previous_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import state as state_module
+    from discord_ferry.core import atomicio
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    original = path.read_bytes()
+    receipt.parts[0].status = "uncertain"
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        raise PermissionError("held receipt")
+
+    monkeypatch.setattr(atomicio, "replace_with_retry", fail_replace)
+    with pytest.raises(StateError):
+        state_module.write_delivery_receipt(state, tmp_path, receipt)
+    assert path.read_bytes() == original
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("linked", ["file", "namespace", "root"])
+def test_delivery_receipt_refuses_linked_paths(tmp_path: Path, linked: str) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if linked == "file":
+        copy = outside / "receipt.json"
+        copy.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(copy)
+    else:
+        directory = path.parent if linked == "namespace" else path.parent.parent
+        moved = outside / "moved"
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(StateError):
+        state_module.read_delivery_receipt(state, tmp_path, receipt.ref)
+    with pytest.raises(StateError):
+        state_module.write_delivery_receipt(state, tmp_path, receipt)
+
+
+def test_delivery_receipt_missing_is_not_corruption(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, path = _delivery_fixture(tmp_path)
+    path.unlink()
+    assert state_module.read_delivery_receipt(state, tmp_path, receipt.ref) is None
+
+
+@pytest.mark.parametrize("status", ["prepared", "uncertain", "acknowledged", "confirmed_rejected"])
+def test_delivery_receipt_closed_statuses_roundtrip(tmp_path: Path, status: str) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, _ = _delivery_fixture(tmp_path)
+    receipt.parts[0].status = status
+    receipt.parts[0].message_id = stoat_id(9) if status == "acknowledged" else ""
+    receipt.parts[0].autumn_ids = ["original-attachment", "original_embed"]
+    token = state_module.write_delivery_receipt(state, tmp_path, receipt)
+    assert len(token.receipt_digest) == 64
+    assert state_module.read_delivery_receipt(state, tmp_path, receipt.ref) == receipt
+
+
+def test_delivery_reference_is_not_scrubbed_as_text(tmp_path: Path) -> None:
+    state, receipt, _ = _delivery_fixture(tmp_path)
+    state.failed_messages = [FailedMessage("456", stoat_id(7), "failure", delivery_ref=receipt.ref)]
+    register_secret("proxy_password", "a")
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.delivery_namespace == "a" * 32
+    assert loaded.failed_messages[0].delivery_ref == receipt.ref
+    assert "a" not in loaded.failed_messages[0].error
+
+
+def test_failed_message_delivery_reference_roundtrips(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    state, receipt, _ = _delivery_fixture(tmp_path)
+    state.failed_messages = [FailedMessage("456", stoat_id(7), "failure", delivery_ref=receipt.ref)]
+    save_state(state, tmp_path)
+    loaded = load_state(tmp_path)
+    assert loaded.failed_messages[0].delivery_ref == receipt.ref
+    assert isinstance(loaded.failed_messages[0].delivery_ref, state_module.DeliveryRef)
+
+
+def test_old_state_has_no_invented_delivery_reference(tmp_path: Path) -> None:
+    from discord_ferry import state as state_module
+
+    assert hasattr(state_module.FailedMessage, "delivery_ref"), "Legacy failures need safe defaults"
+    raw = {
+        "failed_messages": [
+            {"discord_msg_id": "456", "stoat_channel_id": stoat_id(7), "error": "old"}
+        ]
+    }
+    (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
+    loaded = load_state(tmp_path)
+    assert loaded.failed_messages[0].delivery_ref is None
+    assert loaded.delivery_namespace == ""
+    assert loaded.delivery_service_digest == ""
 
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
@@ -845,6 +1057,8 @@ def test_failed_message_members_are_masked_in_state_json(tmp_path: Path) -> None
 # core/security.py at the same time, or it is written unredacted.
 _KNOWN_STATE_FIELDS = frozenset(
     {
+        "delivery_namespace",  # Generated structural namespace, no free text.
+        "delivery_service_digest",  # Target binding digest, no URL or credential.
         "role_map",
         "channel_map",
         "category_map",
@@ -993,6 +1207,7 @@ def test_failed_message_fields_are_classified() -> None:
         "error",
         "retry_count",
         "content_preview",
+        "delivery_ref",  # Validated identifiers and closed family/generation only.
     }, "FailedMessage changed. If the new field holds free text, add it to _TEXT_MEMBERS"
 
 

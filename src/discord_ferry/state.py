@@ -1,16 +1,63 @@
 """Migration state management, ID mapping, and persistence."""
 
 import dataclasses
+import hashlib
 import json
 import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
-from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.core.atomicio import atomic_write_text, ensure_output_subdir
 from discord_ferry.core.security import scrub_document
 from discord_ferry.errors import StateError
+
+DeliveryFamily = Literal["ordinary", "merged", "header", "separator", "forum_index"]
+PartStatus = Literal["prepared", "uncertain", "acknowledged", "confirmed_rejected"]
+
+
+@dataclass(frozen=True)
+class DeliveryRef:
+    """Structural identity of a selected delivery, not a filesystem path."""
+
+    source_channel_id: str
+    source_message_id: str
+    destination_channel_id: str
+    family: DeliveryFamily
+    generation: str = "base"
+
+
+@dataclass
+class DeliveryPart:
+    """One part's saved attempt and original acknowledged media references."""
+
+    index: int
+    key: str
+    attempt: int = 0
+    status: PartStatus = "prepared"
+    message_id: str = ""
+    autumn_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DeliveryReceipt:
+    """Delivery evidence only. Normal migration owners still commit progress."""
+
+    version: int
+    namespace: str
+    service_digest: str
+    ref: DeliveryRef
+    render_digest: str
+    parts: list[DeliveryPart]
+
+
+@dataclass(frozen=True)
+class DeliveryToken:
+    """Identifies the exact receipt revision a checkpoint may consume."""
+
+    receipt_id: str
+    receipt_digest: str
 
 
 @dataclass
@@ -22,6 +69,7 @@ class FailedMessage:
     error: str
     retry_count: int = 0
     content_preview: str = ""
+    delivery_ref: DeliveryRef | None = None
 
 
 @dataclass
@@ -57,6 +105,10 @@ class RollbackProgress:
 @dataclass
 class MigrationState:
     """Tracks all ID mappings and progress for resume support."""
+
+    # Structural identity only; lifecycle and checkpoint handoff are separate.
+    delivery_namespace: str = ""
+    delivery_service_digest: str = ""
 
     # Discord ID -> Stoat ID mappings
     role_map: dict[str, str] = field(default_factory=dict)
@@ -224,6 +276,195 @@ class MigrationState:
     # best-effort full link ("" when the frontend base couldn't be discovered).
     invite_code: str = ""
     invite_url: str = ""
+
+
+def _delivery_string(value: object, pattern: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise StateError("Invalid delivery evidence")
+    return value
+
+
+def _delivery_record(value: object, members: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != members:
+        raise StateError("Invalid delivery evidence members")
+    return cast("dict[str, Any]", value)
+
+
+def _decode_delivery_ref(value: object) -> DeliveryRef:
+    raw = _delivery_record(
+        value,
+        {
+            "source_channel_id",
+            "source_message_id",
+            "destination_channel_id",
+            "family",
+            "generation",
+        },
+    )
+    source_channel = _delivery_string(raw["source_channel_id"], r"[A-Za-z0-9_-]{1,128}")
+    source_message = _delivery_string(raw["source_message_id"], r"[A-Za-z0-9_-]{1,128}")
+    destination = raw["destination_channel_id"]
+    if not is_stoat_id(destination):
+        raise StateError("Invalid delivery destination")
+    family = _delivery_string(raw["family"], r"ordinary|merged|header|separator|forum_index")
+    generation = _delivery_string(raw["generation"], r"base|[0-9a-f]{32}")
+    return DeliveryRef(
+        source_channel, source_message, destination, cast("DeliveryFamily", family), generation
+    )
+
+
+def _validate_delivery_binding(state: MigrationState, *, required: bool = False) -> None:
+    if not required and state.delivery_namespace == state.delivery_service_digest == "":
+        return
+    _delivery_string(state.delivery_namespace, r"[0-9a-f]{32}")
+    _delivery_string(state.delivery_service_digest, r"[0-9a-f]{64}")
+
+
+def _decode_delivery_receipt(value: object) -> DeliveryReceipt:
+    raw = _delivery_record(
+        value,
+        {
+            "version",
+            "namespace",
+            "service_digest",
+            "ref",
+            "render_digest",
+            "parts",
+        },
+    )
+    if type(raw["version"]) is not int or raw["version"] != 1:
+        raise StateError("Unsupported delivery receipt version")
+    namespace = _delivery_string(raw["namespace"], r"[0-9a-f]{32}")
+    service = _delivery_string(raw["service_digest"], r"[0-9a-f]{64}")
+    render = _delivery_string(raw["render_digest"], r"[0-9a-f]{64}")
+    ref = _decode_delivery_ref(raw["ref"])
+    if not isinstance(raw["parts"], list) or not raw["parts"]:
+        raise StateError("Invalid delivery parts")
+    parts: list[DeliveryPart] = []
+    keys: set[str] = set()
+    for index, value in enumerate(raw["parts"]):
+        part = _delivery_record(
+            value,
+            {
+                "index",
+                "key",
+                "attempt",
+                "status",
+                "message_id",
+                "autumn_ids",
+            },
+        )
+        if type(part["index"]) is not int or part["index"] != index:
+            raise StateError("Invalid delivery part position")
+        if type(part["attempt"]) is not int or part["attempt"] < 0:
+            raise StateError("Invalid delivery attempt")
+        key = _delivery_string(part["key"], r"ferry-v2-[0-9a-f]{40}")
+        if key in keys:
+            raise StateError("Duplicate delivery part key")
+        keys.add(key)
+        status = _delivery_string(
+            part["status"], r"prepared|uncertain|acknowledged|confirmed_rejected"
+        )
+        message_id = part["message_id"]
+        if (status == "acknowledged" and not is_stoat_id(message_id)) or (
+            status != "acknowledged" and message_id != ""
+        ):
+            raise StateError("Invalid delivery acknowledgement")
+        autumn_ids = part["autumn_ids"]
+        if not isinstance(autumn_ids, list) or any(
+            not is_stoat_file_id(item) for item in autumn_ids
+        ):
+            raise StateError("Invalid delivery media references")
+        parts.append(
+            DeliveryPart(
+                index, key, part["attempt"], cast("PartStatus", status), message_id, autumn_ids
+            )
+        )
+    return DeliveryReceipt(1, namespace, service, ref, render, parts)
+
+
+def _delivery_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def delivery_receipt_id(ref: DeliveryRef) -> str:
+    """Return a generated filename stem; source identifiers never become paths."""
+    validated = _decode_delivery_ref(dataclasses.asdict(ref))
+    return hashlib.sha256(_delivery_json(dataclasses.asdict(validated)).encode()).hexdigest()
+
+
+def _delivery_path(
+    state: MigrationState, output_dir: Path, ref: DeliveryRef, *, create: bool
+) -> Path:
+    _validate_delivery_binding(state, required=True)
+    folder = output_dir / "delivery-receipts" / state.delivery_namespace
+    if create:
+        ensure_output_subdir(folder, output_dir)
+    else:
+        for directory in (folder.parent, folder):
+            if directory.is_symlink():
+                raise StateError("Linked delivery receipt directory")
+        if not folder.resolve().is_relative_to(output_dir.resolve()):
+            raise StateError("Delivery receipt directory is outside output")
+    path = folder / f"{delivery_receipt_id(ref)}.json"
+    if path.is_symlink():
+        raise StateError("Linked delivery receipt file")
+    return path
+
+
+def write_delivery_receipt(
+    state: MigrationState, output_dir: Path, receipt: DeliveryReceipt
+) -> DeliveryToken:
+    """Validate and safely replace one structural receipt before dispatch."""
+    validated = _decode_delivery_receipt(dataclasses.asdict(receipt))
+    if (validated.namespace, validated.service_digest) != (
+        state.delivery_namespace,
+        state.delivery_service_digest,
+    ):
+        raise StateError("Delivery receipt does not match migration")
+    text = _delivery_json(dataclasses.asdict(validated))
+    try:
+        path = _delivery_path(state, output_dir, validated.ref, create=True)
+        atomic_write_text(path, text)
+    except OSError as exc:
+        raise StateError("Could not save delivery receipt") from exc
+    return DeliveryToken(path.stem, hashlib.sha256(text.encode()).hexdigest())
+
+
+def read_delivery_receipt(
+    state: MigrationState, output_dir: Path, ref: DeliveryRef
+) -> DeliveryReceipt | None:
+    """Read one bound receipt, rejecting malformed evidence rather than replaying."""
+    try:
+        path = _delivery_path(state, output_dir, ref, create=False)
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        raise StateError("Could not read delivery receipt") from exc
+    try:
+        receipt = _decode_delivery_receipt(json.loads(text))
+    except (ValueError, RecursionError) as exc:
+        raise StateError("Invalid delivery receipt JSON") from exc
+    if (receipt.namespace, receipt.service_digest, receipt.ref) != (
+        state.delivery_namespace,
+        state.delivery_service_digest,
+        ref,
+    ):
+        raise StateError("Delivery receipt does not match migration")
+    return receipt
+
+
+def _decode_failed_message(value: dict[str, Any]) -> FailedMessage:
+    raw = dict(value)
+    if raw.get("delivery_ref") is not None:
+        raw["delivery_ref"] = _decode_delivery_ref(raw["delivery_ref"])
+        if (raw["delivery_ref"].source_message_id, raw["delivery_ref"].destination_channel_id) != (
+            raw.get("discord_msg_id"),
+            raw.get("stoat_channel_id"),
+        ):
+            raise StateError("Failed message delivery reference does not match")
+    return FailedMessage(**raw)
 
 
 def save_state(state: MigrationState, output_dir: Path) -> None:
@@ -507,6 +748,7 @@ def check_state_ids(state: MigrationState) -> None:
 
 
 def _state_to_dict(state: MigrationState) -> dict[str, Any]:
+    _validate_delivery_binding(state)
     rp_data: dict[str, Any] | None
     if state.rollback_progress is not None:
         rp_data = dataclasses.asdict(state.rollback_progress)
@@ -516,6 +758,8 @@ def _state_to_dict(state: MigrationState) -> dict[str, Any]:
         rp_data = None
 
     return {
+        "delivery_namespace": state.delivery_namespace,
+        "delivery_service_digest": state.delivery_service_digest,
         "role_map": state.role_map,
         "channel_map": state.channel_map,
         "category_map": state.category_map,
@@ -597,6 +841,8 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
 
     try:
         state = MigrationState(
+            delivery_namespace=data.get("delivery_namespace", ""),
+            delivery_service_digest=data.get("delivery_service_digest", ""),
             role_map=data.get("role_map", {}),
             channel_map=data.get("channel_map", {}),
             category_map=data.get("category_map", {}),
@@ -636,7 +882,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
             autumn_uploads=data.get("autumn_uploads", {}),
             referenced_autumn_ids=set(data.get("referenced_autumn_ids", [])),
             roles_finalized=set(data.get("roles_finalized", [])),
-            failed_messages=[FailedMessage(**d) for d in data.get("failed_messages", [])],
+            failed_messages=[_decode_failed_message(d) for d in data.get("failed_messages", [])],
             validation_results=data.get("validation_results", {}),
             prior_messages_total=data.get("prior_messages_total", 0),
             source_messages_total=data.get("source_messages_total", 0),
@@ -660,6 +906,7 @@ def _dict_to_state(data: dict[str, Any]) -> MigrationState:
         # crashed migration has no completed_at -> not seeded -> resume finalizes the remainder.
         if state.completed_at and state.role_map and not state.roles_finalized:
             state.roles_finalized = set(state.role_map)
+        _validate_delivery_binding(state)
         return state
     except (TypeError, ValueError) as e:
         raise StateError(f"Invalid state data: {e}") from e
