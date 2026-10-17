@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING, Any
 from discord_ferry.core.atomicio import ensure_output_subdir, write_text_no_follow
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.security import safe_sanitize
-from discord_ferry.errors import DeliveryUnresolvedError, DuplicateSendError
-from discord_ferry.migrator.api import api_send_message, get_rate_multiplier, get_session
+from discord_ferry.errors import DeliveryUnresolvedError
+from discord_ferry.migrator.api import api_send_message as api_send_message
+from discord_ferry.migrator.api import get_rate_multiplier, get_session
 from discord_ferry.migrator.delivery import deliver_part
 from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
+    from discord_ferry.migrator.delivery import DeliveryResult
     from discord_ferry.parser.models import (
         DCEAuthor,
         DCEEmoji,
@@ -687,11 +689,12 @@ async def _merge_threads(
         state: Migration state.
         on_event: Event callback.
         parent_name_to_stoat: Mapping of parent channel name to Stoat channel ID.
-        idempotency_salt: Existing repair identity. Source-message delivery hashes
-            it into the structural generation; the separator keeps its existing
-            send boundary until generated-post integration.
+        idempotency_salt: Existing repair identity, hashed into the structural
+            generation for merged messages and their separator.
     """
-    _salt = f"-{idempotency_salt}" if idempotency_salt else ""
+    generation = (
+        hashlib.sha256(idempotency_salt.encode()).hexdigest()[:32] if idempotency_salt else "base"
+    )
     async with get_session(config) as session:
         for export in thread_exports:
             parent_name = export.parent_channel_name or ""
@@ -781,25 +784,31 @@ async def _merge_threads(
             _already_started = export.channel.id in state.channel_high_water or (
                 export.channel.id in state.channel_message_offsets
             )
+            separator_result: DeliveryResult | None = None
             if not ((config.incremental or config.resume) and _already_started):
                 separator = (
                     f"\u2500\u2500 Thread: {export.channel.name} "
                     f"({export.message_count} messages) \u2500\u2500"
                 )
                 try:
-                    await api_send_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        parent_stoat_id,
+                    separator_result = await deliver_part(
+                        session=session,
+                        config=config,
+                        state=state,
+                        ref=DeliveryRef(
+                            export.channel.id,
+                            export.channel.id,
+                            parent_stoat_id,
+                            "separator",
+                            generation,
+                        ),
+                        part_index=0,
+                        part_count=1,
+                        render_digest=hashlib.sha256(separator.encode()).hexdigest(),
                         content=separator,
                         masquerade={"name": "Discord Ferry"},
-                        idempotency_key=f"ferry-thread-sep-{export.channel.id}{_salt}",
+                        allow_rejected_retry=config.incremental or reconcile_failed,
                     )
-                except DuplicateSendError:
-                    # Already on the server. The return value is discarded here, so a
-                    # duplicate is indistinguishable from a success.
-                    pass
                 except Exception as exc:  # noqa: BLE001
                     safe_exc = safe_sanitize(config.token_store, str(exc))
                     state.warnings.append(
@@ -895,11 +904,6 @@ async def _merge_threads(
                     )
                     continue
 
-                generation = (
-                    hashlib.sha256(idempotency_salt.encode()).hexdigest()[:32]
-                    if idempotency_salt
-                    else "base"
-                )
                 if await _process_merged_message(
                     export=export,
                     msg=msg,
@@ -981,6 +985,8 @@ async def _merge_threads(
             # so the transient offset has nothing left to say. Clearing it is what
             # makes the separator gate distinguish "mid-flight" from "finished".
             state.channel_message_offsets.pop(export.channel.id, None)
+            if separator_result is not None and _thread_max_id:
+                consume_delivery(state, separator_result.token, separator_result.message_id)
             save_state(state, config.output_dir)
 
             on_event(
@@ -1119,6 +1125,7 @@ async def _process_single_channel(
         # Inject a system header for flattened threads/forum posts.
         # Gate on a missing durable marker so an unchanged (previously-completed)
         # thread/forum channel makes zero POSTs on an incremental run.
+        header_result: DeliveryResult | None = None
         if (
             export.is_thread
             and export.parent_channel_name
@@ -1129,18 +1136,20 @@ async def _process_single_channel(
             else:
                 header = f"[Thread migrated from #{export.parent_channel_name}]"
             try:
-                await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    stoat_channel_id,
+                header_result = await deliver_part(
+                    session=session,
+                    config=config,
+                    state=state,
+                    ref=DeliveryRef(
+                        export.channel.id, export.channel.id, stoat_channel_id, "header"
+                    ),
+                    part_index=0,
+                    part_count=1,
+                    render_digest=hashlib.sha256(header.encode()).hexdigest(),
                     content=header,
                     masquerade={"name": "Discord Ferry"},
-                    idempotency_key=f"ferry-header-{export.channel.id}",
+                    allow_rejected_retry=config.incremental,
                 )
-            except DuplicateSendError:
-                # Already on the server. The return value is discarded here.
-                pass
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(
                     {
@@ -1293,6 +1302,8 @@ async def _process_single_channel(
             # offset below) so a later --incremental run skips already-copied messages.
             if _channel_max_id:
                 state.channel_high_water[export.channel.id] = str(_channel_max_id)
+                if header_result is not None:
+                    consume_delivery(state, header_result.token, header_result.message_id)
             state.channel_message_offsets.pop(export.channel.id, None)
             # Reconcile this channel's previously-failed ids only after every
             # required part resolves, not merely its first-part map entry. Collapse

@@ -508,7 +508,9 @@ def _sent_message_ids(sent: list[dict[str, Any]], state: MigrationState) -> list
     return [
         identities.get(item["idempotency_key"], "unrecognized delivery key")
         for item in sent
-        if not item["idempotency_key"].startswith("ferry-header-")
+        if not item.get("content", "").startswith(
+            ("[Thread migrated from #", "[Forum post migrated from #")
+        )
     ]
 
 
@@ -3193,7 +3195,7 @@ async def test_new_thread_posts_header(tmp_path: Path) -> None:
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     headers = [
-        k.get("content") for k in sent if k.get("idempotency_key", "").startswith("ferry-header-")
+        k.get("content") for k in sent if k.get("content", "").startswith("[Thread migrated from #")
     ]
     assert headers == ["[Thread migrated from #general]"]
 
@@ -3269,7 +3271,7 @@ async def test_new_forum_posts_forum_header(tmp_path: Path) -> None:
         headers = [
             k.get("content")
             for k in sent
-            if k.get("idempotency_key", "").startswith("ferry-header-")
+            if k.get("content", "").startswith("[Forum post migrated from #")
         ]
         assert headers == ["[Forum post migrated from #general]"], f"type={forum_type}"
 

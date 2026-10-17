@@ -5605,7 +5605,6 @@ async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
         merged_thread_ids=(R_THREAD_A, R_THREAD_B),
     )
     keys = [s["key"] for s in sends]
-    assert f"ferry-thread-sep-{R_THREAD_A}-{R_NEW_CHANNEL}" in keys
     generation = hashlib.sha256(R_NEW_CHANNEL.encode()).hexdigest()[:32]
     replacement = delivery_module.DeliveryRef(
         R_THREAD_A, "900000000000000011", R_NEW_CHANNEL, "merged", generation
@@ -5613,13 +5612,10 @@ async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
     base = dataclasses.replace(replacement, generation="base")
     assert delivery_module.delivery_key(state.delivery_namespace, replacement, 0, 0) in keys
     assert delivery_module.delivery_key(state.delivery_namespace, base, 0, 0) not in keys
-    unsalted = [
-        k
-        for k in keys
-        if k.startswith(("ferry-merge-", "ferry-thread-sep-"))
-        and not k.endswith(f"-{R_NEW_CHANNEL}")
-    ]
-    assert not unsalted, f"an unsalted merge key would be swallowed by Stoat's cache: {unsalted}"
+    separator = dataclasses.replace(replacement, source_message_id=R_THREAD_A, family="separator")
+    base_separator = dataclasses.replace(separator, generation="base")
+    assert delivery_module.delivery_key(state.delivery_namespace, separator, 0, 0) in keys
+    assert delivery_module.delivery_key(state.delivery_namespace, base_separator, 0, 0) not in keys
 
 
 async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) -> None:
