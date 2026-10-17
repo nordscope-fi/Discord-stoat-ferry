@@ -274,6 +274,7 @@ class _ProgressTracker:
         self.messages_sent = 0
         self.messages_partial = 0
         self.messages_unresolved = 0
+        self.failed_records = 0
         self.error_count = 0
         self.warning_count = 0
 
@@ -312,6 +313,7 @@ class _ProgressTracker:
             f"Verified: {self.messages_sent:,}  "
             f"Partial: {self.messages_partial:,}  "
             f"Unresolved: {self.messages_unresolved:,}  "
+            f"Failed records: {self.failed_records:,}  "
             f"Errors: {self.error_count}  "
             f"Warnings: {self.warning_count}"
         )
@@ -339,6 +341,14 @@ class _ProgressTracker:
                 self.messages_sent = delivery["verified"]
                 self.messages_partial = delivery["partial"]
                 self.messages_unresolved = delivery["unresolved"]
+        if (
+            event.phase in ("messages", "report")
+            and event.status == "completed"
+            and isinstance(event.detail, dict)
+        ):
+            remaining = event.detail.get("remaining_failed")
+            if type(remaining) is int and remaining >= 0:
+                self.failed_records = remaining
 
         # User-controlled values (event.message, channel_name, server_name, warnings) are escaped
         # before interpolation into Rich markup. The whole render is additionally guarded against
@@ -432,6 +442,7 @@ class _ProgressTracker:
             f"[bold]Done.[/] Verified: {self.messages_sent:,}  "
             f"Partial: {self.messages_partial:,}  "
             f"Unresolved: {self.messages_unresolved:,}  "
+            f"Failed records: {self.failed_records:,}  "
             f"Errors: {self.error_count}  Warnings: {self.warning_count}"
         )
 

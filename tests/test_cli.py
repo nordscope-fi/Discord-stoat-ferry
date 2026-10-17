@@ -759,6 +759,26 @@ def test_cli_delivery_summary_legacy_progress_does_not_claim_delivery() -> None:
     assert tracker._msg_progress.tasks[0].completed == 3
 
 
+def test_cli_delivery_summary_exposes_parked_failure_records() -> None:
+    from discord_ferry.cli import _ProgressTracker
+    from discord_ferry.core.events import MigrationEvent
+
+    buf, fake = _b5_console()
+    with patch("discord_ferry.cli.console", fake):
+        tracker = _ProgressTracker()
+        tracker.on_event(
+            MigrationEvent(
+                phase="report",
+                status="completed",
+                message="continued without visiting messages",
+                detail={"remaining_failed": 2},
+            )
+        )
+        tracker.print_summary()
+    assert "Failed records: 2" in buf.getvalue()
+    assert tracker.messages_sent == 0
+
+
 def test_confirm_event_handled() -> None:
     """Sending a confirm event to _ProgressTracker must not raise."""
     from discord_ferry.cli import _ProgressTracker

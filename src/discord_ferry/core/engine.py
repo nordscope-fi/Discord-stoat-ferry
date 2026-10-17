@@ -935,7 +935,14 @@ async def run_migration(
     generate_report(config, state, exports)
     generate_markdown_report(config, state, exports)
     save_state(state, config.output_dir)
-    on_event(MigrationEvent(phase="report", status="completed", message="Migration complete"))
+    on_event(
+        MigrationEvent(
+            phase="report",
+            status="completed",
+            message="Migration complete",
+            detail={"remaining_failed": len(state.failed_messages)},
+        )
+    )
 
     return state
 

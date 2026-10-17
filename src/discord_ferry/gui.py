@@ -1417,6 +1417,9 @@ async def migrate_page() -> None:
     completion_card: ui.card
 
     messages_sent = 0
+    messages_partial = 0
+    messages_unresolved = 0
+    failed_records = 0
     error_count = 0
     warning_count = 0
     total_messages = 0
@@ -1457,7 +1460,9 @@ async def migrate_page() -> None:
 
             # Stats row
             with ui.row().classes("w-full justify-between text-sm text-gray-600 mt-2"):
-                messages_sent_label = ui.label("Messages: 0")
+                messages_sent_label = ui.label(
+                    "Verified: 0  Partial: 0  Unresolved: 0  Failed records: 0"
+                )
                 errors_label = ui.label("Errors: 0")
                 warnings_label = ui.label("Warnings: 0")
                 eta_label = ui.label("ETA: —")
@@ -1711,7 +1716,30 @@ async def migrate_page() -> None:
             _update_ui(event)
 
     def _update_ui(event: MigrationEvent) -> None:
-        nonlocal messages_sent, error_count, warning_count, total_messages
+        nonlocal messages_sent, messages_partial, messages_unresolved, failed_records
+        nonlocal error_count, warning_count, total_messages
+
+        if event.phase == "messages" and isinstance(event.detail, dict):
+            delivery = event.detail.get("delivery")
+            if isinstance(delivery, dict) and all(
+                type(delivery.get(key)) is int and delivery[key] >= 0
+                for key in ("verified", "partial", "unresolved")
+            ):
+                messages_sent = delivery["verified"]
+                messages_partial = delivery["partial"]
+                messages_unresolved = delivery["unresolved"]
+        if (
+            event.phase in ("messages", "report")
+            and event.status == "completed"
+            and isinstance(event.detail, dict)
+        ):
+            remaining = event.detail.get("remaining_failed")
+            if type(remaining) is int and remaining >= 0:
+                failed_records = remaining
+        messages_sent_label.set_text(
+            f"Verified: {messages_sent:,}  Partial: {messages_partial:,}  "
+            f"Unresolved: {messages_unresolved:,}  Failed records: {failed_records:,}"
+        )
 
         feedback_context.stage = event.phase
         if event.status == "error":
@@ -1737,9 +1765,8 @@ async def migrate_page() -> None:
         # Update stats
         match event.status:
             case "progress":
-                if event.total > 0:
+                if event.phase == "messages" and event.total > 0:
                     total_messages = event.total
-                    messages_sent = event.current
                     progress = event.current / event.total
                     progress_bar.set_value(progress)
                     remaining = event.total - event.current
@@ -1749,7 +1776,6 @@ async def migrate_page() -> None:
                     m = rem // 60
                     eta_str = f"~{h}h {m}m" if h > 0 else f"~{m}m"
                     eta_label.set_text(f"ETA: {eta_str}")
-                messages_sent_label.set_text(f"Messages: {messages_sent:,}")
             case "error":
                 error_count += 1
                 errors_label.set_text(f"Errors: {error_count}")
@@ -1809,7 +1835,12 @@ async def migrate_page() -> None:
         else:
             open_report_btn.disable()
         progress_bar.set_value(1.0)
-        ui.notify("Migration complete!", type="positive")
+        if messages_partial or messages_unresolved or failed_records:
+            completion_title.set_text("Migration finished with unresolved messages")
+            completion_title.classes(remove="text-green-600", add="text-amber-700")
+            ui.notify("Migration finished. Some messages remain unresolved.", type="warning")
+        else:
+            ui.notify("Migration complete!", type="positive")
 
     def _on_migration_cancelled() -> None:
         controls_row.classes(add="hidden")

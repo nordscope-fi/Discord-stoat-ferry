@@ -147,6 +147,8 @@ async def test_feedback_action_preserves_active_migration_state(
     tab_store: dict[str, object],
     tmp_path: Path,
 ) -> None:
+    from nicegui import ui
+
     from discord_ferry.core.events import MigrationEvent
 
     _seed_migrate_page(user_store, tab_store, tmp_path)
@@ -165,6 +167,7 @@ async def test_feedback_action_preserves_active_migration_state(
                 message="Sending messages",
                 current=3,
                 total=10,
+                detail={"delivery": {"verified": 1, "partial": 1, "unresolved": 1}},
             )
         )
         await release.wait()
@@ -175,7 +178,8 @@ async def test_feedback_action_preserves_active_migration_state(
             patch("discord_ferry.gui.load_state", side_effect=FileNotFoundError),
         ):
             await user.open("/migrate")
-            await user.should_see("Messages: 3")
+            await user.should_see("Verified: 1  Partial: 1  Unresolved: 1  Failed records: 0")
+            assert next(iter(user.find(ui.linear_progress).elements)).value == 0.3
             task = captured["task"]
             state_identity = id(captured["state"])
 
@@ -185,7 +189,8 @@ async def test_feedback_action_preserves_active_migration_state(
             assert captured["task"] is task
             assert id(captured["state"]) == state_identity
             assert state.current_phase == "messages"
-            await user.should_see("Messages: 3")
+            await user.should_see("Verified: 1  Partial: 1  Unresolved: 1  Failed records: 0")
+            assert next(iter(user.find(ui.linear_progress).elements)).value == 0.3
     finally:
         release.set()
         await asyncio.sleep(0)

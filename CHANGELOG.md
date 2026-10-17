@@ -8,20 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- Add validated structural delivery-receipt storage and optional failure references for recovery work (#1171).
-- Bind receipt identity across incremental runs and retire consumed evidence only after successful state snapshots (#1171).
-- Allow validated page cursors in the existing message-history reader for delivery recovery (#1171).
-- Add opt-in message transport recovery without replaying uncertain sends or holding a request slot during lookup (#1171).
-- Route ordinary message parts through delivery receipts and preserve normal bookkeeping across recovery and partial retries (#1171).
-- Recover merged-thread parts through their existing renderer and retain failures until every part is resolved (#1171).
-- Recover generated thread headers and separators, retaining acknowledgements for empty threads without progress markers (#1171).
-- Preserve forum-index channel wiring before message dispatch and recover interrupted initial index creation in that same channel (#1171).
-- Recover report-created forum indexes before editing current counts and finish pending pin work before retiring delivery evidence (#1171).
-- Retry the recorded source and message family, recover complete legacy deliveries, and clear resolved failures before retiring their receipts (#1171).
-- Save and reuse authorized repair replacement identities across interruptions, preserving message progress and channel remapping (#1171).
-- Emit verified, partial, and unresolved source-delivery counts without treating visited progress as delivery, and reconcile carried failures after complete retry resolution (#1171).
-- Show validated verified, partial, and unresolved delivery totals in CLI progress and final summaries (#1171).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
+
+## [2.43.20] - 2026-10-17
+
+### Fixed
+
+- Keep repeat migrations independent and retry corrected messages after a confirmed rejection, including multipart and merged-thread content (#1171).
+- Recover created message identifiers after lost responses, preserve original media and follow-up work, and retain uncertainty when history cannot prove delivery (#1171).
+- Recover generated headers, separators, and forum indexes, and reuse authorized repair replacements after interruption (#1171).
+- Show verified, partial, and unresolved source deliveries separately from progress in both interfaces, with remaining failed records visible after resumed or skipped message work (#1171).
 
 ## [2.43.19] - 2026-10-13
 
