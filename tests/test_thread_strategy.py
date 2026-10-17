@@ -1215,6 +1215,110 @@ async def test_generated_delivery_empty_thread_receipt_survives_restart(
     assert len(records) == (1 if empty else 2)
 
 
+@pytest.mark.parametrize("forum_name", ["my-forum", "Ideas & help 🌱"])
+async def test_structure_index_delivery_recovery_reuses_saved_channel(
+    tmp_path: Path, forum_name: str
+) -> None:
+    """Restart structure after index creation without making another channel or post."""
+    import json
+    import re
+    from dataclasses import asdict
+
+    from aioresponses import CallbackResult
+
+    from discord_ferry.state import DeliveryRef, load_state
+
+    server_id = valid_stoat_id(900)
+    state = MigrationState(stoat_server_id=server_id)
+    config = _make_config(tmp_path, upload_delay=0)
+    post = _make_export(
+        channel_id="900000000000000001",
+        channel_name="post",
+        channel_type=15,
+        is_thread=True,
+        parent_channel_name=forum_name,
+        message_count=42,
+    )
+    channels: list[str] = []
+    records: list[dict[str, str]] = []
+    pins: list[str] = []
+    first = True
+
+    def create_channel(url, **kwargs):
+        channel_id = valid_stoat_id(1800 + len(channels))
+        channels.append(channel_id)
+        return CallbackResult(payload={"_id": channel_id, "name": kwargs["json"]["name"]})
+
+    def create_message(url, **kwargs):
+        nonlocal first
+        row = {
+            "_id": valid_stoat_id(1900 + len(records)),
+            "channel": url.path.split("/")[2],
+            "nonce": kwargs["headers"]["Idempotency-Key"],
+            "content": kwargs["json"]["content"],
+        }
+        records.append(row)
+        if first:
+            first = False
+            raise _Crash("process interruption after index creation")
+        return CallbackResult(payload=row)
+
+    def pin(url, **kwargs):
+        pins.append(url.path.split("/")[-2])
+        return CallbackResult(payload={})
+
+    def register(http):
+        http.post(f"{STOAT_URL}/servers/{server_id}/channels", callback=create_channel, repeat=True)
+        http.post(
+            re.compile(r"https://api\.test/channels/[^/]+/messages$"),
+            callback=create_message,
+            repeat=True,
+        )
+        http.get(
+            re.compile(r"https://api\.test/channels/[^/]+/messages\?.*"),
+            callback=lambda *args, **kwargs: CallbackResult(payload=list(reversed(records))),
+            repeat=True,
+        )
+        http.post(
+            re.compile(r"https://api\.test/channels/[^/]+/messages/[^/]+/pin$"),
+            callback=pin,
+            repeat=True,
+        )
+        http.patch(f"{STOAT_URL}/servers/{server_id}", payload={"_id": server_id}, repeat=True)
+
+    with aioresponses() as http:
+        register(http)
+        with pytest.raises(_Crash):
+            await run_channels(config, state, [post], lambda event: None)
+    assert len(channels) == 2
+    assert len(records) == 1
+    state = load_state(tmp_path)
+    saved_index_channel = state.channel_map.get(f"forum-index-forum-{forum_name}")
+    source_id = hashlib.sha256(f"forum-{forum_name}".encode()).hexdigest()
+    pending_ref = DeliveryRef(source_id, source_id, channels[1], "forum_index")
+    pending = delivery_module.read_delivery_receipt(state, tmp_path, pending_ref)
+    assert pending is not None
+    assert pending.parts[0].status == "uncertain"
+    assert forum_name not in json.dumps(asdict(pending), ensure_ascii=False)
+    with aioresponses() as http:
+        register(http)
+        await run_channels(
+            _make_config(tmp_path, upload_delay=0, resume=True),
+            state,
+            [post],
+            lambda event: None,
+        )
+    assert len(channels) == 2
+    assert len(records) == 1
+    assert saved_index_channel == channels[1]
+    assert state.forum_index_message_ids[f"forum-{forum_name}"] == records[0]["_id"]
+    assert pins == [records[0]["_id"]]
+    assert not state.forum_index_present_unknown_id
+    assert not [warning for warning in state.warnings if warning["type"] == "forum_index_failed"]
+    reloaded = load_state(tmp_path)
+    assert reloaded.forum_index_message_ids == state.forum_index_message_ids
+
+
 async def test_merge_separator_failure_not_recorded_as_failed(tmp_path: Path) -> None:
     """SC-12: a separator failure is warn-only, never a FailedMessage."""
     from unittest.mock import patch

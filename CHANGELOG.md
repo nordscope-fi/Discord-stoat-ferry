@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Route ordinary message parts through delivery receipts and preserve normal bookkeeping across recovery and partial retries (#1171).
 - Recover merged-thread parts through their existing renderer and retain failures until every part is resolved (#1171).
 - Recover generated thread headers and separators, retaining acknowledgements for empty threads without progress markers (#1171).
+- Preserve forum-index channel wiring before message dispatch and recover interrupted initial index creation in that same channel (#1171).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
 ## [2.43.19] - 2026-10-13

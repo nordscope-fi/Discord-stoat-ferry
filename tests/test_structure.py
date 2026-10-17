@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -52,7 +53,7 @@ from discord_ferry.parser.models import (
     DCEMessage,
     DCERole,
 )
-from discord_ferry.state import MigrationState, load_state
+from discord_ferry.state import DeliveryRef, MigrationState, load_state, read_delivery_receipt
 from discord_ferry.state import save_state as save_state_real
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 
@@ -3622,19 +3623,19 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
         # Index channel creation.
         m.post(
             f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-idx1", "name": "my-forum-index"},
+            payload={"_id": "01J5T000000000000000002000", "name": "my-forum-index"},
         )
         # Send index message.
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages",
-            payload={"_id": "idx-msg1"},
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
+            payload={"_id": "01J5T000000000000000002001"},
             callback=lambda url, **kwargs: sent_messages.append(  # type: ignore[misc]
                 kwargs.get("json", {})
             ),
         )
         # Pin the index message.
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/01J5T000000000000000002001/pin",
             payload={},
         )
         # Category PATCH.
@@ -3651,9 +3652,9 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
 
     # Index channel mapped in state.
     assert "forum-index-forum-my-forum" in state.channel_map
-    assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
+    assert state.channel_map["forum-index-forum-my-forum"] == "01J5T000000000000000002000"
     forum_category = category_bodies[-1]["categories"][0]  # type: ignore[index]
-    assert forum_category["channels"] == ["stoat-idx1", "stoat-fp1", "stoat-fp2"]
+    assert forum_category["channels"] == ["01J5T000000000000000002000", "stoat-fp1", "stoat-fp2"]
 
     # The sent message contains channel references and message counts.
     assert len(sent_messages) == 1
@@ -3722,19 +3723,19 @@ async def test_forum_index_empty_forum(tmp_path: Path) -> None:
         # Index channel creation.
         m.post(
             f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-idx1", "name": "empty-forum-index"},
+            payload={"_id": "01J5T000000000000000002000", "name": "empty-forum-index"},
         )
         # Send index message.
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages",
-            payload={"_id": "idx-msg1"},
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
+            payload={"_id": "01J5T000000000000000002001"},
             callback=lambda url, **kwargs: sent_messages.append(  # type: ignore[misc]
                 kwargs.get("json", {})
             ),
         )
         # Pin.
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/01J5T000000000000000002001/pin",
             payload={},
         )
         # Category PATCH.
@@ -4911,17 +4912,21 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
         )
         m.post(
             f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-idx1", "name": "my-forum-index"},
+            payload={"_id": "01J5T000000000000000002000", "name": "my-forum-index"},
         )
         # The index message send answers with a still-cached Idempotency-Key.
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
         )
+        m.get(
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages?limit=100&sort=Latest",
+            payload=[],
+        )
         # Registered so a stray pin is recorded rather than erroring out.
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/01J5T000000000000000002001/pin",
             payload={},
             callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
         )
@@ -4931,7 +4936,7 @@ async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
 
     assert pins == [], "a pin was attempted against a message id that was never returned"
     # The channel wiring does not depend on the message id and must still have run.
-    assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
+    assert state.channel_map["forum-index-forum-my-forum"] == "01J5T000000000000000002000"
 
 
 def _forum_index_exports() -> list[DCEExport]:
@@ -4957,26 +4962,32 @@ def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> N
     )
     m.post(
         f"{STOAT_URL}/servers/srv1/channels",
-        payload={"_id": "stoat-idx1", "name": "my-forum-index"},
+        payload={"_id": "01J5T000000000000000002000", "name": "my-forum-index"},
     )
     if index_send_status == 409:
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
         )
+        m.get(
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages?limit=100&sort=Latest",
+            payload=[],
+        )
     else:
-        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages", payload={"_id": "idx-msg1"})
-        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1/pin", payload={})
+        m.post(
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
+            payload={"_id": "01J5T000000000000000002001"},
+        )
+        m.post(
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/01J5T000000000000000002001/pin",
+            payload={},
+        )
     m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
 
-async def test_forum_index_create_duplicate_marks_the_forum_present(tmp_path: Path) -> None:
-    """#560: a duplicate on the create send records the #215 present-id-unknown marker.
-
-    Stoat returns no id with the 409, so nothing may be written to
-    forum_index_message_ids (a truthy entry there would drive an edit against a missing id).
-    """
+async def test_forum_index_create_conflict_remains_unresolved(tmp_path: Path) -> None:
+    """A new-format conflict without a history match cannot mark an index present."""
     config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
 
@@ -4984,8 +4995,16 @@ async def test_forum_index_create_duplicate_marks_the_forum_present(tmp_path: Pa
         _register_forum_index_channels(m, 409)
         await run_channels(config, state, _forum_index_exports(), [].append)
 
-    assert state.forum_index_present_unknown_id == {"forum-my-forum"}
+    assert not state.forum_index_present_unknown_id
     assert "forum-my-forum" not in state.forum_index_message_ids
+    source_id = hashlib.sha256(b"forum-my-forum").hexdigest()
+    ref = DeliveryRef(source_id, source_id, "01J5T000000000000000002000", "forum_index")
+    receipt = read_delivery_receipt(state, tmp_path, ref)
+    assert receipt is not None
+    assert receipt.parts[0].status == "uncertain"
+    assert [item["type"] for item in state.warnings if item["type"] == "forum_index_failed"] == [
+        "forum_index_failed"
+    ]
 
 
 async def test_forum_index_create_success_does_not_mark_the_forum(tmp_path: Path) -> None:
@@ -4998,7 +5017,7 @@ async def test_forum_index_create_success_does_not_mark_the_forum(tmp_path: Path
         await run_channels(config, state, _forum_index_exports(), [].append)
 
     assert state.forum_index_present_unknown_id == set()
-    assert state.channel_map["forum-index-forum-my-forum"] == "stoat-idx1"
+    assert state.channel_map["forum-index-forum-my-forum"] == "01J5T000000000000000002000"
 
 
 async def test_forum_index_create_success_records_the_message_id(tmp_path: Path) -> None:
@@ -5014,7 +5033,7 @@ async def test_forum_index_create_success_records_the_message_id(tmp_path: Path)
         _register_forum_index_channels(m, 200)
         await run_channels(config, state, _forum_index_exports(), [].append)
 
-    assert state.forum_index_message_ids == {"forum-my-forum": "idx-msg1"}
+    assert state.forum_index_message_ids == {"forum-my-forum": "01J5T000000000000000002001"}
     assert state.forum_index_present_unknown_id == set()
 
 
@@ -5038,22 +5057,26 @@ async def test_report_rebuild_after_a_create_edits_the_created_message(tmp_path:
     events: list[MigrationEvent] = []
     with aioresponses() as m:
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
             payload={"_id": "second-index"},
             callback=lambda url, **kwargs: sends.append(str(url)),  # type: ignore[misc]
             repeat=True,
         )
-        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages/second-index/pin", payload={})
+        m.post(
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/second-index/pin", payload={}
+        )
         m.patch(
-            f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/01J5T000000000000000002001",
             payload={},
             callback=lambda url, **kwargs: edits.append(str(url)),  # type: ignore[misc]
         )
         await _rebuild_forum_indexes(config, state, events.append)
 
     assert sends == [], "the rebuild posted a second index next to the created one"
-    assert edits == [f"{STOAT_URL}/channels/stoat-idx1/messages/idx-msg1"]
-    assert state.forum_index_message_ids == {"forum-my-forum": "idx-msg1"}
+    assert edits == [
+        f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/01J5T000000000000000002001"
+    ]
+    assert state.forum_index_message_ids == {"forum-my-forum": "01J5T000000000000000002001"}
 
 
 async def test_forum_index_create_success_clears_a_stale_mark(tmp_path: Path) -> None:
@@ -5070,35 +5093,37 @@ async def test_forum_index_create_success_clears_a_stale_mark(tmp_path: Path) ->
     assert state.forum_index_present_unknown_id == set()
 
 
-async def test_report_rebuild_after_a_create_duplicate_posts_no_second_index(
+async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
     tmp_path: Path,
 ) -> None:
-    """#560: the REPORT-phase rebuild treats a create-path duplicate as #215 defines.
-
-    Without the marker the rebuild finds no id and no mark, takes the send branch and
-    posts a second index message. With it, the rebuild searches the pinned messages and,
-    finding none here, warns and sends nothing.
-    """
+    """Carried legacy unknown-id evidence still selects pinned recovery, not creation."""
     from discord_ferry.core.engine import _rebuild_forum_indexes
 
     config = _make_config(tmp_path, upload_delay=0)
-    state = MigrationState(stoat_server_id="srv1")
-
-    with aioresponses() as m:
-        _register_forum_index_channels(m, 409)
-        await run_channels(config, state, _forum_index_exports(), [].append)
+    state = MigrationState(
+        stoat_server_id="srv1",
+        channel_map={
+            "forum-index-forum-my-forum": "01J5T000000000000000002000",
+            "fp1": "stoat-fp1",
+        },
+        forum_category_names={"forum-my-forum": "my-forum"},
+        forum_channel_members={"forum-my-forum": ["fp1"]},
+        forum_index_present_unknown_id={"forum-my-forum"},
+    )
 
     sends: list[str] = []
     events: list[MigrationEvent] = []
     with aioresponses() as m:
         m.post(
-            f"{STOAT_URL}/channels/stoat-idx1/messages",
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages",
             payload={"_id": "second-index"},
             callback=lambda url, **kwargs: sends.append(str(url)),  # type: ignore[misc]
             repeat=True,
         )
-        m.post(f"{STOAT_URL}/channels/stoat-idx1/messages/second-index/pin", payload={})
-        m.post(f"{STOAT_URL}/channels/stoat-idx1/search", payload=[])
+        m.post(
+            f"{STOAT_URL}/channels/01J5T000000000000000002000/messages/second-index/pin", payload={}
+        )
+        m.post(f"{STOAT_URL}/channels/01J5T000000000000000002000/search", payload=[])
         await _rebuild_forum_indexes(config, state, events.append)
 
     assert sends == [], "the rebuild posted a second index next to the one already on the server"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import tempfile
@@ -29,7 +30,7 @@ from discord_ferry.discord.metadata import (
 )
 from discord_ferry.discord.models import normalize_channel_position
 from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
-from discord_ferry.errors import AutumnUploadError, DuplicateSendError, MigrationError
+from discord_ferry.errors import AutumnUploadError, MigrationError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
@@ -41,7 +42,6 @@ from discord_ferry.migrator.api import (
     api_fetch_root,
     api_fetch_server,
     api_pin_message,
-    api_send_message,
     api_set_channel_default_permissions,
     api_set_channel_role_permissions,
     api_set_role_permissions,
@@ -49,11 +49,12 @@ from discord_ferry.migrator.api import (
     api_upsert_categories,
     get_session,
 )
+from discord_ferry.migrator.delivery import deliver_part
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCERole
-from discord_ferry.state import save_state
+from discord_ferry.state import DeliveryRef, consume_delivery, read_delivery_receipt, save_state
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_to_autumn, upload_with_cache
 
 if TYPE_CHECKING:
@@ -1693,26 +1694,49 @@ async def run_channels(
             if not forum_cat_stoat_id:
                 continue
 
-            # Incremental: a carried forum-index channel is reused verbatim — no
-            # create, no index message, no pin. Re-attach it at position 0.
             index_key = f"forum-index-{forum_key}"
-            if index_key in pre_existing_channel_ids:
-                category_channels.setdefault(forum_cat_stoat_id, []).insert(
-                    0, state.channel_map[index_key]
-                )
-                continue
             try:
-                index_name = make_unique_channel_name(f"{forum_name}-index", existing_names)
-                idx_result = await api_create_channel(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    state.stoat_server_id,
-                    name=index_name,
-                    channel_type="Text",
-                )
-                index_channel_id: str = idx_result["_id"]
-                await asyncio.sleep(config.upload_delay)
+                # Forum keys contain display names, so use a fixed structural
+                # digest in receipts, including for names with spaces or Unicode.
+                source_id = hashlib.sha256(forum_key.encode()).hexdigest()
+                index_channel_id = state.channel_map.get(index_key, "")
+                if index_key in pre_existing_channel_ids:
+                    ref = DeliveryRef(source_id, source_id, index_channel_id, "forum_index")
+                    pending = (
+                        read_delivery_receipt(state, config.output_dir, ref)
+                        if state.delivery_namespace
+                        else None
+                    )
+                    if pending is None:
+                        # Keep ordinary carried and legacy unknown-id selection.
+                        category_channels.setdefault(forum_cat_stoat_id, []).insert(
+                            0, index_channel_id
+                        )
+                        continue
+                    index_name = state.created_channel_names.get(
+                        index_key, f"{forum_name}-index"[:32]
+                    )
+                else:
+                    index_name = make_unique_channel_name(f"{forum_name}-index", existing_names)
+                    idx_result = await api_create_channel(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        state.stoat_server_id,
+                        name=index_name,
+                        channel_type="Text",
+                    )
+                    index_channel_id = idx_result["_id"]
+                    index_name = idx_result.get("name") or index_name
+                    await asyncio.sleep(config.upload_delay)
+                    ref = DeliveryRef(source_id, source_id, index_channel_id, "forum_index")
+
+                # The existing structure owner saves destination wiring before
+                # message dispatch. A restart then recovers in that same channel.
+                category_channels.setdefault(forum_cat_stoat_id, []).insert(0, index_channel_id)
+                state.channel_map[index_key] = index_channel_id
+                state.created_channel_names[index_key] = index_name
+                save_state(state, config.output_dir)
 
                 # Build the index message content (max 2000 chars).
                 posts = forum_channel_info.get(forum_key, [])
@@ -1732,31 +1756,19 @@ async def run_channels(
                 else:
                     content = "No posts migrated."
 
-                index_msg_id: str = ""
-                try:
-                    msg_result = await api_send_message(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        index_channel_id,
-                        content=content,
-                        masquerade={"name": "Discord Ferry"},
-                        idempotency_key=f"ferry-forum-index-{forum_key}",
-                    )
-                    index_msg_id = msg_result["_id"]
-                except DuplicateSendError:
-                    # The index message is already on the server. Stoat returns no id
-                    # with the 409, so it cannot be pinned. Everything below uses
-                    # index_channel_id rather than the message id, so the channel wiring
-                    # must still run: letting the broad handler swallow it would lose
-                    # the channel_map entry for a channel that exists.
-                    #
-                    # Record it as present with an unknown id, the same signal the
-                    # rebuild path uses (#215), so the REPORT-phase rebuild tries to
-                    # recover the id from the pinned messages (#561) instead of posting
-                    # a second index (#560). Nothing goes into forum_index_message_ids:
-                    # a truthy entry there would drive an edit against a missing id.
-                    state.forum_index_present_unknown_id.add(forum_key)
+                delivery = await deliver_part(
+                    session=session,
+                    config=config,
+                    state=state,
+                    ref=ref,
+                    part_index=0,
+                    part_count=1,
+                    render_digest=hashlib.sha256(content.encode()).hexdigest(),
+                    content=content,
+                    masquerade={"name": "Discord Ferry"},
+                    allow_rejected_retry=config.incremental,
+                )
+                index_msg_id = delivery.message_id
                 await asyncio.sleep(config.upload_delay)
 
                 if index_msg_id:
@@ -1769,23 +1781,13 @@ async def run_channels(
                     )
                     await asyncio.sleep(config.upload_delay)
 
-                # Insert at position 0 so it appears at the top of the category.
-                category_channels.setdefault(forum_cat_stoat_id, []).insert(0, index_channel_id)
-                state.channel_map[f"forum-index-{forum_key}"] = index_channel_id
                 if index_msg_id:
                     # Record the id beside the channel wiring so the REPORT-phase rebuild
                     # edits this message instead of posting and pinning a second index
                     # (#560). A real id supersedes any carried mark; keep the two disjoint.
                     state.forum_index_message_ids[forum_key] = index_msg_id
                     state.forum_index_present_unknown_id.discard(forum_key)
-                # Keyed identically to the id above, synthetic prefix and all, so
-                # the rename check needs no special case for it. index_name came
-                # from make_unique_channel_name, so it is truncated exactly as an
-                # ordinary channel's is.
-                state.created_channel_names[f"forum-index-{forum_key}"] = (
-                    idx_result.get("name") or index_name
-                )
-
+                consume_delivery(state, delivery.token, index_msg_id)
                 save_state(state, config.output_dir)
 
                 on_event(
