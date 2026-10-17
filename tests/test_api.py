@@ -2212,6 +2212,7 @@ async def test_duplicate_nonce_raises_duplicate_send_error(mock_aiohttp: aioresp
     assert isinstance(ei.value, MigrationError), (
         "must subclass MigrationError so an uncatching call site is unaffected"
     )
+    assert "already on the server" not in str(ei.value)
 
 
 async def test_other_409_variant_raises_generic_error(mock_aiohttp: aioresponses) -> None:
@@ -2318,6 +2319,345 @@ async def test_uncatching_call_site_still_sees_a_migration_error(
 # ---------------------------------------------------------------------------
 # api_fetch_messages (#107 batch 9, task #247)
 # ---------------------------------------------------------------------------
+
+
+async def test_message_recovery_after_created_response_loss_uses_free_slot(
+    mock_aiohttp: aioresponses,
+) -> None:
+    from tests.stoat_ids import stoat_id
+
+    init_request_semaphore(1)
+    channel = stoat_id(40)
+    created = {"_id": stoat_id(41), "nonce": "test-key", "channel": channel}
+    remote: list[dict[str, str]] = []
+
+    async def create_then_drop(url, **kwargs):
+        remote.append(created)
+        await asyncio.sleep(0)
+        raise aiohttp.ServerDisconnectedError("lost response")
+
+    mock_aiohttp.post(f"{BASE_URL}/channels/{channel}/messages", callback=create_then_drop)
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/{channel}/messages?limit=100&sort=Latest", payload=[created]
+    )
+    failures = []
+    async with aiohttp.ClientSession() as session:
+
+        async def recover(failure):
+            failures.append(failure)
+            rows = await api_fetch_messages(
+                session, BASE_URL, TOKEN, channel, limit=100, sort="Latest"
+            )
+            return rows[0]
+
+        result = await asyncio.wait_for(
+            api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                channel,
+                content="one",
+                idempotency_key="test-key",
+                message_recovery=recover,
+            ),
+            timeout=1,
+        )
+    assert result == created
+    assert remote == [created]
+    assert len(failures) == 1
+    assert failures[0].disposition == "uncertain"
+    assert failures[0].http_status is None
+    assert [method for method, _ in mock_aiohttp.requests] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (502, {"type": "InternalError"}),
+        (409, {"type": "DuplicateNonce"}),
+        (403, {"type": "MissingPermission", "permission": "ManageMessages"}),
+        (400, {"type": "UnknownError"}),
+        (200, {"unexpected": "success"}),
+        (201, {"_id": "invalid"}),
+        (204, None),
+    ],
+)
+async def test_message_recovery_uncertain_response_never_reposts(
+    mock_aiohttp: aioresponses, status: int, body: object
+) -> None:
+    from tests.stoat_ids import stoat_id
+
+    recovered = {"_id": stoat_id(9)}
+    mock_aiohttp.post(f"{BASE_URL}/channels/ch1/messages", status=status, payload=body)
+    hook = AsyncMock(return_value=recovered)
+    async with aiohttp.ClientSession() as session:
+        result = await api_send_message(
+            session,
+            BASE_URL,
+            TOKEN,
+            "ch1",
+            content="one",
+            idempotency_key="test-key",
+            message_recovery=hook,
+        )
+    assert result == recovered
+    hook.assert_awaited_once()
+    failure = hook.call_args.args[0]
+    assert failure.disposition == "uncertain"
+    assert failure.http_status == status
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 1
+
+
+async def test_message_recovery_confirmed_send_permission_rejection(
+    mock_aiohttp: aioresponses,
+) -> None:
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/messages",
+        status=403,
+        payload={"type": "MissingPermission", "permission": "SendMessage"},
+    )
+    hook = AsyncMock()
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError) as caught:
+            await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                content="one",
+                idempotency_key="test-key",
+                message_recovery=hook,
+            )
+    assert caught.value.disposition == "confirmed_rejected"
+    assert caught.value.http_status == 403
+    assert caught.value.error_type == "MissingPermission"
+    assert TOKEN not in str(caught.value)
+    hook.assert_not_awaited()
+
+
+async def test_message_recovery_unavailable_lookup_propagates_without_post_retry(
+    mock_aiohttp: aioresponses,
+) -> None:
+    mock_aiohttp.post(f"{BASE_URL}/channels/ch1/messages", status=503)
+    hook = AsyncMock(side_effect=MigrationError("history unavailable"))
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="history unavailable"):
+            await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                content="one",
+                idempotency_key="test-key",
+                message_recovery=hook,
+            )
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 1
+
+
+@pytest.mark.parametrize("status", [200, 409, 503])
+async def test_message_recovery_html_is_uncertain(mock_aiohttp: aioresponses, status: int) -> None:
+    from tests.stoat_ids import stoat_id
+
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/messages",
+        status=status,
+        body=f"<html>private {TOKEN}</html>",
+        content_type="text/html",
+    )
+    hook = AsyncMock(return_value={"_id": stoat_id(9)})
+    async with aiohttp.ClientSession() as session:
+        result = await api_send_message(
+            session,
+            BASE_URL,
+            TOKEN,
+            "ch1",
+            content="one",
+            idempotency_key="test-key",
+            message_recovery=hook,
+        )
+    assert result["_id"] == stoat_id(9)
+    failure = hook.call_args.args[0]
+    assert failure.disposition == "uncertain"
+    assert TOKEN not in str(failure)
+    hook.assert_awaited_once()
+
+
+async def test_message_recovery_final_attempt_after_429_retains_budget(
+    mock_aiohttp: aioresponses,
+) -> None:
+    from tests.stoat_ids import stoat_id
+
+    url = f"{BASE_URL}/channels/ch1/messages"
+    for _ in range(api_module.MAX_API_RETRIES - 1):
+        mock_aiohttp.post(url, status=429, headers={"Retry-After": "0"})
+    mock_aiohttp.post(url, exception=aiohttp.ServerDisconnectedError("last response lost"))
+    hook = AsyncMock(return_value={"_id": stoat_id(9)})
+    async with aiohttp.ClientSession() as session:
+        with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+            result = await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                idempotency_key="test-key",
+                message_recovery=hook,
+            )
+    assert result["_id"] == stoat_id(9)
+    hook.assert_awaited_once()
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == api_module.MAX_API_RETRIES
+    assert len(api_module._rate_429_window) == api_module.MAX_API_RETRIES - 1
+    assert api_module._circuit_state.consecutive_failures == 1
+
+
+async def test_message_recovery_429_exhaustion_does_not_open_circuit(
+    mock_aiohttp: aioresponses,
+) -> None:
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/messages",
+        status=429,
+        headers={"Retry-After": "0"},
+        repeat=True,
+    )
+    hook = AsyncMock()
+    async with aiohttp.ClientSession() as session:
+        with (
+            patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(MigrationError) as caught,
+        ):
+            await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                idempotency_key="test-key",
+                message_recovery=hook,
+            )
+    assert caught.value.disposition == "confirmed_rejected"
+    assert caught.value.http_status == 429
+    assert api_module._circuit_state.consecutive_failures == 0
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == api_module.MAX_API_RETRIES
+    hook.assert_not_awaited()
+
+
+async def test_message_recovery_rejects_invalid_recovered_identifier(
+    mock_aiohttp: aioresponses,
+) -> None:
+    mock_aiohttp.post(f"{BASE_URL}/channels/ch1/messages", status=503)
+    hook = AsyncMock(return_value={"_id": "invalid"})
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MigrationError, match="recovery"):
+            await api_send_message(
+                session,
+                BASE_URL,
+                TOKEN,
+                "ch1",
+                idempotency_key="test-key",
+                message_recovery=hook,
+            )
+
+
+@pytest.mark.parametrize("status", [200, 403])
+async def test_message_recovery_invalid_response_encoding_is_uncertain(
+    mock_aiohttp: aioresponses,
+    status: int,
+) -> None:
+    from tests.stoat_ids import stoat_id
+
+    mock_aiohttp.post(
+        f"{BASE_URL}/channels/ch1/messages",
+        status=status,
+        body=b"\xff",
+        content_type="application/json",
+    )
+    hook = AsyncMock(return_value={"_id": stoat_id(9)})
+    async with aiohttp.ClientSession() as session:
+        result = await api_send_message(
+            session,
+            BASE_URL,
+            TOKEN,
+            "ch1",
+            idempotency_key="test-key",
+            message_recovery=hook,
+        )
+    assert result["_id"] == stoat_id(9)
+    assert hook.call_args.args[0].disposition == "uncertain"
+    hook.assert_awaited_once()
+
+
+@pytest.mark.parametrize("exception", [aiohttp.ClientConnectionError("lost"), TimeoutError("lost")])
+async def test_message_recovery_refunds_pacer_before_lookup(
+    mock_aiohttp: aioresponses, exception: BaseException
+) -> None:
+    from tests.stoat_ids import stoat_id
+
+    url = f"{BASE_URL}/channels/ch1/messages"
+    bucket = _BucketState(remaining=4, limit=10, reset_at=time.monotonic() + 10)
+    api_module._url_to_bucket[url] = "message-test-bucket"
+    api_module._bucket_state["message-test-bucket"] = bucket
+    mock_aiohttp.post(url, exception=exception)
+    observations = []
+
+    async def recover(failure):
+        observations.append((bucket.remaining, _circuit_state.consecutive_failures))
+        return {"_id": stoat_id(9)}
+
+    async with aiohttp.ClientSession() as session:
+        result = await api_send_message(
+            session,
+            BASE_URL,
+            TOKEN,
+            "ch1",
+            idempotency_key="test-key",
+            message_recovery=recover,
+        )
+    assert result["_id"] == stoat_id(9)
+    assert observations == [(4, 1)]
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 1
+
+
+async def test_message_recovery_success_keeps_headers_and_request_limit(
+    mock_aiohttp: aioresponses,
+) -> None:
+    from aioresponses import CallbackResult
+
+    from tests.stoat_ids import stoat_id
+
+    init_request_semaphore(1)
+    active = 0
+    peak = 0
+
+    async def respond(url, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        assert kwargs["headers"]["x-session-token"] == TOKEN
+        assert kwargs["headers"]["Idempotency-Key"].startswith("test-key-")
+        assert kwargs["allow_redirects"] is False
+        await asyncio.sleep(0.01)
+        active -= 1
+        return CallbackResult(payload={"_id": stoat_id(9)})
+
+    mock_aiohttp.post(f"{BASE_URL}/channels/ch1/messages", callback=respond, repeat=True)
+    hook = AsyncMock()
+    async with aiohttp.ClientSession() as session:
+        results = await asyncio.gather(
+            *(
+                api_send_message(
+                    session,
+                    BASE_URL,
+                    TOKEN,
+                    "ch1",
+                    content="one",
+                    idempotency_key=f"test-key-{index}",
+                    message_recovery=hook,
+                )
+                for index in range(3)
+            )
+        )
+    assert results == [{"_id": stoat_id(9)}] * 3
+    assert peak == 1
+    assert active == 0
+    hook.assert_not_awaited()
 
 
 async def test_history_before_cursor_reaches_existing_reader(mock_aiohttp: aioresponses) -> None:

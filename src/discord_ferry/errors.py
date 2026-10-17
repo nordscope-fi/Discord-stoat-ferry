@@ -1,5 +1,7 @@
 """Custom exceptions for Discord Ferry."""
 
+from typing import Literal
+
 
 class FerryError(Exception):
     """Base exception for all ferry errors."""
@@ -38,10 +40,31 @@ class MigrationError(FerryError):
 class DuplicateSendError(MigrationError):
     """Stoat rejected a send because its Idempotency-Key was still cached.
 
-    The message IS on the server. Stoat does not return it, so the caller has no
-    Stoat message id. Subclasses MigrationError so a call site that does not catch
-    this behaves exactly as it did before the class existed.
+    Cached consumption does not prove message creation. Stoat does not return a
+    message identifier with this response. Subclasses MigrationError so existing
+    callers retain their exception handling.
     """
+
+
+class MessageSendFailure(MigrationError):  # noqa: N818 - Approved structured-failure contract.
+    """Safe transport provenance for an opted-in message send."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        disposition: Literal["confirmed_rejected", "uncertain"],
+        http_status: int | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.disposition = disposition
+        self.http_status = http_status
+        self.error_type = error_type
+
+
+class DeliveryUnresolvedError(MigrationError):
+    """An uncertain delivery remains preserved rather than being replayed."""
 
 
 class StateError(FerryError):
