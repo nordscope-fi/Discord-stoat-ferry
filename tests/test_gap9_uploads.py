@@ -302,12 +302,15 @@ async def test_repair_nested_retry_reuses_initialized_limits(tmp_path: Path) -> 
         await engine_module.run_repair(config, state, [], emit)
 
     initialize.assert_awaited_once()
+    counts = retry.await_args.kwargs["_delivery_outcomes"]
+    assert isinstance(counts, engine_module.DeliveryOutcomes)
     retry.assert_awaited_once_with(
         config,
         state,
         [],
         emit,
         _upload_limits_ready=True,
+        _delivery_outcomes=counts,
     )
 
 

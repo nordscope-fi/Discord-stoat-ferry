@@ -183,6 +183,55 @@ _SKIP_TYPES = frozenset(
 
 
 @dataclass
+class DeliveryOutcomes:
+    """Run-local source counts, merged by the existing message owners."""
+
+    verified: int = 0
+    partial: int = 0
+    unresolved: int = 0
+    revision: int = field(default=0, init=False, repr=False)
+    _pending: dict[DeliveryRef | tuple[str, str], str] = field(default_factory=dict, repr=False)
+
+    def record(
+        self, ref: DeliveryRef | tuple[str, str], *, acknowledged: bool, complete: bool
+    ) -> None:
+        """Count one selected logical source, never an individual part."""
+        self.revision += 1
+        key = replace(ref, generation="base") if isinstance(ref, DeliveryRef) else ref
+        prior = self._pending.pop(key, None)
+        if prior == "partial":
+            self.partial -= 1
+            acknowledged = True
+        elif prior == "unresolved":
+            self.unresolved -= 1
+        if complete:
+            self.verified += 1
+        elif acknowledged:
+            self.partial += 1
+            self._pending[key] = "partial"
+        else:
+            self.unresolved += 1
+            self._pending[key] = "unresolved"
+
+    def merge(self, other: DeliveryOutcomes) -> None:
+        """Fold a channel result into this run's totals."""
+        self.verified += other.verified
+        for ref, category in other._pending.items():
+            self.record(ref, acknowledged=category == "partial", complete=False)
+        self.revision += 1
+
+    def detail(self) -> dict[str, object]:
+        """Return an independent event snapshot of these counters."""
+        return {
+            "delivery": {
+                "verified": self.verified,
+                "partial": self.partial,
+                "unresolved": self.unresolved,
+            }
+        }
+
+
+@dataclass
 class ChannelResult:
     """Per-channel accumulator — merged into main state after completion."""
 
@@ -201,6 +250,7 @@ class ChannelResult:
     delivery_markers: dict[str, str] = field(default_factory=dict)
     delivery_tokens: dict[str, str] = field(default_factory=dict)
     resolved_deliveries: set[tuple[str, str]] = field(default_factory=set)
+    delivery_outcomes: DeliveryOutcomes = field(default_factory=DeliveryOutcomes)
     pending_pins: list[tuple[str, str]] = field(default_factory=list)
     pending_reactions: list[dict[str, object]] = field(default_factory=list)
     attachments_uploaded: int = 0
@@ -215,7 +265,11 @@ class ChannelResult:
     reactions_dropped: int = 0  # Batch 4 (S1): unmapped-emoji reactions silently dropped
 
 
-def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
+def _merge_channel_result(
+    state: MigrationState,
+    result: ChannelResult,
+    delivery_outcomes: DeliveryOutcomes | None = None,
+) -> None:
     """Merge a per-channel result into the shared migration state."""
     state.warnings.extend(result.warnings)
     state.errors.extend(result.errors)
@@ -279,6 +333,8 @@ def _merge_channel_result(state: MigrationState, result: ChannelResult) -> None:
         consume_delivery(
             state, DeliveryToken(receipt_id, digest), result.delivery_markers[receipt_id]
         )
+    if delivery_outcomes is not None:
+        delivery_outcomes.merge(result.delivery_outcomes)
 
 
 def _skip_attachment(
@@ -388,6 +444,7 @@ async def run_messages(
         exports: Parsed DCE export files (one per channel/thread).
         on_event: Callback for progress events.
     """
+    delivery_outcomes = DeliveryOutcomes()
     # Validate reaction_mode — fall back to "text" on unrecognised values.
     if config.reaction_mode not in _VALID_REACTION_MODES:
         state.warnings.append(
@@ -438,6 +495,7 @@ async def run_messages(
                 phase="messages",
                 status="completed",
                 message=f"[DRY RUN] Mapped {total_msgs} messages",
+                detail=delivery_outcomes.detail(),
             )
         )
         return
@@ -505,6 +563,7 @@ async def run_messages(
                     channel_sem=channel_sem,
                     save_lock=save_lock,
                     source_channel_names=source_channel_names,
+                    delivery_outcomes=delivery_outcomes,
                 ),
                 name=f"channel-{export.channel.id}",
             )
@@ -549,7 +608,7 @@ async def run_messages(
                 continue
             # Success — merge + mark complete (idempotent with the worker's own self-merge +
             # result-reset; kept defensively, NOT load-bearing).
-            _merge_channel_result(state, result)
+            _merge_channel_result(state, result, delivery_outcomes)
             state.completed_channel_ids.add(export.channel.id)
 
         # Cancel takes precedence over a concurrent crash: a user cancel must reach the
@@ -572,7 +631,14 @@ async def run_messages(
                 stoat_id = state.channel_map.get(exp.channel.id)
                 if stoat_id:
                     parent_name_to_stoat[exp.channel.name] = stoat_id
-        await _merge_threads(thread_exports, config, state, on_event, parent_name_to_stoat)
+        await _merge_threads(
+            thread_exports,
+            config,
+            state,
+            on_event,
+            parent_name_to_stoat,
+            delivery_outcomes=delivery_outcomes,
+        )
     elif thread_strategy == "archive" and thread_exports:
         _archive_threads(thread_exports, config, state, on_event)
 
@@ -581,6 +647,7 @@ async def run_messages(
             phase="messages",
             status="completed",
             message="Message import complete.",
+            detail={**delivery_outcomes.detail(), "remaining_failed": len(state.failed_messages)},
         )
     )
 
@@ -602,6 +669,7 @@ async def _process_merged_message(
     delivery_ref: DeliveryRef | None = None,
     allow_rejected_retry: bool = False,
     retry_failure: FailedMessage | None = None,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> bool:
     """Render one selected merged message and return full delivery resolution."""
     if msg.type in _SKIP_TYPES:
@@ -649,6 +717,7 @@ async def _process_merged_message(
     first_id = ""
     latest_token: DeliveryToken | None = None
     fully_resolved = False
+    acknowledged_parts = 0
     for part_index, part_content in enumerate(parts):
         try:
             if context_error is not None:
@@ -668,6 +737,7 @@ async def _process_merged_message(
             )
             latest_token = result.token
             fully_resolved = result.fully_resolved
+            acknowledged_parts += 1
             if part_index == 0:
                 first_id = result.message_id
         except Exception as exc:  # noqa: BLE001
@@ -701,6 +771,12 @@ async def _process_merged_message(
                         delivery_ref=failure_ref,
                     )
                 )
+    if delivery_outcomes is not None:
+        delivery_outcomes.record(
+            ref,
+            acknowledged=acknowledged_parts > 0,
+            complete=not failed and fully_resolved and bool(first_id),
+        )
     if failed or not fully_resolved or latest_token is None or not first_id:
         return False
     # The merge loop still owns source progress and its checkpoint. Consumption
@@ -719,6 +795,7 @@ async def _merge_threads(
     *,
     replacement_ref: Callable[[DeliveryRef], DeliveryRef] | None = None,
     reconcile_failed: bool = False,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> None:
     """Merge thread messages into their parent channels with separators.
 
@@ -970,6 +1047,7 @@ async def _merge_threads(
                     delivery_ref=message_ref,
                     allow_rejected_retry=config.incremental or reconcile_failed,
                     retry_failure=_failures_here.get(msg.id) if replacement_ref is None else None,
+                    delivery_outcomes=delivery_outcomes,
                 ):
                     _succeeded_ids.add(msg.id)
                     # Reconcile before the mid-thread checkpoint can retire the
@@ -1076,6 +1154,7 @@ async def _merge_threads(
                         f"({_posted} messages) into parent channel."
                     ),
                     channel_name=export.channel.name,
+                    detail=delivery_outcomes.detail() if delivery_outcomes is not None else None,
                 )
             )
 
@@ -1181,6 +1260,7 @@ async def _process_single_channel(
     channel_sem: asyncio.Semaphore,
     save_lock: asyncio.Lock,
     source_channel_names: dict[str, str],
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> ChannelResult:
     """Process all messages in a single channel, returning a ChannelResult.
 
@@ -1363,7 +1443,7 @@ async def _process_single_channel(
                         if msg.id.isdigit():
                             state.channel_message_offsets[export.channel.id] = msg.id
                         # Merge partial result before saving so checkpoint includes progress.
-                        _merge_channel_result(state, result)
+                        _merge_channel_result(state, result, delivery_outcomes)
                         save_state(state, config.output_dir)
                         # Reset result to avoid double-counting on next merge.
                         result = ChannelResult(channel_id=export.channel.id)
@@ -1376,6 +1456,9 @@ async def _process_single_channel(
                         current=idx + 1,
                         total=total,
                         channel_name=export.channel.name,
+                        detail=delivery_outcomes.detail()
+                        if delivery_outcomes is not None
+                        else None,
                     )
                 )
 
@@ -1384,7 +1467,7 @@ async def _process_single_channel(
 
         # Channel complete — save state for crash recovery.
         async with save_lock:
-            _merge_channel_result(state, result)
+            _merge_channel_result(state, result, delivery_outcomes)
             state.completed_channel_ids.add(export.channel.id)
             # Durable high-water mark — survives completion (unlike the transient
             # offset below) so a later --incremental run skips already-copied messages.
@@ -1446,6 +1529,7 @@ async def _process_single_channel(
                 current=total,
                 total=total,
                 channel_name=export.channel.name,
+                detail=delivery_outcomes.detail() if delivery_outcomes is not None else None,
             )
         )
 
@@ -1472,6 +1556,7 @@ async def _process_message(
     allow_rejected_retry: bool = False,
     delivery_ref: DeliveryRef | None = None,
     retry_failure: FailedMessage | None = None,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> bool:
     """Process and send a single message.
 
@@ -2134,6 +2219,16 @@ async def _process_message(
             _send_exc = exc
         if channel_result is None:
             raise
+    finally:
+        outcomes = (
+            channel_result.delivery_outcomes if channel_result is not None else delivery_outcomes
+        )
+        if outcomes is not None:
+            outcomes.record(
+                ref,
+                acknowledged=_parts_failed < len(parts),
+                complete=fully_resolved and _parts_failed == 0,
+            )
 
     # Batch 3 (S1): the retry path (engine.run_retry_failed) calls this with
     # channel_result=None and relies on an exception to mark a re-failure. Re-raise

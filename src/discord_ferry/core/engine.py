@@ -81,6 +81,7 @@ from discord_ferry.migrator.emoji import (
 )
 from discord_ferry.migrator.messages import (
     _THREAD_STRATEGIES,
+    DeliveryOutcomes,
     _build_content,
     _merge_threads,
     _process_merged_message,
@@ -1746,6 +1747,7 @@ async def run_retry_failed(
     on_event: EventCallback,
     *,
     _upload_limits_ready: bool = False,
+    _delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> None:
     """Re-process failed messages from state.failed_messages.
 
@@ -1759,11 +1761,15 @@ async def run_retry_failed(
     # Before the early return, so the store exists on every path out.
     _ensure_token_store(config)
     _refuse_dry_run_state(state, "retry")
+    delivery_outcomes = _delivery_outcomes if _delivery_outcomes is not None else DeliveryOutcomes()
 
     if not state.failed_messages:
         on_event(
             MigrationEvent(
-                phase="retry", status="completed", message="No failed messages to retry."
+                phase="retry",
+                status="completed",
+                message="No failed messages to retry.",
+                detail=delivery_outcomes.detail(),
             )
         )
         return
@@ -1825,6 +1831,7 @@ async def run_retry_failed(
             await _initialize_upload_limits(session, config)
         retried = 0
         still_failed: list[FailedMessage] = []
+        resolved_sources: set[DeliveryRef] = set()
         # Batch 3 (S1): iterate a snapshot — _process_message (channel_result=None) appends
         # a FailedMessage to state.failed_messages on a re-fail, so a live-list loop would
         # never terminate (mutate-during-iteration). state.failed_messages is rebuilt from
@@ -1832,6 +1839,11 @@ async def run_retry_failed(
         for fm in list(state.failed_messages):
             found = found_messages.get(fm.discord_msg_id, [])
             if not found:
+                delivery_outcomes.record(
+                    fm.delivery_ref or (fm.discord_msg_id, fm.stoat_channel_id),
+                    acknowledged=False,
+                    complete=False,
+                )
                 on_event(
                     MigrationEvent(
                         phase="retry",
@@ -1844,6 +1856,11 @@ async def run_retry_failed(
 
             stoat_channel_id = fm.stoat_channel_id
             if stoat_channel_id not in mapped_channels:
+                delivery_outcomes.record(
+                    fm.delivery_ref or (fm.discord_msg_id, fm.stoat_channel_id),
+                    acknowledged=False,
+                    complete=False,
+                )
                 message = (
                     f"Message {fm.discord_msg_id} is recorded against channel {stoat_channel_id}, "
                     "which is not one of the channels this migration created. Not retried."
@@ -1856,6 +1873,11 @@ async def run_retry_failed(
                 continue
             candidates = _retry_message_candidates(fm, found, state, parent_names)
             if len(candidates) != 1:
+                delivery_outcomes.record(
+                    fm.delivery_ref or (fm.discord_msg_id, fm.stoat_channel_id),
+                    acknowledged=False,
+                    complete=False,
+                )
                 on_event(
                     MigrationEvent(
                         phase="retry",
@@ -1869,7 +1891,11 @@ async def run_retry_failed(
                 still_failed.append(fm)
                 continue
             export, found_msg, ref = candidates[0]
+            logical_ref = dataclasses.replace(ref, generation="base")
+            if logical_ref in resolved_sources:
+                continue
             failure_start = len(state.failed_messages)
+            before_outcomes = delivery_outcomes.revision
             try:
                 if ref.family == "ordinary":
                     resolved = await _process_message(
@@ -1884,6 +1910,7 @@ async def run_retry_failed(
                         retry_failure=fm,
                         allow_rejected_retry=True,
                         source_channel_names=source_channel_names,
+                        delivery_outcomes=delivery_outcomes,
                     )
                 else:
                     resolved = await _process_merged_message(
@@ -1897,11 +1924,15 @@ async def run_retry_failed(
                         delivery_ref=ref,
                         retry_failure=fm,
                         allow_rejected_retry=True,
+                        delivery_outcomes=delivery_outcomes,
                     )
                 if not resolved:
                     raise DeliveryUnresolvedError("Selected message is not fully delivered")
+                resolved_sources.add(logical_ref)
                 retried += 1
             except Exception as exc:  # noqa: BLE001
+                if delivery_outcomes.revision == before_outcomes:
+                    delivery_outcomes.record(ref, acknowledged=False, complete=False)
                 latest = next(
                     (
                         failed
@@ -1924,7 +1955,20 @@ async def run_retry_failed(
                         else fm.delivery_ref,
                     )
                 )
-        state.failed_messages = still_failed
+        # A carried record may precede the replacement's newer typed failure.
+        # Retire it only when the same unambiguous logical source fully resolves.
+        remaining_failures = []
+        for failure in still_failed:
+            candidates = _retry_message_candidates(
+                failure, found_messages.get(failure.discord_msg_id, []), state, parent_names
+            )
+            if (
+                len(candidates) == 1
+                and dataclasses.replace(candidates[0][2], generation="base") in resolved_sources
+            ):
+                continue
+            remaining_failures.append(failure)
+        state.failed_messages = remaining_failures
     config.session = None
 
     save_state(state, config.output_dir)
@@ -1934,6 +1978,7 @@ async def run_retry_failed(
             phase="retry",
             status="completed",
             message=f"Retry complete: {retried} succeeded, {remaining} still failed.",
+            detail=delivery_outcomes.detail(),
         )
     )
 
@@ -2126,6 +2171,8 @@ async def _restore_merged_threads(
     export: DCEExport,
     exports: list[DCEExport],
     on_event: EventCallback,
+    *,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> int:
     """Re-merge the thread content a recreated parent channel held (#310).
 
@@ -2201,6 +2248,7 @@ async def _restore_merged_threads(
             # merge delivers, or repair's own dead-letter drain sends it again under
             # an unsalted key and Stoat accepts the duplicate.
             reconcile_failed=True,
+            delivery_outcomes=delivery_outcomes,
         )
     except Exception as exc:  # noqa: BLE001
         # One channel's failure must not stop the rest of the repair. Per-message
@@ -2224,6 +2272,8 @@ async def _resend_channel(
     state: MigrationState,
     export: DCEExport,
     on_event: EventCallback,
+    *,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> int:
     """Re-send every message this export holds. Returns the count that landed.
 
@@ -2304,6 +2354,7 @@ async def _resend_channel(
                     DeliveryRef(export.channel.id, msg.id, new_channel_id, "ordinary"),
                 ),
                 allow_rejected_retry=True,
+                delivery_outcomes=delivery_outcomes,
             )
             if not resolved:
                 continue
@@ -2367,6 +2418,8 @@ async def _repair_tail(
     result: CheckResult,
     exports: list[DCEExport],
     on_event: EventCallback,
+    *,
+    delivery_outcomes: DeliveryOutcomes | None = None,
 ) -> bool:
     """Re-send the one message a present channel lost. True when it was sent.
 
@@ -2427,6 +2480,7 @@ async def _repair_tail(
             export_channel_id=discord_id,
             delivery_ref=ref,
             allow_rejected_retry=True,
+            delivery_outcomes=delivery_outcomes,
         )
         if not resolved:
             return False
@@ -3147,6 +3201,7 @@ async def run_repair(
     from discord_ferry.migrator.verify import RepairOutcome
 
     outcome = RepairOutcome(dry_run=config.dry_run)
+    delivery_outcomes = DeliveryOutcomes()
     warnings_start = len(state.warnings)
 
     # Rollback preserves the id maps as an audit trail and NEVER clears them
@@ -3460,7 +3515,14 @@ async def run_repair(
                         label = state.created_channel_names.get(discord_id, discord_id)
                         count = 0
                         if matching is not None:
-                            count = await _resend_channel(sess, config, state, matching, on_event)
+                            count = await _resend_channel(
+                                sess,
+                                config,
+                                state,
+                                matching,
+                                on_event,
+                                delivery_outcomes=delivery_outcomes,
+                            )
                             on_event(
                                 MigrationEvent(
                                     phase="repair",
@@ -3470,7 +3532,12 @@ async def run_repair(
                             )
                             if state.thread_strategy == "merge":
                                 merged = await _restore_merged_threads(
-                                    config, state, matching, exports, on_event
+                                    config,
+                                    state,
+                                    matching,
+                                    exports,
+                                    on_event,
+                                    delivery_outcomes=delivery_outcomes,
                                 )
                                 if merged:
                                     on_event(
@@ -3675,7 +3742,15 @@ async def run_repair(
         try:
             restored = 0
             for result in tail_work:
-                if await _repair_tail(tail_sess, config, state, result, exports, on_event):
+                if await _repair_tail(
+                    tail_sess,
+                    config,
+                    state,
+                    result,
+                    exports,
+                    on_event,
+                    delivery_outcomes=delivery_outcomes,
+                ):
                     restored += 1
                     outcome.restored_tails.append(
                         {
@@ -3711,6 +3786,7 @@ async def run_repair(
             exports,
             on_event,
             _upload_limits_ready=True,
+            _delivery_outcomes=delivery_outcomes,
         )
         outcome.dead_letter = {
             "drained": before - len(state.failed_messages),
@@ -3728,6 +3804,14 @@ async def run_repair(
         for fm in state.failed_messages
     ]
     save_state(state, config.output_dir)
+    on_event(
+        MigrationEvent(
+            phase="repair",
+            status="completed",
+            message="Repair complete.",
+            detail={**delivery_outcomes.detail(), "remaining_failed": len(state.failed_messages)},
+        )
+    )
     return outcome
 
 

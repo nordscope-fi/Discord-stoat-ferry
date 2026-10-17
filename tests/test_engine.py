@@ -2464,6 +2464,187 @@ async def test_retry_delivery_duplicate_source_scan_keeps_bounded_candidates(
     assert not state.message_map
 
 
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.parametrize("outcome", ["verified", "partial", "unresolved"])
+async def test_retry_delivery_outcome_counts_selected_source(
+    tmp_path: Path, family: str, outcome: str
+) -> None:
+    destination = valid_stoat_id(3750)
+    source = "100" if family == "ordinary" else "200"
+    export = _export_for(source)
+    export.is_thread = family == "merged"
+    export.parent_channel_name = "general" if family == "merged" else ""
+    export.messages.append(
+        _text_msg(
+            "20",
+            "source " + "p" * 2500 if outcome == "partial" else "source",
+            "2024-01-15T12:00:00+00:00",
+        )
+    )
+    exports = [export] if family == "ordinary" else [_export_for("100", name="general"), export]
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    state = MigrationState(
+        channel_map={"100": destination},
+        failed_messages=[FailedMessage("20", destination, "original failure")],
+    )
+    await seed_rejected_messages(config, state, exports, family=family)
+    events: list[MigrationEvent] = []
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if outcome == "unresolved" or (outcome == "partial" and content.startswith("[continued")):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        return CallbackResult(payload={"_id": valid_stoat_id(3751)})
+
+    with aioresponses() as http:
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        await run_retry_failed(config, state, exports, events.append, _upload_limits_ready=True)
+    completed = next(
+        event for event in events if event.phase == "retry" and event.status == "completed"
+    )
+    expected = {"verified": 0, "partial": 0, "unresolved": 0}
+    expected[outcome] = 1
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == expected
+    assert len(state.failed_messages) == (0 if outcome == "verified" else 1)
+
+
+@pytest.mark.parametrize("partial_then_drained", [False, True])
+async def test_repair_delivery_outcome_counts_real_tail_and_retry_drain(
+    tmp_path: Path, partial_then_drained: bool
+) -> None:
+    config = _make_repair_config(tmp_path)
+    destination = valid_stoat_id(3780)
+    state = MigrationState(
+        stoat_server_id=R_SERVER,
+        channel_map={R_D_CHANNEL: destination},
+        created_channel_names={R_D_CHANNEL: "general"},
+        channel_high_water={R_D_CHANNEL: "20"},
+        failed_messages=[FailedMessage("20", destination, "old failure")],
+    )
+    export = _export_for(R_D_CHANNEL)
+    export.messages.append(
+        _text_msg(
+            "20",
+            "tail body " + "p" * 2500 if partial_then_drained else "tail body",
+            "2024-01-15T12:00:00+00:00",
+        )
+    )
+    report = CheckReport()
+    report.add(
+        name=f"tail:{R_D_CHANNEL}",
+        status="fail",
+        kind="tail_absent",
+        detail="confirmed missing",
+        discord_id=R_D_CHANNEL,
+        stoat_id=destination,
+    )
+    events: list[MigrationEvent] = []
+    rejected = False
+    posts = []
+
+    def create(url, **kwargs):
+        nonlocal rejected
+        content = kwargs["json"]["content"]
+        if partial_then_drained and content.startswith("[continued") and not rejected:
+            rejected = True
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        posts.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3780 + len(posts))})
+
+    with (
+        patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report)),
+        aioresponses() as http,
+    ):
+        _register_repair_server_reads(http, _server_with_channels(), repeat=True)
+        http.get(f"{BASE_URL}/", payload={"features": {}}, repeat=True)
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            callback=create,
+            repeat=True,
+        )
+        http.get(
+            f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest",
+            payload=[],
+            repeat=True,
+        )
+        outcome = await run_repair(config, state, [export], events.append)
+    assert not state.failed_messages
+    completed_events = [
+        event for event in events if event.phase == "repair" and event.status == "completed"
+    ]
+    assert len(completed_events) == 1
+    completed = completed_events[0]
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == {"verified": 1, "partial": 0, "unresolved": 0}
+    assert len(outcome.restored_tails) == (0 if partial_then_drained else 1)
+    expected_parts = messages_module._split_message(
+        messages_module._build_content(export.messages[0], state)
+    )
+    assert sorted(posts) == sorted(expected_parts)
+
+
+async def test_engine_delivery_outcome_preserves_visited_progress(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    messages = [
+        _dce_msg_dict("10", "verified-body"),
+        _dce_msg_dict("20", "partial-body " + "p" * 2500),
+        _dce_msg_dict("30", "unresolved-body"),
+    ]
+    for message in messages:
+        message["author"]["id"] = "900000000000000004"
+    _write_dce_json(export_dir, "100", messages)
+    destination = valid_stoat_id(3700)
+    records: list[str] = []
+    events: list[MigrationEvent] = []
+
+    async def channels(config, state, exports, emit):
+        state.stoat_server_id = valid_stoat_id(900)
+        state.channel_map["100"] = destination
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if "unresolved-body" in content or content.startswith("[continued"):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        records.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3710 + len(records))})
+
+    with aioresponses() as http:
+        http.get("https://api.test/", payload={"features": {}}, repeat=True)
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        state = await run_migration(
+            _make_config(
+                tmp_path,
+                export_dir=export_dir,
+                message_rate_limit=0.0,
+                create_invite=False,
+                validate_after=False,
+            ),
+            events.append,
+            phase_overrides={
+                **_NOOP_OVERRIDES,
+                "channels": channels,
+                "messages": messages_module.run_messages,
+            },
+        )
+    completed = next(
+        event for event in events if event.phase == "messages" and event.status == "completed"
+    )
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == {"verified": 1, "partial": 1, "unresolved": 1}
+    assert len(records) == 2
+    assert len(state.failed_messages) == 2
+    visited = [event for event in events if event.phase == "messages" and event.total > 0]
+    assert visited[-1].current == visited[-1].total == 3
+
+
 async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_path: Path) -> None:
     """Real engine initialization carries a rejection, then unchanged incremental posts nothing."""
     export_dir = tmp_path / "exports"
@@ -4106,8 +4287,10 @@ async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path
         on_event: Any,
         *,
         _upload_limits_ready: bool,
+        _delivery_outcomes: messages_module.DeliveryOutcomes,
     ) -> None:
         assert _upload_limits_ready is True
+        assert isinstance(_delivery_outcomes, messages_module.DeliveryOutcomes)
         st.failed_messages = [st.failed_messages[0]]  # one now succeeds
 
     with (
@@ -7061,8 +7244,10 @@ async def test_repair_drains_the_dead_letter_queue(tmp_path: Path) -> None:
         _on: Any,
         *,
         _upload_limits_ready: bool,
+        _delivery_outcomes: messages_module.DeliveryOutcomes,
     ) -> None:
         seen["exports"] = exps
+        assert isinstance(_delivery_outcomes, messages_module.DeliveryOutcomes)
         seen["queued"] = len(st.failed_messages)
         seen["upload_limits_ready"] = _upload_limits_ready
 
@@ -7184,8 +7369,10 @@ async def test_a_resent_message_is_dropped_from_the_dead_letter_queue(
         _on: Any,
         *,
         _upload_limits_ready: bool,
+        _delivery_outcomes: messages_module.DeliveryOutcomes,
     ) -> None:
         assert _upload_limits_ready is True
+        assert isinstance(_delivery_outcomes, messages_module.DeliveryOutcomes)
         drained.extend(fm.discord_msg_id for fm in st.failed_messages)
 
     async def _sends_fine(**_kw: Any) -> bool:

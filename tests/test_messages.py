@@ -74,6 +74,81 @@ def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(delivery_module, "api_send_message", send)
 
 
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+async def test_delivery_outcome_counts_complete_partial_and_unresolved_sources(
+    tmp_path: Path, family: str
+) -> None:
+    from aioresponses import CallbackResult
+
+    destination = valid_stoat_id(3600)
+    source = "100" if family == "ordinary" else "200"
+    export = _make_export(
+        channel_id=source,
+        messages=[
+            _make_message(id="10", content="verified-body"),
+            _make_message(id="20", content="partial-body " + "p" * 2500),
+            _make_message(id="30", content="unresolved-body"),
+        ],
+    )
+    export.message_count = 3
+    if family == "merged":
+        export.is_thread = True
+        export.parent_channel_name = "general"
+    exports = [export] if family == "ordinary" else [_make_export(channel_id="100"), export]
+    config = _make_config(tmp_path, thread_strategy="merge" if family == "merged" else "flatten")
+    state = _make_state(channel_map={"100": destination})
+    records: list[str] = []
+    events: list[MigrationEvent] = []
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        if "unresolved-body" in content or content.startswith("[continued"):
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        records.append(content)
+        return CallbackResult(payload={"_id": valid_stoat_id(3610 + len(records))})
+
+    with aioresponses() as http:
+        http.post(f"{BASE_URL}/channels/{destination}/messages", callback=create, repeat=True)
+        await run_messages(config, state, exports, events.append)
+    completed = [
+        event for event in events if event.phase == "messages" and event.status == "completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].detail is not None
+    assert completed[0].detail["delivery"] == {"verified": 1, "partial": 1, "unresolved": 1}
+    assert len(state.failed_messages) == 2
+    assert len(records) == (2 if family == "ordinary" else 3)
+    progress = [event for event in events if event.phase == "messages" and event.total > 0]
+    if family == "ordinary":
+        assert progress[-1].current == progress[-1].total == 3
+
+
+async def test_delivery_outcome_cached_conflict_without_match_is_unresolved(tmp_path: Path) -> None:
+    destination = valid_stoat_id(3650)
+    state = _make_state(channel_map={"100": destination})
+    events: list[MigrationEvent] = []
+    with aioresponses() as http:
+        http.post(
+            f"{BASE_URL}/channels/{destination}/messages",
+            status=409,
+            payload={"type": "DuplicateNonce"},
+        )
+        http.get(f"{BASE_URL}/channels/{destination}/messages?limit=100&sort=Latest", payload=[])
+        await run_messages(
+            _make_config(tmp_path),
+            state,
+            [_make_export(channel_id="100", messages=[_make_message(id="10")])],
+            events.append,
+        )
+    completed = next(event for event in events if event.status == "completed")
+    assert completed.detail is not None
+    assert completed.detail["delivery"] == {"verified": 0, "partial": 0, "unresolved": 1}
+    assert not state.message_map
+    assert len(state.failed_messages) == 1
+
+
 async def test_fresh_destination_uses_independent_delivery_receipt_identity(tmp_path: Path) -> None:
     from aioresponses import CallbackResult
 
@@ -4593,11 +4668,11 @@ async def test_recovered_duplicate_uses_parallel_accumulator(tmp_path: Path) -> 
     seen = []
     real_merge = messages_module._merge_channel_result
 
-    def spy_merge(current, result):
+    def spy_merge(current, result, outcomes=None):
         if result.message_map_updates:
             assert "msg1" not in current.message_map
             seen.append((result.messages_migrated, dict(result.message_map_updates)))
-        real_merge(current, result)
+        real_merge(current, result, outcomes)
 
     with (
         _part_transport(state, duplicate_parts=(0,)),
