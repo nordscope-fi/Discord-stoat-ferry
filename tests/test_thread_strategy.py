@@ -28,6 +28,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -862,6 +863,10 @@ async def test_merge_receipt_refail_attaches_reference_to_carried_failure(tmp_pa
     config, state, parent, thread = _merge_setup(tmp_path, ["20"], marker="20")
     destination = state.channel_map["100"]
     state.failed_messages.append(FailedMessage("20", destination, "old failure", retry_count=2))
+    await seed_rejected_messages(config, state, [parent, thread], family="merged")
+    # Model an old snapshot whose matching rejected receipt survived before its
+    # typed failure reference was committed to normal state.
+    state.failed_messages[0].delivery_ref = None
     with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
         await run_messages(config, state, [parent, thread], lambda event: None)
     assert len(state.failed_messages) == 1
@@ -1641,10 +1646,11 @@ async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Pat
         )
     )
     keys: list[str] = []
+    await seed_rejected_messages(config, state, exports, family="merged")
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, exports, lambda e: None)
 
-    assert _merged_key(state, "20") in keys, "incremental must still self-heal"
+    assert _merged_key(state, "20", attempt=1) in keys, "incremental must still self-heal"
     # Re-sent successfully, so the stale failure record is reconciled away.
     assert [fm.discord_msg_id for fm in state.failed_messages] == []
 

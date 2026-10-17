@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import aiohttp
 import pytest
@@ -26,6 +26,94 @@ from tests.stoat_ids import stoat_id
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from discord_ferry.parser.models import DCEExport
+
+
+async def seed_rejected_messages(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    *,
+    family: Literal["ordinary", "merged"] = "ordinary",
+) -> None:
+    """Arrange real pre-creation rejections for tests that expect a selected retry."""
+    from dataclasses import replace
+
+    from discord_ferry.errors import MessageSendFailure
+    from discord_ferry.migrator import messages
+    from discord_ferry.parser.dce_parser import stream_messages
+
+    original = list(state.failed_messages)
+    seeded = {}
+    source_messages = [
+        (export, msg)
+        for export in exports
+        for msg in (
+            stream_messages(export.json_path) if export.json_path is not None else export.messages
+        )
+    ]
+    with aioresponses() as http:
+        for destination in {failure.stoat_channel_id for failure in original}:
+            http.post(
+                f"{config.stoat_url}/channels/{destination}/messages",
+                status=403,
+                payload={"type": "MissingPermission", "permission": "SendMessage"},
+                repeat=True,
+            )
+        async with aiohttp.ClientSession() as session:
+            for failure in original:
+                choices = [
+                    (export, msg)
+                    for export, msg in source_messages
+                    if msg.id == failure.discord_msg_id
+                    and (
+                        (
+                            family == "ordinary"
+                            and state.channel_map.get(export.channel.id) == failure.stoat_channel_id
+                        )
+                        or (family == "merged" and export.is_thread)
+                    )
+                ]
+                if not choices:
+                    continue
+                assert len(choices) == 1
+                export, msg = choices[0]
+                before = len(state.failed_messages)
+                if family == "ordinary":
+                    with pytest.raises(MessageSendFailure):
+                        await messages._process_message(
+                            msg=msg,
+                            stoat_channel_id=failure.stoat_channel_id,
+                            config=config,
+                            state=state,
+                            session=session,
+                            on_event=lambda event: None,
+                            export_channel_id=export.channel.id,
+                        )
+                else:
+                    assert not await messages._process_merged_message(
+                        export=export,
+                        msg=msg,
+                        stoat_channel_id=failure.stoat_channel_id,
+                        config=config,
+                        state=state,
+                        session=session,
+                        on_event=lambda event: None,
+                    )
+                assert len(state.failed_messages) == before + 1
+                recorded = state.failed_messages[-1]
+                assert recorded.delivery_ref is not None
+                receipt = read_delivery_receipt(state, config.output_dir, recorded.delivery_ref)
+                assert receipt is not None
+                assert all(part.status == "confirmed_rejected" for part in receipt.parts)
+                seeded[id(failure)] = replace(
+                    failure,
+                    delivery_ref=recorded.delivery_ref,
+                    error=recorded.error,
+                    content_preview=recorded.content_preview,
+                )
+    state.failed_messages = [seeded.get(id(failure), failure) for failure in original]
 
 
 def test_delivery_key_is_fixed_length() -> None:
@@ -304,6 +392,84 @@ async def test_delivery_receipt_legacy_match_retains_remote_media_not_new_upload
         assert all(method == "GET" for method, _ in http.requests)
     assert result.message_id == stoat_id(8)
     assert list(result.autumn_ids) == ["legacy_original"]
+
+
+@pytest.mark.parametrize("case", ["complete", "missing", "ambiguous", "mixed_generations"])
+async def test_legacy_delivery_converts_only_complete_unambiguous_multipart(
+    tmp_path: Path, case: str
+):
+    """Legacy parts become one acknowledged receipt, or remain unconverted without POST."""
+    module = importlib.import_module("discord_ferry.migrator.delivery")
+    config = FerryConfig(
+        export_dir=tmp_path, output_dir=tmp_path, stoat_url="https://api.test", token="tok"
+    )
+    state = MigrationState()
+    ensure_delivery_namespace(state, tmp_path, config.stoat_url)
+    ref = DeliveryRef("123", "456", stoat_id(1), "ordinary")
+    rows = [
+        {
+            "_id": stoat_id(80),
+            "channel": ref.destination_channel_id,
+            "nonce": "ferry-456_p1",
+            "content": "first part",
+            "attachments": [{"_id": "original_attachment", "filename": "private-name.png"}],
+            "embeds": [{"type": "Text", "media": {"_id": "original_embed"}}],
+        },
+    ]
+    if case != "missing":
+        rows.insert(
+            0,
+            {
+                "_id": stoat_id(81),
+                "channel": ref.destination_channel_id,
+                "nonce": (
+                    f"ferry-456-{ref.destination_channel_id}_p2"
+                    if case == "mixed_generations"
+                    else "ferry-456_p2"
+                ),
+                "content": "second part",
+            },
+        )
+    if case == "ambiguous":
+        rows.insert(
+            0,
+            {
+                "_id": stoat_id(82),
+                "channel": ref.destination_channel_id,
+                "nonce": "ferry-456_p1",
+                "content": "another first part",
+            },
+        )
+    url = f"{config.stoat_url}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest"
+    with aioresponses() as http:
+        http.get(url, payload=rows)
+        async with aiohttp.ClientSession() as session:
+            call = module.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=2,
+                render_digest="c" * 64,
+                content="first part",
+                attachments=["unused_upload"],
+                legacy_keys=("ferry-456", f"ferry-456-{ref.destination_channel_id}"),
+            )
+            if case == "complete":
+                result = await call
+                assert result.message_id == stoat_id(80)
+                assert result.fully_resolved
+                assert set(result.autumn_ids) == {"original_attachment", "original_embed"}
+                saved = read_delivery_receipt(state, tmp_path, ref)
+                assert saved is not None
+                assert [part.message_id for part in saved.parts] == [stoat_id(80), stoat_id(81)]
+                assert all(part.status == "acknowledged" for part in saved.parts)
+            else:
+                with pytest.raises(DeliveryUnresolvedError):
+                    await call
+                assert read_delivery_receipt(state, tmp_path, ref) is None
+        assert [method for method, _ in http.requests] == ["GET"]
 
 
 async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(tmp_path: Path):

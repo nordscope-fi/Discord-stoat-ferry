@@ -32,6 +32,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader import autumn as autumn_module
+from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -236,6 +237,15 @@ async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Pa
             error="first send failed",
         )
     )
+
+    # Arrange a real rejected attempt without uploading this fixture first.
+    # Retry must replace the limit from the fresh root response below.
+    autumn_module.configure_upload_limits(
+        {"features": {"limits": {"default": {"file_upload_size_limits": {"attachments": 3}}}}},
+        None,
+    )
+    await seed_rejected_messages(config, state, [export])
+    autumn_module.configure_upload_limits({}, None)
 
     with aioresponses() as mocked:
         mocked.get(

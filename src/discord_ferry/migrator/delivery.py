@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     import aiohttp
 
     from discord_ferry.config import FerryConfig
-    from discord_ferry.state import MigrationState
+    from discord_ferry.state import FailedMessage, MigrationState
 
 _locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 # Only identities prepared by this live session may dispatch without lookup.
@@ -67,6 +67,34 @@ def delivery_key(namespace: str, ref: DeliveryRef, attempt: int, part_index: int
     identity = [2, namespace, asdict(ref), attempt, part_index]
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode())
     return "ferry-v2-" + digest.hexdigest()[:40]
+
+
+def retry_delivery_context(
+    state: MigrationState, output_dir: Path, ref: DeliveryRef, failure: FailedMessage
+) -> tuple[DeliveryRef, tuple[str, ...]]:
+    """Validate attempt evidence for an already-selected source, without dispatch."""
+    if (failure.discord_msg_id, failure.stoat_channel_id) != (
+        ref.source_message_id,
+        ref.destination_channel_id,
+    ):
+        raise DeliveryUnresolvedError("Selected retry does not match its recorded destination")
+    recorded = failure.delivery_ref
+    if recorded is not None:
+        if replace(recorded, generation="base") != replace(ref, generation="base"):
+            raise DeliveryUnresolvedError("Selected retry does not match its recorded source")
+        if (
+            not state.delivery_namespace
+            or read_delivery_receipt(state, output_dir, recorded) is None
+        ):
+            raise DeliveryUnresolvedError("Selected retry has no preserved attempt evidence")
+        return recorded, ()
+    if state.delivery_namespace and read_delivery_receipt(state, output_dir, ref) is not None:
+        return ref, ()
+    if ref.family not in {"ordinary", "merged"}:
+        raise DeliveryUnresolvedError("Legacy retry has no supported delivery family")
+    prefix = "ferry-merge" if ref.family == "merged" else "ferry"
+    key = f"{prefix}-{ref.source_message_id}"
+    return ref, (key, f"{key}-{ref.destination_channel_id}")
 
 
 async def _find_messages(
@@ -143,7 +171,18 @@ def _history_media(row: dict[str, Any]) -> list[str]:
         not isinstance(item, dict) or not is_stoat_file_id(item.get("_id")) for item in media
     ):
         raise DeliveryUnresolvedError("Legacy message contains invalid media evidence")
-    return [item["_id"] for item in media]
+    result = [item["_id"] for item in media]
+    embeds = row.get("embeds", [])
+    if not isinstance(embeds, list) or any(not isinstance(item, dict) for item in embeds):
+        raise DeliveryUnresolvedError("Legacy message contains invalid embed evidence")
+    for embed in embeds:
+        if embed.get("type") != "Text" or embed.get("media") is None:
+            continue
+        original_media = embed["media"]
+        if not isinstance(original_media, dict) or not is_stoat_file_id(original_media.get("_id")):
+            raise DeliveryUnresolvedError("Legacy message contains invalid embed media evidence")
+        result.append(original_media["_id"])
+    return result
 
 
 def _result(
@@ -209,18 +248,57 @@ async def deliver_part(
             for item in receipt.parts
         ):
             raise StateError("Delivery key does not match the saved attempt identity")
+        legacy_rows: list[dict[str, Any]] | None = None
+        if legacy_keys and (
+            receipt is None or any(item.status != "acknowledged" for item in receipt.parts)
+        ):
+            if receipt is not None and (
+                receipt.render_digest != render_digest or len(receipt.parts) != part_count
+            ):
+                raise DeliveryUnresolvedError("Legacy render conflicts with preserved delivery")
+            groups = [
+                tuple(key if part_count == 1 else f"{key}_p{index + 1}" for key in legacy_keys)
+                for index in range(part_count)
+            ]
+            matches = await _find_messages(
+                session,
+                config,
+                ref.destination_channel_id,
+                {key for group in groups for key in group},
+            )
+            matched_bases = {
+                key
+                for key in legacy_keys
+                if any(
+                    (key if part_count == 1 else f"{key}_p{index + 1}") in matches
+                    for index in range(part_count)
+                )
+            }
+            if len(matched_bases) != 1:
+                raise DeliveryUnresolvedError("Legacy delivery has no unique complete attempt")
+            legacy_rows = []
+            for index, group in enumerate(groups):
+                candidates = {matches[key]["_id"]: matches[key] for key in group if key in matches}
+                if len(candidates) != 1:
+                    raise DeliveryUnresolvedError(
+                        "Legacy delivery lacks a unique match for every part"
+                    )
+                row = next(iter(candidates.values()))
+                if receipt is not None and (
+                    receipt.parts[index].status == "acknowledged"
+                    and receipt.parts[index].message_id != row["_id"]
+                ):
+                    raise DeliveryUnresolvedError(
+                        "Legacy delivery conflicts with an acknowledged part"
+                    )
+                legacy_rows.append(row)
+            if len({row["_id"] for row in legacy_rows}) != part_count:
+                raise DeliveryUnresolvedError(
+                    "Legacy delivery reuses one identifier for multiple parts"
+                )
         if receipt is None:
             if recover_only:
                 raise DeliveryUnresolvedError("Selected recovery has no preserved delivery")
-            # A legacy candidate permits lookup only, never a fresh dispatch.
-            legacy_match = None
-            if legacy_keys:
-                matches = await _find_messages(
-                    session, config, ref.destination_channel_id, set(legacy_keys)
-                )
-                if len(matches) != 1:
-                    raise DeliveryUnresolvedError("Legacy delivery has no unique history match")
-                legacy_match = next(iter(matches.values()))
             receipt = DeliveryReceipt(
                 1,
                 state.delivery_namespace,
@@ -232,14 +310,18 @@ async def deliver_part(
                     for index in range(part_count)
                 ],
             )
-            if legacy_match is not None:
-                part = receipt.parts[part_index]
+            if legacy_rows is None:
+                write_delivery_receipt(state, config.output_dir, receipt)
+                fresh.update((output, state.delivery_namespace, item.key) for item in receipt.parts)
+        if legacy_rows is not None:
+            legacy_media_by_part = [_history_media(row) for row in legacy_rows]
+            for part, row, original_media in zip(
+                receipt.parts, legacy_rows, legacy_media_by_part, strict=True
+            ):
                 part.status = "acknowledged"
-                part.message_id = legacy_match["_id"]
-                part.autumn_ids = _history_media(legacy_match)
-                return _result(state, config, receipt, part_index, recovered=True)
-            write_delivery_receipt(state, config.output_dir, receipt)
-            fresh.update((output, state.delivery_namespace, item.key) for item in receipt.parts)
+                part.message_id = row["_id"]
+                part.autumn_ids = original_media
+            return _result(state, config, receipt, part_index, recovered=True)
         if receipt.render_digest != render_digest or len(receipt.parts) != part_count:
             if (
                 recover_only
@@ -282,28 +364,19 @@ async def deliver_part(
                 session,
                 config,
                 ref.destination_channel_id,
-                pending | set(legacy_keys),
+                pending,
             )
-            candidates = {matches[key]["_id"] for key in (part.key, *legacy_keys) if key in matches}
-            if len(candidates) > 1:
-                raise DeliveryUnresolvedError("Message delivery has multiple history candidates")
             for item in receipt.parts:
                 if item.status in {"uncertain", "prepared"} and item.key in matches:
                     item.message_id = matches[item.key]["_id"]
                     item.status = "acknowledged"
-            if part.status != "acknowledged" and legacy_keys:
-                legacy_matches = [matches[key] for key in legacy_keys if key in matches]
-                if len(legacy_matches) == 1:
-                    part.message_id = legacy_matches[0]["_id"]
-                    part.autumn_ids = _history_media(legacy_matches[0])
-                    part.status = "acknowledged"
             write_delivery_receipt(state, config.output_dir, receipt)
             if part.status != "acknowledged":
                 raise DeliveryUnresolvedError("Message delivery has no unique history match")
             return {"_id": part.message_id}
 
         capability = (output, state.delivery_namespace, part.key)
-        if recover_only or part.status == "uncertain" or capability not in fresh or legacy_keys:
+        if recover_only or part.status == "uncertain" or capability not in fresh:
             await recover(
                 MessageSendFailure("Preserved delivery requires lookup", disposition="uncertain")
             )

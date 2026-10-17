@@ -32,7 +32,12 @@ from discord_ferry.discord import (
     resume_refusal,
     save_discord_metadata,
 )
-from discord_ferry.errors import DuplicateSendError, MigrationError, StateError
+from discord_ferry.errors import (
+    DeliveryUnresolvedError,
+    DuplicateSendError,
+    MigrationError,
+    StateError,
+)
 from discord_ferry.exporter import (
     download_dce,
     get_dce_path,
@@ -79,6 +84,7 @@ from discord_ferry.migrator.messages import (
     _THREAD_STRATEGIES,
     _build_content,
     _merge_threads,
+    _process_merged_message,
     _process_message,
     _split_message,
     run_messages,
@@ -1698,6 +1704,38 @@ def _refuse_dry_run_state(state: MigrationState, action: str) -> None:
         )
 
 
+def _retry_message_candidates(
+    failure: FailedMessage,
+    found: list[tuple[DCEExport, DCEMessage]],
+    state: MigrationState,
+    parent_names: dict[str, str],
+) -> list[tuple[DCEExport, DCEMessage, DeliveryRef]]:
+    """Relate a failed delivery to source metadata, retaining ambiguous choices."""
+    result: list[tuple[DCEExport, DCEMessage, DeliveryRef]] = []
+    for export, msg in found:
+        refs = []
+        if state.channel_map.get(export.channel.id) == failure.stoat_channel_id:
+            refs.append(
+                DeliveryRef(export.channel.id, msg.id, failure.stoat_channel_id, "ordinary")
+            )
+        if export.is_thread:
+            parent = (
+                state.channel_map.get(export.channel.category_id)
+                if export.channel.category_id
+                else parent_names.get(export.parent_channel_name or "")
+            )
+            if parent == failure.stoat_channel_id:
+                refs.append(DeliveryRef(export.channel.id, msg.id, parent, "merged"))
+        for ref in refs:
+            recorded = failure.delivery_ref
+            if recorded is not None:
+                if dataclasses.replace(recorded, generation="base") != ref:
+                    continue
+                ref = recorded
+            result.append((export, msg, ref))
+    return result
+
+
 async def run_retry_failed(
     config: FerryConfig,
     state: MigrationState,
@@ -1757,16 +1795,26 @@ async def run_retry_failed(
     )
 
     # Scan all exports once, collect matching messages
-    found_messages: dict[str, DCEMessage] = {}
+    found_messages: dict[str, list[tuple[DCEExport, DCEMessage]]] = {}
     for export in exports:
+        retained_counts: dict[str, int] = {}
         msg_iter = (
             stream_messages(export.json_path)
             if export.json_path is not None
             else iter(export.messages)
         )
         for msg in msg_iter:
-            if msg.id in failed_ids:
-                found_messages[msg.id] = msg
+            if msg.id in failed_ids and retained_counts.get(msg.id, 0) < 2:
+                # Two matches already establish ambiguity within this source.
+                # Keep streaming without retaining every malformed duplicate.
+                found_messages.setdefault(msg.id, []).append((export, msg))
+                retained_counts[msg.id] = retained_counts.get(msg.id, 0) + 1
+    parent_names = {
+        export.channel.name: state.channel_map[export.channel.id]
+        for export in sorted(exports, key=lambda item: item.channel.id)
+        if not export.is_thread and export.channel.id in state.channel_map
+    }
+    source_channel_names = {export.channel.id: export.channel.name for export in exports}
 
     async with get_session(config) as session:
         config.session = session
@@ -1779,8 +1827,8 @@ async def run_retry_failed(
         # never terminate (mutate-during-iteration). state.failed_messages is rebuilt from
         # still_failed below, discarding the in-loop duplicate.
         for fm in list(state.failed_messages):
-            found_msg = found_messages.get(fm.discord_msg_id)
-            if found_msg is None:
+            found = found_messages.get(fm.discord_msg_id, [])
+            if not found:
                 on_event(
                     MigrationEvent(
                         phase="retry",
@@ -1803,19 +1851,76 @@ async def run_retry_failed(
                 on_event(MigrationEvent(phase="retry", status="warning", message=message))
                 still_failed.append(fm)
                 continue
-            try:
-                await _process_message(
-                    msg=found_msg,
-                    stoat_channel_id=stoat_channel_id,
-                    config=config,
-                    state=state,
-                    session=session,
-                    on_event=on_event,
+            candidates = _retry_message_candidates(fm, found, state, parent_names)
+            if len(candidates) != 1:
+                on_event(
+                    MigrationEvent(
+                        phase="retry",
+                        status="warning",
+                        message=(
+                            f"Message {fm.discord_msg_id} has no unique recorded source; "
+                            "not retried."
+                        ),
+                    )
                 )
-                retried += 1
-            except Exception:  # noqa: BLE001
-                fm.retry_count += 1
                 still_failed.append(fm)
+                continue
+            export, found_msg, ref = candidates[0]
+            failure_start = len(state.failed_messages)
+            try:
+                if ref.family == "ordinary":
+                    resolved = await _process_message(
+                        msg=found_msg,
+                        stoat_channel_id=stoat_channel_id,
+                        config=config,
+                        state=state,
+                        session=session,
+                        on_event=on_event,
+                        export_channel_id=export.channel.id,
+                        delivery_ref=ref,
+                        retry_failure=fm,
+                        allow_rejected_retry=True,
+                        source_channel_names=source_channel_names,
+                    )
+                else:
+                    resolved = await _process_merged_message(
+                        export=export,
+                        msg=found_msg,
+                        stoat_channel_id=stoat_channel_id,
+                        config=config,
+                        state=state,
+                        session=session,
+                        on_event=on_event,
+                        delivery_ref=ref,
+                        retry_failure=fm,
+                        allow_rejected_retry=True,
+                    )
+                if not resolved:
+                    raise DeliveryUnresolvedError("Selected message is not fully delivered")
+                retried += 1
+            except Exception as exc:  # noqa: BLE001
+                latest = next(
+                    (
+                        failed
+                        for failed in reversed(state.failed_messages[failure_start:])
+                        if failed.discord_msg_id == fm.discord_msg_id
+                        and failed.stoat_channel_id == stoat_channel_id
+                    ),
+                    None,
+                )
+                still_failed.append(
+                    dataclasses.replace(
+                        fm,
+                        retry_count=fm.retry_count + 1,
+                        error=latest.error if latest is not None else _safe(config, str(exc)),
+                        content_preview=latest.content_preview
+                        if latest is not None
+                        else fm.content_preview,
+                        delivery_ref=(latest.delivery_ref or fm.delivery_ref)
+                        if latest is not None
+                        else fm.delivery_ref,
+                    )
+                )
         state.failed_messages = still_failed
     config.session = None
 

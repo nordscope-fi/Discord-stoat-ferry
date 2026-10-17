@@ -41,6 +41,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState, load_state
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import seed_rejected_messages
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -1327,7 +1328,9 @@ async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
     )
 
     events: list[MigrationEvent] = []
+    await seed_rejected_messages(config, state, exports)
     with aioresponses() as m:
+        m.get(f"{BASE_URL}/", payload={"features": {}})
         m.post(
             f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
             payload={"_id": "01J5T011312040827099375552"},
@@ -1445,7 +1448,9 @@ async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     )
 
     events: list[MigrationEvent] = []
+    await seed_rejected_messages(config, state, exports)
     with aioresponses() as m:
+        m.get(f"{BASE_URL}/", payload={"features": {}})
         m.post(
             f"{BASE_URL}/channels/01J5T013913344331853682639/messages",
             payload={"_id": "01J5T009296950391681521246"},
@@ -1482,7 +1487,12 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
         ],
     )
 
+    await seed_rejected_messages(config, state, exports)
+    send_calls = 0
+
     async def always_fail_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal send_calls
+        send_calls += 1
         # Yield + throttle: a true await suspension lets asyncio.wait_for enforce its
         # timeout (a synchronous raise would never yield, so a regression would hang
         # UNBOUNDED instead of timing out); the small sleep bounds a regression's growth.
@@ -1490,9 +1500,14 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
         raise RuntimeError("still broken")
 
     events: list[MigrationEvent] = []
-    with patch("discord_ferry.migrator.messages.api_send_message", always_fail_send):
+    with (
+        aioresponses() as http,
+        patch("discord_ferry.migrator.messages.api_send_message", always_fail_send),
+    ):
+        http.get(f"{BASE_URL}/", payload={"features": {}})
         await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
 
+    assert send_calls == 1
     assert len(state.failed_messages) == 1
     assert state.failed_messages[0].discord_msg_id == "msg_fail"
     assert state.failed_messages[0].retry_count == 1
@@ -1529,6 +1544,7 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
         ],
     )
 
+    await seed_rejected_messages(config, state, exports)
     call = 0
 
     async def send(
@@ -1542,9 +1558,11 @@ async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -
         return {"_id": _valid_send_id(f"ok_{call}")}
 
     events: list[MigrationEvent] = []
-    with patch("discord_ferry.migrator.messages.api_send_message", send):
+    with aioresponses() as http, patch("discord_ferry.migrator.messages.api_send_message", send):
+        http.get(f"{BASE_URL}/", payload={"features": {}})
         await asyncio.wait_for(run_retry_failed(config, state, exports, events.append), timeout=5.0)
 
+    assert call == 2
     ids = {fm.discord_msg_id for fm in state.failed_messages}
     assert ids == {"msg_fail", "msg_gone"}
     assert "msg_ok" in state.message_map
@@ -2122,6 +2140,508 @@ async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path)
         await run_migration(config, events.append, phase_overrides=overrides)
 
     mock_rebuild.assert_called_once()
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.parametrize("refail", [False, True])
+async def test_retry_delivery_uses_recorded_source_and_family(
+    tmp_path: Path, family: str, refail: bool
+) -> None:
+    """Retry the recorded source and only rejected parts despite a colliding identifier."""
+    from discord_ferry.errors import MessageSendFailure
+    from discord_ferry.state import save_state
+
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(2500)
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination, "300": valid_stoat_id(2501)},
+        channel_high_water={"100": "1000", "200": "1000"},
+    )
+    parent = _export_for("100", name="general")
+    selected = parent if family == "ordinary" else _export_for("200", name="thread")
+    if family == "merged":
+        selected.is_thread = True
+        selected.parent_channel_name = "general"
+    body = "selected ordinary body" if family == "ordinary" else "selected merged body " * 120
+    selected.messages.append(_text_msg("50", body, "2024-01-15T12:00:00+00:00"))
+    other = _export_for("300", name="other")
+    other.messages.append(_text_msg("50", "wrong colliding body", "2024-01-15T12:00:00+00:00"))
+    exports = [parent, selected, other] if family == "merged" else [selected, other]
+    expected = messages_module._split_message(
+        messages_module._build_content(selected.messages[0], state)
+    )
+    assert len(expected) == (1 if family == "ordinary" else 2)
+    records: list[dict[str, str]] = []
+    cached: set[str] = set()
+    rejected = 0
+
+    async def create(url, **kwargs):
+        nonlocal rejected
+        await asyncio.sleep(0)
+        key = kwargs["headers"]["Idempotency-Key"]
+        content = kwargs["json"]["content"]
+        if key in cached:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached.add(key)
+        if content == expected[-1] and rejected < (2 if refail else 1):
+            rejected += 1
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        row = {
+            "_id": valid_stoat_id(2600 + len(records)),
+            "channel": destination,
+            "nonce": key,
+            "content": content,
+        }
+        records.append(row)
+        return CallbackResult(payload=row)
+
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.post(url, callback=create, repeat=True)
+        http.get(f"{url}?limit=100&sort=Latest", payload=[], repeat=True)
+        http.get(f"{config.stoat_url}/", payload={"features": {}}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            if family == "ordinary":
+                with pytest.raises(MessageSendFailure):
+                    await messages_module._process_message(
+                        msg=selected.messages[0],
+                        stoat_channel_id=destination,
+                        config=config,
+                        state=state,
+                        session=session,
+                        on_event=lambda event: None,
+                        export_channel_id=selected.channel.id,
+                    )
+            else:
+                resolved = await messages_module._process_merged_message(
+                    export=selected,
+                    msg=selected.messages[0],
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                )
+                assert not resolved
+        assert len(state.failed_messages) == 1
+        ref = state.failed_messages[0].delivery_ref
+        assert ref is not None
+        assert ref.source_channel_id == selected.channel.id
+        assert ref.family == family
+        save_state(state, tmp_path)
+        state = load_state(tmp_path)
+        await asyncio.wait_for(run_retry_failed(config, state, exports, lambda event: None), 5)
+        if refail:
+            assert len(state.failed_messages) == 1
+            assert state.failed_messages[0].retry_count == 1
+            assert state.failed_messages[0].delivery_ref == ref
+            state = load_state(tmp_path)
+            await asyncio.wait_for(run_retry_failed(config, state, exports, lambda event: None), 5)
+    assert not state.failed_messages
+    assert [row["content"] for row in records] == expected
+    assert state.channel_high_water == {"100": "1000", "200": "1000"}
+    if family == "ordinary":
+        assert state.message_map["50"] == records[0]["_id"]
+        assert state.channel_message_counts["100"] == 1
+    else:
+        assert "50" not in state.message_map
+
+
+@pytest.mark.parametrize("case", ["positive", "missing", "ambiguous_source", "missing_receipt"])
+async def test_retry_legacy_delivery_requires_existing_evidence(tmp_path: Path, case: str) -> None:
+    """Old failure text and missing receipts never authorize a fresh message."""
+    from discord_ferry.state import DeliveryRef, ensure_delivery_namespace
+
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(2700)
+    export = _export_for("100")
+    export.messages.append(_text_msg("50", "legacy recovered body", "2024-01-15T12:00:00+00:00"))
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination},
+        failed_messages=[
+            FailedMessage("50", destination, "403 MissingPermission in old error text")
+        ],
+    )
+    exports = [export]
+    if case == "ambiguous_source":
+        other = _export_for("200")
+        other.messages.append(_text_msg("50", "other source body", "2024-01-15T12:00:00+00:00"))
+        exports.append(other)
+        state.channel_map["200"] = destination
+    if case == "missing_receipt":
+        state.failed_messages[0].delivery_ref = DeliveryRef("100", "50", destination, "ordinary")
+        ensure_delivery_namespace(state, tmp_path, config.stoat_url)
+    posted = []
+
+    def create(url, **kwargs):
+        posted.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(2702)})
+
+    rows = (
+        [
+            {
+                "_id": valid_stoat_id(2701),
+                "channel": destination,
+                "nonce": "ferry-50",
+                "content": messages_module._build_content(export.messages[0], state),
+                "attachments": [{"_id": "legacy_original_media"}],
+                "embeds": [{"type": "Text", "media": {"_id": "legacy_embed_media"}}],
+            }
+        ]
+        if case == "positive"
+        else []
+    )
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.get(f"{config.stoat_url}/", payload={"features": {}}, repeat=True)
+        http.get(f"{url}?limit=100&sort=Latest", payload=rows, repeat=True)
+        http.post(url, callback=create, repeat=True)
+        await asyncio.wait_for(run_retry_failed(config, state, exports, lambda event: None), 5)
+    assert posted == []
+    if case == "positive":
+        assert not state.failed_messages
+        assert state.message_map["50"] == valid_stoat_id(2701)
+        assert state.channel_message_counts["100"] == 1
+        assert state.referenced_autumn_ids == {"legacy_original_media", "legacy_embed_media"}
+    else:
+        assert len(state.failed_messages) == 1
+        assert not state.message_map
+        if case != "missing_receipt":
+            assert state.failed_messages[0].delivery_ref is None
+        assert not list((tmp_path / "delivery-receipts").rglob("*.json"))
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.parametrize("found", [False, True])
+async def test_incremental_legacy_delivery_requires_history(
+    tmp_path: Path, family: str, found: bool
+) -> None:
+    """Incremental selection recovers legacy evidence without guessing a new attempt."""
+    destination = valid_stoat_id(2800)
+    source = "100" if family == "ordinary" else "200"
+    config = _make_config(
+        tmp_path,
+        export_dir=tmp_path,
+        incremental=True,
+        message_rate_limit=0.0,
+        thread_strategy="flatten" if family == "ordinary" else "merge",
+    )
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination},
+        channel_high_water={source: "100"},
+        failed_messages=[FailedMessage("50", destination, "old failure without disposition")],
+    )
+    parent = _export_for("100", name="general")
+    selected = parent if family == "ordinary" else _export_for("200", name="thread")
+    selected.is_thread = family == "merged"
+    selected.parent_channel_name = "general" if family == "merged" else ""
+    selected.messages.extend(
+        [
+            _text_msg("50", "legacy selected body", "2024-01-15T12:00:00+00:00"),
+            _text_msg("100", "already passed source", "2024-01-15T12:01:00+00:00"),
+        ]
+    )
+    selected.message_count = 2
+    posted = []
+
+    def create(url, **kwargs):
+        posted.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(2802)})
+
+    nonce = "ferry-50" if family == "ordinary" else "ferry-merge-50"
+    rows = (
+        [
+            {
+                "_id": valid_stoat_id(2801),
+                "channel": destination,
+                "nonce": nonce,
+                "content": messages_module._build_content(selected.messages[0], state),
+            }
+        ]
+        if found
+        else []
+    )
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.get(f"{url}?limit=100&sort=Latest", payload=rows, repeat=True)
+        http.post(url, callback=create, repeat=True)
+        await messages_module.run_messages(
+            config,
+            state,
+            [parent, selected] if family == "merged" else [selected],
+            lambda event: None,
+        )
+    assert posted == []
+    assert state.channel_high_water[source] == "100"
+    assert len(state.failed_messages) == (0 if found else 1)
+    if not found:
+        assert state.failed_messages[0].delivery_ref is None
+    if family == "ordinary" and found:
+        assert state.message_map["50"] == valid_stoat_id(2801)
+    elif family == "merged":
+        assert "50" not in state.message_map
+
+
+async def test_retry_merged_delivery_preserves_skipped_source_types(tmp_path: Path) -> None:
+    """Explicit retry cannot bypass the merge loop's source-type exclusion."""
+    config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
+    destination = valid_stoat_id(2900)
+    state = MigrationState(stoat_server_id=valid_stoat_id(900), channel_map={"100": destination})
+    parent = _export_for("100", name="general")
+    thread = _export_for("200", name="thread")
+    thread.is_thread = True
+    thread.parent_channel_name = "general"
+    msg = _text_msg("50", "source body", "2024-01-15T12:00:00+00:00")
+    thread.messages.append(msg)
+    url = f"{config.stoat_url}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.post(
+            url, status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+        )
+        async with aiohttp.ClientSession() as session:
+            assert not await messages_module._process_merged_message(
+                export=thread,
+                msg=msg,
+                stoat_channel_id=destination,
+                config=config,
+                state=state,
+                session=session,
+                on_event=lambda event: None,
+            )
+    msg.type = "ThreadCreated"
+    posted = []
+
+    def create(url, **kwargs):
+        posted.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": valid_stoat_id(2901)})
+
+    with aioresponses() as http:
+        http.get(f"{config.stoat_url}/", payload={"features": {}})
+        http.post(url, callback=create)
+        await run_retry_failed(config, state, [parent, thread], lambda event: None)
+    assert posted == []
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].retry_count == 1
+
+
+async def test_retry_delivery_duplicate_source_scan_keeps_bounded_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambiguity needs two candidates, not every duplicate in a streamed export."""
+    import weakref
+
+    destination = valid_stoat_id(2950)
+    config = _make_config(tmp_path, export_dir=tmp_path)
+    state = MigrationState(
+        channel_map={"100": destination},
+        failed_messages=[FailedMessage("50", destination, "old failure")],
+    )
+    export = _export_for("100")
+    export.json_path = tmp_path / "source.json"
+    observed = []
+
+    def messages(path):
+        for index in range(50):
+            msg = _text_msg("50", f"duplicate body {index}", "2024-01-15T12:00:00+00:00")
+            observed.append(weakref.ref(msg))
+            yield msg
+            assert sum(reference() is not None for reference in observed) <= 3, (
+                "Retry scan retained an unbounded set of duplicate source messages"
+            )
+
+    monkeypatch.setattr(engine_module, "stream_messages", messages)
+    with aioresponses() as http:
+        http.get(f"{config.stoat_url}/", payload={"features": {}})
+        await run_retry_failed(config, state, [export], lambda event: None)
+        assert all(method == "GET" for method, _ in http.requests)
+    assert len(observed) == 50
+    assert len(state.failed_messages) == 1
+    assert not state.message_map
+
+
+async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_path: Path) -> None:
+    """Real engine initialization carries a rejection, then unchanged incremental posts nothing."""
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    destination = valid_stoat_id(3000)
+    records: list[dict[str, str]] = []
+    cached: set[str] = set()
+    rejected = False
+
+    def source_message(message_id, body):
+        message = _dce_msg_dict(message_id, body)
+        message["author"]["id"] = "900000000000000004"
+        return message
+
+    original = [source_message("50", "rejected body"), source_message("100", "later body")]
+    _write_dce_json(export_dir, "100", original)
+
+    async def channels(config, state, exports, emit):
+        state.stoat_server_id = valid_stoat_id(900)
+        state.channel_map["100"] = destination
+
+    overrides = {**_NOOP_OVERRIDES, "channels": channels, "messages": messages_module.run_messages}
+
+    def create(url, **kwargs):
+        nonlocal rejected
+        key = kwargs["headers"]["Idempotency-Key"]
+        content = kwargs["json"]["content"]
+        if key in cached:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached.add(key)
+        if "rejected body" in content and not rejected:
+            rejected = True
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        row = {
+            "_id": valid_stoat_id(3100 + len(records)),
+            "channel": destination,
+            "nonce": key,
+            "content": content,
+        }
+        records.append(row)
+        return CallbackResult(payload=row)
+
+    with aioresponses() as http:
+        http.get("https://api.test/", payload={"features": {}}, repeat=True)
+        http.post(f"https://api.test/channels/{destination}/messages", callback=create, repeat=True)
+        config = _make_config(
+            tmp_path,
+            export_dir=export_dir,
+            message_rate_limit=0.0,
+            create_invite=False,
+            validate_after=False,
+        )
+        first = await run_migration(config, lambda event: None, phase_overrides=overrides)
+        assert len(first.failed_messages) == 1
+        assert first.failed_messages[0].delivery_ref is not None
+        namespace = first.delivery_namespace
+        first_id = first.message_map["100"]
+        _write_dce_json(export_dir, "100", [*original, source_message("150", "new body")])
+        incremental = dataclasses.replace(config, incremental=True)
+        second = await run_migration(incremental, lambda event: None, phase_overrides=overrides)
+        assert not second.failed_messages
+        assert second.delivery_namespace == namespace
+        assert second.message_map["100"] == first_id
+        assert set(second.message_map) == {"50", "100", "150"}
+        assert second.channel_message_counts["100"] == 3
+        assert len(records) == 3
+        cached.clear()
+        third = await run_migration(incremental, lambda event: None, phase_overrides=overrides)
+    assert third.delivery_namespace == namespace
+    assert not third.failed_messages
+    assert third.channel_message_counts["100"] == 3
+    assert len(records) == 3
+    assert not cached
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+async def test_retry_delivery_checkpoint_removes_resolved_failure_before_retirement(
+    tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful mid-channel checkpoint cannot leave a failure whose receipt it retired."""
+    from discord_ferry.state import save_state
+
+    class Interrupted(BaseException):
+        pass
+
+    destination = valid_stoat_id(3200)
+    source = "100" if family == "ordinary" else "200"
+    config = _make_config(
+        tmp_path,
+        export_dir=tmp_path,
+        incremental=True,
+        checkpoint_interval=1,
+        message_rate_limit=0.0,
+    )
+    export = _export_for(source, name="general" if family == "ordinary" else "thread")
+    export.is_thread = family == "merged"
+    export.parent_channel_name = "general" if family == "merged" else ""
+    export.messages.extend(
+        [
+            _text_msg("20", "corrected body", "2024-01-15T12:00:00+00:00"),
+            _text_msg("30", "later body", "2024-01-15T12:01:00+00:00"),
+        ]
+    )
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={"100": destination},
+        channel_high_water={source: "10"},
+        failed_messages=[FailedMessage("20", destination, "old failure")],
+    )
+    await seed_rejected_messages(config, state, [export], family=family)
+    ref = state.failed_messages[0].delivery_ref
+    assert ref is not None
+    unrelated = [
+        FailedMessage(
+            "20",
+            destination,
+            "other source",
+            delivery_ref=dataclasses.replace(ref, source_channel_id="999"),
+        ),
+        FailedMessage(
+            "20",
+            destination,
+            "other family",
+            delivery_ref=dataclasses.replace(
+                ref, family="merged" if family == "ordinary" else "ordinary"
+            ),
+        ),
+        FailedMessage(
+            "20",
+            valid_stoat_id(3202),
+            "other destination",
+            delivery_ref=dataclasses.replace(ref, destination_channel_id=valid_stoat_id(3202)),
+        ),
+    ]
+    state.failed_messages.extend(unrelated)
+
+    async def create(url, **kwargs):
+        if family == "merged":
+            await asyncio.sleep(5.01)  # Exercise the existing real five-second checkpoint floor.
+        return CallbackResult(payload={"_id": valid_stoat_id(3201)})
+
+    with aioresponses() as http:
+        http.post(f"{config.stoat_url}/channels/{destination}/messages", callback=create)
+        if family == "ordinary":
+            result = messages_module.ChannelResult(channel_id=source)
+            async with aiohttp.ClientSession() as session:
+                assert await messages_module._process_message(
+                    msg=export.messages[0],
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    channel_result=result,
+                    export_channel_id=source,
+                    retry_failure=state.failed_messages[0],
+                    allow_rejected_retry=True,
+                )
+            messages_module._merge_channel_result(state, result)
+            save_state(state, tmp_path)
+        else:
+
+            def checkpoint_then_interrupt(current, output_dir):
+                save_state(current, output_dir)
+                raise Interrupted("process stopped after durable mid-thread checkpoint")
+
+            monkeypatch.setattr(messages_module, "save_state", checkpoint_then_interrupt)
+            with pytest.raises(Interrupted):
+                await messages_module._merge_threads(
+                    [export], config, state, lambda event: None, {"general": destination}
+                )
+    resumed = load_state(tmp_path)
+    assert delivery_module.read_delivery_receipt(resumed, tmp_path, ref) is None
+    if family == "merged":
+        assert resumed.channel_message_offsets[source] == "20"
+    assert resumed.failed_messages == unrelated
 
 
 async def test_forum_index_rebuild_skipped_when_dry_run(tmp_path: Path) -> None:

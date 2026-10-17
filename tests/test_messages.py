@@ -42,6 +42,7 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
@@ -498,12 +499,13 @@ def _sent_message_ids(sent: list[dict[str, Any]], state: MigrationState) -> list
         delivery_module.delivery_key(
             state.delivery_namespace,
             delivery_module.DeliveryRef(channel, source, destination, "ordinary"),
-            0,
+            attempt,
             part,
         ): source
         for channel, destination in state.channel_map.items()
         for source in candidates
         for part in range(max(1, len(sent)))
+        for attempt in (0, 1)  # Fresh sends and these fixtures' first selected retry.
     }
     return [
         identities.get(item["idempotency_key"], "unrecognized delivery key")
@@ -3345,6 +3347,7 @@ async def test_incremental_reattempts_failed_id(tmp_path: Path) -> None:
         failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300", "400")])
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     assert set(_sent_message_ids(sent, state)) == {"200", "400"}
@@ -3398,6 +3401,7 @@ async def test_incremental_failed_id_equals_marker_boundary(tmp_path: Path) -> N
         failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id="100"), _make_message(id="200")])
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     assert _sent_message_ids(sent, state) == ["200"]
@@ -3429,6 +3433,7 @@ async def test_incremental_multiple_failed_ids_one_channel(tmp_path: Path) -> No
     export = _make_export(
         messages=[_make_message(id=i) for i in ("100", "150", "200", "250", "300", "400")]
     )
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     assert set(_sent_message_ids(sent, state)) == {"150", "250", "400"}
@@ -3463,6 +3468,7 @@ async def test_reconcile_drops_succeeded_failed_id(tmp_path: Path) -> None:
         failed_messages=[FailedMessage("200", "01J5T013913344331853682639", "boom")],
     )
     export = _make_export(messages=[_make_message(id=i) for i in ("100", "200", "300")])
+    await seed_rejected_messages(config, state, [export])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export], lambda e: None)
     assert all(fm.discord_msg_id != "200" for fm in state.failed_messages)
@@ -3516,6 +3522,7 @@ async def test_reconcile_isolation_across_channels(tmp_path: Path) -> None:
     )
     export1 = _make_export(channel_id="ch1", messages=[_make_message(id="100")])
     export2 = _make_export(channel_id="ch2", messages=[_make_message(id="550")])
+    await seed_rejected_messages(config, state, [export1, export2])
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_sends(sent)):
         await run_messages(config, state, [export1, export2], lambda e: None)
     remaining = {fm.discord_msg_id for fm in state.failed_messages}
