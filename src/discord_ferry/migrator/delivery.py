@@ -181,6 +181,7 @@ async def deliver_part(
     replies: list[dict[str, Any]] | None = None,
     allow_rejected_retry: bool = False,
     legacy_keys: tuple[str, ...] = (),
+    recover_only: bool = False,
 ) -> DeliveryResult:
     """Deliver one already-selected part or return its verified saved identifier."""
     if config.dry_run or state.is_dry_run:
@@ -209,6 +210,8 @@ async def deliver_part(
         ):
             raise StateError("Delivery key does not match the saved attempt identity")
         if receipt is None:
+            if recover_only:
+                raise DeliveryUnresolvedError("Selected recovery has no preserved delivery")
             # A legacy candidate permits lookup only, never a fresh dispatch.
             legacy_match = None
             if legacy_keys:
@@ -238,8 +241,10 @@ async def deliver_part(
             write_delivery_receipt(state, config.output_dir, receipt)
             fresh.update((output, state.delivery_namespace, item.key) for item in receipt.parts)
         if receipt.render_digest != render_digest or len(receipt.parts) != part_count:
-            if not allow_rejected_retry or any(
-                item.status != "confirmed_rejected" for item in receipt.parts
+            if (
+                recover_only
+                or not allow_rejected_retry
+                or any(item.status != "confirmed_rejected" for item in receipt.parts)
             ):
                 raise DeliveryUnresolvedError(
                     "Message render differs from preserved delivery evidence"
@@ -258,7 +263,7 @@ async def deliver_part(
         if part.status == "acknowledged":
             return _result(state, config, receipt, part_index, recovered=True)
         if part.status == "confirmed_rejected":
-            if not allow_rejected_retry:
+            if not allow_rejected_retry or recover_only:
                 raise MessageSendFailure(
                     "Message remains rejected until selected recovery authorizes retry",
                     disposition="confirmed_rejected",
@@ -298,7 +303,7 @@ async def deliver_part(
             return {"_id": part.message_id}
 
         capability = (output, state.delivery_namespace, part.key)
-        if part.status == "uncertain" or capability not in fresh or legacy_keys:
+        if recover_only or part.status == "uncertain" or capability not in fresh or legacy_keys:
             await recover(
                 MessageSendFailure("Preserved delivery requires lookup", disposition="uncertain")
             )

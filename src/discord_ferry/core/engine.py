@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import re
 import socket
 from collections.abc import Callable, Coroutine, Iterator
@@ -67,6 +68,7 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
+from discord_ferry.migrator.delivery import deliver_part
 from discord_ferry.migrator.emoji import (
     find_emoji_in_exports,
     messages_using_emoji,
@@ -110,12 +112,15 @@ from discord_ferry.review import (
     build_rollback_summary,
 )
 from discord_ferry.state import (
+    DeliveryRef,
     FailedMessage,
     MigrationState,
     RollbackFailure,
     RollbackProgress,
+    consume_delivery,
     ensure_delivery_namespace,
     load_state,
+    read_delivery_receipt,
     save_state,
 )
 from discord_ferry.uploader.autumn import configure_upload_limits
@@ -124,6 +129,7 @@ if TYPE_CHECKING:
     from discord_ferry.blueprint import BlueprintChannel, ServerBlueprint
     from discord_ferry.discord.metadata import ChannelMeta
     from discord_ferry.migrator.api import ServerReadView
+    from discord_ferry.migrator.delivery import DeliveryResult
 
     # Type-only: run_check itself is imported inside run_repair, matching how
     # check_cmd reaches it, so the verify module stays off the engine's import
@@ -1346,6 +1352,39 @@ async def _rebuild_one_forum_index(
 
     try:
         existing_msg_id = state.forum_index_message_ids.get(forum_key)
+        delivery: DeliveryResult | None = None
+        if not force_new:
+            source_id = hashlib.sha256(forum_key.encode()).hexdigest()
+            ref = DeliveryRef(source_id, source_id, index_channel_id, "forum_index")
+            pending = (
+                read_delivery_receipt(state, config.output_dir, ref)
+                if state.delivery_namespace
+                else None
+            )
+            if (existing_msg_id and pending is not None) or (
+                not existing_msg_id and forum_key not in state.forum_index_present_unknown_id
+            ):
+                # Initial and report renders differ. Resolve preserved evidence
+                # without dispatch, even in a shared session, then edit its ID.
+                render_digest = hashlib.sha256(content.encode()).hexdigest()
+                if pending is not None and pending.parts[0].status != "confirmed_rejected":
+                    render_digest = pending.render_digest
+                delivery = await deliver_part(
+                    session=session,
+                    config=config,
+                    state=state,
+                    ref=ref,
+                    part_index=0,
+                    part_count=1,
+                    render_digest=render_digest,
+                    content=content,
+                    masquerade={"name": "Discord Ferry"},
+                    allow_rejected_retry=config.incremental and not existing_msg_id,
+                    recover_only=pending is not None
+                    and pending.parts[0].status != "confirmed_rejected",
+                )
+                if existing_msg_id and delivery.message_id != existing_msg_id:
+                    raise StateError("Forum index mapping conflicts with preserved delivery")
         if existing_msg_id:
             # Re-run: edit the existing index message instead of creating a duplicate.
             await api_edit_message(
@@ -1357,6 +1396,11 @@ async def _rebuild_one_forum_index(
                 content=content,
             )
             index_msg_id: str = existing_msg_id
+            if delivery is not None:
+                await api_pin_message(
+                    session, config.stoat_url, config.token, index_channel_id, index_msg_id
+                )
+                await asyncio.sleep(config.upload_delay)
         elif forum_key in state.forum_index_present_unknown_id:
             # Present on the server, but its id was lost to an earlier duplicate send
             # (#215). Try to recover the id from pinned messages before skipping
@@ -1390,38 +1434,42 @@ async def _rebuild_one_forum_index(
                 )
                 return
         else:
-            try:
-                msg_result = await api_send_message(
-                    session,
-                    config.stoat_url,
-                    config.token,
-                    index_channel_id,
-                    content=content,
-                    masquerade={"name": "Discord Ferry"},
-                    idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
-                )
-                index_msg_id = msg_result["_id"]
-            except DuplicateSendError:
-                # Already on the server with no recoverable id. Try to recover
-                # the id from pinned messages (#561) before falling back to the
-                # present-id-unknown marker (#215). If recovered, the message
-                # is edited with current content and the id is recorded below.
-                # If not, mark the forum so the next run attempts recovery again
-                # from the skip branch rather than posting a duplicate. Write
-                # NOTHING to forum_index_message_ids on failure: a truthy entry
-                # there would drive an api_edit_message against a missing id.
-                recovered_id = await _recover_forum_index_id(
-                    session,
-                    config,
-                    index_channel_id,
-                    forum_name,
-                    content,
-                )
-                if recovered_id:
-                    index_msg_id = recovered_id
-                else:
-                    state.forum_index_present_unknown_id.add(forum_key)
-                    index_msg_id = ""
+            if force_new:
+                # Preserve the existing explicit repair boundary until its
+                # persisted replacement-generation task is applied.
+                try:
+                    msg_result = await api_send_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        content=content,
+                        masquerade={"name": "Discord Ferry"},
+                        idempotency_key=f"ferry-forum-index-rebuilt-{forum_key}",
+                    )
+                    index_msg_id = msg_result["_id"]
+                except DuplicateSendError:
+                    recovered_id = await _recover_forum_index_id(
+                        session, config, index_channel_id, forum_name, content
+                    )
+                    if recovered_id:
+                        index_msg_id = recovered_id
+                    else:
+                        state.forum_index_present_unknown_id.add(forum_key)
+                        index_msg_id = ""
+            elif delivery is not None:
+                index_msg_id = delivery.message_id
+                if delivery.recovered:
+                    await api_edit_message(
+                        session,
+                        config.stoat_url,
+                        config.token,
+                        index_channel_id,
+                        index_msg_id,
+                        content=content,
+                    )
+            else:
+                raise StateError("Forum index creation lacks confirmed delivery")
             await asyncio.sleep(config.upload_delay)
             if index_msg_id:
                 state.forum_index_message_ids[forum_key] = index_msg_id
@@ -1435,6 +1483,8 @@ async def _rebuild_one_forum_index(
                     index_msg_id,
                 )
                 await asyncio.sleep(config.upload_delay)
+        if delivery is not None:
+            consume_delivery(state, delivery.token, delivery.message_id)
         if index_msg_id:
             # Only when something was actually edited or sent. A duplicate send leaves
             # index_msg_id empty and marks the forum instead; claiming "Rebuilt" there

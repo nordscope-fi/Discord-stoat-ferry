@@ -2006,6 +2006,99 @@ async def test_semaphore_initialized_during_migration(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("failure", ["response", "pin"])
+async def test_report_index_delivery_recovery_and_later_edit(tmp_path: Path, failure: str) -> None:
+    """Reload a lost create or failed pin, recover its identifier, then edit it."""
+    from discord_ferry.state import save_state
+
+    class Interrupted(BaseException):
+        pass
+
+    index_channel = valid_stoat_id(2100)
+    post_channel = valid_stoat_id(2101)
+    source = "900000000000000001"
+    forum = "forum-Ideas & help 🌱"
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(900),
+        channel_map={f"forum-index-{forum}": index_channel, source: post_channel},
+        forum_category_names={forum: "Ideas & help 🌱"},
+        forum_channel_members={forum: [source]},
+        channel_message_counts={source: 3},
+    )
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="tok",
+        upload_delay=0,
+    )
+    records: list[dict[str, str]] = []
+    edits: list[str] = []
+    pins: list[str] = []
+
+    def create(url, **kwargs):
+        row = {
+            "_id": valid_stoat_id(2200 + len(records)),
+            "channel": index_channel,
+            "nonce": kwargs["headers"]["Idempotency-Key"],
+            "content": kwargs["json"]["content"],
+        }
+        records.append(row)
+        if failure == "response" and len(records) == 1:
+            raise Interrupted("index created before process interruption")
+        return CallbackResult(payload=row)
+
+    url = f"https://api.test/channels/{index_channel}/messages"
+    with aioresponses() as http:
+        http.post(url, callback=create, repeat=True)
+        if failure == "pin":
+            http.post(
+                f"{url}/{valid_stoat_id(2200)}/pin",
+                status=403,
+                payload={"type": "MissingPermission"},
+            )
+            await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+        else:
+            with pytest.raises(Interrupted):
+                await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+    assert len(records) == 1
+    save_state(state, tmp_path)
+    state = load_state(tmp_path)
+    state.channel_message_counts[source] = 7
+
+    def edit(url, **kwargs):
+        edits.append(kwargs["json"]["content"])
+        return CallbackResult(payload={})
+
+    def pin(url, **kwargs):
+        pins.append(url.path.split("/")[-2])
+        return CallbackResult(payload={})
+
+    with aioresponses() as http:
+        http.get(f"{url}?limit=100&sort=Latest", payload=list(reversed(records)))
+        http.post(url, callback=create, repeat=True)
+        http.patch(f"{url}/{records[0]['_id']}", callback=edit, repeat=True)
+        http.post(f"{url}/{records[0]['_id']}/pin", callback=pin, repeat=True)
+        await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+    assert len(records) == 1
+    assert state.forum_index_message_ids[forum] == records[0]["_id"]
+    assert pins == [records[0]["_id"]]
+    assert len(edits) == 1
+    assert "7 messages migrated" in edits[0]
+    save_state(state, tmp_path)
+    state = load_state(tmp_path)
+    source_id = hashlib.sha256(forum.encode()).hexdigest()
+    ref = delivery_module.DeliveryRef(source_id, source_id, index_channel, "forum_index")
+    assert delivery_module.read_delivery_receipt(state, tmp_path, ref) is None
+    state.channel_message_counts[source] = 8
+    with aioresponses() as http:
+        http.patch(f"{url}/{records[0]['_id']}", callback=edit)
+        await engine_module._rebuild_forum_indexes(config, state, lambda event: None)
+        assert [method for method, _ in http.requests] == ["PATCH"]
+    assert len(edits) == 2
+    assert "8 messages migrated" in edits[-1]
+
+
 async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path) -> None:
     """_rebuild_forum_indexes is invoked during REPORT when forum_channel_members is non-empty."""
     events: list[MigrationEvent] = []
@@ -2066,18 +2159,18 @@ async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) ->
         channel_map={
             "disc-ch1": "stoat-ch1",
             "disc-ch2": "stoat-ch2",
-            "forum-index-forum-news": "stoat-idx-news",
+            "forum-index-forum-news": "01J5T000000000000000002300",
         },
         channel_message_counts={"disc-ch1": 42, "disc-ch2": 7},
     )
 
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages",
-            payload={"_id": "new-idx-msg"},
+            "https://api.test/channels/01J5T000000000000000002300/messages",
+            payload={"_id": "01J5T000000000000000002301"},
         )
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002301/pin",
             payload={},
         )
         import aiohttp
@@ -2102,15 +2195,21 @@ async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
         stoat_server_id="stoat-srv",
         forum_channel_members={"forum-news": ["d1"]},
         forum_category_names={"forum-news": "News"},
-        channel_map={"d1": "s1", "forum-index-forum-news": "idx"},
+        channel_map={"d1": "s1", "forum-index-forum-news": "01J5T000000000000000002300"},
         channel_message_counts={"d1": 3},
     )
     with aioresponses() as mock:
-        mock.post("https://api.test/channels/idx/messages", payload={"_id": "m1"})
-        mock.post("https://api.test/channels/idx/messages/m1/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages",
+            payload={"_id": "01J5T000000000000000002302"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002302/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "forum-news", lambda e: None)
-    assert state.forum_index_message_ids["forum-news"] == "m1"
+    assert state.forum_index_message_ids["forum-news"] == "01J5T000000000000000002302"
 
 
 async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) -> None:
@@ -2131,8 +2230,8 @@ async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) ->
             await _rebuild_one_forum_index(session, config, state, "forum-empty", lambda e: None)
 
 
-async def test_rebuild_marks_forum_on_duplicate(tmp_path: Path) -> None:
-    """A DuplicateSendError with no pinned message to recover marks the forum."""
+async def test_rebuild_conflict_without_history_stays_unresolved(tmp_path: Path) -> None:
+    """A bare conflict cannot establish index presence or authorize a replacement."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
 
     config = _make_config(tmp_path)
@@ -2140,23 +2239,33 @@ async def test_rebuild_marks_forum_on_duplicate(tmp_path: Path) -> None:
         stoat_server_id="s",
         forum_channel_members={"f": ["d1"]},
         forum_category_names={"f": "F"},
-        channel_map={"d1": "s1", "forum-index-f": "idx"},
+        channel_map={"d1": "s1", "forum-index-f": "01J5T000000000000000002300"},
     )
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/idx/messages",
+            "https://api.test/channels/01J5T000000000000000002300/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "x:1:1"},
         )
-        mock.post("https://api.test/channels/idx/search", payload=[])
+        mock.get(
+            "https://api.test/channels/01J5T000000000000000002300/messages?limit=100&sort=Latest",
+            payload=[],
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
-    assert state.forum_index_present_unknown_id == {"f"}
+    assert not state.forum_index_present_unknown_id
     assert "f" not in state.forum_index_message_ids
+    source_id = hashlib.sha256(b"f").hexdigest()
+    ref = delivery_module.DeliveryRef(
+        source_id, source_id, "01J5T000000000000000002300", "forum_index"
+    )
+    receipt = delivery_module.read_delivery_receipt(state, tmp_path, ref)
+    assert receipt is not None
+    assert receipt.parts[0].status == "uncertain"
 
 
-async def test_rebuild_recovers_id_on_duplicate(tmp_path: Path) -> None:
-    """A DuplicateSendError recovers the id from pinned messages (#561)."""
+async def test_rebuild_recovers_id_from_unique_nonce_history(tmp_path: Path) -> None:
+    """A new-format conflict resolves through exact nonce history, then edits and pins."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
 
     config = _make_config(tmp_path)
@@ -2164,23 +2273,45 @@ async def test_rebuild_recovers_id_on_duplicate(tmp_path: Path) -> None:
         stoat_server_id="s",
         forum_channel_members={"f": ["d1"]},
         forum_category_names={"f": "F"},
-        channel_map={"d1": "s1", "forum-index-f": "idx"},
+        channel_map={"d1": "s1", "forum-index-f": "01J5T000000000000000002300"},
     )
+    source_id = hashlib.sha256(b"f").hexdigest()
+    ref = delivery_module.DeliveryRef(
+        source_id, source_id, "01J5T000000000000000002300", "forum_index"
+    )
+
+    def history(*args, **kwargs):
+        return CallbackResult(
+            payload=[
+                {
+                    "_id": "01J5T000000000000000002303",
+                    "channel": ref.destination_channel_id,
+                    "nonce": delivery_module.delivery_key(state.delivery_namespace, ref, 0, 0),
+                }
+            ]
+        )
+
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/idx/messages",
+            "https://api.test/channels/01J5T000000000000000002300/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "x:1:1"},
         )
-        mock.post(
-            "https://api.test/channels/idx/search",
-            payload=[{"_id": "recovered", "content": "**Forum: F** old content"}],
+        mock.get(
+            "https://api.test/channels/01J5T000000000000000002300/messages?limit=100&sort=Latest",
+            callback=history,
         )
-        mock.patch("https://api.test/channels/idx/messages/recovered", payload={})
-        mock.post("https://api.test/channels/idx/messages/recovered/pin", payload={})
+        mock.patch(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002303",
+            payload={},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002303/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
-    assert state.forum_index_message_ids["f"] == "recovered"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000002303"
     assert "f" not in state.forum_index_present_unknown_id
 
 
@@ -2245,14 +2376,20 @@ async def test_rebuild_success_never_leaves_forum_in_both(tmp_path: Path) -> Non
         stoat_server_id="s",
         forum_channel_members={"f": ["d1"]},
         forum_category_names={"f": "F"},
-        channel_map={"d1": "s1", "forum-index-f": "idx"},
+        channel_map={"d1": "s1", "forum-index-f": "01J5T000000000000000002300"},
     )
     with aioresponses() as mock:
-        mock.post("https://api.test/channels/idx/messages", payload={"_id": "m3"})
-        mock.post("https://api.test/channels/idx/messages/m3/pin", payload={})
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages",
+            payload={"_id": "01J5T000000000000000002304"},
+        )
+        mock.post(
+            "https://api.test/channels/01J5T000000000000000002300/messages/01J5T000000000000000002304/pin",
+            payload={},
+        )
         async with aiohttp.ClientSession() as session:
             await _rebuild_one_forum_index(session, config, state, "f", lambda e: None)
-    assert state.forum_index_message_ids["f"] == "m3"
+    assert state.forum_index_message_ids["f"] == "01J5T000000000000000002304"
     assert set(state.forum_index_message_ids) & state.forum_index_present_unknown_id == set()
 
 
@@ -2803,13 +2940,8 @@ async def test_retry_path_preserves_unresolved_duplicate(tmp_path: Path) -> None
     )
 
 
-async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> None:
-    """SC-2.7: three id consumers here, and the state write is the one that matters.
-
-    A bad forum_index_message_ids entry persists into state.json and is read back on
-    the next run, where it drives an api_edit_message against an id that does not
-    exist. Nothing may be written when Stoat returned no id.
-    """
+async def test_unresolved_index_conflict_writes_no_false_state_entry(tmp_path: Path) -> None:
+    """No history match means no saved index identifier, pin, or success event."""
     from discord_ferry.core.engine import _rebuild_forum_indexes
 
     events: list[MigrationEvent] = []
@@ -2820,7 +2952,7 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
         forum_category_names={"forum-news": "News"},
         channel_map={
             "disc-ch1": "stoat-ch1",
-            "forum-index-forum-news": "stoat-idx-news",
+            "forum-index-forum-news": "01J5T000000000000000002400",
         },
         channel_message_counts={"disc-ch1": 42},
     )
@@ -2829,13 +2961,17 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
 
     with aioresponses() as mock:
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages",
+            "https://api.test/channels/01J5T000000000000000002400/messages",
             status=409,
             payload={"type": "DuplicateNonce", "location": "crates/x/src/lib.rs:1:1"},
         )
+        mock.get(
+            "https://api.test/channels/01J5T000000000000000002400/messages?limit=100&sort=Latest",
+            payload=[],
+        )
         # Registered so a stray pin is recorded rather than erroring out.
         mock.post(
-            "https://api.test/channels/stoat-idx-news/messages/new-idx-msg/pin",
+            "https://api.test/channels/01J5T000000000000000002400/messages/01J5T000000000000000002401/pin",
             payload={},
             callback=lambda url, **kwargs: pins.append(str(url)),  # type: ignore[misc]
         )
@@ -2851,13 +2987,9 @@ async def test_index_rebuild_duplicate_writes_no_state_entry(tmp_path: Path) -> 
         "this persists into state.json and drives an edit against a nonexistent id "
         f"on the next run. got: {state.forum_index_message_ids}"
     )
-    # The two above already hold, because the broad handler catches the duplicate before
-    # either statement runs. This one does not: it is the reason the task exists.
-    assert not [w for w in state.warnings if w.get("type") == "forum_index_rebuild_failed"], (
-        "the rebuild was reported as failed, but the index message is on the server. "
-        "Reporting a failure that did not happen is the same defect as the FailedMessage "
-        "on the message path, in a different place"
-    )
+    assert any(warning["type"] == "forum_index_rebuild_failed" for warning in state.warnings)
+    assert not state.forum_index_present_unknown_id
+    assert not any("Rebuilt forum index" in event.message for event in events)
 
 
 # ---------------------------------------------------------------------------

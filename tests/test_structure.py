@@ -5131,6 +5131,134 @@ async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
     assert [e.status for e in events] == ["warning"]
 
 
+async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
+    tmp_path: Path,
+) -> None:
+    """A report render change cannot authorize another POST for an uncertain initial index."""
+    from aioresponses import CallbackResult
+
+    from discord_ferry.core.engine import _rebuild_forum_indexes
+
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+    with aioresponses() as http:
+        _register_forum_index_channels(http, 409)
+        await run_channels(config, state, _forum_index_exports(), lambda event: None)
+    assert not state.forum_index_message_ids
+    sends = []
+
+    def create(url, **kwargs):
+        sends.append(str(url))
+        return CallbackResult(payload={"_id": "01J5T000000000000000002002"})
+
+    url = f"{STOAT_URL}/channels/01J5T000000000000000002000/messages"
+    with aioresponses() as http:
+        http.get(f"{url}?limit=100&sort=Latest", payload=[])
+        http.post(url, callback=create)
+        http.post(f"{url}/01J5T000000000000000002002/pin", payload={})
+        await _rebuild_forum_indexes(config, state, lambda event: None)
+    assert sends == []
+    assert not state.forum_index_message_ids
+    assert not state.forum_index_present_unknown_id
+    assert any(warning["type"] == "forum_index_rebuild_failed" for warning in state.warnings)
+
+
+async def test_report_index_delivery_recovery_does_not_dispatch_prepared_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shared session cannot send changed report content under an initial receipt hash."""
+    from aioresponses import CallbackResult
+
+    from discord_ferry.core.engine import _rebuild_forum_indexes
+    from discord_ferry.errors import StateError
+    from discord_ferry.migrator import delivery
+
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1")
+    writer = delivery.write_delivery_receipt
+    interrupted = False
+
+    def fail_before_dispatch(*args):
+        nonlocal interrupted
+        receipt = args[-1]
+        if not interrupted and receipt.parts[0].status == "uncertain":
+            interrupted = True
+            raise StateError("receipt transition could not be saved")
+        return writer(*args)
+
+    monkeypatch.setattr(delivery, "write_delivery_receipt", fail_before_dispatch)
+    sends = []
+
+    def create(url, **kwargs):
+        sends.append(kwargs["json"]["content"])
+        return CallbackResult(payload={"_id": "01J5T000000000000000002002"})
+
+    url = f"{STOAT_URL}/channels/01J5T000000000000000002000/messages"
+    with aioresponses() as http:
+        async with aiohttp.ClientSession() as session:
+            config.session = session
+            _register_forum_index_channels(http, 200)
+            await run_channels(config, state, _forum_index_exports(), lambda event: None)
+            assert interrupted
+            # The saved initial part is prepared, and this same session still holds
+            # its fresh-part capability. No send was authorized before the write fault.
+            http.get(f"{url}?limit=100&sort=Latest", payload=[])
+            http.post(url, callback=create)
+            http.post(f"{url}/01J5T000000000000000002002/pin", payload={})
+            await _rebuild_forum_indexes(config, state, lambda event: None)
+            assert not [key for key in http.requests if key[0] == "POST" and str(key[1]) == url]
+    assert sends == []
+    assert not state.forum_index_message_ids
+
+
+async def test_report_recover_only_cannot_rotate_a_rejected_render(tmp_path: Path) -> None:
+    """Lookup-only recovery must not replace preserved identity even if retry is allowed."""
+    from discord_ferry.errors import DeliveryUnresolvedError
+    from discord_ferry.migrator import delivery
+    from discord_ferry.state import (
+        DeliveryPart,
+        DeliveryReceipt,
+        ensure_delivery_namespace,
+        write_delivery_receipt,
+    )
+
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    ensure_delivery_namespace(state, tmp_path, config.stoat_url)
+    ref = DeliveryRef("source", "source", "01J5T000000000000000002000", "forum_index")
+    key = delivery.delivery_key(state.delivery_namespace, ref, 0, 0)
+    receipt = DeliveryReceipt(
+        1,
+        state.delivery_namespace,
+        state.delivery_service_digest,
+        ref,
+        "a" * 64,
+        [DeliveryPart(0, key, status="confirmed_rejected")],
+    )
+    write_delivery_receipt(state, tmp_path, receipt)
+    with aioresponses() as http:
+        http.get(
+            f"{STOAT_URL}/channels/{ref.destination_channel_id}/messages?limit=100&sort=Latest",
+            payload=[],
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(DeliveryUnresolvedError):
+                await delivery.deliver_part(
+                    session=session,
+                    config=config,
+                    state=state,
+                    ref=ref,
+                    part_index=0,
+                    part_count=1,
+                    render_digest="b" * 64,
+                    content="changed render",
+                    allow_rejected_retry=True,
+                    recover_only=True,
+                )
+        assert all(method == "GET" for method, _ in http.requests)
+    assert read_delivery_receipt(state, tmp_path, ref) == receipt
+
+
 # ---------------------------------------------------------------------------
 # created_channel_names: the name Ferry SENT, from the create response (#289)
 # ---------------------------------------------------------------------------
