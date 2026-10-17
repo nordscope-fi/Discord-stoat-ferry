@@ -2320,6 +2320,33 @@ async def test_uncatching_call_site_still_sees_a_migration_error(
 # ---------------------------------------------------------------------------
 
 
+async def test_history_before_cursor_reaches_existing_reader(mock_aiohttp: aioresponses) -> None:
+    from tests.stoat_ids import stoat_id
+
+    cursor = stoat_id(42)
+    rows = [{"_id": stoat_id(41), "nonce": "ferry-v2-" + "a" * 40}]
+    url = f"{BASE_URL}/channels/ch1/messages?limit=100&sort=Latest&before={cursor}"
+    mock_aiohttp.get(url, payload=rows)
+    async with aiohttp.ClientSession() as session:
+        result = await api_fetch_messages(
+            session, BASE_URL, TOKEN, "ch1", limit=100, sort="Latest", before=cursor
+        )
+    assert result == rows
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 1
+
+
+@pytest.mark.parametrize("cursor", ["", "../escape", "A" * 25, "A" * 27, "A" * 26 + "?x=1"])
+async def test_history_before_rejects_invalid_cursor_without_http(
+    mock_aiohttp: aioresponses, cursor: str
+) -> None:
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(ValueError, match="before"):
+            await api_fetch_messages(
+                session, BASE_URL, TOKEN, "ch1", limit=100, sort="Latest", before=cursor
+            )
+    assert not mock_aiohttp.requests
+
+
 async def test_message_fetch_rejects_a_limit_below_the_range() -> None:
     """Kills an implementation that forwards the limit and lets Stoat reject it.
 

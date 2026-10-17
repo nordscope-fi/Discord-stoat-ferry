@@ -25,6 +25,7 @@ from discord_ferry.core.http import (
     tls_hint,
 )
 from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.state import is_stoat_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -1272,6 +1273,7 @@ async def api_fetch_messages(
     *,
     limit: int,
     sort: str,
+    before: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read a channel's messages (GET /channels/{id}/messages).
 
@@ -1307,7 +1309,11 @@ async def api_fetch_messages(
         raise ValueError(f"limit must be between 1 and 100, got {limit}")
     if sort not in ("Latest", "Oldest"):
         raise ValueError(f"sort must be 'Latest' or 'Oldest', got {sort!r}")
+    if before is not None and not is_stoat_id(before):
+        raise ValueError("before must be a valid Stoat message identifier")
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/messages?limit={limit}&sort={sort}"
+    if before is not None:
+        url += f"&before={before}"
     # Annotated `object` on purpose. _api_request is declared -> dict[str, Any]
     # but its success path returns whatever JSON arrived, and this route returns
     # an array. Widening that shared helper would cost 28 callers their typing,
