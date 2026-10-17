@@ -5598,22 +5598,21 @@ async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
 async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
     tmp_path: Path,
 ) -> None:
-    """A repair key must not collide with the one the migration used.
-
-    The migration's keys are ferry-merge-{id} and ferry-thread-sep-{thread id},
-    built from Discord ids a recreated channel does not change, and Stoat's store
-    is a 1000-entry LRU with no TTL. A cached key answers 409 DuplicateNonce with
-    no message id, which would drop the message from a channel that is new. The
-    new channel id salts them, as it already does for the parent's own messages.
-    """
-    _, sends, _ = await _repair_merge_parent(
+    """The existing replacement identity changes the opaque merged attempt key."""
+    state, sends, _ = await _repair_merge_parent(
         tmp_path,
         exports=_merge_fixture(),
         merged_thread_ids=(R_THREAD_A, R_THREAD_B),
     )
     keys = [s["key"] for s in sends]
     assert f"ferry-thread-sep-{R_THREAD_A}-{R_NEW_CHANNEL}" in keys
-    assert f"ferry-merge-900000000000000011-{R_NEW_CHANNEL}" in keys
+    generation = hashlib.sha256(R_NEW_CHANNEL.encode()).hexdigest()[:32]
+    replacement = delivery_module.DeliveryRef(
+        R_THREAD_A, "900000000000000011", R_NEW_CHANNEL, "merged", generation
+    )
+    base = dataclasses.replace(replacement, generation="base")
+    assert delivery_module.delivery_key(state.delivery_namespace, replacement, 0, 0) in keys
+    assert delivery_module.delivery_key(state.delivery_namespace, base, 0, 0) not in keys
     unsalted = [
         k
         for k in keys

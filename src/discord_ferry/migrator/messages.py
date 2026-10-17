@@ -570,6 +570,102 @@ async def run_messages(
 # ---------------------------------------------------------------------------
 
 
+async def _process_merged_message(
+    *,
+    export: DCEExport,
+    msg: DCEMessage,
+    stoat_channel_id: str,
+    config: FerryConfig,
+    state: MigrationState,
+    session: aiohttp.ClientSession,
+    on_event: EventCallback,
+    delivery_ref: DeliveryRef | None = None,
+    allow_rejected_retry: bool = False,
+) -> bool:
+    """Render one selected merged message and return full delivery resolution."""
+    content = _build_content(_merge_forwarded(msg), state)
+    masquerade, masq_escaped = await _build_masquerade(msg.author, session, state, config)
+    if masq_escaped:
+        state.warnings.append(
+            {
+                "phase": "messages",
+                "type": "unsafe_media_path",
+                "message": (
+                    f"Masquerade avatar for {msg.author.name} failed the "
+                    "export-root containment check; skipped."
+                ),
+            }
+        )
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="warning",
+                message=f"Masquerade avatar for {msg.author.name} unsafe path; skipped.",
+            )
+        )
+    parts = _split_message(content)
+    ref = delivery_ref or DeliveryRef(export.channel.id, msg.id, stoat_channel_id, "merged")
+    render_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "parts": parts,
+                "masquerade": {key: value for key, value in masquerade.items() if key != "avatar"},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    failed = False
+    first_id = ""
+    latest_token: DeliveryToken | None = None
+    fully_resolved = False
+    for part_index, part_content in enumerate(parts):
+        try:
+            result = await deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=part_index,
+                part_count=len(parts),
+                render_digest=render_digest,
+                content=part_content,
+                masquerade=masquerade,
+                allow_rejected_retry=allow_rejected_retry,
+            )
+            latest_token = result.token
+            fully_resolved = result.fully_resolved
+            if part_index == 0:
+                first_id = result.message_id
+        except Exception as exc:  # noqa: BLE001
+            safe_exc = safe_sanitize(config.token_store, str(exc))
+            state.warnings.append(
+                {
+                    "phase": "messages",
+                    "type": "merge_message_failed",
+                    "message": f"Merge message {msg.id} failed: {safe_exc}",
+                }
+            )
+            if not failed:
+                failed = True
+                state.failed_messages.append(
+                    FailedMessage(
+                        discord_msg_id=msg.id,
+                        stoat_channel_id=stoat_channel_id,
+                        error=safe_exc,
+                        content_preview=content[:50] if content else "",
+                        delivery_ref=ref,
+                    )
+                )
+    if failed or not fully_resolved or latest_token is None or not first_id:
+        return False
+    # The merge loop still owns source progress and its checkpoint. Consumption
+    # becomes durable only when that owner saves its normal state successfully.
+    state.delivery_bookkeeping[latest_token.receipt_id] = first_id
+    consume_delivery(state, latest_token, first_id)
+    return True
+
+
 async def _merge_threads(
     thread_exports: list[DCEExport],
     config: FerryConfig,
@@ -591,11 +687,9 @@ async def _merge_threads(
         state: Migration state.
         on_event: Event callback.
         parent_name_to_stoat: Mapping of parent channel name to Stoat channel ID.
-        idempotency_salt: Appended to every Idempotency-Key. Empty for the migration,
-            so its keys are unchanged. ``ferry repair`` passes the recreated channel's
-            id (#310): the keys are built from Discord ids that a recreated channel
-            does not change, and a key still in Stoat's cache answers 409 with no
-            message id, which would drop the message from a channel that is new.
+        idempotency_salt: Existing repair identity. Source-message delivery hashes
+            it into the structural generation; the separator keeps its existing
+            send boundary until generated-post integration.
     """
     _salt = f"-{idempotency_salt}" if idempotency_salt else ""
     async with get_session(config) as session:
@@ -619,12 +713,9 @@ async def _merge_threads(
                 )
                 continue
 
-            # These two markers are the ONLY thing preventing a re-run from
-            # duplicating this thread into the parent channel. The Idempotency-Key
-            # header does not help: Stoat's store is a 1000-entry in-memory LRU with
-            # no TTL, cleared on restart, and a hit returns 409 rather than the
-            # original message. And unlike flatten, the merge path never writes
-            # `message_map`, so there is no second line of defence here.
+            # These markers select continuation work. Receipts recover selected
+            # sends, but do not reopen work below a resume marker. The merge path
+            # does not write the parent-owned message_map.
             #
             # Batch 6 (#107): mirrors the flatten read at :808-826.
             # --resume reads the TRANSIENT per-thread offset, which is where a crashed
@@ -669,6 +760,10 @@ async def _merge_threads(
                     fm.discord_msg_id
                     for fm in state.failed_messages
                     if fm.stoat_channel_id == parent_stoat_id
+                    and (
+                        fm.delivery_ref is None
+                        or fm.delivery_ref.source_channel_id == export.channel.id
+                    )
                 }
                 if config.incremental or reconcile_failed
                 else set()
@@ -771,11 +866,8 @@ async def _merge_threads(
                 # so incremental gating is untouched. Above _build_masquerade so a
                 # suppressed message costs no Autumn avatar upload.
                 #
-                # Known miss, deferred as #240: a parent send that landed under a 409
-                # DuplicateNonce sets `duplicate_unmapped` in _process_message and writes
-                # no map entry, so it is invisible here and that one case still
-                # duplicates. Pinned by
-                # test_merge_still_duplicates_after_a_parent_duplicate_nonce.
+                # Ordinary receipt recovery restores the parent map before this
+                # loop, so a recovered origin is suppressed by the same rule.
                 if msg.id in state.message_map:
                     # NOT counted in _posted: nothing was sent, and _posted feeds the
                     # user-facing "Merged thread X (N messages)" event. Pinned by
@@ -803,86 +895,24 @@ async def _merge_threads(
                     )
                     continue
 
-                # This path never enters _process_message, so the forwarded payload has
-                # to be promoted here too -- otherwise a forward inside a merged thread
-                # is sent as an empty message with no warning.
-                content = _build_content(_merge_forwarded(msg), state)
-                masquerade, masq_escaped = await _build_masquerade(
-                    msg.author, session, state, config
+                generation = (
+                    hashlib.sha256(idempotency_salt.encode()).hexdigest()[:32]
+                    if idempotency_salt
+                    else "base"
                 )
-                if masq_escaped:
-                    state.warnings.append(
-                        {
-                            "phase": "messages",
-                            "type": "unsafe_media_path",
-                            "message": (
-                                f"Masquerade avatar for {msg.author.name} failed the "
-                                "export-root containment check; skipped."
-                            ),
-                        }
-                    )
-                    on_event(
-                        MigrationEvent(
-                            phase="messages",
-                            status="warning",
-                            message=(
-                                f"Masquerade avatar for {msg.author.name} unsafe path; skipped."
-                            ),
-                        )
-                    )
-                parts = _split_message(content)
-
-                _msg_failed = False
-                for part_idx, part_content in enumerate(parts):
-                    idem_key = (
-                        f"ferry-merge-{msg.id}{_salt}"
-                        if len(parts) == 1
-                        else f"ferry-merge-{msg.id}{_salt}_p{part_idx + 1}"
-                    )
-                    try:
-                        await api_send_message(
-                            session,
-                            config.stoat_url,
-                            config.token,
-                            parent_stoat_id,
-                            content=part_content,
-                            masquerade=masquerade,
-                            idempotency_key=idem_key,
-                        )
-                    except DuplicateSendError:
-                        # Already on the server. _msg_failed deliberately stays False so
-                        # the message still reaches _succeeded_ids and drives
-                        # reconciliation. Recording a FailedMessage here is the defect
-                        # this batch fixes: --incremental re-attempts previously-failed
-                        # ids, the idempotency LRU has evicted the key by then, and the
-                        # re-send succeeds, leaving a real duplicate in the channel.
-                        continue
-                    except Exception as exc:  # noqa: BLE001
-                        safe_exc = safe_sanitize(config.token_store, str(exc))
-                        state.warnings.append(
-                            {
-                                "phase": "messages",
-                                "type": "merge_message_failed",
-                                "message": f"Merge message {msg.id} failed: {safe_exc}",
-                            }
-                        )
-                        # Batch 7 S1: record the failure ONCE per message (a multi-part
-                        # message strands on the first failing part) so it lands in
-                        # failed_messages — recoverable via incremental re-attempt / retry.
-                        if not _msg_failed:
-                            _msg_failed = True
-                            state.failed_messages.append(
-                                FailedMessage(
-                                    discord_msg_id=msg.id,
-                                    stoat_channel_id=parent_stoat_id,
-                                    error=safe_exc,
-                                    content_preview=content[:50] if content else "",
-                                )
-                            )
-
-                # A message that POSTed all parts cleanly drives reconciliation (drop on
-                # success); a failed one is left in failed_messages for the next run.
-                if not _msg_failed:
+                if await _process_merged_message(
+                    export=export,
+                    msg=msg,
+                    stoat_channel_id=parent_stoat_id,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=on_event,
+                    delivery_ref=DeliveryRef(
+                        export.channel.id, msg.id, parent_stoat_id, "merged", generation
+                    ),
+                    allow_rejected_retry=config.incremental or reconcile_failed,
+                ):
                     _succeeded_ids.add(msg.id)
                 _posted += 1
 
@@ -922,18 +952,28 @@ async def _merge_threads(
             # succeeded message still recorded as failed — an inaccurate durable
             # record, and a duplicate send the next time it is re-attempted.
             if (config.incremental or reconcile_failed) and _failed_ids_here:
-                _seen: set[str] = set()
+                _seen: dict[str, int] = {}
                 _reconciled: list[FailedMessage] = []
                 for fm in state.failed_messages:
                     if (
                         fm.stoat_channel_id == parent_stoat_id
                         and fm.discord_msg_id in _failed_ids_here
+                        and (
+                            fm.delivery_ref is None
+                            or fm.delivery_ref.source_channel_id == export.channel.id
+                        )
                     ):
                         if fm.discord_msg_id in _succeeded_ids:
                             continue  # succeeded this run -> drop
                         if fm.discord_msg_id in _seen:
+                            prior_index = _seen[fm.discord_msg_id]
+                            prior = _reconciled[prior_index]
+                            if prior.delivery_ref is None and fm.delivery_ref is not None:
+                                _reconciled[prior_index] = replace(
+                                    prior, delivery_ref=fm.delivery_ref
+                                )
                             continue  # carried + re-fail dup -> collapse
-                        _seen.add(fm.discord_msg_id)
+                        _seen[fm.discord_msg_id] = len(_reconciled)
                     _reconciled.append(fm)
                 state.failed_messages = _reconciled
 

@@ -12,7 +12,7 @@ from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.security import SecureTokenStore
-from discord_ferry.errors import DuplicateSendError, MigrationError
+from discord_ferry.errors import DuplicateSendError, MessageSendFailure, MigrationError
 from discord_ferry.migrator import delivery as delivery_module
 from discord_ferry.migrator import messages as messages_module
 from discord_ferry.migrator.messages import run_messages
@@ -53,6 +53,23 @@ def _ordinary_key(state: MigrationState, source: str) -> str:
         delivery_module.DeliveryRef("100", source, state.channel_map["100"], "ordinary"),
         0,
         0,
+    )
+
+
+def _merged_key(
+    state: MigrationState,
+    source: str,
+    thread: str = "200",
+    *,
+    part: int = 0,
+    attempt: int = 0,
+    parent: str = "100",
+) -> str:
+    return delivery_module.delivery_key(
+        state.delivery_namespace,
+        delivery_module.DeliveryRef(thread, source, state.channel_map[parent], "merged"),
+        attempt,
+        part,
     )
 
 
@@ -605,7 +622,7 @@ async def test_merge_incremental_unchanged_thread_zero_posts(tmp_path: Path) -> 
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
     assert not any(k.startswith("ferry-thread-sep-200") for k in keys)
-    assert not any(k.startswith("ferry-merge-") for k in keys)
+    assert keys == []
 
 
 async def test_merge_brand_new_thread_posts_all_and_records_marker(tmp_path: Path) -> None:
@@ -617,7 +634,7 @@ async def test_merge_brand_new_thread_posts_all_and_records_marker(tmp_path: Pat
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
     assert "ferry-thread-sep-200" in keys
-    assert {"ferry-merge-10", "ferry-merge-20", "ferry-merge-30"}.issubset(set(keys))
+    assert {_merged_key(state, mid) for mid in ("10", "20", "30")}.issubset(set(keys))
     assert state.channel_high_water["200"] == "30"
 
 
@@ -644,8 +661,7 @@ async def test_merge_incremental_only_new_messages(tmp_path: Path) -> None:
     keys: list[str] = []
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
-    merge_keys = sorted(k for k in keys if k.startswith("ferry-merge-"))
-    assert merge_keys == ["ferry-merge-30", "ferry-merge-40"]
+    assert keys == [_merged_key(state, "30"), _merged_key(state, "40")]
     assert not any(k.startswith("ferry-thread-sep-") for k in keys)
     assert state.channel_high_water["200"] == "40"
 
@@ -693,7 +709,7 @@ async def test_merge_skip_type_trailing_high_id_marker(tmp_path: Path) -> None:
     keys: list[str] = []
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
-    assert "ferry-merge-30" not in keys  # skip-type never posted
+    assert _merged_key(state, "30") not in keys  # skip-type never posted
     assert state.channel_high_water["200"] == "30"  # but it advances the marker
 
 
@@ -719,8 +735,8 @@ async def test_merge_non_numeric_thread_id_no_crash(tmp_path: Path) -> None:
     keys: list[str] = []
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)  # must not raise
-    assert "ferry-merge-sys-x" in keys  # non-numeric never skipped (no int() compare)
-    assert "ferry-merge-30" in keys  # 30 > 20 marker -> posts
+    assert _merged_key(state, "sys-x") in keys  # non-numeric never skipped
+    assert _merged_key(state, "30") in keys  # 30 > 20 marker -> posts
 
 
 async def test_merge_non_numeric_marker_no_crash(tmp_path: Path) -> None:
@@ -732,8 +748,8 @@ async def test_merge_non_numeric_marker_no_crash(tmp_path: Path) -> None:
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)  # must not raise
     # Threshold normalized to "" -> every message copies (idempotent), no ValueError.
-    assert "ferry-merge-10" in keys
-    assert "ferry-merge-20" in keys
+    assert _merged_key(state, "10") in keys
+    assert _merged_key(state, "20") in keys
 
 
 # ---------------------------------------------------------------------------
@@ -742,21 +758,17 @@ async def test_merge_non_numeric_marker_no_crash(tmp_path: Path) -> None:
 
 
 def _fail_on(fail_ids: set[str], keys: list[str] | None = None) -> object:
-    """Patch target for api_send_message: raise for merge POSTs whose key maps to a
-    msg.id in fail_ids; else record the idempotency_key + return a fake id.
-
-    Mirrors _capture_keys but injects a per-message send failure.
-    """
+    """Reject the selected fixture bodies before creation, without decoding keys."""
 
     async def _send(
         session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
     ) -> dict[str, object]:
         key = str(kwargs.get("idempotency_key", ""))
-        mid = ""
-        if key.startswith("ferry-merge-"):
-            mid = key[len("ferry-merge-") :].split("_p")[0]
-        if mid and mid in fail_ids:
-            raise RuntimeError(f"simulated send failure for {mid}")
+        content = str(kwargs.get("content", ""))
+        if any(content.endswith((f" msg {mid}", f" m{mid}")) for mid in fail_ids):
+            raise MessageSendFailure(
+                "simulated pre-creation rejection", disposition="confirmed_rejected"
+            )
         if keys is not None:
             keys.append(key)
         return {"_id": _valid_id(f"stoat-{key}")}
@@ -807,8 +819,8 @@ async def test_merge_incremental_reattempts_prior_failed_id(tmp_path: Path) -> N
     keys2: list[str] = []
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys2)):
         await run_messages(config2, state, [parent2, thread2], lambda e: None)
-    assert "ferry-merge-20" in keys2
-    assert "ferry-merge-10" not in keys2  # already-copied, not failed -> skipped
+    assert _merged_key(state, "20", attempt=1) in keys2
+    assert _merged_key(state, "10") not in keys2  # already-copied, not failed -> skipped
 
 
 async def test_merge_reattempt_success_drops_entry(tmp_path: Path) -> None:
@@ -837,6 +849,20 @@ async def test_merge_reattempt_refail_collapses_to_one(tmp_path: Path) -> None:
     assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "20"]) == 1
 
 
+async def test_merge_receipt_refail_attaches_reference_to_carried_failure(tmp_path: Path) -> None:
+    """Collapsing a carried failure must retain the newly established reference."""
+    from discord_ferry.state import DeliveryRef
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["20"], marker="20")
+    destination = state.channel_map["100"]
+    state.failed_messages.append(FailedMessage("20", destination, "old failure", retry_count=2))
+    with patch("discord_ferry.migrator.messages.api_send_message", _fail_on({"20"})):
+        await run_messages(config, state, [parent, thread], lambda event: None)
+    assert len(state.failed_messages) == 1
+    assert state.failed_messages[0].delivery_ref == DeliveryRef("200", "20", destination, "merged")
+    assert state.failed_messages[0].retry_count == 2
+
+
 async def test_merge_plain_mode_ignores_marker_no_failrecord_on_success(tmp_path: Path) -> None:
     """SC-6: plain mode (incremental=False) ignores the marker (no skip), no FailedMessage."""
     from unittest.mock import patch
@@ -848,7 +874,7 @@ async def test_merge_plain_mode_ignores_marker_no_failrecord_on_success(tmp_path
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
     # No incremental skip in plain mode: every message is (re-)posted, no FailedMessage.
-    assert {"ferry-merge-10", "ferry-merge-20", "ferry-merge-30"}.issubset(set(keys))
+    assert {_merged_key(state, mid) for mid in ("10", "20", "30")}.issubset(set(keys))
     assert state.failed_messages == []
 
 
@@ -876,13 +902,130 @@ async def test_merge_multipart_failure_records_one(tmp_path: Path) -> None:
         session: object, stoat_url: object, token: object, channel_id: object, **kwargs: object
     ) -> dict[str, object]:
         key = str(kwargs.get("idempotency_key", ""))
-        if key == "ferry-merge-50_p2":
+        if key == _merged_key(state, "50", part=1):
             raise RuntimeError("part 2 fails")
         return {"_id": _valid_id(f"stoat-{key}")}
 
     with patch("discord_ferry.migrator.messages.api_send_message", _send):
         await run_messages(config, state, [parent, thread], lambda e: None)
     assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "50"]) == 1
+
+
+@pytest.mark.parametrize("rejections", [1, 2])
+async def test_merge_receipt_partial_recovery_rejected_retry(
+    tmp_path: Path, rejections: int
+) -> None:
+    """Restart only the rejected merged part, retaining its original renderer."""
+    from aioresponses import CallbackResult
+
+    from discord_ferry.migrator.messages import _build_content, _split_message
+    from discord_ferry.state import DeliveryRef, load_state
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["50"], marker=None, incremental=False)
+    thread.messages[0].content = "merged body " * 230
+    state.stoat_server_id = valid_stoat_id(900)
+    destination = state.channel_map["100"]
+    expected = _split_message(_build_content(thread.messages[0], state))
+    assert len(expected) == 2
+    records: list[dict[str, str]] = []
+    cached: set[str] = set()
+    rejected = 0
+
+    def create(url, **kwargs):
+        nonlocal rejected
+        key = kwargs["headers"]["Idempotency-Key"]
+        content = kwargs["json"]["content"]
+        if key in cached:
+            return CallbackResult(status=409, payload={"type": "DuplicateNonce"})
+        cached.add(key)
+        if content == expected[1] and rejected < rejections:
+            rejected += 1
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        row = {
+            "_id": valid_stoat_id(1000 + len(records)),
+            "channel": destination,
+            "nonce": key,
+            "content": content,
+        }
+        records.append(row)
+        return CallbackResult(payload=row)
+
+    url = f"{STOAT_URL}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.post(url, callback=create, repeat=True)
+        http.get(
+            f"{url}?limit=100&sort=Latest",
+            callback=lambda *args, **kwargs: CallbackResult(payload=list(reversed(records))),
+            repeat=True,
+        )
+        await run_messages(config, state, [parent, thread], lambda event: None)
+        first_id = next(row["_id"] for row in records if row["content"] == expected[0])
+        for attempt in range(rejections):
+            state = load_state(tmp_path)
+            assert len(state.failed_messages) == 1
+            assert state.failed_messages[0].delivery_ref == DeliveryRef(
+                thread.channel.id, "50", destination, "merged"
+            )
+            cached.clear()
+            retry_config = _make_config(
+                tmp_path, incremental=True, thread_strategy="merge", message_rate_limit=0.0
+            )
+            await run_messages(retry_config, state, [parent, thread], lambda event: None)
+            if attempt < rejections - 1:
+                assert len(state.failed_messages) == 1
+    source_records = [row for row in records if row["content"] in expected]
+    assert [row["content"] for row in source_records] == expected
+    assert source_records[0]["_id"] == first_id
+    assert not state.failed_messages
+    assert "50" not in state.message_map
+    assert state.channel_high_water[thread.channel.id] == "50"
+    ref = DeliveryRef(thread.channel.id, "50", destination, "merged")
+    assert delivery_module.read_delivery_receipt(state, tmp_path, ref) is None
+
+
+async def test_merge_receipt_recovers_lost_response_after_restart(tmp_path: Path) -> None:
+    """A saved uncertain merged send is located, not replayed after cache loss."""
+    import aiohttp
+    from aioresponses import CallbackResult
+
+    from discord_ferry.state import load_state
+
+    config, state, parent, thread = _merge_setup(tmp_path, ["50"], marker=None, incremental=False)
+    state.stoat_server_id = valid_stoat_id(900)
+    destination = state.channel_map["100"]
+    records: list[dict[str, str]] = []
+
+    def create(url, **kwargs):
+        content = kwargs["json"]["content"]
+        row = {
+            "_id": valid_stoat_id(1100 + len(records)),
+            "channel": destination,
+            "nonce": kwargs["headers"]["Idempotency-Key"],
+            "content": content,
+        }
+        records.append(row)
+        if not content.startswith("── Thread:"):
+            raise aiohttp.ServerDisconnectedError("response lost after creation")
+        return CallbackResult(payload=row)
+
+    url = f"{STOAT_URL}/channels/{destination}/messages"
+    with aioresponses() as http:
+        http.post(url, callback=create, repeat=True)
+        http.get(f"{url}?limit=100&sort=Latest", status=403, payload={"type": "MissingPermission"})
+        await run_messages(config, state, [parent, thread], lambda event: None)
+    assert len(state.failed_messages) == 1
+    state = load_state(tmp_path)
+    config = _make_config(
+        tmp_path, incremental=True, thread_strategy="merge", message_rate_limit=0.0
+    )
+    with aioresponses() as http:
+        http.get(f"{url}?limit=100&sort=Latest", payload=list(reversed(records)))
+        await run_messages(config, state, [parent, thread], lambda event: None)
+        assert all(method == "GET" for method, _ in http.requests)
+    assert len([row for row in records if not row["content"].startswith("── Thread:")]) == 1
+    assert not state.failed_messages
 
 
 async def test_merge_cross_thread_sibling_safety(tmp_path: Path) -> None:
@@ -1243,10 +1386,10 @@ async def test_resume_does_not_remerge_already_sent_thread_messages(tmp_path: Pa
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, exports, lambda e: None)
 
-    thread_200 = [k for k in keys if k in ("ferry-merge-10", "ferry-merge-20")]
+    thread_200 = [k for k in keys if k in (_merged_key(state, "10"), _merged_key(state, "20"))]
     assert thread_200 == [], "re-sent messages the crashed run had already delivered"
-    assert "ferry-merge-30" in keys
-    assert "ferry-merge-40" in keys
+    assert _merged_key(state, "30") in keys
+    assert _merged_key(state, "40") in keys
 
 
 async def test_resume_does_not_repost_the_thread_separator(tmp_path: Path) -> None:
@@ -1292,11 +1435,11 @@ async def test_resume_keeps_a_failed_merge_message_recoverable(tmp_path: Path) -
         await run_messages(config, state, exports, lambda e: None)
 
     # Not re-attempted under resume — same contract as flatten.
-    assert "ferry-merge-20" not in keys
+    assert _merged_key(state, "20") not in keys
     # ...but still on the books, so it is neither silent nor permanent.
     assert [fm.discord_msg_id for fm in state.failed_messages] == ["20"]
     # Everything above the marker is still sent.
-    assert "ferry-merge-40" in keys
+    assert _merged_key(state, "40") in keys
 
 
 async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Path) -> None:
@@ -1317,7 +1460,7 @@ async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Pat
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, exports, lambda e: None)
 
-    assert "ferry-merge-20" in keys, "incremental must still self-heal"
+    assert _merged_key(state, "20") in keys, "incremental must still self-heal"
     # Re-sent successfully, so the stale failure record is reconciled away.
     assert [fm.discord_msg_id for fm in state.failed_messages] == []
 
@@ -1341,15 +1484,17 @@ def _dup_on(prefix: str) -> object:
     return _send
 
 
-async def test_merge_duplicate_records_no_failed_message(tmp_path: Path) -> None:
-    """SC-2.5: the merge path must not record a landed message as failed.
+@pytest.mark.parametrize("found", [False, True])
+async def test_merge_duplicate_requires_unique_history_match(tmp_path: Path, found: bool) -> None:
+    """A cached key resolves only when history establishes the real identifier."""
+    from aioresponses import CallbackResult
 
-    This is the defect itself. A FailedMessage here is what --incremental later
-    re-sends, producing a real duplicate in the user's channel.
-    """
-    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    config = _make_config(
+        tmp_path, thread_strategy="merge", message_rate_limit=0.0, incremental=True
+    )
     state = MigrationState(stoat_server_id="srv1", autumn_url=AUTUMN_URL)
     state.channel_map["100"] = "01J5T011311245727070449921"
+    state.channel_high_water["200"] = "0"
 
     parent = _make_export(channel_id="100", channel_name="general", message_count=0)
     thread = _make_export(
@@ -1361,14 +1506,26 @@ async def test_merge_duplicate_records_no_failed_message(tmp_path: Path) -> None
         message_count=1,
     )
 
-    with patch("discord_ferry.migrator.messages.api_send_message", _dup_on("ferry-merge-")):
-        await run_messages(config, state, [parent, thread], lambda e: None)
+    destination = state.channel_map["100"]
+    url = f"{STOAT_URL}/channels/{destination}/messages"
 
-    assert not state.failed_messages, (
-        "a message already on the server was recorded as failed; --incremental will "
-        "re-send it and create a real duplicate"
-    )
-    assert not [w for w in state.warnings if w.get("type") == "merge_message_failed"]
+    def history(*args, **kwargs):
+        rows = [
+            {
+                "_id": valid_stoat_id(1200),
+                "channel": destination,
+                "nonce": _merged_key(state, "m2"),
+            }
+        ]
+        return CallbackResult(payload=rows if found else [])
+
+    with aioresponses() as http:
+        http.post(url, status=409, payload={"type": "DuplicateNonce"})
+        http.get(f"{url}?limit=100&sort=Latest", callback=history)
+        await run_messages(config, state, [parent, thread], lambda e: None)
+        assert [method for method, _ in http.requests] == ["POST", "GET"]
+    assert len(state.failed_messages) == (0 if found else 1)
+    assert bool([w for w in state.warnings if w.get("type") == "merge_message_failed"]) != found
 
 
 async def test_merge_separator_duplicate_records_no_warning(tmp_path: Path) -> None:
@@ -1477,14 +1634,69 @@ async def test_merge_sends_a_colliding_origin_message_once(tmp_path: Path) -> No
         await run_messages(config, state, [parent, thread], lambda e: None)
 
     assert _ordinary_key(state, _ORIGIN_ID) in keys, "the parent's own send must be unaffected"
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, (
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys, (
         "the thread's copy of the parent's own message was sent again into the same "
         "Stoat channel; that is the duplicate this batch exists to prevent"
     )
-    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, (
+    assert _merged_key(state, _THREAD_REPLY_ID, _ORIGIN_ID) in keys, (
         "a thread message that does not collide must still be merged; the suppression "
         "is scoped to the collision, not to the thread"
     )
+
+
+@pytest.mark.parametrize("thread_first", [False, True])
+async def test_merge_receipt_parent_origin_suppression_in_both_arrival_orders(
+    tmp_path: Path, thread_first: bool
+) -> None:
+    """Real ordinary results retain the parent map before merged suppression."""
+    from aioresponses import CallbackResult
+
+    config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
+    parent_destination = valid_stoat_id(1300)
+    thread_destination = valid_stoat_id(1301)
+    state = MigrationState(stoat_server_id=valid_stoat_id(900), autumn_url=AUTUMN_URL)
+    state.channel_map = {"100": parent_destination, _ORIGIN_ID: thread_destination}
+    parent, thread = _post_bump_pair()
+    records: list[dict[str, str]] = []
+
+    def create(url, **kwargs):
+        row = {
+            "_id": valid_stoat_id(1400 + len(records)),
+            "channel": url.path.split("/")[2],
+            "content": kwargs["json"]["content"],
+        }
+        records.append(row)
+        return CallbackResult(payload=row)
+
+    results = []
+    with aioresponses() as http:
+        for destination in (parent_destination, thread_destination):
+            http.post(f"{STOAT_URL}/channels/{destination}/messages", callback=create, repeat=True)
+        async with messages_module.get_session(config) as session:
+            for export, destination in ((parent, parent_destination), (thread, thread_destination)):
+                result = messages_module.ChannelResult(channel_id=export.channel.id)
+                await messages_module._process_message(
+                    msg=export.messages[0],
+                    stoat_channel_id=destination,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    channel_result=result,
+                    export_channel_id=export.channel.id,
+                )
+                results.append(result)
+        for result in reversed(results) if thread_first else results:
+            messages_module._merge_channel_result(state, result)
+        assert state.message_map[_ORIGIN_ID] == records[0]["_id"]
+        await messages_module._merge_threads(
+            [thread], config, state, lambda event: None, {"general": parent_destination}
+        )
+    parent_records = [row for row in records if row["channel"] == parent_destination]
+    assert len(parent_records) == 3  # Original, separator, and the actual thread reply.
+    assert sum("first reply in the thread" in row["content"] for row in parent_records) == 1
+    assert sum(row["content"] == records[0]["content"] for row in parent_records) == 1
+    assert state.merge_duplicates_suppressed == 1
 
 
 async def test_merge_still_delivers_when_the_parents_send_failed(tmp_path: Path) -> None:
@@ -1520,7 +1732,7 @@ async def test_merge_still_delivers_when_the_parents_send_failed(tmp_path: Path)
         "premise of this test: a failed send writes no map entry, so the suppression "
         "has nothing to act on"
     )
-    assert f"ferry-merge-{_ORIGIN_ID}" in keys, (
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) in keys, (
         "the suppression fired on a message the parent never delivered, so the message "
         "reached neither channel and is lost; that is strictly worse than the duplicate "
         "this batch removes"
@@ -1577,7 +1789,7 @@ async def test_merge_never_suppresses_a_forum_posts_starter(tmp_path: Path) -> N
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [forum_channel, post], lambda e: None)
 
-    assert f"ferry-merge-{_FORUM_POST_ID}" in keys, (
+    assert _merged_key(state, _FORUM_POST_ID, _FORUM_POST_ID, parent="300") in keys, (
         "the forum post's own starter was suppressed; a `key == channel_id` "
         "discriminator does exactly this, and the post has no other copy anywhere"
     )
@@ -1643,8 +1855,8 @@ async def test_a_suppressed_message_is_not_counted_as_posted(tmp_path: Path) -> 
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], events.append)
 
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, "premise: the origin was suppressed"
-    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, "premise: the reply was merged"
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys, "origin was suppressed"
+    assert _merged_key(state, _THREAD_REPLY_ID, _ORIGIN_ID) in keys, "reply was merged"
 
     merged = [e.message or "" for e in events if "Merged thread" in (e.message or "")]
     assert any("(1 messages)" in m for m in merged), (
@@ -1669,7 +1881,7 @@ async def test_the_merge_suppression_records_no_warning(tmp_path: Path) -> None:
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
 
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, "premise: the origin was suppressed"
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys, "origin was suppressed"
     assert not [w for w in state.warnings if _ORIGIN_ID in w.get("message", "")], (
         f"the suppression recorded a warning naming the suppressed message: {state.warnings}"
     )
@@ -1693,7 +1905,7 @@ async def test_the_merge_suppression_increments_the_counter(tmp_path: Path) -> N
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
 
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, "premise: the origin was suppressed"
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys, "origin was suppressed"
     assert state.merge_duplicates_suppressed == 1, (
         f"expected 1 suppressed duplicate, got {state.merge_duplicates_suppressed}"
     )
@@ -1743,8 +1955,8 @@ async def test_merge_recovers_parent_duplicate_before_origin_suppression(tmp_pat
     assert _ordinary_key(state, _ORIGIN_ID) in keys
     assert state.message_map[_ORIGIN_ID] == valid_stoat_id(991)
     assert len(remote) == 1
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys
-    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys
+    assert _merged_key(state, _THREAD_REPLY_ID, _ORIGIN_ID) in keys
     assert not state.failed_messages
     assert not any(warning["type"] == "duplicate_send_unmapped" for warning in state.warnings)
 
@@ -1784,7 +1996,7 @@ async def test_flatten_then_merge_under_incremental_suppresses_everything(
     with patch("discord_ferry.migrator.messages.api_send_message", _capture_keys(keys)):
         await run_messages(config, state, [parent, thread], lambda e: None)
 
-    assert not [k for k in keys if k.startswith("ferry-merge-")], (
+    assert keys == [f"ferry-thread-sep-{_ORIGIN_ID}"], (
         f"a strategy switch under --incremental must not re-deliver messages that are "
         f"already on the server in their own thread channel: {keys}"
     )
@@ -1815,10 +2027,10 @@ async def test_a_resume_interrupted_mid_thread_does_not_resend_the_separator(
     assert f"ferry-thread-sep-{_ORIGIN_ID}" not in keys, (
         "the separator was re-sent, so every crash would add another one"
     )
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys, (
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys, (
         "a message at or below the transient offset must not be re-sent"
     )
-    assert f"ferry-merge-{_THREAD_REPLY_ID}" in keys, (
+    assert _merged_key(state, _THREAD_REPLY_ID, _ORIGIN_ID) in keys, (
         "the tail above the offset is exactly what resume exists to deliver"
     )
 
@@ -1888,7 +2100,7 @@ async def test_a_thread_whose_only_message_is_suppressed_still_gets_its_separato
     assert f"ferry-thread-sep-{_ORIGIN_ID}" in keys, (
         "the separator is the only remaining trace that this thread existed"
     )
-    assert f"ferry-merge-{_ORIGIN_ID}" not in keys
+    assert _merged_key(state, _ORIGIN_ID, _ORIGIN_ID) not in keys
     merged = [e.message or "" for e in events if "Merged thread" in (e.message or "")]
     assert any("(0 messages)" in m for m in merged), (
         f"the completion event must report zero, not one: {merged}"
