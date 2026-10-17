@@ -42,6 +42,7 @@ from discord_ferry.state import (
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_with_cache
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import aiohttp
@@ -716,7 +717,7 @@ async def _merge_threads(
     on_event: EventCallback,
     parent_name_to_stoat: dict[str, str],
     *,
-    idempotency_salt: str = "",
+    replacement_ref: Callable[[DeliveryRef], DeliveryRef] | None = None,
     reconcile_failed: bool = False,
 ) -> None:
     """Merge thread messages into their parent channels with separators.
@@ -730,12 +731,9 @@ async def _merge_threads(
         state: Migration state.
         on_event: Event callback.
         parent_name_to_stoat: Mapping of parent channel name to Stoat channel ID.
-        idempotency_salt: Existing repair identity, hashed into the structural
-            generation for merged messages and their separator.
+        replacement_ref: Existing repair owner saves identity for selected
+            replacement messages and separators. Does not select source work.
     """
-    generation = (
-        hashlib.sha256(idempotency_salt.encode()).hexdigest()[:32] if idempotency_salt else "base"
-    )
     async with get_session(config) as session:
         for export in thread_exports:
             parent_name = export.parent_channel_name or ""
@@ -766,7 +764,17 @@ async def _merge_threads(
             # run stopped inside this thread and is cleared once the thread completes.
             # --incremental reads the DURABLE high-water mark, taking the transient
             # offset too in case a crash left it ahead. Plain runs skip nothing.
-            if config.resume:
+            replacement_continuation = (
+                replacement_ref is not None
+                and delivery_receipt_id(
+                    DeliveryRef(export.channel.id, export.channel.id, parent_stoat_id, "separator")
+                )
+                in state.pending_delivery_replacements
+            )
+            if replacement_ref is not None and not replacement_continuation:
+                # Old-channel offsets cannot cover a newly authorized replacement.
+                state.channel_message_offsets.pop(export.channel.id, None)
+            if replacement_continuation or config.resume:
                 _thread_skip_below = state.channel_message_offsets.get(export.channel.id, "")
             elif config.incremental:
                 _thread_skip_below = max(
@@ -836,17 +844,16 @@ async def _merge_threads(
                     f"({export.message_count} messages) \u2500\u2500"
                 )
                 try:
+                    separator_ref = DeliveryRef(
+                        export.channel.id, export.channel.id, parent_stoat_id, "separator"
+                    )
+                    if replacement_ref is not None:
+                        separator_ref = replacement_ref(separator_ref)
                     separator_result = await deliver_part(
                         session=session,
                         config=config,
                         state=state,
-                        ref=DeliveryRef(
-                            export.channel.id,
-                            export.channel.id,
-                            parent_stoat_id,
-                            "separator",
-                            generation,
-                        ),
+                        ref=separator_ref,
                         part_index=0,
                         part_count=1,
                         render_digest=hashlib.sha256(separator.encode()).hexdigest(),
@@ -949,6 +956,9 @@ async def _merge_threads(
                     )
                     continue
 
+                message_ref = DeliveryRef(export.channel.id, msg.id, parent_stoat_id, "merged")
+                if replacement_ref is not None:
+                    message_ref = replacement_ref(message_ref)
                 if await _process_merged_message(
                     export=export,
                     msg=msg,
@@ -957,11 +967,9 @@ async def _merge_threads(
                     state=state,
                     session=session,
                     on_event=on_event,
-                    delivery_ref=DeliveryRef(
-                        export.channel.id, msg.id, parent_stoat_id, "merged", generation
-                    ),
+                    delivery_ref=message_ref,
                     allow_rejected_retry=config.incremental or reconcile_failed,
-                    retry_failure=_failures_here.get(msg.id) if not idempotency_salt else None,
+                    retry_failure=_failures_here.get(msg.id) if replacement_ref is None else None,
                 ):
                     _succeeded_ids.add(msg.id)
                     # Reconcile before the mid-thread checkpoint can retire the
@@ -982,6 +990,10 @@ async def _merge_threads(
                         )
                     ]
                 _posted += 1
+                if replacement_ref is not None and msg.id.isdigit():
+                    # Saving the next replacement intent may retire this receipt.
+                    # Carry its normal progress in that same successful snapshot.
+                    state.channel_message_offsets[export.channel.id] = msg.id
 
                 # Batch 6 (#107): checkpoint inside the thread. Without this a crash
                 # loses the record of everything sent since the phase began, and the
@@ -1885,10 +1897,7 @@ async def _process_message(
         if len(candidates) != 1:
             raise DeliveryUnresolvedError("Selected delivery lacks a unique source channel")
         source_channel = candidates[0]
-    generation = (
-        hashlib.sha256(idempotency_salt.encode()).hexdigest()[:32] if idempotency_salt else "base"
-    )
-    ref = DeliveryRef(source_channel, msg.id, stoat_channel_id, "ordinary", generation)
+    ref = DeliveryRef(source_channel, msg.id, stoat_channel_id, "ordinary")
     if delivery_ref is not None:
         if (
             delivery_ref.source_channel_id != source_channel
@@ -1903,6 +1912,8 @@ async def _process_message(
     if retry_failure is not None:
         try:
             ref, legacy_keys = retry_delivery_context(state, config.output_dir, ref, retry_failure)
+            if legacy_keys and idempotency_salt:
+                legacy_keys = (*legacy_keys, f"ferry-{msg.id}-{idempotency_salt}")
         except Exception as exc:  # noqa: BLE001
             context_error = exc
     receipt_id = delivery_receipt_id(ref)
@@ -1946,9 +1957,7 @@ async def _process_message(
                 embeds=(stoat_embeds if stoat_embeds and is_first else None),
                 masquerade=masquerade,
                 replies=(replies if replies and is_first else None),
-                allow_rejected_retry=allow_rejected_retry
-                or config.incremental
-                or bool(idempotency_salt),
+                allow_rejected_retry=allow_rejected_retry or config.incremental,
                 legacy_keys=legacy_keys,
             )
         except Exception as exc:  # noqa: BLE001
