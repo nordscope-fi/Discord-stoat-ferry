@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [2.43.21] - 2026-10-19
+
+### Fixed
+
+- Capture the approved permission safety decision as separate snapshot evidence and verify its exact scoped backup, while retaining rejection of other paths (#1172).
+
 ## [2.43.20] - 2026-10-17
 
 ### Fixed
