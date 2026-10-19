@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -249,6 +250,58 @@ def test_approved_ignored_instructions_keep_separate_identity(tmp_path: Path) ->
     assert report["separate_identity"] is True
     assert report["substitutes_rejected"] is True
     assert report["backup_required"] is True
+
+
+def test_permission_decision_record_round_trip(tmp_path: Path) -> None:
+    for variant in ("create", "edit", "worktree"):
+        report = assert_fixture_ok(tmp_path / variant, "permission-adr", variant)
+        assert report["instruction_path"] == (
+            "docs/architecture/adr/045-permission-preflight-safety.md"
+        )
+        assert report["domain"] == "instruction"
+        assert report["before_exists"] is (variant != "create")
+        assert report["after_exists"] is True
+        assert report["mode"] == "100644"
+        assert report["sha256"] == hashlib.sha256(b"after permission decision\n").hexdigest()
+        assert report["backup_destination"] == (
+            "projects/Discord-stoat-ferry/adr/045-permission-preflight-safety.md"
+        )
+        for field in (
+            "owner_matches_primary",
+            "active_index_unchanged",
+            "backup_valid",
+            "replay_valid",
+            "missing_backup_rejected",
+        ):
+            assert report[field] is True
+        assert report["tracked_tree_contains_instruction"] is False
+
+
+@pytest.mark.parametrize(
+    ("variant", "message"),
+    [
+        ("other-record", "unapproved instruction path"),
+        ("suffix", "unapproved instruction path"),
+        ("credential", "rejected before read"),
+        ("absolute", "rejected before read"),
+        ("traversal", "rejected before read"),
+        ("symlink", "rejected before read: docs/architecture/adr/045"),
+        ("wrong-destination", "outside the Ferry scope"),
+        ("wrong-bytes", "backup bytes changed"),
+        ("wrong-mode", "backup mode changed"),
+        ("changed", "instruction candidate changed"),
+    ],
+)
+def test_permission_decision_record_refuses_unsafe_evidence(
+    tmp_path: Path, variant: str, message: str
+) -> None:
+    result = run_fixture(tmp_path, "permission-adr", variant)
+    assert result.returncode == 1
+    assert message in result.stderr
+    if variant in {"other-record", "suffix", "credential", "absolute", "traversal", "symlink"}:
+        evidence = tmp_path / "repo/docs/plans/.review/chunk-snapshots/tasks/1002"
+        assert not (evidence / "baseline.json").exists()
+        assert not (evidence / "patch.json").exists()
 
 
 def test_provider_artifacts_and_posted_markers_belong_to_snapshot(

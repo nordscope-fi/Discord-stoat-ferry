@@ -1096,6 +1096,118 @@ async function main([fixture, directory, variant]) {
     writeJson({ shipping_rejected: shippingRejected, committed_rejected: committedRejected });
     return;
   }
+  if (fixture === 'permission-adr') {
+    const instructionPath = 'docs/architecture/adr/045-permission-preflight-safety.md';
+    const backupPath = 'projects/Discord-stoat-ferry/adr/045-permission-preflight-safety.md';
+    const afterBytes = 'after permission decision\n';
+    mkdirSync(join(root, 'docs/plans'), { recursive: true });
+    mkdirSync(join(root, dirname(instructionPath)), { recursive: true });
+    writeFileSync(join(root, 'docs/plans/fixture-plan.md'), SINGLE_CHUNK_PLAN);
+    writeFileSync(join(root, '.gitignore'), 'docs/architecture/\n');
+    writeFileSync(join(root, 'tracked.txt'), 'before\n');
+    if (variant !== 'create') {
+      writeFileSync(join(root, instructionPath), 'before permission decision\n');
+    }
+    git(root, 'add', 'docs/plans/fixture-plan.md', '.gitignore', 'tracked.txt');
+    git(root, 'commit', '-qm', 'fixture baseline');
+    let active = root;
+    if (variant === 'worktree') {
+      active = resolve(directory, 'candidate');
+      git(root, 'worktree', 'add', '-q', '-b', 'instruction-candidate', active);
+      mkdirSync(join(active, dirname(instructionPath)), { recursive: true });
+      writeFileSync(join(active, instructionPath), 'unapproved worktree shadow\n');
+    }
+    const refusedPaths = {
+      'other-record': 'docs/architecture/adr/046-unapproved-record.md',
+      suffix: `${instructionPath}.extra.md`,
+      credential: '.mcp.json',
+      absolute: join(root, instructionPath),
+      traversal: '../045-permission-preflight-safety.md',
+    };
+    const options = {
+      ...optionsFor(active, ['tracked.txt']),
+      instructionPaths: [refusedPaths[variant] ?? instructionPath],
+    };
+    if (variant === 'symlink') {
+      rmSync(join(root, instructionPath));
+      writeFileSync(join(root, 'docs/architecture/dummy.txt'), 'not instruction evidence\n');
+      symlinkSync(join(root, 'docs/architecture/dummy.txt'), join(root, instructionPath));
+    }
+    const indexPath = resolve(active, git(active, 'rev-parse', '--git-path', 'index'));
+    const indexBefore = sha256(readFileSync(indexPath));
+    const baseline = captureBaseline(options);
+    writeFileSync(join(active, 'tracked.txt'), 'after\n');
+    writeFileSync(join(root, instructionPath), afterBytes);
+    const task = captureTask({ ...options, baselinePath: baseline.path });
+    const snapshot = captureChunk({
+      ...options,
+      taskRecords: [task.path],
+      outputPath: `${options.evidenceRoot}/chunks/1001/permission-adr.json`,
+    });
+    const validation = {
+      root: active,
+      planPath: options.planPath,
+      approvedPlanDigestPath: options.approvedPlanDigestPath,
+      snapshotPaths: [snapshot.path],
+      phase: 'review',
+      evidenceRoot: options.evidenceRoot,
+    };
+    let missingBackupRejected = false;
+    try { validateChain(validation); } catch (error) {
+      missingBackupRejected = error.message === 'scoped instruction backup evidence is required';
+    }
+    const snapshotLogPath = `${options.evidenceRoot}/fixtures/backup-snapshot.log`;
+    mkdirSync(join(active, options.evidenceRoot, 'fixtures'), { recursive: true });
+    writeFileSync(join(active, snapshotLogPath), 'snapshot complete\n');
+    const backupRoot = resolve(directory, 'claude-setup');
+    mkdirSync(backupRoot, { recursive: true });
+    git(backupRoot, 'init', '-q');
+    git(backupRoot, 'config', 'user.email', 'fixture@example.com');
+    git(backupRoot, 'config', 'user.name', 'Fixture');
+    writeFileSync(join(backupRoot, 'README.md'), 'backup fixture\n');
+    git(backupRoot, 'add', 'README.md');
+    git(backupRoot, 'commit', '-qm', 'backup baseline');
+    const destination = variant === 'wrong-destination'
+      ? 'projects/Discord-stoat-ferry/adr/046-unapproved-record.md' : backupPath;
+    mkdirSync(join(backupRoot, dirname(destination)), { recursive: true });
+    writeFileSync(join(backupRoot, destination), variant === 'wrong-bytes' ? 'wrong\n' : afterBytes);
+    chmodSync(join(backupRoot, destination), variant === 'wrong-mode' ? 0o755 : 0o644);
+    git(backupRoot, 'add', destination);
+    git(backupRoot, 'commit', '-qm', 'backup permission instruction');
+    const backup = bindBackup({
+      root: active,
+      taskRecordPath: task.path,
+      snapshotLogPath,
+      backupRepoPath: backupRoot,
+      backupCommitOid: git(backupRoot, 'rev-parse', 'HEAD'),
+      evidenceRoot: options.evidenceRoot,
+    });
+    if (variant === 'changed') {
+      writeFileSync(join(root, instructionPath), 'changed after capture\n');
+    }
+    validateChain({ ...validation, backupEvidencePath: backup.path });
+    const replay = reconstructChain({
+      root: active, snapshotPaths: [snapshot.path], evidenceRoot: options.evidenceRoot,
+    });
+    const operation = task.record.operations.find(item => item.after.path === instructionPath);
+    const saved = replay.instructionStates.find(item => item.path === instructionPath);
+    writeJson({
+      instruction_path: saved.path,
+      domain: saved.domain,
+      before_exists: operation.before.exists,
+      after_exists: saved.exists,
+      mode: saved.mode,
+      sha256: saved.sha256,
+      owner_matches_primary: saved.owner_root === root && saved.owner_path === instructionPath,
+      tracked_tree_contains_instruction: git(active, 'ls-tree', replay.finalTree, '--', instructionPath) !== '',
+      active_index_unchanged: sha256(readFileSync(indexPath)) === indexBefore,
+      backup_destination: git(backupRoot, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'),
+      backup_valid: backup.record.instruction_states.some(item => item.sha256 === saved.sha256),
+      replay_valid: replay.finalTree === snapshot.record.ending_git_tree,
+      missing_backup_rejected: missingBackupRejected,
+    });
+    return;
+  }
   if (fixture === 'instructions') {
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
     writeFileSync(join(root, 'docs/plans/fixture-plan.md'), FIXTURE_PLAN);
