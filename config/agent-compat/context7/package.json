@@ -4,6 +4,6 @@
   "private": true,
   "description": "Pinned Context7 helper for the Discord Ferry reviewer runtime (issue 995)",
   "dependencies": {
-    "@upstash/context7-mcp": "4.1.1"
+    "@upstash/context7-mcp": "4.4.4"
   }
 }
