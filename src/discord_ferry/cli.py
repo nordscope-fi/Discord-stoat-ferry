@@ -26,6 +26,7 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import (
     PHASE_ORDER,
     run_migration,
+    run_permission_role_backfill,
     run_repair,
     run_retry_failed,
     run_rollback,
@@ -33,11 +34,14 @@ from discord_ferry.core.engine import (
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret, sanitize_secrets
-from discord_ferry.discord import refresh_permission_metadata
-from discord_ferry.errors import CheckError, MigrationError, StateError
+from discord_ferry.discord import (
+    load_bound_discord_metadata,
+    read_cached_metadata,
+    refresh_permission_metadata,
+)
+from discord_ferry.errors import CheckError, MigrationError, PermissionSafetyError, StateError
 from discord_ferry.feedback_cli import _print_feedback_hint, run_feedback_cli
 from discord_ferry.migrator.api import init_request_semaphore
-from discord_ferry.migrator.structure import run_role_backfill
 from discord_ferry.parser.dce_parser import (
     acknowledgement_required,
     parse_export_directory,
@@ -48,6 +52,8 @@ from discord_ferry.stats import summarize_state
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.core.permissions import PermissionOutcome
+    from discord_ferry.discord.metadata import DiscordMetadata
     from discord_ferry.migrator.verify import CheckReport, RepairOutcome
     from discord_ferry.parser.models import DCEExport
     from discord_ferry.review import RollbackSummary
@@ -265,6 +271,17 @@ def _safe(value: object) -> str:
 def _masked(value: object) -> str:
     """Mask registered secrets, then escape Rich markup (``_safe`` alone masks nothing)."""
     return _safe(sanitize_secrets(str(value)))
+
+
+def _print_permission_outcome(outcome: PermissionOutcome, human: Console) -> None:
+    """Display shared operation facts without calculating access in the shell."""
+    colour = "green" if outcome.verified else "yellow"
+    human.print(
+        f"[{colour}]Permissions: {_masked(outcome.reason)} ({_masked(outcome.stage)}); "
+        f"destination effects: {_masked(outcome.effects)}[/]"
+    )
+    for problem in outcome.problems:
+        human.print(_masked(problem.guidance))
 
 
 class _ProgressTracker:
@@ -771,6 +788,9 @@ def migrate(ctx: click.Context, /, **kwargs: Any) -> None:
     try:
         with tracker.start_live():
             final_state = asyncio.run(run_migration(config, on_event=tracker.on_event))
+    except PermissionSafetyError as exc:
+        _print_permission_outcome(exc.outcome, console)
+        sys.exit(1)
     except (MigrationError, StateError) as exc:
         console.print(f"\n[bold red]Migration failed:[/] {_safe(exc)}")
         _print_feedback_hint()
@@ -1414,6 +1434,9 @@ def refresh_permissions_cmd(output_dir: str, export_dir: str, discord_server_id:
                 )
 
         asyncio.run(refresh())
+    except PermissionSafetyError as exc:
+        _print_permission_outcome(exc.outcome, Console(stderr=True))
+        sys.exit(1)
     except (MigrationError, OSError) as exc:
         click.echo("Cannot refresh source permissions: " + sanitize_secrets(str(exc)), err=True)
         sys.exit(1)
@@ -1484,7 +1507,15 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None, as_json
         sys.exit(1)
 
     try:
-        report = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
+        report = asyncio.run(
+            run_check(
+                stoat_url,
+                token,
+                state,
+                lambda _e: None,
+                permission_metadata=read_cached_metadata(Path(output_dir), check_keys=True).meta,
+            )
+        )
     except (CheckError, MigrationError) as exc:
         console.print(f"[bold red]Cannot check this migration:[/] {_masked(exc)}")
         _print_feedback_hint(to_stderr=as_json)
@@ -1679,6 +1710,9 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     console.print("[bold]Discord Ferry[/] — retrying failed messages\n")
     try:
         asyncio.run(run_retry_failed(config, state, exports, _on_event))
+    except PermissionSafetyError as exc:
+        _print_permission_outcome(exc.outcome, console)
+        sys.exit(1)
     except MigrationError as exc:
         console.print(f"\n[bold red]Retry failed:[/] {_masked(exc)}")
         _print_feedback_hint()
@@ -1698,6 +1732,7 @@ def _emit_repair_json(
     stoat_url: str,
     token: str,
     state: MigrationState,
+    permission_metadata: DiscordMetadata | None = None,
 ) -> None:
     """Assemble and print the repair --json outcome document (#308).
 
@@ -1718,7 +1753,15 @@ def _emit_repair_json(
     document["check"] = None
     if not dry_run:
         try:
-            post = asyncio.run(run_check(stoat_url, token, state, lambda _e: None))
+            post = asyncio.run(
+                run_check(
+                    stoat_url,
+                    token,
+                    state,
+                    lambda _e: None,
+                    permission_metadata=permission_metadata,
+                )
+            )
             document["check"] = post.to_dict()
         except (CheckError, MigrationError) as exc:
             document["check_error"] = strip_control(str(exc))
@@ -1857,14 +1900,23 @@ def repair_cmd(
         from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES
 
         declined = [w for w in outcome.declined if w.get("type") in UNREPAIRED_WARNING_TYPES]
-        code = 1 if (state.failed_messages or declined) else 0
+        code = 1 if (state.failed_messages or declined or not outcome.permissions.verified) else 0
 
     # The JSON document is emitted for BOTH exit codes, and its exit code is the
     # same one the human path produces. The post-repair check is a --json-only
     # follow-up; a failure of it must not change the exit code or lose the
     # outcome repair already produced.
     if as_json:
-        _emit_repair_json(outcome, dry_run, stoat_url, token, state)
+        _emit_repair_json(
+            outcome,
+            dry_run,
+            stoat_url,
+            token,
+            state,
+            permission_metadata=load_bound_discord_metadata(config, exports),
+        )
+    if not dry_run:
+        _print_permission_outcome(outcome.permissions, human)
 
     if code != 0 and not as_json:
         _print_feedback_hint()
@@ -1967,7 +2019,10 @@ def backfill_roles_cmd(
 
     console.print("[bold]Discord Ferry[/] — backfilling role order\n")
     try:
-        asyncio.run(run_role_backfill(config, state, exports, _on_event))
+        asyncio.run(run_permission_role_backfill(config, state, exports, _on_event))
+    except PermissionSafetyError as exc:
+        _print_permission_outcome(exc.outcome, console)
+        sys.exit(1)
     except (CheckError, MigrationError) as exc:
         console.print(f"\n[bold red]Backfill failed:[/] {_masked(exc)}")
         _print_feedback_hint()

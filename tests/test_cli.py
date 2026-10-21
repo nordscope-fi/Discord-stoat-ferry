@@ -92,6 +92,149 @@ def test_refresh_help_does_not_require_target_credentials(runner: CliRunner) -> 
     assert "--token" not in result.output
 
 
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("effects", ["none_confirmed", "changes_confirmed", "changes_possible"])
+def test_cli_repair_permission_refusal_retains_json_and_actions(
+    tmp_path, monkeypatch, runner, as_json, effects
+):
+    from discord_ferry import cli
+    from discord_ferry.core.permissions import PermissionOutcome
+
+    state = MigrationState(stoat_server_id=SERVER_ID)
+    outcome = RepairOutcome(
+        permissions=PermissionOutcome("recheck", "readback_mismatch", effects),
+        recreated_channels=[{"discord_id": "333", "stoat_id": stoat_id(3), "resent_count": 2}],
+    )
+    monkeypatch.setattr(cli, "load_state", lambda path: state)
+    monkeypatch.setattr(cli, "parse_export_directory", lambda path: [])
+    monkeypatch.setattr(cli, "run_repair", AsyncMock(return_value=outcome))
+    monkeypatch.setattr(
+        "discord_ferry.migrator.verify.run_check", AsyncMock(return_value=CheckReport())
+    )
+    result = runner.invoke(
+        main,
+        ["repair", str(tmp_path), "--export-dir", str(tmp_path), *(["--json"] if as_json else [])],
+        env={"STOAT_URL": "https://api.test", "STOAT_TOKEN": _CMD_TOKEN},
+    )
+    assert not state.failed_messages
+    assert result.exit_code == 1
+    if as_json:
+        document = json.loads(result.stdout)
+        assert document["permissions"] == outcome.permissions.to_dict()
+        assert document["actions"]["recreated_channels"][0]["resent_count"] == 2
+        assert "repairing" not in result.stdout.lower()
+    else:
+        assert effects in result.output and "readback_mismatch" in result.output
+
+
+@pytest.mark.parametrize("command", ["migrate", "retry", "backfill-roles"])
+def test_cli_typed_permission_stop_shows_shared_guidance_without_completion(
+    tmp_path, monkeypatch, runner, command
+):
+    from discord_ferry import cli
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.errors import PermissionSafetyError
+
+    outcome = PermissionOutcome(
+        "preflight",
+        "unverified",
+        "changes_possible",
+        (PermissionProblem("unverified", (), None, "Refresh selected source evidence"),),
+    )
+    operation = AsyncMock(side_effect=PermissionSafetyError(outcome))
+    state = MigrationState(stoat_server_id=SERVER_ID)
+    monkeypatch.setattr(cli, "load_state", lambda path: state)
+    monkeypatch.setattr(cli, "parse_export_directory", lambda path: [])
+    if command == "migrate":
+        monkeypatch.setattr(cli, "run_migration", operation)
+        args = ["migrate", "--export-dir", str(tmp_path), "--yes"]
+    elif command == "retry":
+        monkeypatch.setattr(cli, "run_retry_failed", operation)
+        args = [command, str(tmp_path), "--export-dir", str(tmp_path)]
+    else:
+        monkeypatch.setattr(cli, "run_permission_role_backfill", operation, raising=False)
+        monkeypatch.setattr(
+            cli,
+            "run_role_backfill",
+            AsyncMock(side_effect=AssertionError("CLI bypassed guarded backfill entry")),
+            raising=False,
+        )
+        args = [command, str(tmp_path), "--export-dir", str(tmp_path)]
+    result = runner.invoke(
+        main, args, env={"STOAT_URL": "https://api.test", "STOAT_TOKEN": _CMD_TOKEN}
+    )
+    operation.assert_awaited_once()
+    assert result.exit_code == 1
+    for text in ("preflight", "changes_possible", "Refresh selected source evidence"):
+        assert text in result.output
+    assert "Migration complete" not in result.output
+    assert not state.failed_messages
+
+
+def test_cli_check_passes_cached_evidence_without_source_refresh(tmp_path, monkeypatch, runner):
+    from discord_ferry import cli
+    from discord_ferry.discord.metadata import save_discord_metadata
+    from tests.test_metadata_refresh import valid_metadata
+
+    metadata = valid_metadata()
+    save_discord_metadata(metadata, tmp_path)
+    check = AsyncMock(return_value=CheckReport())
+    refresh = AsyncMock(side_effect=AssertionError("Check refreshed source metadata"))
+    monkeypatch.setattr(cli, "load_state", lambda path: MigrationState(stoat_server_id=SERVER_ID))
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", check)
+    monkeypatch.setattr(cli, "refresh_permission_metadata", refresh)
+    result = runner.invoke(
+        main,
+        ["check", str(tmp_path)],
+        env={"STOAT_URL": "https://api.test", "STOAT_TOKEN": _CMD_TOKEN},
+    )
+    assert result.exit_code == 0
+    assert check.await_args.kwargs["permission_metadata"] == metadata
+    refresh.assert_not_called()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_repair_absent_permission_evidence_is_not_a_success_claim(tmp_path, runner, dry_run):
+    extra = ["--json", *(["--dry-run"] if dry_run else [])]
+    result = _invoke_repair(runner, tmp_path, RepairOutcome(dry_run=dry_run), *extra)
+    assert result.exit_code == (0 if dry_run else 1)
+    assert json.loads(result.stdout)["permissions"]["verified"] is False
+
+
+@pytest.mark.parametrize("export_guild", ["111", "999"])
+def test_cli_repair_postcheck_uses_metadata_bound_to_selected_exports(
+    tmp_path, monkeypatch, runner, export_guild
+):
+    from discord_ferry import cli
+    from discord_ferry.discord.metadata import save_discord_metadata
+    from discord_ferry.parser.models import DCEChannel, DCEExport, DCEGuild
+    from tests.test_metadata_refresh import valid_metadata
+
+    metadata = valid_metadata()
+    save_discord_metadata(metadata, tmp_path)
+    state = MigrationState(stoat_server_id=SERVER_ID)
+    check = AsyncMock(return_value=CheckReport())
+    monkeypatch.setattr(cli, "load_state", lambda path: state)
+    monkeypatch.setattr(
+        cli,
+        "parse_export_directory",
+        lambda path: [
+            DCEExport(DCEGuild(export_guild, "source"), DCEChannel("333", 0, "selected"))
+        ],
+    )
+    monkeypatch.setattr(cli, "run_repair", AsyncMock(return_value=_verified_repair_fixture()))
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", check)
+    result = runner.invoke(
+        main,
+        ["repair", str(tmp_path), "--export-dir", str(tmp_path), "--json"],
+        env={"STOAT_URL": "https://api.test", "STOAT_TOKEN": _CMD_TOKEN},
+    )
+    assert result.exit_code == 0
+    assert check.await_args.kwargs["permission_metadata"] == (
+        metadata if export_guild == "111" else None
+    )
+
+
 @pytest.mark.parametrize(
     "missing", ["output", "exports", "guild", "output-is-file", "prompt-abort"]
 )
@@ -3461,6 +3604,15 @@ def test_retry_with_an_unreadable_state_exits_two(runner: CliRunner, tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+def _verified_repair_fixture(**kwargs: Any) -> RepairOutcome:
+    """Supply a synthetic result for unrelated shell units, never operation authority."""
+    from discord_ferry.core.permissions import PermissionOutcome
+
+    return RepairOutcome(
+        permissions=PermissionOutcome("recheck", "verified", "none_confirmed"), **kwargs
+    )
+
+
 def _repair_argv(out_dir: Path, export_dir: Path, *extra: str) -> list[str]:
     return [
         "repair",
@@ -3485,7 +3637,7 @@ def test_repair_exits_zero_when_nothing_is_left_failing(runner: CliRunner, tmp_p
     save_state(MigrationState(stoat_server_id=SERVER_ID), out_dir)
 
     async def _noop(*_a: Any, **_k: Any) -> RepairOutcome:
-        return RepairOutcome()
+        return _verified_repair_fixture()
 
     with patch("discord_ferry.cli.run_repair", new=_noop):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -3500,7 +3652,7 @@ def test_repair_exits_non_zero_when_a_message_is_still_failed(
     out_dir = _write_state_with_one_failure(tmp_path / "out")
 
     async def _leaves_it(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
-        return RepairOutcome()
+        return _verified_repair_fixture()
 
     with patch("discord_ferry.cli.run_repair", new=_leaves_it):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -3548,7 +3700,7 @@ def test_repair_passes_a_real_export_to_the_coroutine(runner: CliRunner, tmp_pat
 
     async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> RepairOutcome:
         seen["exports"] = exports
-        return RepairOutcome()
+        return _verified_repair_fixture()
 
     with patch("discord_ferry.cli.run_repair", new=_capture):
         runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -3570,7 +3722,7 @@ def test_repair_registers_the_token_and_the_semaphore_before_any_request(
 
     async def _noop(*_a: Any, **_k: Any) -> RepairOutcome:
         order.append("request")
-        return RepairOutcome()
+        return _verified_repair_fixture()
 
     with (
         patch(
@@ -3656,7 +3808,9 @@ def test_repair_exits_non_zero_when_it_declined_a_repair(runner: CliRunner, tmp_
             "message": "Cannot recreate channel 800000000000000001",
         }
         state.warnings.append(decline)
-        return RepairOutcome(declined=[{"type": "no_recorded_name", "message": decline["message"]}])
+        return _verified_repair_fixture(
+            declined=[{"type": "no_recorded_name", "message": decline["message"]}]
+        )
 
     with patch("discord_ferry.cli.run_repair", new=_declines):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -3669,7 +3823,7 @@ def test_repair_exits_non_zero_when_an_emoji_could_not_be_recreated(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """emoji_missing_media is an unrepaired defect: the emoji stays missing (#307)."""
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[{"type": "emoji_missing_media", "message": "no usable image"}]
     )
     result = _invoke_repair(runner, tmp_path, outcome)
@@ -3687,7 +3841,7 @@ def test_repair_exits_non_zero_when_a_role_attribute_edit_failed(
     so the role's appearance is left broken. Same shape as emoji_rewrite_failed: the
     exit code must say the migration is not whole.
     """
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[{"type": "role_icon_upload_failed", "message": "Role icon upload failed"}]
     )
     result = _invoke_repair(runner, tmp_path, outcome)
@@ -3700,7 +3854,7 @@ def test_repair_exits_non_zero_when_channel_attributes_could_not_be_restored(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """A failed slowmode or voice-limit edit leaves the channel incomplete (#1062)."""
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[
             {"type": "channel_attributes_failed", "message": "Could not restore channel settings"}
         ]
@@ -3720,7 +3874,7 @@ def test_repair_exits_zero_when_only_role_attributes_were_not_restored(
     appearance from, and the documented remedy is an --incremental re-run. Like
     no_discord_metadata, it must not push the exit code to 1.
     """
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[
             {"type": "role_attributes_not_restored", "message": "colour/hoist/icon not restored"}
         ]
@@ -3742,7 +3896,7 @@ def test_repair_exits_non_zero_when_the_server_default_needs_an_owner_edit(
     Exiting 0 would tell a script the server is whole while an owner action stays
     outstanding.
     """
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[
             {
                 "type": "server_default_manual",
@@ -3767,7 +3921,7 @@ def test_repair_exits_non_zero_when_the_server_default_check_failed(
     a re-run cures. Exiting 0 here reports a whole server whose state was never
     read, which is the false green #344 was filed to remove.
     """
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[
             {
                 "type": "server_default_check_failed",
@@ -3791,7 +3945,7 @@ def test_repair_exits_zero_when_the_server_default_was_reset(
     on it would make the successful convergence path exit non-zero and read as a
     failure.
     """
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         declined=[
             {
                 "type": "server_default_reset",
@@ -3809,7 +3963,9 @@ def test_repair_exits_non_zero_when_an_emoji_rewrite_failed(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """emoji_rewrite_failed leaves a message on the dead id and the record open (#307)."""
-    outcome = RepairOutcome(declined=[{"type": "emoji_rewrite_failed", "message": "edit boom"}])
+    outcome = _verified_repair_fixture(
+        declined=[{"type": "emoji_rewrite_failed", "message": "edit boom"}]
+    )
     result = _invoke_repair(runner, tmp_path, outcome)
     assert result.exit_code == 1, (
         f"a failed emoji rewrite exited {result.exit_code}, which reads as success"
@@ -3823,7 +3979,9 @@ def test_repair_exits_zero_on_a_split_tail_emoji_decline(runner: CliRunner, tmp_
     is back and its addressable reference fixed; only an unaddressable later send
     of a split message keeps the old id.
     """
-    outcome = RepairOutcome(declined=[{"type": "emoji_in_split_tail", "message": "later send"}])
+    outcome = _verified_repair_fixture(
+        declined=[{"type": "emoji_in_split_tail", "message": "later send"}]
+    )
     result = _invoke_repair(runner, tmp_path, outcome)
     assert result.exit_code == 0, (
         f"a partial split-tail decline exited {result.exit_code}, which reads as failure"
@@ -3843,7 +4001,7 @@ def test_repair_exit_code_ignores_a_stale_decline_from_an_earlier_run(
     """
     state = MigrationState(stoat_server_id=SERVER_ID)
     state.warnings.append({"phase": "repair", "type": "not_in_export", "message": "old run"})
-    result = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json", state=state)
+    result = _invoke_repair(runner, tmp_path, _verified_repair_fixture(), "--json", state=state)
     doc = json.loads(result.stdout)
     assert doc["declined"] == []
     assert result.exit_code == 0, (
@@ -3875,7 +4033,9 @@ def test_repair_still_exits_zero_on_a_documented_partial_restore(
             "message": "thread content not restored",
         }
         state.warnings.append(decline)
-        return RepairOutcome(declined=[{"type": decline["type"], "message": decline["message"]}])
+        return _verified_repair_fixture(
+            declined=[{"type": decline["type"], "message": decline["message"]}]
+        )
 
     with patch("discord_ferry.cli.run_repair", new=_partial):
         result = runner.invoke(main, _repair_argv(out_dir, export_dir))
@@ -3932,7 +4092,7 @@ def _invoke_repair(
 
 def test_repair_json_prints_one_parseable_document(runner: CliRunner, tmp_path: Path) -> None:
     """SC-1.1, SC-4.1. Asserted by parsing, never by inspecting the string (#145)."""
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         recreated_channels=[
             {"discord_id": "d1", "stoat_id": "s1", "name": "general", "resent_count": 2}
         ]
@@ -3952,7 +4112,7 @@ def test_repair_json_keeps_human_output_off_stdout(
     """SC-1.2. The banner and proxy notices go to stderr; stdout is pure JSON."""
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8080")
     monkeypatch.setenv("COLUMNS", "200")
-    outcome = RepairOutcome()
+    outcome = _verified_repair_fixture()
     result = _invoke_repair(runner, tmp_path, outcome, "--json")
     json.loads(result.stdout)  # stdout parses as JSON
     assert "Discord Ferry" not in result.stdout
@@ -3961,7 +4121,7 @@ def test_repair_json_keeps_human_output_off_stdout(
 
 def test_repair_without_json_prints_the_banner_on_stdout(runner: CliRunner, tmp_path: Path) -> None:
     """SC-1.3. Without --json the human banner is unchanged on stdout."""
-    result = _invoke_repair(runner, tmp_path, RepairOutcome())
+    result = _invoke_repair(runner, tmp_path, _verified_repair_fixture())
     assert "Discord Ferry" in result.output
 
 
@@ -3969,7 +4129,9 @@ def test_repair_dry_run_json_has_null_check_and_exits_zero(
     runner: CliRunner, tmp_path: Path
 ) -> None:
     """SC-4.3. --dry-run --json emits a valid document, check null, exit 0."""
-    result = _invoke_repair(runner, tmp_path, RepairOutcome(dry_run=True), "--json", "--dry-run")
+    result = _invoke_repair(
+        runner, tmp_path, _verified_repair_fixture(dry_run=True), "--json", "--dry-run"
+    )
     doc = json.loads(result.stdout)
     assert doc["dry_run"] is True
     assert doc["check"] is None
@@ -3982,7 +4144,7 @@ def test_repair_json_survives_a_failing_post_check(runner: CliRunner, tmp_path: 
     result = _invoke_repair(
         runner,
         tmp_path,
-        RepairOutcome(),
+        _verified_repair_fixture(),
         "--json",
         post_check_error=MigrationError("boom"),
     )
@@ -4000,15 +4162,15 @@ def test_repair_exit_code_identical_with_and_without_json(
     failing.failed_messages = [FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="x")]
 
     for state, expected in ((clean, 0), (failing, 1)):
-        plain = _invoke_repair(runner, tmp_path, RepairOutcome(), state=state)
-        js = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json", state=state)
+        plain = _invoke_repair(runner, tmp_path, _verified_repair_fixture(), state=state)
+        js = _invoke_repair(runner, tmp_path, _verified_repair_fixture(), "--json", state=state)
         assert plain.exit_code == expected
         assert js.exit_code == expected
 
 
 def test_repair_json_empty_sections_are_lists(runner: CliRunner, tmp_path: Path) -> None:
     """SC-3.3. A clean run serialises declined and failed_messages as []."""
-    result = _invoke_repair(runner, tmp_path, RepairOutcome(), "--json")
+    result = _invoke_repair(runner, tmp_path, _verified_repair_fixture(), "--json")
     doc = json.loads(result.stdout)
     assert doc["declined"] == []
     assert doc["failed_messages"] == []
@@ -4016,7 +4178,9 @@ def test_repair_json_empty_sections_are_lists(runner: CliRunner, tmp_path: Path)
 
 def test_repair_json_failed_messages_carry_ids_only(runner: CliRunner, tmp_path: Path) -> None:
     """SC-3.2. Residual failures expose identifying fields, never message content."""
-    outcome = RepairOutcome(failed_messages=[{"discord_msg_id": "m1", "stoat_channel_id": "c1"}])
+    outcome = _verified_repair_fixture(
+        failed_messages=[{"discord_msg_id": "m1", "stoat_channel_id": "c1"}]
+    )
     result = _invoke_repair(runner, tmp_path, outcome, "--json")
     doc = json.loads(result.stdout)
     assert doc["failed_messages"] == [{"discord_msg_id": "m1", "stoat_channel_id": "c1"}]
@@ -4033,7 +4197,7 @@ def test_repair_json_stdout_survives_a_realistic_payload(runner: CliRunner, tmp_
         "Role 'moderators' was recreated with its name and permissions. Its colour, "
         "rank, hoist setting and icon are not restored: set them by hand (see #344)."
     )
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         recreated_channels=[
             {
                 "discord_id": "d1",
@@ -4053,7 +4217,7 @@ def test_repair_json_stdout_survives_a_realistic_payload(runner: CliRunner, tmp_
 
 def test_repair_json_strips_control_chars_from_stdout(runner: CliRunner, tmp_path: Path) -> None:
     """SC-5.3. A control char in a recorded name never reaches stdout."""
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         recreated_channels=[
             {"discord_id": "d1", "stoat_id": "s1", "name": "gen\x07eral", "resent_count": 0}
         ]
@@ -4068,7 +4232,7 @@ def test_repair_json_mixed_run_is_consistent(runner: CliRunner, tmp_path: Path) 
     """SC-I1. Every section populated; exit code equals the non-json run's."""
     state = MigrationState(stoat_server_id=SERVER_ID)
     state.failed_messages = [FailedMessage(discord_msg_id="m1", stoat_channel_id="c1", error="x")]
-    outcome = RepairOutcome(
+    outcome = _verified_repair_fixture(
         recreated_channels=[
             {"discord_id": "d1", "stoat_id": "s1", "name": "general", "resent_count": 5}
         ],
@@ -4187,7 +4351,7 @@ def test_backfill_dry_run_exits_0_and_passes_flag(runner: CliRunner, tmp_path: P
     async def _capture(config: Any, state: Any, exports: Any, on_event: Any) -> None:
         seen["dry_run"] = config.dry_run
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_capture):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_capture):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir, "--dry-run"))
     assert seen["dry_run"] is True
     assert result.exit_code == 0, result.output
@@ -4200,7 +4364,7 @@ def test_backfill_exits_0_when_clean(runner: CliRunner, tmp_path: Path) -> None:
     async def _noop(config: Any, state: Any, exports: Any, on_event: Any) -> None:
         return None
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_noop):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_noop):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 0, result.output
 
@@ -4214,7 +4378,7 @@ def test_backfill_exits_1_on_permission_refusal(runner: CliRunner, tmp_path: Pat
             {"phase": "roles", "type": "role_ordering_not_permitted", "message": "x"}
         )
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_refused):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_refused):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 1, result.output
 
@@ -4226,7 +4390,7 @@ def test_backfill_exits_1_on_generic_failure(runner: CliRunner, tmp_path: Path) 
     async def _failed(config: Any, state: Any, exports: Any, on_event: Any) -> None:
         state.warnings.append({"phase": "roles", "type": "role_ordering_failed", "message": "x"})
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_failed):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_failed):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 1, result.output
 
@@ -4238,7 +4402,7 @@ def test_backfill_summary_reports_already_correct(runner: CliRunner, tmp_path: P
     async def _noop(config: Any, state: Any, exports: Any, on_event: Any) -> None:
         return None
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_noop):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_noop):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 0
     assert "already correct" in result.output
@@ -4257,7 +4421,7 @@ def test_backfill_summary_reports_a_reorder(runner: CliRunner, tmp_path: Path) -
             )
         )
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_reorder):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_reorder):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 0
     assert "Applied role ordering to 3 roles" in result.output
@@ -4282,7 +4446,7 @@ def test_backfill_stale_warning_from_prior_run_does_not_cause_false_failure(
     async def _noop(config: Any, state: Any, exports: Any, on_event: Any) -> None:
         return None  # this run succeeds
 
-    with patch("discord_ferry.cli.run_role_backfill", new=_noop):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_noop):
         result = runner.invoke(main, _backfill_argv(out_dir, export_dir))
     assert result.exit_code == 0, result.output
 
@@ -4413,7 +4577,7 @@ def test_backfill_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path:
         raise MigrationError(f"server echoed {_CMD_TOKEN}")
 
     argv = _backfill_argv(out_dir, export_dir)
-    with patch("discord_ferry.cli.run_role_backfill", new=_run):
+    with patch("discord_ferry.cli.run_permission_role_backfill", new=_run):
         result = runner.invoke(main, argv, catch_exceptions=False)
 
     assert result.exit_code == 1, result.output
