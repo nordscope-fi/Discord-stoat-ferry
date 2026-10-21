@@ -239,11 +239,22 @@ async def download_role_icon(
         return None
 
 
+def _parse_permission_bits(value: object) -> int:
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    raise MigrationError("Discord returned an invalid permission value") from None
+
+
 def _parse_role(data: dict[str, Any]) -> DiscordRole:
     return DiscordRole(
         id=str(data["id"]),
         name=data["name"],
-        permissions=int(data["permissions"]),  # Discord sends as string
+        permissions=_parse_permission_bits(data["permissions"]),
         position=data.get("position", 0),
         color=data.get("color", 0),
         hoist=data.get("hoist", False),
@@ -259,8 +270,8 @@ def _parse_channel(data: dict[str, Any]) -> DiscordChannel:
         PermissionOverwrite(
             id=str(ow["id"]),
             type=ow["type"],
-            allow=int(ow["allow"]),  # Discord sends as string
-            deny=int(ow["deny"]),  # Discord sends as string
+            allow=_parse_permission_bits(ow["allow"]),
+            deny=_parse_permission_bits(ow["deny"]),
         )
         for ow in data.get("permission_overwrites", [])
     ]

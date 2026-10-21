@@ -12,6 +12,7 @@ from discord_ferry.discord.metadata import (
     PermissionPair,
     RoleMeta,
     RoleOverride,
+    capture_permission_source,
     load_bound_discord_metadata,
     load_discord_metadata,
     load_discord_metadata_for_resume,
@@ -59,6 +60,7 @@ async def fetch_and_translate_guild_metadata(
 
     roles = await fetch_guild_roles(session, token, guild_id)
     channels = await fetch_guild_channels(session, token, guild_id)
+    permission_source = capture_permission_source(guild_id, roles, channels)
 
     # Identify @everyone role (id == guild_id) → server default permissions
     server_default = 0
@@ -137,4 +139,5 @@ async def fetch_and_translate_guild_metadata(
         category_positions=category_positions,
         guild_description=guild_description,
         guild_nsfw=guild_nsfw,
+        permission_source=permission_source,
     )
