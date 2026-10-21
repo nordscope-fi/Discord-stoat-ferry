@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from discord_ferry.core.security import register_secret
 from discord_ferry.discord.client import fetch_guild, fetch_guild_channels, fetch_guild_roles
 from discord_ferry.discord.metadata import (
     ChannelMeta,
@@ -12,6 +14,7 @@ from discord_ferry.discord.metadata import (
     PermissionPair,
     RoleMeta,
     RoleOverride,
+    _bad_id,
     capture_permission_source,
     load_bound_discord_metadata,
     load_discord_metadata,
@@ -19,11 +22,17 @@ from discord_ferry.discord.metadata import (
     read_cached_metadata,
     resume_refusal,
     save_discord_metadata,
+    validate_permission_source,
 )
 from discord_ferry.discord.permissions import translate_permissions
+from discord_ferry.errors import MigrationError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import aiohttp
+
+    from discord_ferry.parser.models import DCEExport
 
 __all__ = [
     "fetch_and_translate_guild_metadata",
@@ -31,6 +40,7 @@ __all__ = [
     "load_discord_metadata",
     "load_discord_metadata_for_resume",
     "read_cached_metadata",
+    "refresh_permission_metadata",
     "resume_refusal",
     "save_discord_metadata",
     "translate_permissions",
@@ -141,3 +151,41 @@ async def fetch_and_translate_guild_metadata(
         guild_nsfw=guild_nsfw,
         permission_source=permission_source,
     )
+
+
+async def refresh_permission_metadata(
+    session: aiohttp.ClientSession,
+    token: str,
+    guild_id: str,
+    exports: list[DCEExport],
+    output_dir: Path,
+) -> DiscordMetadata:
+    """Replace only the selected local metadata after validating fresh source evidence."""
+    register_secret("discord", token)
+    if (
+        _bad_id("guild", guild_id) is not None
+        or {export.guild.id for export in exports} != {guild_id}
+        or any(_bad_id("channel", export.channel.id) is not None for export in exports)
+    ):
+        raise MigrationError("Source permission evidence does not match the selected exports")
+    cached = read_cached_metadata(
+        output_dir, configured_guild_id=guild_id, export_guild_ids={guild_id}
+    )
+    if cached.problem is not None:
+        raise MigrationError(
+            "Selected output metadata is unusable or belongs to another source; "
+            "choose the correct output directory"
+        )
+    channel_ids = frozenset(export.channel.id for export in exports)
+    try:
+        meta = await fetch_and_translate_guild_metadata(session, token, guild_id)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise MigrationError(
+            "Source permission evidence is incomplete or malformed; refresh was not saved"
+        ) from exc
+    if meta.guild_id != guild_id or validate_permission_source(meta, channel_ids):
+        raise MigrationError("Source permission evidence does not match the selected exports")
+    # Deliver cancellation requested by the fetch before the synchronous atomic write.
+    await asyncio.sleep(0)
+    save_discord_metadata(meta, output_dir)
+    return meta
