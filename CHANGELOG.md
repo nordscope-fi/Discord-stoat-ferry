@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
+- Correct the CI dependency-install count in the project configuration comment (#1273).
+
+## [3.0.0] - 2026-10-21
+
+### Breaking
+
+- Require proved channel access before content writes. Missing or unsupported source evidence and changed target access now stop the whole operation instead of continuing with incomplete permissions. Existing migrations may need source refresh, read-only Check and explicit Repair before continuing (#1172).
+- Advance Check's JSON contract to schema version 2. Permission outcomes have their own schema version 1; dry-run previews and exit-zero unverifiable checks are not permission proof (#1172).
+
+### Fixed
+
+- Rebind recreated roles to existing permission plans, prove dependent channels before content, and preserve unrelated cells and emoji-only rendering without changing role ranks or saved-state formats (#1172).
+- Preflight explicit channel repair before target writes, preserve actual target facts while planning corrections or recreation, and require fresh permission proof before resend. Retain completed actions and actual dead-letter totals when repair stops (#1172).
+
+### Changed
+
+- Verify ordinary text-channel access on Stoat 0.16.2 with real non-owner visibility and send observations, including overlapping roles, administrator access and role/channel recreation. Unsupported and unverified controls make no target writes. Normal-DCE generated forum indexes and unproved thread inheritance remain unsupported; their correction stays separate in #1217 (#1172).
+
 - Document exact-access refusal, source-only refresh, explicit permission recovery and check schema version 2 in the existing operator guides. Keep the normal-DCE forum-index limitation explicit (#1172, #1217).
 
 - Accept pinned Stoat 0.16.2 creation defaults and add an explicit isolated permission-proof harness using existing migration/repair owners and non-owner access observations, bound to captured candidate bytes before credential access. Retain the real-DCE forum-index limitation (#1172, #1217).
@@ -53,16 +72,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Record the approved exact-access-or-stop policy and its recovery, evidence and reporting boundaries in Ferry's local architecture decision record (#1172).
 - Refresh bound source permission evidence through the existing Discord and atomic metadata owners, preserving prior files on failure or cancellation without target work (#1172).
 - Apply calculated channel permissions through the shared writer, preserving unrelated cells and requiring fresh matching readback, with typed stops instead of warning-only failures (#1172).
-- Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
-- Correct the CI dependency-install count in the project configuration comment (#1273).
 
 ## [2.43.21] - 2026-10-19
 
 ### Fixed
-
-- Rebind recreated roles to existing permission plans, prove dependent channels before content, and preserve unrelated cells and emoji-only rendering without changing role ranks or saved-state formats (#1172).
-
-- Preflight explicit channel repair before target writes, preserve actual target facts while planning corrections or recreation, and require fresh permission proof before resend. Retain completed actions and actual dead-letter totals when repair stops (#1172).
 
 - Capture the approved permission safety decision as separate snapshot evidence and verify its exact scoped backup, while retaining rejection of other paths (#1172).
 
