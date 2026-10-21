@@ -832,6 +832,40 @@ def test_creation_default_helper_requires_exact_pinned_contract() -> None:
         assert helper(version) is None
 
 
+def test_creation_default_0162_is_finite_and_source_pinned() -> None:
+    p = compiler_functions()
+    # stoatchat/stoatchat 483c1779, DEFAULT_PERMISSION_SERVER; independently
+    # observed on an empty owner-approved 0.16.2 server before implementation.
+    assert p.backend_creation_default("0.16.2") == 2276038022144
+    assert p.backend_creation_default("0.15.7") == 77014766592
+    for version in ("0.16.1", "0.16.3", "0.16.2-custom", " 0.16.2", "unknown"):
+        assert p.backend_creation_default(version) is None
+
+
+def test_creation_default_0162_zero_source_is_exact_without_new_grants() -> None:
+    p = compiler_functions()
+    source = source_evidence((0, (1 << 10) | (1 << 11)), ())
+    layout = replace(compiler_layout(source, new_server=True), planned_server_default=2276038022144)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems and len(plan.channels) == 1
+    assert layout.server_default is None and not layout.server_id
+    for members in (frozenset(), frozenset({"112"})):
+        actual = compiled_target_value(plan.channels[0], layout, members)
+        assert bool(actual & (1 << 20)) == source_oracle(source, members, 10)
+        assert bool(actual & (1 << 22)) == (
+            source_oracle(source, members, 10) and source_oracle(source, members, 11)
+        )
+        # The extra backend default bit is preserved, not mapped into a new source grant.
+        if actual & (1 << 20):
+            assert actual & (1 << 41)
+    assert not (plan.channels[0].default.allow | plan.channels[0].default.deny) & (1 << 41)
+    assert not p.PermissionRuntime(plan).ready
+    for wrong in (0, 2276038022145):
+        assert p.compile_permission_plan(
+            source, replace(layout, planned_server_default=wrong)
+        ).problems
+
+
 def test_creation_default_zero_source_matches_independent_access() -> None:
     p = compiler_functions()
     for grants in ((0, 0), (0, (1 << 10) | (1 << 11)), (1 << 100, 1 << 10)):

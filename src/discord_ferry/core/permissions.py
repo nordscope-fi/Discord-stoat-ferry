@@ -690,8 +690,9 @@ def _target_effect_problems(layout: TargetLayout, affected: int) -> tuple[Permis
 
 def backend_creation_default(version: str) -> int | None:
     """Return the pinned creation contract, never an observed server value."""
-    # Backend 5fb97ec4, DEFAULT_PERMISSION_SERVER, confirmed by captured 0.15.7 creation.
-    return 77014766592 if version == "0.15.7" else None
+    # DEFAULT_PERMISSION_SERVER at 5fb97ec4 (0.15.7) and 483c1779 (0.16.2),
+    # each independently confirmed by captured empty-server creation.
+    return {"0.15.7": 77014766592, "0.16.2": 2276038022144}.get(version)
 
 
 def validate_calculation_inputs(
@@ -816,8 +817,17 @@ def validate_calculation_inputs(
     everyone = raw_roles[source.guild_id].permissions
     expected_default = translate_permissions(everyone) if everyone is not None else None
     if not layout.server_id and expected_default == 0:
-        # Existing role creation skips zero, leaving the pinned backend default unchanged.
-        expected_default = backend_creation_default("0.15.7")
+        # Existing role creation skips zero. Preflight binds the exact backend
+        # version; the pure compiler permits only these pinned creation contracts.
+        creation_defaults = {
+            backend_creation_default("0.15.7"),
+            backend_creation_default("0.16.2"),
+        }
+        expected_default = (
+            layout.planned_server_default
+            if layout.planned_server_default in creation_defaults
+            else None
+        )
     if layout.planned_server_default is not None and (
         everyone is None or layout.planned_server_default != expected_default
     ):

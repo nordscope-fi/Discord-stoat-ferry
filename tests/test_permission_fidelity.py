@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import re
+import runpy
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -14,6 +17,7 @@ import pytest
 from aioresponses import CallbackResult, aioresponses
 
 from discord_ferry import discord
+from discord_ferry.core import engine
 from discord_ferry.core.engine import run_migration, run_repair
 from discord_ferry.core.http import new_session
 from discord_ferry.discord import client
@@ -30,6 +34,177 @@ from discord_ferry.state import load_state, save_state
 from tests.stoat_ids import stoat_id
 from tests.test_core_permissions import source_oracle, target_truth
 from tests.test_engine import _permission_preflight_case
+
+
+def smoke_module():
+    return runpy.run_path("scripts/permission-fidelity-smoke.py")
+
+
+def test_live_harness_requires_explicit_prerequisites(tmp_path, monkeypatch):
+    monkeypatch.delenv("FERRY_PERMISSION_TEST_TARGET", raising=False)
+    evidence = tmp_path / "result.json"
+    assert smoke_module()["main"](["--evidence", str(evidence)]) != 0
+    result = json.loads(evidence.read_text())
+    assert result["status"] == "unavailable"
+    assert result["target_write_attempts"] == 0
+    assert result["forum_correction_issue"] == 1217
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"isolated_synthetic": False},
+        {"api_base": "http://api.test"},
+        {"api_base": "https://user:synthetic-secret@api.test"},
+        {"backend_version": "unknown"},
+        {"server_id": "not-a-server"},
+        {"observer_credential": "Personal/STOAT_TOKEN/Secret"},
+    ],
+)
+def test_live_harness_refuses_unsafe_selection_before_credentials(tmp_path, monkeypatch, change):
+    settings = {
+        "isolated_synthetic": True,
+        "api_base": "https://api.test",
+        "backend_version": "0.16.2",
+        "server_id": stoat_id(31000),
+        "owner_credential": "Personal/STOAT_TOKEN/Secret",
+        "observer_credential": "Personal/STOAT_TEST_BASELINE/Secret",
+        "candidate_manifest": "docs/plans/.review/explicit-candidate.json",
+    }
+    settings.update(change)
+    selected = tmp_path / "target.json"
+    selected.write_text(json.dumps(settings))
+    monkeypatch.setenv("FERRY_PERMISSION_TEST_TARGET", str(selected))
+    monkeypatch.setattr(
+        "subprocess.run", lambda *args, **kwargs: pytest.fail("Unsafe target read a credential")
+    )
+    evidence = tmp_path / "result.json"
+    module = smoke_module()
+    monkeypatch.setitem(
+        module["main"].__globals__,
+        "candidate_identity",
+        lambda *args: pytest.fail("Unsafe target reached candidate validation"),
+    )
+    assert module["main"](["--evidence", str(evidence)]) != 0
+    result = json.loads(evidence.read_text())
+    assert result["status"] == "unavailable"
+    assert result["target_write_attempts"] == 0
+    assert "synthetic-secret" not in evidence.read_text()
+
+
+def test_live_harness_never_overwrites_previous_evidence(tmp_path, monkeypatch):
+    monkeypatch.delenv("FERRY_PERMISSION_TEST_TARGET", raising=False)
+    evidence = tmp_path / "result.json"
+    evidence.write_text('{"preserve":"previous-attempt"}')
+    before = evidence.read_bytes()
+    assert smoke_module()["main"](["--evidence", str(evidence)]) != 0
+    assert evidence.read_bytes() == before
+
+
+def test_live_harness_requires_candidate_before_credential_access(tmp_path, monkeypatch):
+    module = smoke_module()
+    settings = {
+        "isolated_synthetic": True,
+        "api_base": "https://api.test",
+        "backend_version": "0.16.2",
+        "server_id": stoat_id(31000),
+        "owner_credential": "Personal/STOAT_TOKEN/Secret",
+        "observer_credential": "Personal/STOAT_TEST_BASELINE/Secret",
+    }
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(settings))
+    monkeypatch.setenv("FERRY_PERMISSION_TEST_TARGET", str(target))
+    monkeypatch.setattr("shutil.which", lambda name: "pass-cli")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *args, **kwargs: pytest.fail("Unbound candidate read credentials")
+    )
+    assert module["main"](["--evidence", str(tmp_path / "result.json")]) != 0
+
+
+def test_live_harness_candidate_binding_reuses_snapshot_owner(tmp_path):
+    from tests.test_chunk_snapshot import assert_fixture_ok
+
+    module = smoke_module()
+    binding = module.get("candidate_identity")
+    assert callable(binding), "Live evidence must bind the actual captured candidate"
+    assert_fixture_ok(tmp_path, "interruption")
+    root = tmp_path / "repo"
+    evidence_root = root / "docs/plans/.review/chunk-snapshots"
+    manifest = evidence_root / "candidate.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    "docs/plans/.review/chunk-snapshots/chunks/1001/snapshot.json",
+                    "docs/plans/.review/chunk-snapshots/chunks/1010/snapshot.json",
+                ]
+            }
+        )
+    )
+    identity = binding(root, manifest)
+    last = json.loads((evidence_root / "chunks/1010/snapshot.json").read_text())
+    assert identity["candidate_tree"] == last["ending_git_tree"]
+    assert identity["candidate_snapshot_digest"] == last["digest_sha256"]
+    assert identity["application_commit"] == last["starting_commit"]
+    (root / "shared.txt").write_text("changed after capture\n")
+    with pytest.raises(module["ProofRefusedError"]):
+        binding(root, manifest)
+
+
+def test_live_harness_candidate_binding_checks_existing_doc_links(tmp_path):
+    from tests.test_chunk_snapshot import assert_fixture_ok
+
+    assert_fixture_ok(tmp_path, "interruption")
+    root = tmp_path / "repo"
+    evidence = root / "docs/plans/.review/chunk-snapshots"
+    snapshot = evidence / "chunks/1010/snapshot.json"
+    record = json.loads(snapshot.read_text())
+    subprocess.run(["git", "read-tree", record["ending_git_tree"]], cwd=root, check=True)
+    (root / ".github").mkdir(exist_ok=True)
+    (root / "CHANGELOG.md").write_text("Synthetic changes\n")
+    (root / ".github/CONTRIBUTING.md").write_text("Synthetic contributing guide\n")
+    links = {
+        "docs/changelog.md": "../CHANGELOG.md",
+        "docs/contributing.md": "../.github/CONTRIBUTING.md",
+    }
+    for name, target in links.items():
+        (root / name).symlink_to(target)
+    subprocess.run(
+        ["git", "add", "CHANGELOG.md", ".github/CONTRIBUTING.md", *links], cwd=root, check=True
+    )
+    tree = subprocess.check_output(["git", "write-tree"], cwd=root, text=True).strip()
+    record["ending_git_tree"] = tree
+    del record["digest_sha256"]
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    record["digest_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    snapshot.write_text(json.dumps(record))
+    manifest = evidence / "candidate.json"
+    manifest.write_text(json.dumps({"snapshots": [str(snapshot.relative_to(root))]}))
+    module = smoke_module()
+    assert module["candidate_identity"](root, manifest)["candidate_tree"] == tree
+    for name in links:
+        path = root / name
+        path.unlink()
+        path.symlink_to("../shared.txt")
+        with pytest.raises(module["ProofRefusedError"]):
+            module["candidate_identity"](root, manifest)
+        path.unlink()
+        path.symlink_to(links[name])
+
+
+def test_live_harness_independent_source_expectations(tmp_path):
+    module = smoke_module()
+    metadata, *_ = module["synthetic_source"](tmp_path, "ferry-test-")
+    source = metadata.permission_source
+    access = module["source_access"]
+    assert access(source, frozenset(), "222") == (False, False)
+    assert access(source, frozenset({"112"}), "222") == (True, True)
+    assert access(source, frozenset({"113"}), "222") == (True, False)
+    assert access(source, frozenset({"112", "113"}), "444") == (True, True)
+    assert access(source, frozenset({"112"}), "333") == (True, False)
+    assert all(
+        access(source, frozenset({"114"}), cid) == (True, True) for cid in ("222", "333", "444")
+    )
 
 
 class ControlledDestination:
@@ -280,6 +455,157 @@ def integration_context(tmp_path, *, common=False):
         upload_delay=0,
     )
     return config, metadata, destination
+
+
+@pytest.mark.parametrize("wrong_observer_access", [False, True])
+async def test_live_harness_composes_real_owners_and_rejects_false_access(
+    tmp_path, monkeypatch, wrong_observer_access
+):
+    module = smoke_module()
+    destination = ControlledDestination()
+    observer_id = stoat_id(31002)
+    member_roles = []
+    rate_limited_member_edit = False
+    traces = []
+    created_sessions = []
+    intercepted_writes = []
+
+    def traced_session(**kwargs):
+        session = new_session(**kwargs)
+        created_sessions.append(session)
+        for trace in session.trace_configs:
+            if trace not in traces:
+                traces.append(trace)
+        return session
+
+    monkeypatch.setitem(module["run_live"].__globals__, "new_session", traced_session)
+    monkeypatch.setattr("discord_ferry.core.engine.new_session", traced_session)
+    result = {
+        "status": "failed",
+        "target_write_attempts": 0,
+        "target_writes_acknowledged": 0,
+        "forum_correction_issue": 1217,
+        "real_dce_forum_index_support": False,
+    }
+    settings = {
+        "api_base": "https://api.test",
+        "server_id": destination.server_id,
+        "backend_version": "0.16.2",
+    }
+    member_path = f"/servers/{destination.server_id}/members/{observer_id}"
+
+    def observed_permissions(cid):
+        channel = destination.channels[cid]
+        value = destination.server["default_permissions"]
+        ordered = sorted(member_roles, key=lambda rid: -destination.server["roles"][rid]["rank"])
+        for rid in ordered:
+            pair = destination.server["roles"][rid]["permissions"]
+            value = (value | pair["a"]) & ~pair["d"]
+        pair = channel["default_permissions"]
+        value = (value | pair["a"]) & ~pair["d"]
+        for rid in ordered:
+            pair = channel["role_permissions"].get(rid, {"a": 0, "d": 0})
+            value = (value | pair["a"]) & ~pair["d"]
+        return value
+
+    async def transport(url, method, **kwargs):
+        nonlocal member_roles, rate_limited_member_edit
+        for trace in traces:
+            for handler in trace.on_request_start:
+                await handler(None, None, SimpleNamespace(method=method, url=url))
+        path = urlsplit(str(url)).path
+        body = kwargs.get("json") or {}
+        observer = kwargs.get("headers", {}).get("x-session-token") == "synthetic-observer"
+        reply = None
+        if path == "/users/@me" and observer:
+            reply = CallbackResult(payload={"_id": observer_id})
+        elif path == member_path:
+            if method == "PATCH" and not wrong_observer_access and not rate_limited_member_edit:
+                rate_limited_member_edit = True
+                reply = CallbackResult(
+                    status=429, headers={"X-RateLimit-Reset-After": "1"}, payload={}
+                )
+            elif method == "PATCH":
+                member_roles = list(body["roles"])
+            if reply is None:
+                reply = CallbackResult(payload={"roles": member_roles})
+        elif path.startswith("/channels/") and observer:
+            cid = path.split("/")[2]
+            value = observed_permissions(cid)
+            can_view = bool(value & (1 << 20)) or wrong_observer_access
+            can_send = can_view and bool(value & (1 << 22))
+            if method == "GET":
+                reply = CallbackResult(status=200 if can_view else 403, payload={})
+            elif not can_send:
+                reply = CallbackResult(
+                    status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+                )
+        elif path.startswith(f"/servers/{destination.server_id}/roles/") and method == "DELETE":
+            del destination.server["roles"][path.rsplit("/", 1)[1]]
+            reply = CallbackResult(status=204)
+        elif path.startswith("/channels/") and method == "DELETE":
+            cid = path.rsplit("/", 1)[1]
+            del destination.channels[cid]
+            destination.server["channels"].remove(cid)
+            reply = CallbackResult(status=204)
+        if reply is None:
+            reply = destination.call(method, url, kwargs)
+            if path == "/" and method == "GET":
+                reply.payload["revolt"] = "0.16.2"
+        # aioresponses bypasses aiohttp signals. Constructor observations below
+        # independently require the real trace on every owner-created session.
+        if method not in {"GET", "HEAD"}:
+            intercepted_writes.append((method, path))
+        for trace in traces:
+            for handler in trace.on_request_end:
+                await handler(
+                    None,
+                    None,
+                    SimpleNamespace(
+                        method=method, url=url, response=SimpleNamespace(status=reply.status or 200)
+                    ),
+                )
+        return reply
+
+    with aioresponses() as remote:
+        for method in ("get", "post", "put", "patch", "delete"):
+            verb = method.upper()
+
+            async def callback(url, verb=verb, **kwargs):
+                return await transport(url, verb, **kwargs)
+
+            getattr(remote, method)(
+                re.compile(r"^https://api\.test/.*$"), callback=callback, repeat=True
+            )
+        evidence = tmp_path / "result.json"
+        if wrong_observer_access:
+            with pytest.raises(module["ProofRefusedError"]):
+                await module["run_live"](
+                    settings, "synthetic-owner", "synthetic-observer", tmp_path, evidence, result
+                )
+            assert result["status"] != "passed"
+        else:
+            await module["run_live"](
+                settings, "synthetic-owner", "synthetic-observer", tmp_path, evidence, result
+            )
+            assert result["status"] == "passed"
+            assert len(result["observations"]) >= 30
+            assert all(row["passed"] for row in result["observations"])
+            assert result["refusal_controls"] == [
+                {"kind": "unverified", "target_write_attempts": 0},
+                {"kind": "unsupported", "target_write_attempts": 0},
+            ]
+            assert result["source_inputs"]["guild_id"] == "111"
+            assert len(result["source_inputs"]["roles"]) == 4
+            assert len(result["source_inputs"]["channels"]) == 3
+        assert result["observer_roles_restored"] and not member_roles
+        assert result["target_write_attempts"] == len(intercepted_writes)
+        assert len(created_sessions) >= 2
+        assert all(session.trace_configs == traces for session in created_sessions)
+        assert engine.new_session is traced_session
+    assert not destination.unknown
+    assert "synthetic-owner" not in evidence.read_text()
+    assert "synthetic-observer" not in evidence.read_text()
 
 
 def assert_independent_access(metadata, destination, state):
