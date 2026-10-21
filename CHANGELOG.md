@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Model expected changes made by existing role finalization, ordering and default writers separately from actual observations, requiring complete matching readback before permission readiness (#1172).
 - Define shared permission facts, refused plans and operation-local outcome records without changing migration behavior (#1172).
 - Record received Discord role and channel field names separately from parser defaults for source permission evidence (#1172).
 - Capture and save versioned raw permission evidence before translation, and reject malformed permission numbers before conversion (#1172).

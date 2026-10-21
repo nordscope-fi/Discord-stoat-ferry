@@ -200,7 +200,7 @@ class TargetRole:
 
 @dataclass(frozen=True)
 class PlannedRole:
-    """Proposed role facts bound to source identity, before target creation."""
+    """Proposed role facts bound to source identity, separate from observation."""
 
     source_id: str
     permissions: PermissionCell
@@ -244,6 +244,7 @@ class TargetLayout:
     fingerprint: str = ""
     planned_role_facts: tuple[PlannedRole, ...] = ()
     planned_server_default: int | None = None
+    planned_role_updates: tuple[PlannedRole, ...] = ()
 
     def __post_init__(self) -> None:
         if self.server_id:
@@ -252,6 +253,7 @@ class TargetLayout:
         _records(self.roles, TargetRole)
         _records(self.channels, TargetChannel)
         _records(self.planned_role_facts, PlannedRole)
+        _records(self.planned_role_updates, PlannedRole)
         _integer(self.planned_server_default, "planned server default", unknown=True)
         _pairs(self.planned_roles)
         _pairs(self.planned_channels)
@@ -593,8 +595,27 @@ def _permission_mapping() -> dict[int, tuple[int, ...]]:
     }
 
 
+def _expected_existing_roles(layout: TargetLayout) -> dict[str, TargetRole | PlannedRole]:
+    """Expected owner results, never observations or readback authority."""
+    bindings = dict(layout.planned_roles)
+    updates = {bindings.get(role.source_id): role for role in layout.planned_role_updates}
+    return {role.id: updates.get(role.id, role) for role in layout.roles}
+
+
+def _role_update_problems(layout: TargetLayout) -> tuple[PermissionProblem, ...]:
+    mapped = dict(layout.planned_roles)
+    sources = [role.source_id for role in layout.planned_role_updates]
+    if len(set(sources)) != len(sources) or any(mapped.get(sid) is None for sid in sources):
+        return (
+            PermissionProblem(
+                "unverified", (), None, "Bind unique updates only to existing mapped roles"
+            ),
+        )
+    return ()
+
+
 def _calculation_roles(layout: TargetLayout) -> tuple[str, ...]:
-    actual = {role.id: role for role in layout.roles}
+    actual = _expected_existing_roles(layout)
     future = {role.source_id: role for role in layout.planned_role_facts}
     priorities: dict[str, int] = {}
     for source, target in layout.planned_roles:
@@ -614,15 +635,15 @@ def _target_effect_problems(layout: TargetLayout, affected: int) -> tuple[Permis
 
     actual = {role.id for role in layout.roles}
     targets = {target for _, target in layout.planned_roles if target is not None}
-    for role in layout.roles:
+    for role_id, role in _expected_existing_roles(layout).items():
         assert role.permissions is not None
         if role.permissions.deny & affected:
             return refuse(
-                "unsupported", "Server-role deny effects require an exact supported model", role.id
+                "unsupported", "Server-role deny effects require an exact supported model", role_id
             )
-        if role.id not in targets and role.permissions.allow & affected:
+        if role_id not in targets and role.permissions.allow & affected:
             return refuse(
-                "unsupported", "Native target role access has no source intent binding", role.id
+                "unsupported", "Native target role access has no source intent binding", role_id
             )
     for proposed in layout.planned_role_facts:
         if proposed.permissions.deny & affected:
@@ -675,7 +696,7 @@ def validate_calculation_inputs(
     ):
         return refuse("unverified", "Bind a complete target service and permission context")
     if layout.server_id:
-        if layout.server_default is None or layout.planned_server_default is not None:
+        if layout.server_default is None:
             return refuse(
                 "unverified", "Read the actual server default separately from planned values"
             )
@@ -706,7 +727,13 @@ def validate_calculation_inputs(
         return refuse("unverified", "Supply separate facts for each uncreated mapped role")
     if any(role.permissions is None or role.rank is None for role in layout.roles):
         return refuse("unverified", "Read every target role grant, deny and rank")
-    ranks = tuple(role.rank for role in layout.roles) + tuple(
+    update_problems = _role_update_problems(layout)
+    if update_problems:
+        return update_problems
+    observed_ranks = tuple(role.rank for role in layout.roles)
+    if len(set(observed_ranks)) != len(observed_ranks):
+        return refuse("unverified", "Read unambiguous actual target role priority")
+    ranks = tuple(role.rank for role in _expected_existing_roles(layout).values()) + tuple(
         role.rank for role in layout.planned_role_facts
     )
     if len(set(ranks)) != len(ranks):
@@ -752,8 +779,21 @@ def validate_calculation_inputs(
             return refuse(
                 "unverified", "Bind planned grants to the existing role creation owner", sid
             )
+    for proposed in layout.planned_role_updates:
+        target = mappings[proposed.source_id]
+        assert target is not None
+        raw = raw_roles[proposed.source_id].permissions
+        if raw is None or proposed.permissions not in (
+            actual[target].permissions,
+            PermissionCell(translate_permissions(raw), 0),
+        ):
+            return refuse(
+                "unverified",
+                "Bind updated grants to the existing role finalization owner",
+                proposed.source_id,
+            )
     everyone = raw_roles[source.guild_id].permissions
-    if not layout.server_id and (
+    if layout.planned_server_default is not None and (
         everyone is None or layout.planned_server_default != translate_permissions(everyone)
     ):
         return refuse(
@@ -840,7 +880,7 @@ def compile_supported_bits(
         1 << bit for bit in {target for targets in mapping.values() for target in targets}
     )
     source_roles = {role.id: role for role in source.roles}
-    actual = {role.id: role for role in layout.roles}
+    actual = _expected_existing_roles(layout)
     future = {role.source_id: role for role in layout.planned_role_facts}
     bindings = dict(layout.planned_roles)
     ordered = _calculation_roles(layout)
@@ -979,7 +1019,11 @@ class PermissionReadback:
 
     def __post_init__(self) -> None:
         _fact(self.layout, TargetLayout)
-        if self.layout.planned_role_facts or self.layout.planned_server_default is not None:
+        if (
+            self.layout.planned_role_facts
+            or self.layout.planned_role_updates
+            or self.layout.planned_server_default is not None
+        ):
             raise ValueError("Proposed role/default facts cannot stand in for observed readback")
         _records(self.problems, PermissionProblem)
 
@@ -1115,10 +1159,7 @@ class PermissionRuntime:
                     if target is not None
                 )
                 or any(role.permissions is None or role.rank is None for role in layout.roles)
-                or (
-                    layout.server_id
-                    and (layout.server_default is None or layout.planned_server_default is not None)
-                )
+                or (layout.server_id and layout.server_default is None)
                 or (
                     not layout.server_id
                     and (
@@ -1134,7 +1175,13 @@ class PermissionRuntime:
                     "Bind complete source, mapping and target assumptions",
                     stage=stage,
                 )
-            ranks = tuple(role.rank for role in layout.roles) + tuple(
+            update_problems = _role_update_problems(layout)
+            if update_problems:
+                raise self.stop(update_problems[0].reason, stage=stage, problems=update_problems)
+            observed_ranks = tuple(role.rank for role in layout.roles)
+            if len(set(observed_ranks)) != len(observed_ranks):
+                self._refuse("unverified", "Bind unambiguous observed target priority", stage=stage)
+            ranks = tuple(role.rank for role in _expected_existing_roles(layout).values()) + tuple(
                 role.rank for role in layout.planned_role_facts
             )
             if len(set(ranks)) != len(ranks):
@@ -1363,14 +1410,18 @@ class PermissionRuntime:
             )
         base = plan.target_layout
         expected_roles: dict[str, tuple[PermissionCell, int]] = {}
-        for role in base.roles:
+        for role_id, role in _expected_existing_roles(base).items():
             assert role.permissions is not None and role.rank is not None
-            expected_roles[role.id] = (role.permissions, role.rank)
+            expected_roles[role_id] = (role.permissions, role.rank)
         for planned_role in base.planned_role_facts:
             actual_id = self._roles[planned_role.source_id]
             assert actual_id is not None
             expected_roles[actual_id] = (planned_role.permissions, planned_role.rank)
-        expected_default = base.server_default if base.server_id else base.planned_server_default
+        expected_default = (
+            base.planned_server_default
+            if base.planned_server_default is not None
+            else base.server_default
+        )
         if (
             layout.server_default != expected_default
             or {rid: (role.permissions, role.rank) for rid, role in roles.items()} != expected_roles

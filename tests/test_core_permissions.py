@@ -1289,6 +1289,196 @@ def runtime_case(*, grants=((1 << 10) | (1 << 11), (1 << 10) | (1 << 11))):
     return p, runtime, plan, actual
 
 
+def owner_transition_case(*, default_change=False):
+    p = compiler_functions()
+    assert "planned_role_updates" in p.TargetLayout.__dataclass_fields__, (
+        "Expected existing-owner changes need separate facts"
+    )
+    server, native, old, new, channel = (f"01J5T{i:021d}" for i in range(17001, 17006))
+    source = source_evidence((1 << 10, 1 << 11, 0), ())
+    layout = p.TargetLayout(
+        service="https://target.test",
+        server_id=server,
+        roles=(
+            p.TargetRole(native, p.PermissionCell(0, 0), 0),
+            p.TargetRole(old, p.PermissionCell(0, 0), 1),
+        ),
+        server_default=0 if default_change else 1 << 20,
+        channels=(p.TargetChannel(channel, p.PermissionCell(0, 0), ()),),
+        planned_roles=(("112", old), ("113", None)),
+        planned_channels=(("222", channel),),
+        planned_role_facts=(p.PlannedRole("113", p.PermissionCell(0, 0), 1),),
+        planned_role_updates=(p.PlannedRole("112", p.PermissionCell(1 << 22, 0), 2),),
+        planned_server_default=(1 << 20) if default_change else None,
+        fingerprint="actual-before-owner-writes",
+    )
+    return p, source, layout, new
+
+
+def owner_transition_readback(p, layout, runtime, new):
+    from discord_ferry.migrator.verify import decode_permission_readback
+    from discord_ferry.state import MigrationState
+
+    native, old = layout.roles
+    channel_id = layout.channels[0].id
+    channel = runtime.channel_plan(channel_id)
+    # These are synthetic backend replies, decoded through the production reader.
+    server = {
+        "_id": layout.server_id,
+        "default_permissions": 1 << 20,
+        "channels": [channel_id],
+        "roles": {
+            native.id: {"_id": native.id, "rank": 0, "permissions": {"a": 0, "d": 0}},
+            old.id: {"_id": old.id, "rank": 2, "permissions": {"a": 1 << 22, "d": 0}},
+            new: {"_id": new, "rank": 1, "permissions": {"a": 0, "d": 0}},
+        },
+    }
+    remote = {
+        "_id": channel_id,
+        "server": layout.server_id,
+        "channel_type": "TextChannel",
+        "default_permissions": {"a": channel.default.allow, "d": channel.default.deny},
+        "role_permissions": {rid: {"a": cell.allow, "d": cell.deny} for rid, cell in channel.roles},
+    }
+    observed = decode_permission_readback(
+        server,
+        (remote,),
+        server,
+        MigrationState(stoat_server_id=layout.server_id),
+        service=layout.service,
+        channel_ids=(channel_id,),
+    )
+    assert not observed.problems
+    return observed
+
+
+@pytest.mark.parametrize("default_change", [False, True])
+def test_owner_transition_compiles_without_replacing_before_facts(default_change):
+    p, source, layout, _ = owner_transition_case(default_change=default_change)
+    original = replace(layout)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems, plan.problems
+    assert layout == original and plan.target_layout is layout
+    assert layout.roles[1].rank == 1 and layout.roles[1].permissions.allow == 0
+    # Independent concrete after-state control, not an observed-before substitute.
+    final = replace(
+        layout,
+        roles=(
+            layout.roles[0],
+            replace(layout.roles[1], permissions=p.PermissionCell(1 << 22, 0), rank=2),
+        ),
+        server_default=1 << 20,
+        planned_server_default=None,
+        planned_role_updates=(),
+    )
+    for assigned in (
+        frozenset(),
+        frozenset({"112"}),
+        frozenset({"113"}),
+        frozenset({"112", "113"}),
+    ):
+        actual = compiled_target_value(plan.channels[0], final, assigned)
+        assert bool(actual & (1 << 20)) == source_oracle(source, assigned, 10)
+        assert bool(actual & (1 << 22)) == source_oracle(source, assigned, 11)
+
+
+@pytest.mark.parametrize("default_change", [False, True])
+def test_owner_transition_requires_fresh_complete_actual_after_state(default_change):
+    p, source, layout, new = owner_transition_case(default_change=default_change)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    runtime = p.PermissionRuntime(plan)
+    runtime.bind_role("113", new)
+    assert not runtime.ready
+    observed = owner_transition_readback(p, layout, runtime, new)
+    runtime.verify(layout.channels[0].id, observed)
+    assert runtime.require(layout.channels[0].id) is observed
+    assert observed.layout.planned_role_updates == ()
+
+
+@pytest.mark.parametrize("change", ["grants", "rank", "identity", "default", "missing", "native"])
+def test_owner_transition_refuses_partial_or_unexpected_after_state(change):
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, source, layout, new = owner_transition_case()
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    runtime = p.PermissionRuntime(plan)
+    runtime.bind_role("113", new)
+    observed = owner_transition_readback(p, layout, runtime, new)
+    roles = list(observed.layout.roles)
+    index = next(i for i, r in enumerate(roles) if r.id == layout.roles[1].id)
+    if change == "grants":
+        roles[index] = replace(roles[index], permissions=p.PermissionCell(0, 0))
+    elif change == "rank":
+        roles[index] = replace(roles[index], rank=1)
+    elif change == "identity":
+        roles[index] = replace(roles[index], id="unexpected-role")
+    elif change == "missing":
+        roles.pop(index)
+    elif change == "native":
+        native_index = next(i for i, r in enumerate(roles) if r.id == layout.roles[0].id)
+        roles[native_index] = replace(roles[native_index], rank=7)
+    changed = replace(observed.layout, roles=tuple(roles))
+    if change == "default":
+        changed = replace(changed, server_default=0)
+    with pytest.raises(PermissionSafetyError):
+        runtime.verify(layout.channels[0].id, p.PermissionReadback(changed))
+    assert not runtime.ready
+
+
+@pytest.mark.parametrize(
+    "change", ["duplicate", "unmapped", "native", "future", "grant", "tie", "default"]
+)
+def test_owner_transition_refuses_invalid_proposals(change):
+    p, source, layout, _ = owner_transition_case()
+    update = layout.planned_role_updates[0]
+    if change == "duplicate":
+        layout = replace(layout, planned_role_updates=(update, update))
+    elif change == "unmapped":
+        layout = replace(layout, planned_role_updates=(replace(update, source_id="999"),))
+    elif change == "native":
+        layout = replace(
+            layout, planned_role_updates=(replace(update, source_id=layout.roles[0].id),)
+        )
+    elif change == "future":
+        layout = replace(layout, planned_role_updates=(replace(update, source_id="113"),))
+    elif change == "grant":
+        layout = replace(
+            layout, planned_role_updates=(replace(update, permissions=p.PermissionCell(1, 0)),)
+        )
+    elif change == "tie":
+        layout = replace(layout, planned_role_updates=(replace(update, rank=1),))
+    elif change == "default":
+        layout = replace(layout, planned_server_default=1 << 22)
+    plan = p.compile_permission_plan(source, layout)
+    assert plan.problems and not plan.channels
+
+
+def test_owner_transition_readback_cannot_contain_proposed_updates():
+    p, _, layout, _ = owner_transition_case()
+    layout = replace(
+        layout,
+        planned_roles=(),
+        planned_channels=(),
+        planned_role_facts=(),
+        planned_server_default=None,
+    )
+    with pytest.raises(ValueError, match="Proposed"):
+        p.PermissionReadback(layout)
+    with pytest.raises(ValueError):
+        replace(layout, planned_role_updates=list(layout.planned_role_updates))
+
+
+def test_owner_transition_fingerprint_binds_separate_expectations():
+    p, source, layout, _ = owner_transition_case()
+    first = p.compile_permission_plan(source, layout)
+    changed = replace(layout, planned_server_default=1 << 20)
+    second = p.compile_permission_plan(source, changed)
+    assert not first.problems and not second.problems
+    assert first.calculation_fingerprint != second.calculation_fingerprint
+
+
 def test_permission_plan_is_not_runtime_authority() -> None:
     from discord_ferry.errors import PermissionSafetyError
 
