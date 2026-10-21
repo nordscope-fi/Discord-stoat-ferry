@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Document exact-access refusal, source-only refresh, explicit permission recovery and check schema version 2 in the existing operator guides. Keep the normal-DCE forum-index limitation explicit (#1172, #1217).
+
 - Accept pinned Stoat 0.16.2 creation defaults and add an explicit isolated permission-proof harness using existing migration/repair owners and non-owner access observations, bound to captured candidate bytes before credential access. Retain the real-DCE forum-index limitation (#1172, #1217).
 
 - Add actual-owner integration checks for multi-role access, incremental delivery identities, partial-write recovery, nested retry authority, source-only refresh and refusal after access changes (#1172).

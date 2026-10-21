@@ -222,7 +222,10 @@ Before creating anything on Stoat, Ferry shows a review summary.
     The CLI prints a summary table before proceeding. In orchestrated mode this happens automatically; in offline mode it appears after validation.
 
 !!! info "Permission migration"
-    When you provide a Discord token (1-Click mode), Ferry fetches role permissions and channel overrides directly from the Discord API and translates them to Stoat equivalents. In offline mode (no Discord token), roles are created without permissions, you will need to set them manually on Stoat.
+    In 1-Click mode, Ferry captures source permission evidence from Discord. Offline mode needs
+    complete matching cached evidence. Missing evidence or access that cannot be preserved stops
+    the operation instead of creating channels without proved access. See
+    [permission recovery](../guides/earlier-migrations.md#recover-channel-access-before-continuing).
 
 ---
 
@@ -293,11 +296,11 @@ Before creating anything on Stoat, Ferry shows a review summary.
 
 After a successful migration:
 
-- All channels and categories are created in the same structure as Discord
+- Selected supported channels and categories are recreated; unprovable access stops the operation
 - Channels marked not safe for work (NSFW) are correctly flagged
 - Channel permission overrides (@everyone and per-role) are applied
-- Forum posts are grouped into dedicated categories named after the parent forum
-- Roles are recreated with colours, hierarchy order, and permissions preserved
+- Normal DCE forum-post exports do not currently produce a supported generated forum index; see [known limitations](../guides/known-limitations.md#structural)
+- Roles are recreated with colours and hierarchy order; channel access must be proved before content, and members must be assigned separately
 - Messages appear under the original author's name and avatar, so conversations look natural
 - Original timestamps appear at the start of each message: `*[2024-01-15 14:30 UTC]*`
 - Embeds are preserved with uploaded thumbnails and images

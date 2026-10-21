@@ -14,13 +14,13 @@ Ferry's command-line interface provides the same migration capability as the GUI
 
 ## Commands
 
-Ferry has twelve top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `backfill-roles`, `retry`, `probe`, and `tls-check`.
+Ferry has thirteen top-level commands: `migrate`, `validate`, `build`, `export-blueprint`, `rollback`, `stats`, `check`, `repair`, `backfill-roles`, `retry`, `refresh-permissions`, `probe`, and `tls-check`.
 
 ---
 
 ## `ferry validate`
 
-Parse a DiscordChatExporter export and report what was found. Makes **zero network calls** — nothing is sent to your Stoat server.
+Parse a DiscordChatExporter export and report what was found. Makes **zero network calls**, nothing is sent to your Stoat server.
 
 ```
 ferry validate EXPORT_DIR
@@ -81,7 +81,7 @@ ferry migrate [OPTIONS]
 | `--server-name TEXT` | | | Name for the new server (defaults to the Discord server name) |
 | `--create-invite` / `--no-create-invite` | | on | Create an invite link to the migrated server when the migration finishes. The invite URL is printed in the completion summary and included in the reports. |
 | `--invite-channel-id TEXT` | | | Discord channel ID to base the invite on. By default Ferry picks the first eligible text channel. |
-| `--skip-messages` | | false | Import structure only — no messages sent |
+| `--skip-messages` | | false | Import structure only, no messages sent |
 | `--skip-emoji` | | false | Do not upload custom emoji |
 | `--skip-reactions` | | false | Do not add reactions |
 | `--skip-threads` | | false | Do not migrate threads or forum posts |
@@ -90,7 +90,7 @@ ferry migrate [OPTIONS]
 | `--upload-delay FLOAT` | | 0.5 | Seconds between Autumn file uploads |
 | `--output-dir TEXT` | | `./ferry-output` | Directory for the migration report and state file |
 | `--resume` | | false | Resume an interrupted migration using the saved state file |
-| `--incremental` | | false | Delta migration — only migrate messages newer than the last completed run per channel. Cannot be combined with `--resume`. |
+| `--incremental` | | false | Delta migration, only migrate messages newer than the last completed run per channel. Cannot be combined with `--resume`. |
 | `--force` | | false | Override DCE export freshness errors (>30 days old) and other soft warnings |
 | `--dry-run` | | false | Run all phases without making API calls; produces synthetic IDs for validation |
 | `--max-channels INT` | | 200 | Channel limit; raise for self-hosted instances with custom limits |
@@ -139,7 +139,7 @@ Ferry also reads a handful of environment variables outside the `.env` file:
 ---
 
 !!! warning "Concurrency on the official service"
-    Raising `--max-concurrent-channels` / `--max-concurrent-requests` against `api.stoat.chat` usually makes runs **slower** — the official rate limits trigger 429 backoff. Ferry prints a warning when you try. These flags are for self-hosted instances with relaxed limits.
+    Raising `--max-concurrent-channels` / `--max-concurrent-requests` against `api.stoat.chat` usually makes runs **slower**, the official rate limits trigger 429 backoff. Ferry prints a warning when you try. These flags are for self-hosted instances with relaxed limits.
 
 !!! note "Two flags named --max-concurrent-requests"
     `ferry migrate --max-concurrent-requests` controls migration API calls. `ferry rollback` has an unrelated flag of the same name that controls concurrent channel deletions.
@@ -259,9 +259,9 @@ Ferry refuses a blueprint file larger than 10 MiB, or nested too deeply, before 
 
 Ferry includes three built-in server templates:
 
-- **gaming** — Admin, Moderator, and Member roles with General, Voice, and Gaming categories
-- **community** — Admin, Moderator, Helper, and Member roles with Welcome, General, and Voice categories
-- **education** — Instructor, TA, and Student roles with Announcements, Coursework, and Discussion categories
+- **gaming**, Admin, Moderator, and Member roles with General, Voice, and Gaming categories
+- **community**, Admin, Moderator, Helper, and Member roles with Welcome, General, and Voice categories
+- **education**, Instructor, TA, and Student roles with Announcements, Coursework, and Discussion categories
 
 Each template includes appropriate role permissions and channel structures.
 
@@ -316,7 +316,7 @@ The GUI export page offers the same optional metadata folder. A selected cache m
 
 ## `ferry rollback`
 
-Reverse a recorded migration by deleting Ferry-created channels, roles, custom emoji, and Ferry-owned categories from the Stoat target server. Reads `state.json` for the entity IDs to delete. Idempotent: 404 responses are treated as "already deleted" — re-runs are clean no-ops. **Autumn-hosted attachments are not removed** (no public DELETE endpoint for Autumn files; see `known-limitations.md`).
+Reverse a recorded migration by deleting Ferry-created channels, roles, custom emoji, and Ferry-owned categories from the Stoat target server. Reads `state.json` for the entity IDs to delete. Idempotent: 404 responses are treated as "already deleted", re-runs are clean no-ops. **Autumn-hosted attachments are not removed** (no public DELETE endpoint for Autumn files; see `known-limitations.md`).
 
 ```
 ferry rollback --output-dir <path> [OPTIONS]
@@ -340,13 +340,13 @@ ferry rollback --output-dir <path> [OPTIONS]
 | Code | Meaning |
 |------|---------|
 | 0 | Rollback completed with no failures |
-| 1 | Engine error, or one or more entities failed to delete (DLQ — see `state.rollback_progress.failures`) |
+| 1 | Engine error, or one or more entities failed to delete (DLQ, see `state.rollback_progress.failures`) |
 | 2 | `state.json` missing or unreadable |
 | 130 | Ctrl+C or user aborted at the confirmation prompt |
 
 ### Confirmation Gate
 
-Before any DELETE call, rollback prints a Rich table with the counts of entities to delete plus any **untracked-Ferry-suspect** channels — channels present on the Stoat server but absent from `state.channel_map` (likely orphans from a crashed prior migration). Each suspect row shows: name, creation time (decoded from the channel's ULID), and the Stoat channel ID. You opt in to deleting each suspect individually; `--yes` skips opt-in and proceeds with mapped entities only (safe default — never auto-deletes suspects).
+Before any DELETE call, rollback prints a Rich table with the counts of entities to delete plus any **untracked-Ferry-suspect** channels, channels present on the Stoat server but absent from `state.channel_map` (likely orphans from a crashed prior migration). Each suspect row shows: name, creation time (decoded from the channel's ULID), and the Stoat channel ID. You opt in to deleting each suspect individually; `--yes` skips opt-in and proceeds with mapped entities only (safe default, never auto-deletes suspects).
 
 ### Examples
 
@@ -371,7 +371,7 @@ ferry rollback --output-dir ./ferry-output --force-unlock
 
 ## `ferry stats`
 
-Print aggregate stats for a completed (or in-progress) migration. Read-only — loads `state.json` and `message_map.json` from the output directory and renders a Rich-table summary to the console. Makes **zero network calls** — no Stoat, Discord, or Autumn API.
+Print aggregate stats for a completed (or in-progress) migration. Read-only, loads `state.json` and `message_map.json` from the output directory and renders a Rich-table summary to the console. Makes **zero network calls**, no Stoat, Discord, or Autumn API.
 
 Use this after a migration has finished (or after a crash) to see what got migrated, what failed, and how close you came to a perfect fidelity score, without re-running anything.
 
@@ -383,18 +383,18 @@ ferry stats OUTPUT_DIR
 
 ### What gets rendered
 
-A single Rich table titled `Migration Stats — Stoat ID: <id>` with these sections:
+A single Rich table titled `Migration Stats, Stoat ID: <id>` with these sections:
 
-- **Entities** — counts of channels, roles, categories, emojis, and messages migrated.
-- **Counters** — attachments uploaded/skipped, pins applied, reactions applied, replies linked/total, embeds total/dropped, failed messages, prior messages total.
-- **Fidelity** — the overall fidelity score plus five sub-scores (messages, attachments, embeds, replies, reactions). Sub-scores render as `n/a` when the corresponding category had no items in the migration (e.g., a server with no custom embeds).
-- **Errors / Warnings** — counts plus a truncated 80-character preview of the most recent message in each list.
-- **Timing** — elapsed wall-clock as `HH:MM:SS` when the migration completed, `in progress` when it was interrupted before completion, or `unknown` when timestamps are unavailable.
+- **Entities**, counts of channels, roles, categories, emojis, and messages migrated.
+- **Counters**, attachments uploaded/skipped, pins applied, reactions applied, replies linked/total, embeds total/dropped, failed messages, prior messages total.
+- **Fidelity**, the overall fidelity score plus five sub-scores (messages, attachments, embeds, replies, reactions). Sub-scores render as `n/a` when the corresponding category had no items in the migration (e.g., a server with no custom embeds).
+- **Errors / Warnings**, counts plus a truncated 80-character preview of the most recent message in each list.
+- **Timing**, elapsed wall-clock as `HH:MM:SS` when the migration completed, `in progress` when it was interrupted before completion, or `unknown` when timestamps are unavailable.
 
 Two optional sub-sections render only when present in the state:
 
-- **Per-Channel Messages** — top 20 channels by message count, with a `+N more` footer if applicable. Omitted when no per-channel counts are recorded.
-- **Rollback** — counters from `state.rollback_progress` (channels deleted, roles deleted, categories cleaned, failures). Omitted when no rollback was performed.
+- **Per-Channel Messages**, top 20 channels by message count, with a `+N more` footer if applicable. Omitted when no per-channel counts are recorded.
+- **Rollback**, counters from `state.rollback_progress` (channels deleted, roles deleted, categories cleaned, failures). Omitted when no rollback was performed.
 
 When the migration was a dry-run, the title carries a `[DRY-RUN]` badge.
 
@@ -417,7 +417,7 @@ ferry stats ~/migrations/my-server-2026-05-15/
 ```
 
 !!! note "What stats does NOT do"
-    `ferry stats` is read-only. It does not write to `state.json`, does not call any API, and does not modify the Stoat server. For a richer Markdown report including the original Discord export context, use the `migration_report.md` file written into the output directory by `ferry migrate` — it includes fields that require the original DCE exports to compute.
+    `ferry stats` is read-only. It does not write to `state.json`, does not call any API, and does not modify the Stoat server. For a richer Markdown report including the original Discord export context, use the `migration_report.md` file written into the output directory by `ferry migrate`, it includes fields that require the original DCE exports to compute.
 
 ---
 
@@ -465,13 +465,17 @@ A `warn` on its own does not fail the command, because nothing has been lost. Us
 
 ### How scripts identify the JSON contract
 
-With `--json`, the top-level object contains `"schema_version": 1`. Scripts should reject a
+With `--json`, the top-level object contains `"schema_version": 2`. Scripts should reject a
 version they do not recognise instead of guessing whether its fields and result vocabulary still
 mean the same thing.
 
 The integer increases when a top-level or result field, data type, status, kind, or meaning
 changes. Adding a field or vocabulary value counts even when older consumers could ignore it.
 Ordinary result values and free-form `detail` text do not change the contract.
+
+Permission results distinguish verified access, mismatches, unsupported rules and unverified
+evidence. Check never changes grants or authorizes later writes. Exit code 0 can include
+unverifiable results. See [permission recovery](earlier-migrations.md#recover-channel-access-before-continuing).
 
 ### What Check cannot tell you
 
@@ -639,9 +643,10 @@ ferry retry <output-dir> --export-dir <export-dir> [OPTIONS]
 | `--stoat-url URL` | Stoat API base URL. Or set `STOAT_URL` |
 | `--token TOKEN` | Stoat user token. Prefer the `STOAT_TOKEN` environment variable |
 
-Cheaper than `ferry repair`, and narrower. It contacts the server only to send, where repair spends
-a request per channel checking first. Use `retry` when you already know messages failed, and
-`repair` when you want to find out what is wrong.
+Retry handles recorded failures rather than searching for missing content. It reads destination
+permissions before sending and refuses unsupported, unverified or changed access. It does not
+correct grants. Use [permission recovery](earlier-migrations.md#recover-channel-access-before-continuing)
+when that check stops the operation.
 
 ### Exit codes
 
@@ -651,6 +656,25 @@ a request per channel checking first. Use `retry` when you already know messages
 | 1 | Something is still failing |
 | 2 | The state file or the export directory could not be read |
 | 130 | Interrupted |
+
+## `ferry refresh-permissions`
+
+Refresh source permission evidence for an existing export and migration output without
+re-exporting messages or contacting Stoat.
+
+```bash
+ferry refresh-permissions ./ferry-output --export-dir ./export --discord-server-id SOURCE_GUILD_ID
+```
+
+| Option | Description |
+|---|---|
+| `--export-dir PATH` | Required existing DCE export directory |
+| `--discord-server-id TEXT` | Required source guild ID matching the export and output |
+
+Use `DISCORD_TOKEN` or the hidden prompt, not a token in the command line. Metadata replacement
+is atomic; failure or cancellation preserves the previous files. Refresh does not repair target
+permissions or grant authority to resume. Follow the [recovery walkthrough](earlier-migrations.md#recover-channel-access-before-continuing)
+for read-only Check and explicit Repair.
 
 ## `ferry probe`
 
@@ -675,11 +699,11 @@ Probe creates its test entities (channels, uploads) on the server you point it a
 
 ### What it checks
 
-- **Upload size limits** — the limits the instance's file server (Autumn) advertises per upload category, compared against the values Ferry assumes. A mismatch is reported as a warning.
-- **Upload boundary enforcement** *(with `--deep`)* — uploads test files at the exact advertised limit and one byte over for each upload category. Reports whether the server accepts or rejects each. Non-attachment tags require valid image files, which the probe generates as padded PNGs. Probe entities are torn down afterwards, but uploaded bytes persist in Autumn.
+- **Upload size limits**, the limits the instance's file server (Autumn) advertises per upload category, compared against the values Ferry assumes. A mismatch is reported as a warning.
+- **Upload boundary enforcement** *(with `--deep`)*, uploads test files at the exact advertised limit and one byte over for each upload category. Reports whether the server accepts or rejects each. Non-attachment tags require valid image files, which the probe generates as padded PNGs. Probe entities are torn down afterwards, but uploaded bytes persist in Autumn.
 - **Voice channels:** reads `features.livekit.enabled` from the instance. When LiveKit is enabled, the probe creates and reads back a test voice channel. If creation fails during migration, Ferry retries the channel as text.
-- **Webhooks** — creates a test channel and checks whether webhooks can be created on the instance.
-- **Rate limiting** — what rate-limit information the instance exposes in its responses.
+- **Webhooks**, creates a test channel and checks whether webhooks can be created on the instance.
+- **Rate limiting**, what rate-limit information the instance exposes in its responses.
 
 ### Exit Codes
 

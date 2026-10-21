@@ -392,13 +392,13 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 
 ## Permission and Role Issues
 
-### Per-member overrides skipped
+### Permission evidence is missing or unsupported
 
 | | |
 |---|---|
-| **Symptom** | Ferry warns "per-member overrides skipped" during structure creation |
-| **Cause** | Discord allows channel-level permission overrides for individual users. Stoat only supports per-role overrides, so user-specific permissions cannot be migrated directly. |
-| **Solution** | As a workaround, create single-user roles on your Stoat server for any users who need individual channel permissions, then assign those roles manually after migration. |
+| **Symptom** | Migration, Retry or Repair stops with a permission outcome instead of continuing |
+| **Cause** | Source evidence is missing or mismatched, target access changed, or selected rules cannot be represented and proved. Per-member overrides stop the whole operation; they are not skipped. |
+| **Solution** | Keep the export, output, state and receipts. Follow [permission recovery](earlier-migrations.md#recover-channel-access-before-continuing): source refresh, read-only Check, then explicit Repair for supported corrections. Do not add helper roles or delete progress to bypass a refusal. |
 
 ---
 
