@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import textwrap
 from collections.abc import Callable
@@ -29,9 +30,10 @@ from discord_ferry.core.engine import (
     run_retry_failed,
     run_rollback,
 )
-from discord_ferry.core.http import format_proxy_notices
+from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret, sanitize_secrets
+from discord_ferry.discord import refresh_permission_metadata
 from discord_ferry.errors import CheckError, MigrationError, StateError
 from discord_ferry.feedback_cli import _print_feedback_hint, run_feedback_cli
 from discord_ferry.migrator.api import init_request_semaphore
@@ -1383,6 +1385,43 @@ def probe_cmd(
     console.print(table)
     if any(check.status == "fail" for check in report.checks):
         _print_feedback_hint()
+
+
+@main.command(name="refresh-permissions")
+@click.argument("output_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--export-dir", required=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--discord-server-id", required=True, help="Source Discord server ID")
+def refresh_permissions_cmd(output_dir: str, export_dir: str, discord_server_id: str) -> None:
+    """Refresh only source permission metadata in OUTPUT_DIR.
+
+    Prefer the DISCORD_TOKEN environment variable; otherwise enter it at a hidden prompt.
+    Existing exports are read, never exported again. No Stoat requests are made.
+    """
+    token = ""
+    try:
+        exports = parse_export_directory(Path(export_dir), metadata_only=True)
+        token = os.environ.get("DISCORD_TOKEN") or click.prompt("Discord token", hide_input=True)
+        register_secret("discord", token)
+        click.echo(
+            "Only discord_metadata.json in the selected output directory will be replaced. "
+            "Exports, migration state and Stoat are unchanged."
+        )
+
+        async def refresh() -> None:
+            async with new_session() as session:
+                await refresh_permission_metadata(
+                    session, token, discord_server_id, exports, Path(output_dir)
+                )
+
+        asyncio.run(refresh())
+    except (MigrationError, OSError) as exc:
+        click.echo("Cannot refresh source permissions: " + sanitize_secrets(str(exc)), err=True)
+        sys.exit(1)
+    except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+        raise click.Abort() from exc
+    finally:
+        token = ""
+    click.echo("Source permission metadata refreshed. Stoat access has not been verified.")
 
 
 @main.command(name="check")
