@@ -1323,6 +1323,8 @@ async def _recover_forum_index_id(
     index_channel_id: str,
     forum_name: str,
     content: str,
+    *,
+    state: MigrationState,
 ) -> str:
     """Recover a lost forum-index message id from the channel's pinned messages.
 
@@ -1336,9 +1338,8 @@ async def _recover_forum_index_id(
     than the next.
 
     Returns the recovered message id, or an empty string if the message was not
-    found or the search failed. Swallows all exceptions: recovery is best-effort,
-    and a failure here must fall back to the present-id-unknown marker rather
-    than report a rebuild failure (#561).
+    found or the search failed. Ordinary recovery failures fall back to the
+    present-id-unknown marker (#561). Permission safety stops propagate.
     """
     try:
         pinned = await api_search_pinned_messages(
@@ -1353,6 +1354,9 @@ async def _recover_forum_index_id(
                 continue
             if (msg.get("content") or "").startswith(f"**Forum: {forum_name}**"):
                 index_msg_id = str(mid)
+                runtime = require_permission_runtime(state, service=config.stoat_url)
+                runtime.require(index_channel_id)
+                runtime.note_write()
                 await api_edit_message(
                     session,
                     config.stoat_url,
@@ -1361,7 +1365,10 @@ async def _recover_forum_index_id(
                     index_msg_id,
                     content=content,
                 )
+                runtime.note_write_confirmed()
                 return index_msg_id
+    except PermissionSafetyError:
+        raise
     except Exception:  # noqa: BLE001
         pass
     return ""
@@ -1606,8 +1613,7 @@ async def _prepare_permission_operation(
             }
             exported = {export.channel.id for export in selected}
             if any(
-                sid.startswith("forum-index-")
-                or sid not in exported
+                (sid not in indexes if sid.startswith("forum-index-") else sid not in exported)
                 or not state.created_channel_names.get(sid)
                 for sid in missing
             ) or any(tid is None for sid, tid in bindings if sid not in missing):
@@ -1861,6 +1867,11 @@ async def _rebuild_one_forum_index(
     if not index_channel_id:
         return
 
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    runtime = require_permission_runtime(state, service=config.stoat_url)
+    await verify_permission_channel(session, config, state, index_channel_id)
+
     if force_new:
         # The recorded id is stale for a repair (its channel or message is gone). Drop it
         # and any present-id-unknown mark so the send branch runs and records a real id.
@@ -1951,6 +1962,8 @@ async def _rebuild_one_forum_index(
                     raise StateError("Forum index mapping conflicts with preserved delivery")
         if existing_msg_id:
             # Re-run: edit the existing index message instead of creating a duplicate.
+            runtime.require(index_channel_id)
+            runtime.note_write()
             await api_edit_message(
                 session,
                 config.stoat_url,
@@ -1959,11 +1972,15 @@ async def _rebuild_one_forum_index(
                 existing_msg_id,
                 content=content,
             )
+            runtime.note_write_confirmed()
             index_msg_id: str = existing_msg_id
             if delivery is not None:
+                runtime.require(index_channel_id)
+                runtime.note_write()
                 await api_pin_message(
                     session, config.stoat_url, config.token, index_channel_id, index_msg_id
                 )
+                runtime.note_write_confirmed()
                 await asyncio.sleep(config.upload_delay)
         elif forum_key in state.forum_index_present_unknown_id:
             # Present on the server, but its id was lost to an earlier duplicate send
@@ -1979,6 +1996,7 @@ async def _rebuild_one_forum_index(
                 index_channel_id,
                 forum_name,
                 content,
+                state=state,
             )
             if recovered_id:
                 state.forum_index_message_ids[forum_key] = recovered_id
@@ -2001,6 +2019,8 @@ async def _rebuild_one_forum_index(
             if delivery is not None:
                 index_msg_id = delivery.message_id
                 if delivery.recovered:
+                    runtime.require(index_channel_id)
+                    runtime.note_write()
                     await api_edit_message(
                         session,
                         config.stoat_url,
@@ -2009,6 +2029,7 @@ async def _rebuild_one_forum_index(
                         index_msg_id,
                         content=content,
                     )
+                    runtime.note_write_confirmed()
             else:
                 raise StateError("Forum index creation lacks confirmed delivery")
             await asyncio.sleep(config.upload_delay)
@@ -2016,6 +2037,8 @@ async def _rebuild_one_forum_index(
                 state.forum_index_message_ids[forum_key] = index_msg_id
                 # A recovered id supersedes any prior mark; keep the two disjoint.
                 state.forum_index_present_unknown_id.discard(forum_key)
+                runtime.require(index_channel_id)
+                runtime.note_write()
                 await api_pin_message(
                     session,
                     config.stoat_url,
@@ -2023,6 +2046,7 @@ async def _rebuild_one_forum_index(
                     index_channel_id,
                     index_msg_id,
                 )
+                runtime.note_write_confirmed()
                 await asyncio.sleep(config.upload_delay)
         if delivery is not None:
             consume_delivery(state, delivery.token, delivery.message_id)
@@ -2037,6 +2061,8 @@ async def _rebuild_one_forum_index(
                     message=f"Rebuilt forum index for '{forum_name}' with actual data",
                 )
             )
+    except PermissionSafetyError:
+        raise
     except Exception as exc:  # noqa: BLE001
         state.warnings.append(
             {
@@ -2189,9 +2215,16 @@ async def _remove_duplicate_forum_indexes(
                 )
                 continue
             try:
+                runtime = state.permission_runtime
+                if runtime is not None:
+                    runtime.note_write()
                 await api_delete_message(
                     session, config.stoat_url, config.token, index_channel_id, message_id
                 )
+                if runtime is not None:
+                    runtime.note_write_confirmed()
+            except PermissionSafetyError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 warn(
                     f"Could not remove the extra pinned index message {message_id} "
@@ -3351,19 +3384,38 @@ async def _recreate_forum_index(
 
     recorded = state.created_channel_names.get(discord_id, discord_id)
     unique_name = make_unique_channel_name(recorded, existing_names)
-    created = await api_create_channel(
-        session,
-        config.stoat_url,
-        config.token,
-        state.stoat_server_id,
-        name=unique_name,
-        channel_type="Text",
-    )
+    runtime = require_permission_runtime(state, service=config.stoat_url)
+    proposed = dict(runtime._active_plan("application").target_layout.planned_channels)
+    if discord_id not in proposed or proposed[discord_id] is not None:
+        raise runtime.stop("unverified", stage="application")
+    runtime.note_write()
+    try:
+        created = await api_create_channel(
+            session,
+            config.stoat_url,
+            config.token,
+            state.stoat_server_id,
+            name=unique_name,
+            channel_type="Text",
+        )
+    except MigrationError as exc:
+        raise runtime.stop("write_uncertain", stage="application") from exc
+    runtime.note_write_confirmed()
     new_id: str = created["_id"]
     state.channel_map[discord_id] = new_id
     state.created_channel_names[discord_id] = created.get("name") or unique_name
     existing_names.add(state.created_channel_names[discord_id])
     save_state(state, config.output_dir)
+    runtime.bind_channel(discord_id, new_id)
+    await apply_channel_permissions(
+        session,
+        config,
+        state,
+        new_id,
+        None,
+        state.created_channel_names[discord_id],
+        phase="repair",
+    )
 
     # Position 0 of the forum category, mirroring the create path, so the index sits at
     # the top. NOT via _reattach_to_category, which would no-op on the synthetic key.
@@ -3373,9 +3425,11 @@ async def _recreate_forum_index(
         channels.remove(old_id)
     if new_id not in channels:
         channels.insert(0, new_id)
+    runtime.note_write()
     await api_upsert_categories(
         session, config.stoat_url, config.token, state.stoat_server_id, live_categories
     )
+    runtime.note_write_confirmed()
 
     on_event(
         MigrationEvent(
@@ -4104,7 +4158,7 @@ async def _run_repair(
         }
         selected_channels = {
             result.discord_id
-            for result in structure_work
+            for result in structure_work + forum_index_work
             if result.kind == "channel_missing"
             and state.channel_map.get(result.discord_id or "") == result.stoat_id
         }
@@ -4508,19 +4562,29 @@ async def _run_repair(
                     result for result in forum_index_work if _structure_still_missing(result, view)
                 ]
                 for result in forum_index_work:
-                    created = await _recreate_forum_index(
-                        fi_sess, config, state, result, existing_names, live_categories, on_event
-                    )
-                    if created:
-                        discord_id = result.discord_id or ""
-                        outcome.recreated_channels.append(
-                            {
-                                "discord_id": discord_id,
-                                "stoat_id": state.channel_map.get(discord_id),
-                                "name": state.created_channel_names.get(discord_id, discord_id),
-                                "resent_count": 0,
-                            }
+                    discord_id = result.discord_id or ""
+                    created = False
+                    try:
+                        created = await _recreate_forum_index(
+                            fi_sess,
+                            config,
+                            state,
+                            result,
+                            existing_names,
+                            live_categories,
+                            on_event,
                         )
+                    finally:
+                        actual = state.channel_map.get(discord_id)
+                        if created or (actual is not None and actual != result.stoat_id):
+                            outcome.recreated_channels.append(
+                                {
+                                    "discord_id": discord_id,
+                                    "stoat_id": actual,
+                                    "name": state.created_channel_names.get(discord_id, discord_id),
+                                    "resent_count": 0,
+                                }
+                            )
             for result in forum_index_rebuild_work:
                 forum_key = (result.discord_id or "").removeprefix("forum-index-")
                 # tail_absent: the channel is intact but the recorded index message is
@@ -4617,7 +4681,23 @@ async def _run_repair(
     outcome.declined = _repair_declined(state, warnings_start)
     if state.permission_runtime is not None:
         if not state.permission_runtime.outcome.verified:
-            raise state.permission_runtime.stop("unverified", stage="recheck")
+            from discord_ferry.migrator.verify import verify_permission_channel
+
+            # Binding a recreated channel invalidates the complete fingerprint.
+            # Read back the final bound scope; do not copy old proofs or write corrections.
+            proof_session = session or new_session()
+            try:
+                plan = state.permission_runtime._active_plan("recheck")
+                for source, _ in plan.target_layout.planned_channels:
+                    target = state.channel_map.get(source)
+                    if target is None:
+                        raise state.permission_runtime.stop("unverified", stage="recheck")
+                    await verify_permission_channel(proof_session, config, state, target)
+            finally:
+                if session is None:
+                    await proof_session.close()
+            if not state.permission_runtime.outcome.verified:
+                raise state.permission_runtime.stop("unverified", stage="recheck")
         outcome.permissions = state.permission_runtime.outcome
     outcome.failed_messages = [
         {"discord_msg_id": fm.discord_msg_id, "stoat_channel_id": fm.stoat_channel_id}
