@@ -14,10 +14,15 @@ Every migration involves trade-offs. Discord and Stoat are different platforms w
 
 These limitations relate to how channels, threads, and server organization are represented after migration.
 
+All thread strategies remain subject to the permission check. Unproved thread membership or
+inheritance stops the whole operation. Merge and archive do not bypass that check; use
+`--skip-threads` to exclude threads. Normal DCE forum routing and source-evidence correction
+is tracked in [#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/1217), not implemented in this release.
+
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
 | Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel. Use `--thread-strategy archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; archive mode posts nothing to Stoat. Both options are also available in the GUI's thread strategy setting. |
-| Forum posts | DCE 2.48 exports each post as a public thread. Ferry applies the selected thread strategy; with the default `flatten` strategy, each post becomes a text channel. DCE does not label these thread exports as forum posts, so Ferry cannot build its forum category or index from a normal 2.48 export. | Recreate the forum grouping and index manually after migration. |
+| Forum posts | Normal DCE exports do not produce a supported generated forum index. Thread access must not be assumed to match its parent. | Exclude unprovable threads with `--skip-threads`; see #1217 above. |
 | Stage Channels | Not migrated (no Stoat equivalent) | None |
 | Scheduled Events | Not migrated | None |
 | Channel ordering | Categories follow the original Discord order (since v2.3.0, requires a Discord token), but channels *inside* a category may appear in a different order | Manually reorder channels within categories in Stoat after migration |
@@ -51,9 +56,15 @@ These limitations affect how individual messages and their content appear after 
 
 These limitations affect role and permission migration.
 
+Ferry requires exact proved channel access before content writes. Unknown or unsupported source
+rules stop the whole operation, rather than granting broader access. Generated indexes require
+matching proved access for every indexed source. Concurrent permission or role-order editing is
+unsupported. See [permission recovery](earlier-migrations.md#recover-channel-access-before-continuing)
+for legacy evidence, explicit Repair and partial-effect reporting.
+
 | Discord Feature | What Stoat Gets | Workaround |
 |-----------------|----------------|------------|
-| Per-member channel overrides | Not supported by Stoat; only role-based overrides are migrated | Create a single-user role for each member who had individual overrides, then apply the override to that role |
+| Per-member channel overrides | Unsupported; the whole operation stops before writes | No automatic translation or helper roles |
 | Managed roles (bot roles) | Not migrated; these are auto-created by Discord for each bot integration | None needed; bot integrations do not carry over |
 | Role membership | Roles are recreated, but members are **not** assigned to them; there is no reliable way to map Discord accounts to Stoat accounts | Members re-join via invite and assign roles manually (or with a Stoat bot) |
 | "Pin messages" permission | Not migrated on its own; Stoat has no pin-only permission. Pinning lives under `ManageMessages`, which also allows deletion, so Ferry will not grant it from a pin-only Discord role | Grant `ManageMessages` manually to roles that should be able to pin |

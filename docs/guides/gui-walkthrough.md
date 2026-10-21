@@ -166,6 +166,12 @@ If Ferry detects cached export files from a previous run, it shows a summary (fi
 - **Use Cached**, skip re-exporting and go straight to validation.
 - **Re-export**, discard cached files and export fresh.
 
+For incomplete or older permission evidence, select the existing export and output context,
+enter the **Source Discord token**, and choose **Refresh source permissions**. This refreshes
+source metadata without re-exporting or contacting Stoat. The source token field is cleared
+when refresh ends. Follow [permission recovery](earlier-migrations.md#recover-channel-access-before-continuing)
+before continuing; **Use Cached** does not bypass the access check.
+
 This is useful when resuming after a crash or when you want to re-run the migration without re-downloading everything.
 
 ### DCE Runtime
@@ -199,7 +205,7 @@ The dialog displays a summary table:
 
 If potential issues are detected, they appear below the summary:
 
-- **No Discord token provided**, permissions and not-safe-for-work (NSFW) flags will not be migrated (these require the Discord API)
+- **Missing source permission evidence**, a migration without complete matching cached evidence stops rather than creating channels without proved access. A source refresh can recover missing evidence; unsupported rules still stop the operation.
 - **Channel limit may be exceeded**, combined channel and thread count is close to or over 200
 - **Emoji limit may be exceeded**, more than 100 custom emoji detected
 

@@ -10,8 +10,8 @@ what is missing on the live server, and `ferry repair` re-sends the messages and
 channels or roles it dropped. See the [CLI reference](cli-reference.md#ferry-repair) for what each
 one can and cannot touch.
 
-!!! info "Nothing here requires a re-export"
-    Everything below is a Ferry bug, not an export bug. Your existing chat export from the
+!!! info "Older content-loss recovery usually needs no re-export"
+    The five older bugs below are Ferry bugs, not export bugs. Your existing chat export from the
     DiscordChatExporter tool (DCE) still contains the missing data, with one exception,
     noted under [Forwarded messages](#1-forwarded-messages-were-discarded).
 
@@ -19,6 +19,7 @@ one can and cannot touch.
 
 | If you migrated with | Then look for |
 |----------------------|---------------|
+| anything before **3.0.0** | Unproved channel access; follow [permission recovery](#recover-channel-access-before-continuing) before further writes |
 | anything before **2.43.20** | Missing messages after repeating a migration or retrying a corrected rejection; see [recorded send failures](#recorded-send-failures-and-repeat-migrations) |
 | anything before **2.9.0** | Missing forwarded messages, and missing replies whose whole content was a sticker or an embed |
 | anything before **2.8.5** | Missing attachments just over a round size — e.g. a 20.4 MB file |
@@ -162,6 +163,75 @@ That leaves:
 | Forwarded messages, sticker- or embed-only replies | Migrate the same export again with v2.9.0 or later, into a **new, empty Stoat server**. This produces a complete second copy — it does not merge into the existing one. |
 | Missing attachments | The same. The message text is already in your server; only the file is missing, and there is no supported way to attach it after the fact. |
 | Voice and role permissions | Fixable in place, by hand — no content is involved. Grant the permissions on the affected roles in Stoat, or re-run the ROLES and CHANNELS phases into a fresh server. |
+
+## Recover channel access before continuing
+
+Ferry 3.0 requires proof that selected destination channels preserve source access before it
+writes content. Missing source evidence, unsupported access rules or a changed destination stop
+the whole operation. A saved report or a successful older migration is not permission proof.
+
+Keep the original export, output directory, state and delivery receipts together. Do not delete
+or edit progress to force a retry. Stop concurrent channel-permission and role-order changes
+while Ferry is running. A stop cancels queued work, but requests already sent may have taken
+effect; inspect the reported confirmed or possible effects before continuing.
+
+For an older migration or incomplete cached permission evidence:
+
+1. Refresh source evidence using the original export and output directory:
+
+    ```bash
+    ferry refresh-permissions ./ferry-output --export-dir ./export --discord-server-id SOURCE_GUILD_ID
+    ```
+
+    Set `DISCORD_TOKEN` in your environment or use the hidden prompt. This reads the Discord API
+    and atomically replaces bound source metadata. It does not re-export messages or contact
+    Stoat. Failure or cancellation preserves the previous files. The selected guild, export and
+    output must match the migration.
+
+2. Inspect the destination without changing it:
+
+    ```bash
+    ferry check ./ferry-output --stoat-url https://api.stoat.chat --json
+    ```
+
+    Set `STOAT_TOKEN` in your environment. Check schema version 2 distinguishes verified access,
+    mismatches, unsupported rules and unverified evidence. Its existing exit code can be zero
+    with unverifiable findings, so read the permission results, not just the exit code.
+
+3. For supported corrections or missing structure, explicitly run Repair:
+
+    ```bash
+    ferry repair ./ferry-output --export-dir ./export --stoat-url https://api.stoat.chat
+    ```
+
+    Repair proves access before resending content. It can retain completed recreation actions
+    when a later step stops. Keep those saved identities and run the supported recovery again;
+    do not create replacement roles or change grants to bypass a refusal.
+
+Resume, incremental migration and Retry verify existing access; they do not correct permission
+drift. Role backfill changes ordering only and must prove that access remains correct. A dry run
+is a preview, not live permission proof. Even an empty Repair queue still needs verified access.
+
+In the GUI, select the existing export/output context and use **Refresh source permissions**
+with the **Source Discord token** field. The field is cleared when the operation ends. This
+uses the same source-only recovery; refreshing does not authorize destination writes.
+
+### Which layouts can still stop
+
+Selected ordinary text channels are supported only when their exact role-based access can be
+proved. Per-member overrides, uncertain role inventories and unmodelled thread membership or
+inheritance stop the operation. `--skip-threads` can exclude threads; merge and archive are not
+ways around the access check. Ferry does not add helper roles or assign members to migrated roles.
+
+Generated indexes require complete source evidence and the same exact access for every indexed
+channel. Mixed or unknown access stops the operation. Normal DCE forum-post exports do not
+currently produce a supported generated forum index; [#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues/1217)
+tracks the routing and source-evidence correction. This release does not assume that thread
+access equals parent-channel access.
+
+Migration reports and Repair JSON include a permission outcome with its own schema version 1:
+stage, reason, effects, verification state and problems. This is an account of the operation,
+not reusable authority for a later run.
 
 ## Recorded send failures and repeat migrations
 
