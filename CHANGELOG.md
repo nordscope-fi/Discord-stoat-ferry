@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Accept pinned Stoat 0.16.2 creation defaults and add an explicit isolated permission-proof harness using existing migration/repair owners and non-owner access observations, bound to captured candidate bytes before credential access. Retain the real-DCE forum-index limitation (#1172, #1217).
+
 - Add actual-owner integration checks for multi-role access, incremental delivery identities, partial-write recovery, nested retry authority, source-only refresh and refusal after access changes (#1172).
 
 - Keep GUI completion pending until the migration returns, show shared permission stops with retained delivery totals, preserve repair actions and effects after refusal, and pass cached source evidence to read-only checks (#1172).
