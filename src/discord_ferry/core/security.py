@@ -232,6 +232,9 @@ _ROLLBACK_TEXT_MEMBERS: frozenset[str] = frozenset({"error"})
 # unbounded substring replacement would corrupt the value.
 _VALIDATION_TEXT_MEMBERS: frozenset[str] = frozenset({"detail"})
 
+# Permission problem identities, masks and enum values are structural, not free text.
+_PERMISSION_TEXT_MEMBERS: frozenset[str] = frozenset({"guidance"})
+
 
 def scrub_document(
     doc: dict[str, Any], token_store: SecureTokenStore | None = None
@@ -303,5 +306,12 @@ def scrub_document(
     guild = out.get("source_guild")
     if isinstance(guild, dict) and isinstance(guild.get("name"), str):
         out["source_guild"] = {**guild, "name": _mask(guild["name"])}
+
+    permissions = out.get("permissions")
+    if isinstance(permissions, dict):
+        out["permissions"] = {
+            **permissions,
+            "problems": _mask_entries(permissions.get("problems"), _PERMISSION_TEXT_MEMBERS),
+        }
 
     return out

@@ -64,6 +64,12 @@ def test_repair_failure_set_is_shared_and_exact() -> None:
                 # a convergence repair completed, matching the CLI comment.
                 "server_default_manual",
                 "server_default_check_failed",
+                "permission_unsupported",
+                "permission_unverified",
+                "permission_write_rejected",
+                "permission_write_uncertain",
+                "permission_readback_mismatch",
+                "permission_interrupted",
             }
         )
         == UNREPAIRED_WARNING_TYPES

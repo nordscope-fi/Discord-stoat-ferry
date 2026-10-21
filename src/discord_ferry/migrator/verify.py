@@ -42,7 +42,7 @@ from discord_ferry.core.permissions import (
     common_index_plan,
     compile_permission_plan,
 )
-from discord_ferry.core.security import strip_control
+from discord_ferry.core.security import scrub_document, strip_control
 from discord_ferry.discord.metadata import validate_permission_source
 from discord_ferry.errors import CheckError, FerryError, PermissionSafetyError
 from discord_ferry.migrator.api import (
@@ -419,6 +419,13 @@ UNREPAIRED_WARNING_TYPES = frozenset(
         # repair COMPLETED, so gating on it would fail the successful path (#1060).
         "server_default_manual",
         "server_default_check_failed",
+        # ADR-036: refused, unreadable or failed permission work is not completed repair.
+        "permission_unsupported",
+        "permission_unverified",
+        "permission_write_rejected",
+        "permission_write_uncertain",
+        "permission_readback_mismatch",
+        "permission_interrupted",
     }
 )
 
@@ -528,6 +535,7 @@ class RepairOutcome:
     dead_letter: dict[str, int] = field(default_factory=lambda: {"drained": 0, "remaining": 0})
     declined: list[dict[str, Any]] = field(default_factory=list)
     failed_messages: list[dict[str, Any]] = field(default_factory=list)
+    permissions: PermissionOutcome = field(default_factory=PermissionOutcome.unverified)
 
     def _clean(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip control characters from every string value, matching CheckReport."""
@@ -538,8 +546,12 @@ class RepairOutcome:
 
     def to_dict(self) -> dict[str, Any]:
         """Sanitized, JSON-ready dict. Every free-text field goes through strip_control."""
+        permissions = scrub_document({"permissions": self.permissions.to_dict()})["permissions"]
+        for problem in permissions["problems"]:
+            problem["guidance"] = strip_control(problem["guidance"])
         return {
             "dry_run": self.dry_run,
+            "permissions": scrub_document({"permissions": permissions})["permissions"],
             "actions": {
                 "recreated_channels": self._clean(self.recreated_channels),
                 "recreated_roles": self._clean(self.recreated_roles),

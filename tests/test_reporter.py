@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.security import SecureTokenStore, register_secret
 from discord_ferry.discord.metadata import (
@@ -22,6 +24,63 @@ def _make_config(tmp_path: Path) -> FerryConfig:
         token="test-token",
         output_dir=tmp_path,
     )
+
+
+@pytest.mark.parametrize("mode", ["absent", "verified", "unsupported", "confirmed", "uncertain"])
+def test_permission_reports_follow_real_runtime_outcome_not_metadata(
+    tmp_path: Path, mode: str
+) -> None:
+    from dataclasses import replace
+
+    from discord_ferry.core.permissions import PermissionProblem
+    from tests.test_core_permissions import runtime_case
+
+    config = replace(_make_config(tmp_path), token_store=SecureTokenStore({"proxy": "123"}))
+    state = MigrationState(message_map={"123-source": "target-message"})
+    meta = DiscordMetadata(
+        guild_id="111",
+        fetched_at="today",
+        server_default_permissions=0,
+        role_permissions={},
+        channel_metadata={},
+    )
+    save_discord_metadata(meta, tmp_path)
+    if mode != "absent":
+        _, runtime, _, actual = runtime_case()
+        if mode == "verified":
+            runtime.verify("c-222", actual)
+        else:
+            if mode in {"confirmed", "uncertain"}:
+                runtime.note_write()
+                if mode == "confirmed":
+                    runtime.note_write_confirmed()
+            reason = "unsupported" if mode == "unsupported" else "write_uncertain"
+            runtime.stop(
+                reason,
+                stage="application",
+                problems=(PermissionProblem(reason, ("123-entity",), 20, "Inspect 123"),),
+            )
+        state.permission_runtime = runtime
+    report = generate_report(config, state, [_make_export()])
+    generate_markdown_report(config, state, [_make_export()])
+    expected = mode == "verified"
+    assert report["permissions"]["verified"] is expected
+    assert report["summary"]["messages_imported"] == 1
+    assert (
+        any("Review migrated role permissions" in item["task"] for item in report["checklist"])
+        is expected
+    )
+    stored = json.loads((tmp_path / "migration_report.json").read_text())
+    markdown = (tmp_path / "migration_report.md").read_text()
+    assert "## Permissions" in markdown
+    assert ("**Verified:** yes" in markdown) is expected
+    if mode not in {"absent", "verified"}:
+        assert stored["permissions"]["problems"][0]["guidance"] == "Inspect ****"
+        assert stored["permissions"]["problems"][0]["entity_ids"] == ["123-entity"]
+        assert "Inspect 123" not in markdown and "Inspect ****" in markdown
+    if mode in {"confirmed", "uncertain"}:
+        effects = "changes_confirmed" if mode == "confirmed" else "changes_possible"
+        assert stored["permissions"]["effects"] == effects and effects in markdown
 
 
 def _make_export(
@@ -357,7 +416,9 @@ def test_generate_report_has_nonzero_duration(tmp_path: Path) -> None:
 
 
 def test_checklist_with_permissions(tmp_path: Path) -> None:
-    """Checklist includes permission review items when discord_metadata.json is present."""
+    """Checklist includes permission review items after actual runtime verification."""
+    from tests.test_core_permissions import runtime_case
+
     config = _make_config(tmp_path)
     state = MigrationState()
     exports = [_make_export()]
@@ -370,6 +431,10 @@ def test_checklist_with_permissions(tmp_path: Path) -> None:
         channel_metadata={},
     )
     save_discord_metadata(meta, tmp_path)
+
+    _, runtime, _, actual = runtime_case()
+    runtime.verify("c-222", actual)
+    state.permission_runtime = runtime
 
     report = generate_report(config, state, exports)
 
@@ -1224,6 +1289,7 @@ _KNOWN_REPORT_FIELDS = frozenset(
         "checklist",
         "invite",
         "native_fidelity",
+        "permissions",  # Only problems[].guidance is free text, classified by the writer.
     }
 )
 
