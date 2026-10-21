@@ -7,7 +7,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import ssl
 import sys
 from typing import IO, TYPE_CHECKING
@@ -15,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.discord import fetch_and_translate_guild_metadata
@@ -74,6 +73,396 @@ _VALID_PNG = bytes.fromhex(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def channel_attributes_only(monkeypatch):
+    """Isolate layout/attribute tests from the separately tested permission writer."""
+    writer = AsyncMock()
+    monkeypatch.setattr(structure_module, "apply_channel_permissions", writer)
+    yield writer
+    writer.assert_awaited()
+
+
+def test_missing_runtime_does_not_authorize_a_writer() -> None:
+    from discord_ferry.core import permissions
+    from discord_ferry.errors import PermissionSafetyError
+
+    require_runtime = getattr(permissions, "require_permission_runtime", None)
+    assert callable(require_runtime), "Shared writers require bound operation authority"
+    with pytest.raises(PermissionSafetyError) as caught:
+        require_runtime(MigrationState())
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.effects == "none_confirmed"
+
+
+@pytest.mark.parametrize("metadata", [None, ChannelMeta(False)])
+async def test_channel_writer_refuses_missing_runtime_before_any_request(tmp_path, metadata):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    with aioresponses() as mocked, pytest.raises(PermissionSafetyError):
+        async with aiohttp.ClientSession() as session:
+            await structure_module.apply_channel_permissions(
+                session, config, state, "target-channel", metadata, "selected", phase="channels"
+            )
+    assert not mocked.requests
+    assert state.permission_runtime is None
+
+
+def _permission_writer_case(native=1 << 45, source_pair=(0, 1 << 11), captured_source=None):
+    from discord_ferry.core import permissions as p
+    from discord_ferry.discord.permissions import translate_permissions
+    from tests.test_core_permissions import source_evidence
+
+    server_id, channel_id, role_id, inactive_id = (
+        f"01J5T{value:021d}" for value in (10001, 10002, 10003, 10004)
+    )
+    source = captured_source or source_evidence(
+        ((1 << 10) | (1 << 11), (1 << 10) | (1 << 11)), (source_pair,)
+    )
+    wire_native = native if native < 1 << 63 else native - (1 << 64)
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": translate_permissions(source.roles[0].permissions),
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "permissions": {"a": translate_permissions(source.roles[1].permissions), "d": 0},
+                "rank": 0,
+            }
+        },
+    }
+    remote = {
+        "_id": channel_id,
+        "server": server_id,
+        "channel_type": "TextChannel",
+        "default_permissions": {"a": wire_native, "d": 0},
+        "role_permissions": {
+            role_id: {"a": 0, "d": wire_native},
+            inactive_id: {"a": 1 << 22, "d": wire_native},
+        },
+    }
+    layout = p.TargetLayout(
+        service=STOAT_URL,
+        server_id=server_id,
+        server_default=server["default_permissions"],
+        roles=(
+            p.TargetRole(
+                role_id, p.PermissionCell(server["roles"][role_id]["permissions"]["a"], 0), 0
+            ),
+        ),
+        channels=(
+            p.TargetChannel(
+                channel_id,
+                p.PermissionCell(native, 0),
+                (
+                    (role_id, p.PermissionCell(0, native)),
+                    (inactive_id, p.PermissionCell(1 << 22, native)),
+                ),
+            ),
+        ),
+        planned_roles=(("112", role_id),),
+        planned_channels=(("222", channel_id),),
+        fingerprint="captured-before-application",
+    )
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        channel_map={"222": channel_id},
+        permission_runtime=p.PermissionRuntime(plan),
+    )
+    return state, plan, server, remote, role_id, inactive_id
+
+
+async def _exercise_calculated_writer(
+    tmp_path,
+    mode="apply",
+    native=1 << 45,
+    metadata=None,
+    source_pair=(0, 1 << 11),
+    captured_source=None,
+    equivalent=False,
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, plan, server, remote, role_id, inactive_id = _permission_writer_case(
+        native, source_pair, captured_source
+    )
+    runtime = state.permission_runtime
+    target = remote["_id"]
+    config = _make_config(tmp_path, upload_delay=0)
+    order, bodies = [], []
+
+    def read_server(_url, **_kwargs):
+        order.append("server-read")
+        return CallbackResult(payload=server)
+
+    def read_channel(_url, **_kwargs):
+        order.append("channel-read")
+        if mode == "cancel-readback" and bodies:
+            raise asyncio.CancelledError()
+        if mode == "unexpected-readback" and bodies:
+            raise RuntimeError("synthetic readback failure")
+        return CallbackResult(payload=remote)
+
+    def write_cell(url, **kwargs):
+        assert not runtime.ready, "A successful PUT must not grant channel authority"
+        role = str(url).rsplit("/", 1)[1]
+        order.append("write-" + role)
+        bodies.append((role, kwargs["json"]["permissions"]))
+        assert all(0 <= mask < (1 << 64) for mask in bodies[-1][1].values())
+        if mode == "cancelled":
+            raise asyncio.CancelledError()
+        if mode == "default-failure" and role == "default":
+            return CallbackResult(status=403, payload={"type": "Forbidden"})
+        if mode == "role-failure" and role != "default":
+            return CallbackResult(status=403, payload={"type": "Forbidden"})
+        if mode != "ignored":
+            pair = kwargs["json"]["permissions"]
+            # Pinned From<Override> for OverrideField casts request u64 to reply i64.
+            stored = {
+                key: mask if mask < 1 << 63 else mask - (1 << 64) for key, mask in pair.items()
+            }
+            if role == "default":
+                remote["default_permissions"] = {"a": stored["allow"], "d": stored["deny"]}
+            else:
+                remote["role_permissions"][role] = {"a": stored["allow"], "d": stored["deny"]}
+        if mode == "changed-role":
+            server["roles"][role_id]["rank"] = 1
+        if mode == "malformed-readback" and role != "default":
+            remote["default_permissions"] = None
+        return CallbackResult(payload={})
+
+    with aioresponses() as mocked:
+        mocked.get(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}", callback=read_server, repeat=True
+        )
+        mocked.get(f"{STOAT_URL}/channels/{target}", callback=read_channel, repeat=True)
+        for role in ("default", role_id):
+            mocked.put(
+                f"{STOAT_URL}/channels/{target}/permissions/{role}",
+                callback=write_cell,
+                repeat=True,
+            )
+        async with aiohttp.ClientSession() as session:
+            if mode == "apply":
+                await structure_module.apply_channel_permissions(
+                    session, config, state, target, metadata, "selected", phase="channels"
+                )
+                proof = runtime.require(target)
+                assert proof.layout.channels[0].id == target
+                if equivalent:
+                    remote["role_permissions"][role_id]["a"] &= ~(1 << 20)
+                applied_count = len(bodies)
+                await structure_module.apply_channel_permissions(
+                    session, config, state, target, metadata, "selected", phase="channels"
+                )
+                assert len(bodies) == applied_count, "Matching access needs no corrective PUT"
+                assert runtime.require(target) is not proof, "Readback must still be fresh"
+            else:
+                expected = (
+                    asyncio.CancelledError
+                    if mode in {"cancelled", "cancel-readback"}
+                    else PermissionSafetyError
+                )
+                with pytest.raises(expected):
+                    await structure_module.apply_channel_permissions(
+                        session, config, state, target, metadata, "selected", phase="channels"
+                    )
+                assert runtime.stopped and not runtime.ready
+    assert bodies
+    assert order[:3] == ["server-read", "channel-read", "server-read"]
+    if mode == "apply":
+        assert order[-3:] == ["server-read", "channel-read", "server-read"]
+        proposal = plan.channels[0]
+
+        assert bodies == [
+            (
+                "default",
+                {"allow": proposal.default.allow, "deny": proposal.default.deny},
+            ),
+            (
+                role_id,
+                {
+                    "allow": proposal.roles[0][1].allow,
+                    "deny": proposal.roles[0][1].deny,
+                },
+            ),
+        ]
+        assert remote["default_permissions"]["a"] & native
+        assert remote["role_permissions"][role_id]["d"] & native
+        assert runtime.effects == "changes_confirmed"
+        # Independent pinned target order for both memberships, not compiler output.
+        for member in (False, True):
+            default = remote["default_permissions"]
+            value = (server["default_permissions"] | (default["a"] & ((1 << 64) - 1))) & ~(
+                default["d"] & ((1 << 64) - 1)
+            )
+            if member:
+                value |= server["roles"][role_id]["permissions"]["a"]
+                cell = remote["role_permissions"][role_id]
+                value = (value | (cell["a"] & ((1 << 64) - 1))) & ~(cell["d"] & ((1 << 64) - 1))
+            assert value & (1 << 20), "Source channel remains visible"
+            assert not value & (1 << 22), "Server grants must not reopen source-denied posting"
+    else:
+        if mode in {"cancelled", "role-failure", "default-failure"}:
+            assert runtime.effects == "changes_possible"
+            assert runtime.outcome.stage == "application"
+        else:
+            assert runtime.effects == "changes_confirmed"
+            assert runtime.outcome.stage == "recheck"
+        expected_reason = {
+            "ignored": "readback_mismatch",
+            "changed-role": "readback_mismatch",
+            "malformed-readback": "unverified",
+            "unexpected-readback": "unverified",
+            "role-failure": "write_uncertain",
+            "default-failure": "write_uncertain",
+            "cancelled": "interrupted",
+            "cancel-readback": "interrupted",
+        }[mode]
+        assert runtime.outcome.reason == expected_reason
+        if mode in {"cancelled", "default-failure"}:
+            assert len(bodies) == 1
+        else:
+            assert len(bodies) == 2
+    assert remote["role_permissions"][inactive_id] == {
+        "a": 1 << 22,
+        "d": native if native < 1 << 63 else native - (1 << 64),
+    }
+    assert state.channel_map == {"222": target}
+    assert not state.warnings
+    return state, plan, remote, order, bodies
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "apply",
+        "ignored",
+        "role-failure",
+        "default-failure",
+        "cancelled",
+        "changed-role",
+        "malformed-readback",
+        "cancel-readback",
+        "unexpected-readback",
+    ],
+)
+@pytest.mark.parametrize("native", [1 << 45, 1 << 63])
+async def test_channel_writer_uses_calculated_cells_and_actual_readback(tmp_path, mode, native):
+    await _exercise_calculated_writer(tmp_path, mode, native)
+
+
+async def test_calculated_writer_accepts_equivalent_noncanonical_cells_without_rewriting(tmp_path):
+    _, _, remote, _, bodies = await _exercise_calculated_writer(tmp_path, equivalent=True)
+    role_id = bodies[1][0]
+    assert not remote["role_permissions"][role_id]["a"] & (1 << 20)
+    assert len(bodies) == 2
+
+
+@pytest.mark.parametrize("scope", ["default", "role"])
+async def test_unrepresentable_calculated_payload_stops_before_the_first_put(tmp_path, scope):
+    from dataclasses import replace
+
+    from discord_ferry.core import permissions as p
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, plan, server, remote, _, _ = _permission_writer_case()
+    channel = plan.channels[0]
+    if scope == "default":
+        channel = replace(channel, default=p.PermissionCell(channel.default.allow | (1 << 64), 0))
+    else:
+        source_id, cell = channel.roles[0]
+        channel = replace(
+            channel, roles=((source_id, p.PermissionCell(cell.allow | (1 << 64), cell.deny)),)
+        )
+    state.permission_runtime = p.PermissionRuntime(replace(plan, channels=(channel,)))
+    with aioresponses() as mocked, pytest.raises(PermissionSafetyError) as caught:
+        mocked.get(f"{STOAT_URL}/servers/{state.stoat_server_id}", payload=server, repeat=True)
+        mocked.get(f"{STOAT_URL}/channels/{remote['_id']}", payload=remote, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            await structure_module.apply_channel_permissions(
+                session,
+                _make_config(tmp_path),
+                state,
+                remote["_id"],
+                None,
+                "selected",
+                phase="channels",
+            )
+    assert caught.value.outcome.reason == "unsupported"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert all(method == "GET" for method, _ in mocked.requests)
+    assert state.permission_runtime.stopped and not state.permission_runtime.ready
+
+
+@pytest.mark.parametrize("change", ["default", "inactive", "rank", "grant", "missing"])
+async def test_channel_writer_refuses_changed_or_missing_preserved_context_before_put(
+    tmp_path, change
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, _, server, remote, role_id, inactive_id = _permission_writer_case()
+    if change == "default":
+        remote["default_permissions"]["a"] |= 1 << 46
+    elif change == "inactive":
+        remote["role_permissions"].pop(inactive_id)
+    elif change == "rank":
+        server["roles"][role_id]["rank"] += 1
+    elif change == "grant":
+        server["roles"][role_id]["permissions"]["a"] ^= 1 << 22
+    else:
+        remote["default_permissions"] = None
+    with aioresponses() as mocked, pytest.raises(PermissionSafetyError) as caught:
+        mocked.get(f"{STOAT_URL}/servers/{state.stoat_server_id}", payload=server, repeat=True)
+        mocked.get(f"{STOAT_URL}/channels/{remote['_id']}", payload=remote, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            await structure_module.apply_channel_permissions(
+                session,
+                _make_config(tmp_path),
+                state,
+                remote["_id"],
+                None,
+                "selected",
+                phase="channels",
+            )
+    assert all(method == "GET" for method, _ in mocked.requests)
+    assert caught.value.outcome.reason in {"readback_mismatch", "unverified"}
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert state.permission_runtime.stopped and not state.permission_runtime.ready
+
+
+async def _assert_unbound_legacy_writer_refuses(tmp_path, metadata):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, _, _, remote, _, _ = _permission_writer_case()
+    state.permission_runtime = None
+    save_discord_metadata(DiscordMetadata("111", "legacy", 0, {}, {"222": metadata}), tmp_path)
+    before = (tmp_path / "discord_metadata.json").read_bytes()
+    with aioresponses() as mocked:
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await structure_module.apply_channel_permissions(
+                    session,
+                    _make_config(tmp_path),
+                    state,
+                    remote["_id"],
+                    metadata,
+                    "legacy",
+                    phase="channels",
+                )
+        assert not mocked.requests
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert (tmp_path / "discord_metadata.json").read_bytes() == before
+    assert state.channel_map == {"222": remote["_id"]}
+    assert not state.warnings
 
 
 def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
@@ -851,7 +1240,7 @@ async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
     assert any(w.get("type") == "hoist_skipped" for w in state.warnings)
 
 
-async def test_batch2_fields_skip_without_metadata(tmp_path: Path) -> None:
+async def test_batch2_fields_skip_without_metadata(channel_attributes_only, tmp_path: Path) -> None:
     """S5 graceful-degrade: channels + roles emit batch-2 skip warnings without metadata.
 
     With no discord_metadata.json present, run_channels and run_roles must complete
@@ -1511,7 +1900,7 @@ async def test_run_categories_skips_a_thread_parent_as_a_category(tmp_path: Path
 # ---------------------------------------------------------------------------
 
 
-async def test_run_channels_creates_channels(tmp_path: Path) -> None:
+async def test_run_channels_creates_channels(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase creates channels and populates channel_map."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1532,7 +1921,7 @@ async def test_run_channels_creates_channels(tmp_path: Path) -> None:
     assert any("general" in msg for msg in messages)
 
 
-async def test_run_channels_assigns_to_categories(tmp_path: Path) -> None:
+async def test_run_channels_assigns_to_categories(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase PATCHes the server with categories containing the stoat channel IDs."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1572,7 +1961,7 @@ async def test_run_channels_assigns_to_categories(tmp_path: Path) -> None:
     assert cat["channels"] == ["stoat-ch1"]
 
 
-async def test_run_channels_thread_flattening(tmp_path: Path) -> None:
+async def test_run_channels_thread_flattening(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase adds ├─ prefix to thread channel names in flatten mode."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1779,7 +2168,7 @@ async def test_final_layout_retry_reuses_saved_channels(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("missing", [False, True])
 async def test_final_layout_orders_one_new_channel_with_carried_members(
-    tmp_path: Path, missing: bool
+    channel_attributes_only, tmp_path: Path, missing: bool
 ) -> None:
     state = MigrationState(
         stoat_server_id="srv1",
@@ -1823,7 +2212,9 @@ async def test_final_layout_orders_one_new_channel_with_carried_members(
 
 
 @pytest.mark.parametrize("with_metadata", [False, True])
-async def test_channel_selection_stays_in_export_order(tmp_path: Path, with_metadata: bool) -> None:
+async def test_channel_selection_stays_in_export_order(
+    channel_attributes_only, tmp_path: Path, with_metadata: bool
+) -> None:
     state = MigrationState(stoat_server_id="srv1", category_map={"100": "cat"})
     if with_metadata:
         save_discord_metadata(
@@ -1862,7 +2253,9 @@ async def test_channel_selection_stays_in_export_order(tmp_path: Path, with_meta
     )
 
 
-async def test_run_channels_orders_categories_by_discord_position(tmp_path: Path) -> None:
+async def test_run_channels_orders_categories_by_discord_position(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """CHANNELS orders the category upsert by Discord position (ascending)."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1906,7 +2299,9 @@ async def test_run_channels_orders_categories_by_discord_position(tmp_path: Path
     assert titles == ["Bravo", "Alpha"]  # position 0 before position 2
 
 
-async def test_run_channels_category_without_position_sorts_last(tmp_path: Path) -> None:
+async def test_run_channels_category_without_position_sorts_last(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """A category with no captured Discord position sorts after positioned ones."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1994,7 +2389,9 @@ async def test_category_position_ties(
     assert len(bodies) == 1
 
 
-async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
+async def test_run_channels_deduplicates_channel_ids(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """CHANNELS phase creates each channel only once even if the same ID appears twice."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2017,7 +2414,9 @@ async def test_run_channels_deduplicates_channel_ids(tmp_path: Path) -> None:
     assert len(state.channel_map) == 1
 
 
-async def test_channel_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
+async def test_channel_kill_and_resume_no_duplicates(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """A hard kill after channel 2 of 3 persists both mappings; resume creates only channel 3."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="01J5T000000000000000009000")
@@ -2079,7 +2478,7 @@ async def test_channel_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
     assert resumed_state.channel_map["813"] == "01J5T000000000000000000503"
 
 
-async def test_run_channels_voice_fallback_to_text(tmp_path: Path) -> None:
+async def test_run_channels_voice_fallback_to_text(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase retries a failed voice channel creation as text and warns."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2116,7 +2515,7 @@ async def test_run_channels_voice_fallback_to_text(tmp_path: Path) -> None:
     assert len(fallback_warnings) == 1
 
 
-async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
+async def test_run_channels_passes_nsfw_flag(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase passes nsfw=True from Discord metadata."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2151,7 +2550,7 @@ async def test_run_channels_passes_nsfw_flag(tmp_path: Path) -> None:
     assert created_bodies[0].get("nsfw") is True
 
 
-async def test_run_channels_truncates_long_topic(tmp_path: Path) -> None:
+async def test_run_channels_truncates_long_topic(channel_attributes_only, tmp_path: Path) -> None:
     """A channel topic longer than 1024 chars is truncated before reaching Stoat."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2178,7 +2577,9 @@ async def test_run_channels_truncates_long_topic(tmp_path: Path) -> None:
     assert len(desc) == 1024  # type: ignore[arg-type]
 
 
-async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
+async def test_channel_slowmode_and_user_limit_applied(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """Slowmode needs an edit; a Voice cap is carried by creation."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2239,7 +2640,7 @@ async def test_channel_slowmode_and_user_limit_applied(tmp_path: Path) -> None:
     assert state.native_fidelity_counts == {"slowmode": 1, "user_limit": 1}
 
 
-async def test_channel_slowmode_clamped_above_max(tmp_path: Path) -> None:
+async def test_channel_slowmode_clamped_above_max(channel_attributes_only, tmp_path: Path) -> None:
     """Slowmode > 21600 is clamped to 21600 and a slowmode_clamped warning is logged."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2279,7 +2680,9 @@ async def test_channel_slowmode_clamped_above_max(tmp_path: Path) -> None:
     assert any(w.get("type") == "slowmode_clamped" for w in state.warnings)
 
 
-async def test_voice_cap_resume_does_not_recount_carried_channels(tmp_path: Path) -> None:
+async def test_voice_cap_resume_does_not_recount_carried_channels(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     exports = [
         _make_export(channel_id=ch, channel_name=ch, channel_type=2, category_id="")
         for ch in ("first", "second")
@@ -2328,7 +2731,7 @@ async def test_voice_cap_resume_does_not_recount_carried_channels(tmp_path: Path
     edit.assert_not_awaited()
 
 
-async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
+async def test_voice_fallback_skips_voice_patch(channel_attributes_only, tmp_path: Path) -> None:
     """A voice channel that falls back to text skips the voice PATCH.
 
     slowmode is still applied to the text-fallback channel.
@@ -2387,140 +2790,27 @@ async def test_voice_fallback_skips_voice_patch(tmp_path: Path) -> None:
     assert state.native_fidelity_counts == {"slowmode": 1}
 
 
-async def test_run_channels_applies_channel_permission_overrides(tmp_path: Path) -> None:
-    """CHANNELS phase applies role permission overrides via PUT after channel creation."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(
-        stoat_server_id="srv1",
-        role_map={"discord-role1": "stoat-role1"},
-    )
-
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={},
-        channel_metadata={
-            "ch1": ChannelMeta(
-                nsfw=False,
-                role_overrides=[
-                    RoleOverride(discord_role_id="discord-role1", allow=4_194_304, deny=0)
-                ],
-            ),
-        },
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    exports = [_make_export(channel_id="ch1", channel_name="general", category_id="")]
-
-    perm_bodies: list[dict[str, object]] = []
-
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch1", "name": "general"},
-        )
-        m.put(
-            f"{STOAT_URL}/channels/stoat-ch1/permissions/stoat-role1",
-            payload={},
-            callback=lambda url, **kwargs: perm_bodies.append(  # type: ignore[misc]
-                kwargs.get("json", {})
-            ),
-        )
-        await run_channels(config, state, exports, events.append)
-
-    assert len(perm_bodies) == 1
-    assert perm_bodies[0] == {"permissions": {"allow": 4_194_304, "deny": 0}}
+async def test_calculated_writer_compensates_server_grants_without_a_source_role_overwrite(
+    tmp_path,
+):
+    _, plan, _, _, bodies = await _exercise_calculated_writer(tmp_path)
+    assert plan.channels[0].source_predicates
+    assert bodies[1][1]["deny"] & (1 << 22)
 
 
-async def test_run_channels_applies_default_override(tmp_path: Path) -> None:
-    """CHANNELS phase applies default permission override via PUT after channel creation."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={},
-        channel_metadata={
-            "ch1": ChannelMeta(
-                nsfw=False,
-                default_override=PermissionPair(allow=2_097_152, deny=4_194_304),
-            ),
-        },
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    exports = [_make_export(channel_id="ch1", channel_name="readonly", category_id="")]
-
-    default_perm_bodies: list[dict[str, object]] = []
-
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch1", "name": "readonly"},
-        )
-        m.put(
-            f"{STOAT_URL}/channels/stoat-ch1/permissions/default",
-            payload={},
-            callback=lambda url, **kwargs: default_perm_bodies.append(  # type: ignore[misc]
-                kwargs.get("json", {})
-            ),
-        )
-        await run_channels(config, state, exports, events.append)
-
-    assert len(default_perm_bodies) == 1
-    assert default_perm_bodies[0] == {"permissions": {"allow": 2_097_152, "deny": 4_194_304}}
+async def test_calculated_writer_uses_bound_source_instead_of_a_saved_default(tmp_path):
+    metadata = ChannelMeta(False, default_override=PermissionPair(ALL_STOAT_PERMISSIONS, 0))
+    _, _, _, _, bodies = await _exercise_calculated_writer(tmp_path, metadata=metadata)
+    assert bodies[0][1]["deny"] & (1 << 22)
+    assert not bodies[0][1]["allow"] & (1 << 22)
 
 
-async def test_run_channels_override_failure_non_fatal(tmp_path: Path) -> None:
-    """CHANNELS phase logs a warning and does not raise when permission override PUT fails."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(
-        stoat_server_id="srv1",
-        role_map={"discord-role1": "stoat-role1"},
-    )
-
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={},
-        channel_metadata={
-            "ch1": ChannelMeta(
-                nsfw=False,
-                default_override=PermissionPair(allow=0, deny=4_194_304),
-                role_overrides=[
-                    RoleOverride(discord_role_id="discord-role1", allow=4_194_304, deny=0)
-                ],
-            ),
-        },
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    exports = [_make_export(channel_id="ch1", channel_name="general", category_id="")]
-
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels",
-            payload={"_id": "stoat-ch1", "name": "general"},
-        )
-        # Both PUT calls fail.
-        m.put(f"{STOAT_URL}/channels/stoat-ch1/permissions/default", status=500)
-        m.put(f"{STOAT_URL}/channels/stoat-ch1/permissions/stoat-role1", status=500)
-
-        # Should NOT raise.
-        await run_channels(config, state, exports, events.append)
-
-    assert state.channel_map["ch1"] == "stoat-ch1"
-    default_warnings = [w for w in state.warnings if w.get("type") == "channel_default_perm_failed"]
-    role_warnings = [w for w in state.warnings if w.get("type") == "channel_role_perm_failed"]
-    assert len(default_warnings) == 1
-    assert len(role_warnings) == 1
+async def test_calculated_writer_stops_on_a_rejected_role_write(tmp_path):
+    state, _, _, order, bodies = await _exercise_calculated_writer(tmp_path, mode="role-failure")
+    assert state.permission_runtime.stopped
+    assert state.permission_runtime.outcome.reason == "write_uncertain"
+    assert len(bodies) == 2
+    assert order[-1].startswith("write-")
 
 
 # ---------------------------------------------------------------------------
@@ -2568,104 +2858,45 @@ def _permission_urls(mock: aioresponses) -> list[str]:
 
 
 @pytest.mark.parametrize("inflated", _INFLATED_ALLOWS)
-async def test_run_channels_sends_no_allow_for_an_inflated_everyone_overwrite(
-    tmp_path: Path, inflated: int
-) -> None:
-    """SC-2.2 (#986): the saved allow is replaced by 0 and the deny is kept."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1")
-    _save_overrides(
-        tmp_path,
-        {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(inflated, 1 << 20))},
+async def test_compiled_default_preserves_native_flags_that_source_cleanup_would_remove(
+    tmp_path, inflated
+):
+    from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
+
+    native = inflated & ADMINISTRATOR_ONLY_BITS
+    assert native
+    metadata = ChannelMeta(False, default_override=PermissionPair(inflated, 1 << 20))
+    _, _, remote, _, bodies = await _exercise_calculated_writer(
+        tmp_path, native=native, metadata=metadata
     )
-    bodies: list[object] = []
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
-        )
-        m.put(
-            f"{STOAT_URL}/channels/stoat-ch1/permissions/default",
-            payload={},
-            callback=_recorder(bodies),
-        )
-        await run_channels(
-            _make_config(tmp_path, upload_delay=0.0),
-            state,
-            [_make_export(channel_id="ch1", category_id="")],
-            events.append,
-        )
-    assert bodies == [{"permissions": {"allow": 0, "deny": 1 << 20}}]
+    assert bodies[0][1]["allow"] & native == native
+    assert remote["default_permissions"]["a"] & native == native
 
 
 @pytest.mark.parametrize("inflated", _INFLATED_ALLOWS)
-async def test_run_channels_sends_no_allow_for_an_inflated_role_overwrite(
-    tmp_path: Path, inflated: int
-) -> None:
-    """SC-2.3 (#986)."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1", role_map={"discord-role1": "stoat-role1"})
-    _save_overrides(
-        tmp_path,
-        {
-            "ch1": ChannelMeta(
-                nsfw=False,
-                role_overrides=[RoleOverride("discord-role1", inflated, 1 << 22)],
-            )
-        },
+async def test_compiled_role_preserves_native_flags_that_source_cleanup_would_remove(
+    tmp_path, inflated
+):
+    from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
+
+    native = inflated & ADMINISTRATOR_ONLY_BITS
+    assert native
+    metadata = ChannelMeta(False, role_overrides=[RoleOverride("112", inflated, 1 << 22)])
+    _, _, _, _, bodies = await _exercise_calculated_writer(
+        tmp_path, native=native, metadata=metadata
     )
-    bodies: list[object] = []
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
-        )
-        m.put(
-            f"{STOAT_URL}/channels/stoat-ch1/permissions/stoat-role1",
-            payload={},
-            callback=_recorder(bodies),
-        )
-        await run_channels(
-            _make_config(tmp_path, upload_delay=0.0),
-            state,
-            [_make_export(channel_id="ch1", category_id="")],
-            events.append,
-        )
-    assert bodies == [{"permissions": {"allow": 0, "deny": 1 << 22}}]
+    assert bodies[1][1]["deny"] & native == native
 
 
-async def test_run_channels_warns_once_per_channel_with_an_inflated_overwrite(
-    tmp_path: Path,
-) -> None:
-    """SC-2.4: one warning per affected channel, carrying only the existing keys."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1", role_map={"discord-role1": "stoat-role1"})
-    _save_overrides(
+async def test_unbound_legacy_default_and_role_cells_stop_without_permission_warnings(tmp_path):
+    await _assert_unbound_legacy_writer_refuses(
         tmp_path,
-        {
-            "ch1": ChannelMeta(
-                nsfw=False,
-                default_override=PermissionPair(0x1FFFFF03FDF, 0),
-                role_overrides=[RoleOverride("discord-role1", 0x1FFFFF03FDF, 0)],
-            ),
-            "ch2": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0)),
-        },
+        ChannelMeta(
+            False,
+            default_override=PermissionPair(0x1FFFFF03FDF, 0),
+            role_overrides=[RoleOverride("112", 0x1FFFFF03FDF, 0)],
+        ),
     )
-    exports = [
-        _make_export(channel_id="ch1", channel_name="general", category_id=""),
-        _make_export(channel_id="ch2", channel_name="staff", category_id=""),
-    ]
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
-        )
-        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch2", "name": "staff"})
-        m.put(re.compile(rf"{STOAT_URL}/channels/.*/permissions/.*"), payload={}, repeat=True)
-        await run_channels(_make_config(tmp_path, upload_delay=0.0), state, exports, events.append)
-    inflated = _inflated_warnings(state)
-    assert len(inflated) == 2
-    assert all(set(w) == {"phase", "type", "message"} for w in inflated)
-    assert all(w["phase"] == "channels" for w in inflated)
-    assert sorted("'general'" in w["message"] for w in inflated) == [False, True]
-    assert sorted("'staff'" in w["message"] for w in inflated) == [False, True]
 
 
 async def test_run_roles_leaves_a_role_holding_every_permission_unchanged(
@@ -2704,97 +2935,22 @@ async def test_run_roles_leaves_a_role_holding_every_permission_unchanged(
     assert _inflated_warnings(state) == []
 
 
-async def test_run_channels_sends_an_ordinary_saved_overwrite_unchanged(tmp_path: Path) -> None:
-    """SC-2.6: every mapped bit together is the largest real allow, and is sent as is."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1")
-    _save_overrides(
-        tmp_path,
-        {
-            "ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x1FFEFF00FDF, 0)),
-            "ch2": ChannelMeta(nsfw=False, default_override=PermissionPair(1 << 22, 0)),
-        },
-    )
-    exports = [
-        _make_export(channel_id="ch1", channel_name="general", category_id=""),
-        _make_export(channel_id="ch2", channel_name="staff", category_id=""),
-    ]
-    bodies: list[object] = []
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
-        )
-        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch2", "name": "staff"})
-        m.put(
-            re.compile(rf"{STOAT_URL}/channels/.*/permissions/default"),
-            payload={},
-            callback=_recorder(bodies),
-            repeat=True,
-        )
-        await run_channels(_make_config(tmp_path, upload_delay=0.0), state, exports, events.append)
-    sent = sorted(b["permissions"]["allow"] for b in bodies)
-    assert sent == sorted([0x1FFEFF00FDF, 1 << 22])
-    assert _inflated_warnings(state) == []
-
-
-async def test_run_channels_records_both_warnings_when_a_replaced_send_fails(
-    tmp_path: Path,
-) -> None:
-    """SC-2.7: the replacement and the failure are both true, so both are recorded."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1")
-    _save_overrides(
-        tmp_path,
-        {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0))},
-    )
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
-        )
-        m.put(f"{STOAT_URL}/channels/stoat-ch1/permissions/default", status=500)
-        await run_channels(
-            _make_config(tmp_path, upload_delay=0.0),
-            state,
-            [_make_export(channel_id="ch1", category_id="")],
-            events.append,
-        )
-    failed = [w for w in state.warnings if w.get("type") == "channel_default_perm_failed"]
-    (inflated,) = _inflated_warnings(state)
-    assert len(failed) == 1
-    # The send failed, so the warning must describe the change to the value, not a send.
-    assert inflated["message"] == (
-        "Saved permission overwrite for 'general' granted every permission, which Discord "
-        "never grants inside an overwrite. Ferry removed its allowed permissions and kept "
-        "its denied ones."
+async def test_ordinary_legacy_overwrites_are_not_permission_authority(tmp_path):
+    await _assert_unbound_legacy_writer_refuses(
+        tmp_path, ChannelMeta(False, default_override=PermissionPair(0x1FFEFF00FDF, 0))
     )
 
 
-async def test_run_channels_skips_an_inflated_override_for_an_unmigrated_role(
-    tmp_path: Path,
-) -> None:
-    """SC-2.8: nothing is sent for the role, so there is nothing to warn about."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1")
-    _save_overrides(
-        tmp_path,
-        {
-            "ch1": ChannelMeta(
-                nsfw=False, role_overrides=[RoleOverride("discord-gone", 0x3FF00CDF, 0)]
-            )
-        },
+async def test_unverified_legacy_overwrites_stop_before_a_permission_send(tmp_path):
+    await _assert_unbound_legacy_writer_refuses(
+        tmp_path, ChannelMeta(False, default_override=PermissionPair(0x3FF00CDF, 0))
     )
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "general"}
-        )
-        await run_channels(
-            _make_config(tmp_path, upload_delay=0.0),
-            state,
-            [_make_export(channel_id="ch1", category_id="")],
-            events.append,
-        )
-        assert _permission_urls(m) == []
-    assert state.warnings == []
+
+
+async def test_unmapped_legacy_role_cells_do_not_authorize_a_writer(tmp_path):
+    await _assert_unbound_legacy_writer_refuses(
+        tmp_path, ChannelMeta(False, role_overrides=[RoleOverride("discord-gone", 0x3FF00CDF, 0)])
+    )
 
 
 async def test_run_channels_dry_run_sends_and_warns_nothing(tmp_path: Path) -> None:
@@ -2816,59 +2972,38 @@ async def test_run_channels_dry_run_sends_and_warns_nothing(tmp_path: Path) -> N
     assert _inflated_warnings(state) == []
 
 
-async def test_a_fetched_administrator_overwrite_reaches_stoat_as_zero_without_a_warning(
-    tmp_path: Path,
-) -> None:
-    """SC-I1: fetch, save, then send. Fresh data is never inflated, so nothing warns."""
-    events: list[MigrationEvent] = []
-    discord_api = "https://discord.com/api/v10"
-    guild = "999000000000000001"
-    channel = "555000000000000002"
-    everyone = {
-        "id": guild,
-        "name": "@everyone",
-        "permissions": "0",
-        "position": 0,
-        "color": 0,
-        "hoist": False,
-        "managed": False,
-    }
-    discord_channel = {
-        "id": channel,
-        "name": "staff",
+async def test_fetched_administrator_overwrite_is_normalized_before_calculation(tmp_path):
+    from discord_ferry.discord.metadata import validate_permission_source
+
+    base = "https://discord.com/api/v10/guilds/111"
+    grants = (1 << 10) | (1 << 11)
+    roles = [
+        {"id": rid, "name": name, "permissions": str(grants), "position": rank, "managed": False}
+        for rid, name, rank in (("111", "everyone", 0), ("112", "ordinary", 1))
+    ]
+    channel = {
+        "id": "222",
+        "name": "selected",
         "type": 0,
-        "nsfw": False,
         "permission_overwrites": [
-            {"id": guild, "type": 0, "allow": str(1 << 3), "deny": str(1 << 10)}
+            {"id": "111", "type": 0, "allow": str(1 << 3), "deny": str(1 << 11)}
         ],
     }
-    state = MigrationState(stoat_server_id="srv1")
-    bodies: list[object] = []
-    with aioresponses() as m:
-        m.get(f"{discord_api}/guilds/{guild}", payload={"id": guild, "name": "T", "banner": None})
-        m.get(f"{discord_api}/guilds/{guild}/roles", payload=[everyone])
-        m.get(f"{discord_api}/guilds/{guild}/channels", payload=[discord_channel])
+    with aioresponses() as mocked:
+        mocked.get(base, payload={"id": "111", "name": "source"})
+        mocked.get(base + "/roles", payload=roles)
+        mocked.get(base + "/channels", payload=[channel])
         async with aiohttp.ClientSession() as session:
-            meta = await fetch_and_translate_guild_metadata(session, "test-token", guild)
-        save_discord_metadata(meta, tmp_path)
-        m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1", "name": "staff"})
-        m.put(
-            f"{STOAT_URL}/channels/stoat-ch1/permissions/default",
-            payload={},
-            callback=_recorder(bodies),
-        )
-        await run_channels(
-            _make_config(tmp_path, upload_delay=0.0),
-            state,
-            [
-                _make_export(
-                    guild_id=guild, channel_id=channel, channel_name="staff", category_id=""
-                )
-            ],
-            events.append,
-        )
-    assert bodies == [{"permissions": {"allow": 0, "deny": 1 << 20}}]
-    assert _inflated_warnings(state) == []
+            meta = await fetch_and_translate_guild_metadata(session, "test-token", "111")
+    assert not validate_permission_source(meta, frozenset({"222"}))
+    assert meta.channel_metadata["222"].default_override == PermissionPair(0, 1 << 22)
+    save_discord_metadata(meta, tmp_path)
+    state, _, _, _, bodies = await _exercise_calculated_writer(
+        tmp_path, metadata=meta.channel_metadata["222"], captured_source=meta.permission_source
+    )
+    assert not bodies[0][1]["allow"] & (1 << 22)
+    assert bodies[1][1]["deny"] & (1 << 22)
+    assert not state.warnings
 
 
 async def test_a_carried_channel_is_not_sent_its_saved_overwrite_again(tmp_path: Path) -> None:
@@ -3078,6 +3213,7 @@ async def test_run_roles_does_not_apply_another_guilds_permissions(tmp_path: Pat
 async def test_run_channels_does_not_apply_another_guilds_overrides(tmp_path: Path) -> None:
     """Channel overwrites from a different server are not sent to this one (#971)."""
     from discord_ferry.discord.metadata import ChannelMeta
+    from discord_ferry.errors import PermissionSafetyError
 
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -3097,7 +3233,8 @@ async def test_run_channels_does_not_apply_another_guilds_overrides(tmp_path: Pa
         m.post(f"{STOAT_URL}/servers/srv1/channels", payload={"_id": "stoat-ch1"}, repeat=True)
         m.patch(f"{STOAT_URL}/channels/stoat-ch1", payload={}, repeat=True)
         m.patch(f"{STOAT_URL}/servers/srv1", payload={}, repeat=True)
-        await run_channels(config, state, exports, [].append)
+        with pytest.raises(PermissionSafetyError):
+            await run_channels(config, state, exports, [].append)
         bodies = [
             c.kwargs.get("json", {})
             for (method, _), calls in m.requests.items()
@@ -3250,7 +3387,7 @@ async def test_run_roles_permission_failure_non_fatal(tmp_path: Path) -> None:
     assert "Mod" in perm_warnings[0]["message"]
 
 
-async def test_run_channels_skip_threads(tmp_path: Path) -> None:
+async def test_run_channels_skip_threads(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase skips thread exports when config.skip_threads is True."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, skip_threads=True)
@@ -3279,7 +3416,7 @@ async def test_run_channels_skip_threads(tmp_path: Path) -> None:
     assert "th1" not in state.channel_map
 
 
-async def test_run_channels_skip_threads_false(tmp_path: Path) -> None:
+async def test_run_channels_skip_threads_false(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase includes threads when skip_threads is False (default)."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, skip_threads=False)
@@ -3310,7 +3447,9 @@ async def test_run_channels_skip_threads_false(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_run_channels_forum_threads_get_dedicated_category(tmp_path: Path) -> None:
+async def test_run_channels_forum_threads_get_dedicated_category(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """Forum thread exports (type 15) create a dedicated category named after the forum."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, upload_delay=0)
@@ -3366,7 +3505,7 @@ async def test_run_channels_forum_threads_get_dedicated_category(tmp_path: Path)
     assert categories[0]["channels"] == ["stoat-ft1"]  # type: ignore[index]
 
 
-async def test_run_channels_truncates_at_200(tmp_path: Path) -> None:
+async def test_run_channels_truncates_at_200(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase truncates to 200 channels, dropping threads first."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -3563,7 +3702,7 @@ async def test_no_banner_skipped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_forum_index_channel_created(tmp_path: Path) -> None:
+async def test_forum_index_channel_created(channel_attributes_only, tmp_path: Path) -> None:
     """Forum category with 2 posts creates an index channel with a pinned message
     that includes channel references and message counts."""
     events: list[MigrationEvent] = []
@@ -3670,7 +3809,7 @@ async def test_forum_index_channel_created(tmp_path: Path) -> None:
     assert masq.get("name") == "Discord Ferry"  # type: ignore[union-attr]
 
 
-async def test_forum_index_empty_forum(tmp_path: Path) -> None:
+async def test_forum_index_empty_forum(channel_attributes_only, tmp_path: Path) -> None:
     """Forum category with 0 posts sends 'No posts migrated.' message."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path, upload_delay=0)
@@ -3778,7 +3917,7 @@ async def test_forum_index_not_created_in_dry_run(tmp_path: Path) -> None:
     assert "forum-index-forum-my-forum" not in state.channel_map
 
 
-async def test_forum_index_failure_nonfatal(tmp_path: Path) -> None:
+async def test_forum_index_failure_nonfatal(channel_attributes_only, tmp_path: Path) -> None:
     """api_create_channel failure for forum index logs a warning but does not crash."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -4879,7 +5018,7 @@ async def test_a_refused_proxy_names_the_proxy(
     assert "FERRY_DISABLE_PROXY" in message
 
 
-async def test_forum_index_duplicate_skips_the_pin(tmp_path: Path) -> None:
+async def test_forum_index_duplicate_skips_the_pin(channel_attributes_only, tmp_path: Path) -> None:
     """SC-2.6: a duplicate index send leaves no id, so there is nothing to pin.
 
     Driven through real HTTP so the whole stack runs, including api.py's
@@ -4986,7 +5125,9 @@ def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> N
     m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
 
-async def test_forum_index_create_conflict_remains_unresolved(tmp_path: Path) -> None:
+async def test_forum_index_create_conflict_remains_unresolved(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """A new-format conflict without a history match cannot mark an index present."""
     config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
@@ -5007,7 +5148,9 @@ async def test_forum_index_create_conflict_remains_unresolved(tmp_path: Path) ->
     ]
 
 
-async def test_forum_index_create_success_does_not_mark_the_forum(tmp_path: Path) -> None:
+async def test_forum_index_create_success_does_not_mark_the_forum(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """#560: a normal create send leaves the marker set empty."""
     config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(stoat_server_id="srv1")
@@ -5020,7 +5163,9 @@ async def test_forum_index_create_success_does_not_mark_the_forum(tmp_path: Path
     assert state.channel_map["forum-index-forum-my-forum"] == "01J5T000000000000000002000"
 
 
-async def test_forum_index_create_success_records_the_message_id(tmp_path: Path) -> None:
+async def test_forum_index_create_success_records_the_message_id(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """#560: a successful create send records the index message id.
 
     Without it the REPORT-phase rebuild finds no id and posts a second, separately
@@ -5037,7 +5182,9 @@ async def test_forum_index_create_success_records_the_message_id(tmp_path: Path)
     assert state.forum_index_present_unknown_id == set()
 
 
-async def test_report_rebuild_after_a_create_edits_the_created_message(tmp_path: Path) -> None:
+async def test_report_rebuild_after_a_create_edits_the_created_message(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """#560: create then REPORT rebuild in one run edits one message and sends none.
 
     The distinguishing input is the rebuild's own requests: one PATCH to the id the
@@ -5079,7 +5226,9 @@ async def test_report_rebuild_after_a_create_edits_the_created_message(tmp_path:
     assert state.forum_index_message_ids == {"forum-my-forum": "01J5T000000000000000002001"}
 
 
-async def test_forum_index_create_success_clears_a_stale_mark(tmp_path: Path) -> None:
+async def test_forum_index_create_success_clears_a_stale_mark(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """#560: a carried mark does not survive a create that returned a real id."""
     config = _make_config(tmp_path, upload_delay=0)
     state = MigrationState(
@@ -5132,6 +5281,7 @@ async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
 
 
 async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
+    channel_attributes_only,
     tmp_path: Path,
 ) -> None:
     """A report render change cannot authorize another POST for an uncertain initial index."""
@@ -5164,7 +5314,7 @@ async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
 
 
 async def test_report_index_delivery_recovery_does_not_dispatch_prepared_render(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A shared session cannot send changed report content under an initial receipt hash."""
     from aioresponses import CallbackResult
@@ -5268,7 +5418,9 @@ async def test_report_recover_only_cannot_rotate_a_rejected_render(tmp_path: Pat
 # rename test pass against a broken implementation.
 
 
-async def test_run_channels_records_the_created_name(tmp_path: Path) -> None:
+async def test_run_channels_records_the_created_name(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.2. The ordinary case."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -5285,7 +5437,9 @@ async def test_run_channels_records_the_created_name(tmp_path: Path) -> None:
     assert state.created_channel_names == {"d-100": "general"}
 
 
-async def test_the_recorded_name_comes_from_the_response(tmp_path: Path) -> None:
+async def test_the_recorded_name_comes_from_the_response(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.3. In every OTHER test the sent name and the returned name are equal.
 
     Only a response whose name differs from what Ferry sent can distinguish
@@ -5309,7 +5463,9 @@ async def test_the_recorded_name_comes_from_the_response(tmp_path: Path) -> None
     assert state.created_channel_names == {"d-100": "general-normalised"}
 
 
-async def test_a_name_over_32_characters_records_the_truncated_value(tmp_path: Path) -> None:
+async def test_a_name_over_32_characters_records_the_truncated_value(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.4. The truncation trap, and the reason this field is not the Discord name.
 
     make_unique_channel_name cuts to 32 characters. Recording ch.name would make
@@ -5335,7 +5491,9 @@ async def test_a_name_over_32_characters_records_the_truncated_value(tmp_path: P
     assert state.created_channel_names == {"d-100": truncated}
 
 
-async def test_a_collision_pair_records_distinct_suffixed_names(tmp_path: Path) -> None:
+async def test_a_collision_pair_records_distinct_suffixed_names(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.5. Two channels truncating to the same 32 characters.
 
     make_unique_channel_name appends "-1" to the second. Recording ch.name would
@@ -5367,7 +5525,9 @@ async def test_a_collision_pair_records_distinct_suffixed_names(tmp_path: Path) 
     assert first != second
 
 
-async def test_a_voice_retry_records_the_retrys_response(tmp_path: Path) -> None:
+async def test_a_voice_retry_records_the_retrys_response(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.6. The retry reassigns the response INSIDE an except block.
 
     A voice channel that fails is retried as text. The id-map write sits
@@ -5398,7 +5558,9 @@ async def test_a_voice_retry_records_the_retrys_response(tmp_path: Path) -> None
     assert state.created_channel_names == {"d-100": "voice-room-as-text"}
 
 
-async def test_the_forum_index_channel_records_its_name(tmp_path: Path) -> None:
+async def test_the_forum_index_channel_records_its_name(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.7. channel_map keys are not all Discord snowflakes.
 
     The forum index writer stores a synthetic `forum-index-{key}`, and its name
@@ -5540,7 +5702,9 @@ def assert_names_complete(state: MigrationState) -> None:
             )
 
 
-async def test_a_fresh_structure_run_records_a_name_for_every_id(tmp_path: Path) -> None:
+async def test_a_fresh_structure_run_records_a_name_for_every_id(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-2.10. Channels, a forum index and a role, all in one run.
 
     This is the guard that catches a create site added later by someone who

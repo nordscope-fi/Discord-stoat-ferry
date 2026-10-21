@@ -13,6 +13,8 @@ from discord_ferry.errors import PermissionSafetyError
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from discord_ferry.state import MigrationState
+
 ProblemReason = Literal[
     "unsupported",
     "unverified",
@@ -1005,6 +1007,17 @@ class PermissionOutcome:
         return self.reason == "verified" and not self.problems
 
 
+def require_permission_runtime(state: MigrationState) -> PermissionRuntime:
+    """Refuse a writer without this operation's complete bound permission plan."""
+    runtime = state.permission_runtime
+    if not isinstance(runtime, PermissionRuntime):
+        raise PermissionSafetyError(
+            PermissionOutcome("application", "unverified", "none_confirmed")
+        )
+    runtime._active_plan("application")
+    return runtime
+
+
 @dataclass
 class PermissionRuntime:
     """One operation's proposed bindings, observed authority and terminal stop."""
@@ -1319,9 +1332,9 @@ class PermissionRuntime:
     def note_write_rejected(self) -> None:
         self._settle_write(False)
 
-    def verify(
+    def _observed_context(
         self, target: str, observed: PermissionReadback, *, stage: PermissionStage = "recheck"
-    ) -> PermissionReadback:
+    ) -> tuple[ChannelPermissionPlan, TargetChannel, dict[str, TargetRole]]:
         plan = self._active_plan(stage)
         channel = self.channel_plan(target)
         if observed.problems:
@@ -1405,7 +1418,25 @@ class PermissionRuntime:
                     "Unrelated or inactive channel-role cells changed",
                     stage=stage,
                 )
-        if not self._matches_source(channel, layout.server_default, actual, roles):
+        return channel, actual, roles
+
+    def application_plan(
+        self, target: str, observed: PermissionReadback
+    ) -> ChannelPermissionPlan | None:
+        """Bind preserved scope to actual context without granting content authority."""
+        self.invalidate_channel(target)
+        channel, actual, roles = self._observed_context(target, observed, stage="application")
+        assert observed.layout.server_default is not None
+        if self._matches_source(channel, observed.layout.server_default, actual, roles):
+            return None
+        return channel
+
+    def verify(
+        self, target: str, observed: PermissionReadback, *, stage: PermissionStage = "recheck"
+    ) -> PermissionReadback:
+        channel, actual, roles = self._observed_context(target, observed, stage=stage)
+        assert observed.layout.server_default is not None
+        if not self._matches_source(channel, observed.layout.server_default, actual, roles):
             self._refuse(
                 "readback_mismatch",
                 "Observed channel access differs from the proved source result",

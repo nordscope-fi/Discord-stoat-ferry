@@ -37,6 +37,7 @@ from discord_ferry.parser.models import (
     DCERole,
 )
 from discord_ferry.state import MigrationState
+from tests.test_structure import channel_attributes_only as channel_attributes_only
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -505,7 +506,9 @@ async def test_rerun_keeps_existing_channels_attached_to_categories(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
-async def test_rerun_creates_only_new_channel_and_category(tmp_path: Path) -> None:
+async def test_rerun_creates_only_new_channel_and_category(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-4: prior maps cover all-but-one channel + category; export adds new ones.
 
     Exactly the new channel is created (1 POST), the new category is generated,
@@ -628,7 +631,9 @@ async def test_rerun_carried_channels_not_dropped_near_max(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_rerun_partial_export_keeps_carried_only_category(tmp_path: Path) -> None:
+async def test_rerun_partial_export_keeps_carried_only_category(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-7: category C is carried but absent from the (partial) current export.
 
     The full-replace upsert must still include C with its carried channels +
@@ -764,7 +769,9 @@ async def test_rerun_forum_index_channel_not_recreated(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_rerun_two_carried_only_categories_keep_own_channels(tmp_path: Path) -> None:
+async def test_rerun_two_carried_only_categories_keep_own_channels(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-7b: two carried-only categories each retain ONLY their own channels.
 
     Prior state has cat A with {a1, a2} and cat B with {b1, b2}, all carried,
@@ -994,7 +1001,9 @@ async def test_fresh_run_categories_fires_early_upsert(tmp_path: Path) -> None:
     assert patch_bodies, "fresh run must fire the early upsert (non-regression)"
 
 
-async def test_incremental_final_upsert_includes_carried_and_new(tmp_path: Path) -> None:
+async def test_incremental_final_upsert_includes_carried_and_new(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-16: after run_channels, the authoritative upsert holds carried + new categories."""
     exports = [
         _make_export(
@@ -1028,7 +1037,9 @@ async def test_incremental_final_upsert_includes_carried_and_new(tmp_path: Path)
     assert "stoat-chOld" in by_id["stoat-catOld"]["channels"]  # carried channel re-attached
 
 
-async def test_incremental_multiple_carried_only_categories_survive(tmp_path: Path) -> None:
+async def test_incremental_multiple_carried_only_categories_survive(
+    channel_attributes_only, tmp_path: Path
+) -> None:
     """SC-18: multiple simultaneously carried-only categories all survive (no contamination)."""
     exports = [
         _make_export(
