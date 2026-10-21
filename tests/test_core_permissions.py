@@ -695,3 +695,552 @@ def test_synthesis_rejects_non_boolean_query_results(value: object) -> None:
     p = synthesis_functions()
     with pytest.raises(ValueError):
         p.synthesize_bit(1, lambda z, o: value, 0, False)
+
+
+def planned_contracts() -> ModuleType:
+    p = permissions()
+    assert callable(getattr(p, "PlannedRole", None)), "Explicit planned-role facts are missing"
+    return p
+
+
+def test_planned_role_and_server_facts_remain_separate_from_readback() -> None:
+    p = planned_contracts()
+    role = p.PlannedRole("112", p.PermissionCell(1 << 100, 0), 0)
+    layout = p.TargetLayout(
+        planned_roles=(("112", None),), planned_role_facts=(role,), planned_server_default=0
+    )
+    assert layout.roles == () and layout.server_default is None and layout.server_id == ""
+    assert layout.planned_role_facts == (role,)
+    assert layout.planned_server_default == 0
+    assert p.TargetLayout().planned_server_default is None
+    assert p.PermissionReadback().layout.planned_role_facts == ()
+    with pytest.raises(ValueError):
+        p.PermissionReadback(layout)
+    with pytest.raises(FrozenInstanceError):
+        role.rank = 1
+    with pytest.raises(FrozenInstanceError):
+        layout.planned_server_default = 1
+
+
+@pytest.mark.parametrize(
+    "source_id,cell,rank",
+    [("", None, 0), ("112", None, 0), ("112", [], 0), ("112", "cell", 0), ("112", 0, -1)],
+)
+def test_planned_role_rejects_missing_or_mutable_facts(source_id, cell, rank) -> None:
+    p = planned_contracts()
+    with pytest.raises(ValueError):
+        p.PlannedRole(source_id, cell, rank)
+
+
+def test_planned_layout_rejects_mutable_collections_and_invalid_defaults() -> None:
+    p = planned_contracts()
+    for facts in ([], ([],)):
+        with pytest.raises(ValueError):
+            p.TargetLayout(planned_role_facts=facts)
+    for value in (True, -1, 0.5):
+        with pytest.raises(ValueError):
+            p.TargetLayout(planned_server_default=value)
+
+
+def compiler_functions() -> ModuleType:
+    p = planned_contracts()
+    for name in (
+        "validate_calculation_inputs",
+        "compile_supported_bits",
+        "compile_permission_plan",
+    ):
+        assert callable(getattr(p, name, None)), f"Compiler boundary {name} is missing"
+    return p
+
+
+def compiler_layout(source, *, new_server: bool = False):
+    p = planned_contracts()
+    from discord_ferry.discord.permissions import translate_permissions
+
+    ordinary = [r for r in source.roles if r.id != source.guild_id and not r.managed]
+    return p.TargetLayout(
+        service="https://target.test",
+        server_id="" if new_server else "server",
+        roles=()
+        if new_server
+        else tuple(
+            p.TargetRole(
+                f"r-{role.id}", p.PermissionCell(translate_permissions(role.permissions), 0), i
+            )
+            for i, role in enumerate(ordinary)
+        ),
+        server_default=None if new_server else translate_permissions(source.roles[0].permissions),
+        channels=()
+        if new_server
+        else tuple(
+            p.TargetChannel(f"c-{c.id}", p.PermissionCell(0, 0), ()) for c in source.channels
+        ),
+        planned_roles=tuple((r.id, None if new_server else f"r-{r.id}") for r in ordinary),
+        planned_channels=tuple(
+            (c.id, None if new_server else f"c-{c.id}") for c in source.channels
+        ),
+        fingerprint="target-context",
+        planned_role_facts=tuple(
+            p.PlannedRole(r.id, p.PermissionCell(translate_permissions(r.permissions), 0), i)
+            for i, r in enumerate(ordinary)
+        )
+        if new_server
+        else (),
+        planned_server_default=translate_permissions(source.roles[0].permissions)
+        if new_server
+        else None,
+    )
+
+
+def compiled_target_value(channel, layout, assigned: frozenset[str]) -> int:
+    """Independent full-bitfield target order, ending with its visibility gate."""
+    value = layout.server_default if layout.server_id else layout.planned_server_default
+    value = (value | channel.default.allow) & ~channel.default.deny
+    observed = {r.id: r for r in layout.roles}
+    future = {r.source_id: r for r in layout.planned_role_facts}
+    mappings = dict(layout.planned_roles)
+    ordered = sorted(
+        mappings,
+        key=lambda sid: (
+            (observed[mappings[sid]] if mappings[sid] is not None else future[sid]).rank
+        ),
+        reverse=True,
+    )
+    for sid in ordered:
+        if sid in assigned:
+            role = observed[mappings[sid]] if mappings[sid] is not None else future[sid]
+            value = (value | role.permissions.allow) & ~role.permissions.deny
+    cells = dict(channel.roles)
+    for sid in ordered:
+        if sid in assigned:
+            value = (value | cells[sid].allow) & ~cells[sid].deny
+    return value if value & (1 << 20) else 0
+
+
+def test_incomplete_layout_cannot_produce_writable_cells() -> None:
+    p = compiler_functions()
+    source = p.PermissionSourceEvidence("111", "discord-to-stoat-v1", schema_version=0)
+    result = p.compile_permission_plan(source, p.TargetLayout())
+    assert result.problems and result.channels == ()
+    assert all(problem.reason == "unverified" for problem in result.problems)
+
+
+@pytest.mark.parametrize("new_server", [False, True])
+def test_compiler_private_and_read_only_channels_match_independent_access(new_server: bool) -> None:
+    p = compiler_functions()
+    view, send = 1 << 10, 1 << 11
+    for deny in (view, send):
+        source = source_evidence((view | send, view | send), ((0, deny),))
+        layout = compiler_layout(source, new_server=new_server)
+        result = p.compile_permission_plan(source, layout)
+        assert result.problems == () and len(result.channels) == 1
+        for assigned in (frozenset(), frozenset({"112"})):
+            target = compiled_target_value(result.channels[0], layout, assigned)
+            assert bool(target & (1 << 20)) == source_oracle(source, assigned, 10)
+            assert bool(target & (1 << 22)) == (
+                source_oracle(source, assigned, 10) and source_oracle(source, assigned, 11)
+            )
+
+
+def test_compiler_accounts_for_send_dependencies_and_preserves_unrelated_cells() -> None:
+    p = compiler_functions()
+    source = source_evidence(((1 << 10) | (1 << 14) | (1 << 15) | (1 << 17),), ())
+    layout = compiler_layout(source)
+    unrelated = (1 << 100) | (1 << 12)
+    layout = replace(
+        layout, channels=(p.TargetChannel("c-222", p.PermissionCell(unrelated, 1 << 99), ()),)
+    )
+    result = p.compile_permission_plan(source, layout)
+    assert result.problems == ()
+    channel = result.channels[0]
+    value = compiled_target_value(channel, layout, frozenset())
+    assert value & unrelated == unrelated
+    assert channel.default.deny & (1 << 99)
+    assert not value & ((1 << 26) | (1 << 27) | (1 << 37) | (1 << 38))
+
+
+def test_compiler_refuses_all_channels_when_one_is_unsupported() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10,), ())
+    source = replace(
+        source,
+        channels=source.channels
+        + (replace(source.channels[0], id="333", member_overwrite_count=1),),
+        covered_channel_ids=frozenset({"222", "333"}),
+    )
+    result = p.compile_permission_plan(source, compiler_layout(source))
+    assert result.channels == () and result.problems[0].reason == "unsupported"
+
+
+def test_compiler_requires_explicit_planned_role_facts_and_new_server_default() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10, 0), ())
+    layout = compiler_layout(source, new_server=True)
+    for incomplete in (
+        replace(layout, planned_role_facts=()),
+        replace(layout, planned_server_default=None),
+    ):
+        result = p.compile_permission_plan(source, incomplete)
+        assert result.channels == () and result.problems[0].reason == "unverified"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "service",
+        "source-version",
+        "source-binding",
+        "target-binding",
+        "server-default",
+        "role-map",
+        "duplicate-map",
+        "duplicate-role",
+        "rank",
+        "rank-tie",
+        "role-permissions",
+        "channel-default",
+        "channel-roles",
+        "duplicate-channel-role",
+        "contradictory-plan",
+    ],
+)
+def test_compiler_refuses_unknown_or_ambiguous_context(change: str) -> None:
+    p = compiler_functions()
+    source = source_evidence(((1 << 10) | (1 << 11), 0, 0), ())
+    layout = compiler_layout(source)
+    if change == "source-version":
+        source = replace(source, schema_version=0)
+    elif change == "source-binding":
+        source = replace(source, fingerprint="")
+    elif change in {"service", "target-binding", "server-default"}:
+        field, value = {
+            "service": ("service", ""),
+            "target-binding": ("fingerprint", ""),
+            "server-default": ("server_default", None),
+        }[change]
+        layout = replace(layout, **{field: value})
+    elif change == "role-map":
+        layout = replace(layout, planned_roles=layout.planned_roles[:1])
+    elif change == "duplicate-map":
+        layout = replace(layout, planned_roles=layout.planned_roles + layout.planned_roles[:1])
+    elif change == "duplicate-role":
+        layout = replace(layout, roles=layout.roles + layout.roles[:1])
+    elif change in {"rank", "rank-tie", "role-permissions"}:
+        field, value = {
+            "rank": ("rank", None),
+            "rank-tie": ("rank", 1),
+            "role-permissions": ("permissions", None),
+        }[change]
+        layout = replace(
+            layout, roles=(replace(layout.roles[0], **{field: value}), layout.roles[1])
+        )
+    elif change == "contradictory-plan":
+        layout = replace(layout, planned_server_default=0)
+    else:
+        field, value = {
+            "channel-default": ("default", None),
+            "channel-roles": ("roles", None),
+            "duplicate-channel-role": (
+                "roles",
+                (("r-112", p.PermissionCell(0, 0)), ("r-112", p.PermissionCell(0, 0))),
+            ),
+        }[change]
+        layout = replace(layout, channels=(replace(layout.channels[0], **{field: value}),))
+    result = p.compile_permission_plan(source, layout)
+    assert result.channels == () and result.problems[0].reason == "unverified"
+
+
+@pytest.mark.parametrize("recreate_role", [False, True])
+def test_compiler_preserves_deleted_role_cells_with_complete_bound_inventory(
+    recreate_role: bool,
+) -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10, 0), ())
+    layout = compiler_layout(source)
+    if recreate_role:
+        proposed = compiler_layout(source, new_server=True)
+        layout = replace(
+            layout,
+            roles=(),
+            planned_roles=proposed.planned_roles,
+            planned_role_facts=proposed.planned_role_facts,
+        )
+    control = p.compile_permission_plan(source, layout)
+    assert control.problems == ()
+    stale = p.PermissionCell((1 << 22) | (1 << 100), 1 << 20)
+    original = replace(
+        layout,
+        channels=(replace(layout.channels[0], roles=(("deleted-role", stale),)),),
+    )
+    result = p.compile_permission_plan(source, original)
+    assert result.problems == ()
+    assert result.channels[0].default == control.channels[0].default
+    assert result.channels[0].roles == control.channels[0].roles
+    assert result.channels[0].affected_mask == control.channels[0].affected_mask
+    assert result.channels[0].preserved_mask & (1 << 100)
+    assert result.channels[0].target_layout == original
+    assert result.calculation_fingerprint != control.calculation_fingerprint
+    assert result.target_layout == original
+    assert original.channels[0].roles == (("deleted-role", stale),)
+
+    # Independent backend lookup: membership alone does not activate an absent role.
+    owned_cell = dict(result.channels[0].roles)["112"]
+    for assigned in (frozenset(), frozenset({"112"})):
+        baseline = compiled_target_value(result.channels[0], layout, assigned)
+        for stale_member in (False, True):
+            members = {"r-112"} if assigned else set()
+            if stale_member:
+                members.add("deleted-role")
+            actual = {"r-112": owned_cell}
+            value = layout.server_default
+            default = result.channels[0].default
+            value = (value | default.allow) & ~default.deny
+            for rid, cell in (("r-112", owned_cell), ("deleted-role", stale)):
+                if rid in members and rid in actual:
+                    value = (value | cell.allow) & ~cell.deny
+            value = value if value & (1 << 20) else 0
+            assert value == baseline
+            assert bool(value & (1 << 20)) == source_oracle(source, assigned, 10)
+
+    for incomplete in (
+        replace(original, fingerprint=""),
+        replace(original, service=""),
+        replace(original, server_default=None),
+        replace(original, planned_role_facts=()) if recreate_role else replace(original, roles=()),
+    ):
+        refused = p.compile_permission_plan(source, incomplete)
+        assert refused.channels == () and refused.problems[0].reason == "unverified"
+
+
+def test_compiler_preserves_inert_native_cells_and_refuses_material_native_effects() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10,), ())
+    layout = compiler_layout(source)
+    native = p.TargetRole("native", p.PermissionCell(1 << 100, 0), 0)
+    layout = replace(
+        layout,
+        roles=(native,),
+        channels=(replace(layout.channels[0], roles=(("native", p.PermissionCell(1 << 100, 0)),)),),
+    )
+    result = p.compile_permission_plan(source, layout)
+    assert result.problems == () and result.channels[0].roles == ()
+    assert result.target_layout.channels == layout.channels
+    for permissions in (p.PermissionCell(1 << 20, 0), p.PermissionCell(0, 1 << 20)):
+        bad = replace(layout, roles=(replace(native, permissions=permissions),))
+        refused = p.compile_permission_plan(source, bad)
+        assert refused.channels == () and refused.problems[0].reason == "unsupported"
+        active_cell = replace(
+            layout,
+            channels=(replace(layout.channels[0], roles=(("native", permissions),)),),
+        )
+        refused = p.compile_permission_plan(source, active_cell)
+        assert refused.channels == () and refused.problems[0].reason == "unsupported"
+
+
+def test_compiler_does_not_assume_grant_only_fallback_for_server_denies() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10, 0), ())
+    layout = compiler_layout(source)
+    layout = replace(
+        layout, roles=(replace(layout.roles[0], permissions=p.PermissionCell(0, 1 << 20)),)
+    )
+    result = p.compile_permission_plan(source, layout)
+    assert result.channels == () and result.problems[0].reason == "unsupported"
+
+
+def test_compiler_detects_incompatible_rank_without_changing_roles() -> None:
+    p = compiler_functions()
+    source = source_evidence((0, 1 << 10, 8), ((0, 1 << 10),))
+    layout = compiler_layout(source)
+    # Admin is initially below the ordinary role: no exact overwrite order.
+    original = replace(layout)
+    refused = p.compile_permission_plan(source, layout)
+    assert refused.channels == () and refused.problems[0].reason == "unsupported"
+    assert layout == original
+    good = replace(
+        layout, roles=(replace(layout.roles[0], rank=1), replace(layout.roles[1], rank=0))
+    )
+    compiled = p.compile_permission_plan(source, good)
+    assert compiled.problems == ()
+    for assigned in (
+        frozenset(),
+        frozenset({"112"}),
+        frozenset({"113"}),
+        frozenset({"112", "113"}),
+    ):
+        value = compiled_target_value(compiled.channels[0], good, assigned)
+        assert bool(value & (1 << 20)) == source_oracle(source, assigned, 10)
+
+
+def test_compiler_is_deterministic_immutable_and_creates_no_readiness() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10, 0), ())
+    layout = compiler_layout(source, new_server=True)
+    first = p.compile_permission_plan(source, layout)
+    assert first.problems == () and first == p.compile_supported_bits(source, layout)
+    assert first == p.compile_permission_plan(source, layout)
+    assert first.source_fingerprint == source.fingerprint and first.calculation_fingerprint
+    assert p.PermissionRuntime(plan=first).ready == {}
+    with pytest.raises(FrozenInstanceError):
+        first.calculation_fingerprint = "ready"
+
+
+def test_compiler_can_choose_a_data_default_when_everyone_cannot_view_channel() -> None:
+    p = compiler_functions()
+    view, send = 1 << 10, 1 << 11
+    source = source_evidence((send, 0, send), ((0, 0), (view, send), (send, 0)))
+    layout = compiler_layout(source)
+    compiled = p.compile_permission_plan(source, layout)
+    assert compiled.problems == ()
+    for assigned in (
+        frozenset(),
+        frozenset({"112"}),
+        frozenset({"113"}),
+        frozenset({"112", "113"}),
+    ):
+        value = compiled_target_value(compiled.channels[0], layout, assigned)
+        visible = source_oracle(source, assigned, 10)
+        assert bool(value & (1 << 20)) == visible
+        assert bool(value & (1 << 22)) == (visible and source_oracle(source, assigned, 11))
+
+
+def test_compiler_exhaustive_two_role_visibility_and_send_match_all_target_encodings() -> None:
+    p = compiler_functions()
+    view, send = 1 << 10, 1 << 11
+    tables = {
+        target_truth(ops, 3, base)
+        for ops in product((None, False, True), repeat=2)
+        for base in (False, True)
+    }
+    possible = {
+        tuple((v, v and s) for v, s in zip(vt, st, strict=True)) for vt in tables for st in tables
+    }
+    cells = tuple(
+        (va | sa, vd | sd)
+        for (va, vd), (sa, sd) in product(
+            ((0, 0), (view, 0), (0, view)), ((0, 0), (send, 0), (0, send))
+        )
+    )
+    assigned = (frozenset(), frozenset({"113"}), frozenset({"112"}), frozenset({"112", "113"}))
+    for overwrites in product(cells, repeat=3):
+        source = source_evidence((view | send,) * 3, overwrites)
+        layout = compiler_layout(source)
+        wanted = tuple(
+            (
+                source_oracle(source, members, 10),
+                source_oracle(source, members, 10) and source_oracle(source, members, 11),
+            )
+            for members in assigned
+        )
+        compiled = p.compile_permission_plan(source, layout)
+        assert (not compiled.problems) == (wanted in possible), (
+            overwrites,
+            wanted,
+            compiled.problems,
+        )
+        if not compiled.problems:
+            for members, expected in zip(assigned, wanted, strict=True):
+                value = compiled_target_value(compiled.channels[0], layout, members)
+                assert (bool(value & (1 << 20)), bool(value & (1 << 22))) == expected
+
+
+def test_compiler_uses_the_entire_existing_mapping_inventory() -> None:
+    p = compiler_functions()
+    from discord_ferry.discord.permissions import DISCORD_TO_STOAT, translate_permissions
+
+    affected = sum(
+        1 << bit
+        for bit in {
+            target
+            for value in DISCORD_TO_STOAT.values()
+            for target in (value if isinstance(value, list) else [value])
+        }
+    )
+    for bit in DISCORD_TO_STOAT:
+        grants = (1 << 10) | (1 << 11) | (1 << bit)
+        source = source_evidence((grants,), ())
+        layout = compiler_layout(source)
+        compiled = p.compile_permission_plan(source, layout)
+        assert compiled.problems == (), bit
+        assert compiled.channels[0].affected_mask == affected
+        assert compiled_target_value(
+            compiled.channels[0], layout, frozenset()
+        ) & affected == translate_permissions(grants)
+
+
+def test_compiler_checks_managed_effects_after_visibility_and_implicit_dependencies() -> None:
+    p = compiler_functions()
+    view, send = 1 << 10, 1 << 11
+    for everyone, managed_grant, supported in (
+        (0, send, True),
+        (view, send, False),
+        (view | send, send, True),
+        (view, 1 << 100, True),
+    ):
+        source = source_evidence((everyone, managed_grant), (), managed=frozenset({1}))
+        compiled = p.compile_permission_plan(source, compiler_layout(source))
+        assert (not compiled.problems) is supported
+        if not supported:
+            assert compiled.channels == () and compiled.problems[0].reason == "unsupported"
+
+
+@pytest.mark.parametrize("channel_type", [2, 4, 13])
+def test_compiler_refuses_unmodelled_category_and_live_voice_scopes(channel_type: int) -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10,), ())
+    source = replace(source, channels=(replace(source.channels[0], type=channel_type),))
+    compiled = p.compile_permission_plan(source, compiler_layout(source))
+    assert compiled.channels == () and compiled.problems[0].reason == "unsupported"
+
+
+def test_compiler_preserves_owned_unmapped_cells_and_observed_inputs() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10, 0), ())
+    layout = compiler_layout(source)
+    preserved = p.PermissionCell(1 << 100, 1 << 99)
+    layout = replace(layout, channels=(replace(layout.channels[0], roles=(("r-112", preserved),)),))
+    before = replace(layout)
+    compiled = p.compile_permission_plan(source, layout)
+    assert compiled.problems == () and layout == before
+    cell = dict(compiled.channels[0].roles)["112"]
+    assert cell.allow & preserved.allow == preserved.allow
+    assert cell.deny & preserved.deny == preserved.deny
+    assert (
+        compiled.channels[0].preserved_mask & (preserved.allow | preserved.deny)
+        == preserved.allow | preserved.deny
+    )
+
+
+def test_visibility_and_dependency_queries_match_independent_small_truth_tables() -> None:
+    p = compiler_functions()
+    predicates = [
+        p.BitPredicate(allow, deny, grant, base)
+        for allow, deny, grant, base in product(range(4), range(4), range(4), (False, True))
+    ]
+    constraints = []
+    for states in product((0, 1, 2), repeat=2):
+        zeros = sum(1 << i for i, state in enumerate(states) if state == 1)
+        ones = sum(1 << i for i, state in enumerate(states) if state == 2)
+        constraints.append((zeros, ones))
+    for i, view in enumerate(predicates):
+        for j, data in enumerate(predicates):
+            send = predicates[(i + 3 * j) % len(predicates)]
+            for zeros, ones in constraints:
+                values = {
+                    p.evaluate_source_bit(data, members) and p.evaluate_source_bit(send, members)
+                    for members in range(4)
+                    if not members & zeros
+                    and members & ones == ones
+                    and p.evaluate_source_bit(view, members)
+                }
+                expected = next(iter(values)) if len(values) == 1 else None if values else False
+                assert (
+                    p._visible_bit_query(view, (data, send), 3, 0, False, zeros, ones) is expected
+                )
+
+
+@pytest.mark.parametrize("rank", [-1, True, None, 0.5])
+def test_planned_role_rejects_invalid_rank_with_valid_permission_facts(rank: object) -> None:
+    p = planned_contracts()
+    with pytest.raises(ValueError):
+        p.PlannedRole("112", p.PermissionCell(0, 0), rank)

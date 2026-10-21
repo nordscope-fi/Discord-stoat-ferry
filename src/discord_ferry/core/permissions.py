@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
+from functools import partial
+from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -192,6 +195,20 @@ class TargetRole:
 
 
 @dataclass(frozen=True)
+class PlannedRole:
+    """Proposed role facts bound to source identity, before target creation."""
+
+    source_id: str
+    permissions: PermissionCell
+    rank: int
+
+    def __post_init__(self) -> None:
+        _identity(self.source_id)
+        _fact(self.permissions, PermissionCell)
+        _integer(self.rank, "planned rank")
+
+
+@dataclass(frozen=True)
 class TargetChannel:
     """Observed channel cells; missing role inventory is not an empty one."""
 
@@ -221,6 +238,8 @@ class TargetLayout:
     planned_roles: tuple[tuple[str, str | None], ...] = ()
     planned_channels: tuple[tuple[str, str | None], ...] = ()
     fingerprint: str = ""
+    planned_role_facts: tuple[PlannedRole, ...] = ()
+    planned_server_default: int | None = None
 
     def __post_init__(self) -> None:
         if self.server_id:
@@ -228,6 +247,8 @@ class TargetLayout:
         _integer(self.server_default, "server default", unknown=True)
         _records(self.roles, TargetRole)
         _records(self.channels, TargetChannel)
+        _records(self.planned_role_facts, PlannedRole)
+        _integer(self.planned_server_default, "planned server default", unknown=True)
         _pairs(self.planned_roles)
         _pairs(self.planned_channels)
         for source, target in (*self.planned_roles, *self.planned_channels):
@@ -522,6 +543,368 @@ class PermissionPlan:
         return cls(problems=problems)
 
 
+def _permission_mapping() -> dict[int, tuple[int, ...]]:
+    # The mapping keeps its existing owner. A function-local import avoids the
+    # package initialization cycle through the metadata domain-record imports.
+    from discord_ferry.discord.permissions import DISCORD_TO_STOAT
+
+    return {
+        source: tuple(target) if isinstance(target, list) else (target,)
+        for source, target in DISCORD_TO_STOAT.items()
+    }
+
+
+def _calculation_roles(layout: TargetLayout) -> tuple[str, ...]:
+    actual = {role.id: role for role in layout.roles}
+    future = {role.source_id: role for role in layout.planned_role_facts}
+    priorities: dict[str, int] = {}
+    for source, target in layout.planned_roles:
+        role: TargetRole | PlannedRole = actual[target] if target is not None else future[source]
+        assert role.rank is not None
+        priorities[source] = role.rank
+    return tuple(sorted(priorities, key=priorities.__getitem__, reverse=True))
+
+
+def validate_calculation_inputs(
+    source: PermissionSourceEvidence, layout: TargetLayout
+) -> tuple[PermissionProblem, ...]:
+    """Check operation scope, complete facts and the supported target fallback."""
+
+    def refuse(reason: ProblemReason, guidance: str, *ids: str) -> tuple[PermissionProblem, ...]:
+        return (PermissionProblem(reason, tuple(ids), None, guidance),)
+
+    if (
+        source.schema_version != 1
+        or source.translation_version != "discord-to-stoat-v1"
+        or not isinstance(source.fingerprint, str)
+        or not source.fingerprint
+    ):
+        return refuse("unverified", "Refresh validated and bound source permission evidence")
+    if (
+        not isinstance(layout.service, str)
+        or not layout.service
+        or not isinstance(layout.fingerprint, str)
+        or not layout.fingerprint
+    ):
+        return refuse("unverified", "Bind a complete target service and permission context")
+    if layout.server_id:
+        if layout.server_default is None or layout.planned_server_default is not None:
+            return refuse(
+                "unverified", "Read the actual server default separately from planned values"
+            )
+    elif (
+        layout.planned_server_default is None
+        or layout.server_default is not None
+        or layout.roles
+        or layout.channels
+    ):
+        return refuse("unverified", "Supply explicit planned context for the new server")
+    raw_roles = {role.id: role for role in source.roles}
+    if len(raw_roles) != len(source.roles) or source.guild_id not in raw_roles:
+        return refuse("unverified", "Refresh a unique source role inventory including everyone")
+    ordinary = {
+        role.id for role in source.roles if role.id != source.guild_id and role.managed is False
+    }
+    mappings = dict(layout.planned_roles)
+    if len(mappings) != len(layout.planned_roles) or set(mappings) != ordinary:
+        return refuse("unverified", "Bind every ordinary source role exactly once")
+    actual = {role.id: role for role in layout.roles}
+    future = {role.source_id: role for role in layout.planned_role_facts}
+    if len(actual) != len(layout.roles) or len(future) != len(layout.planned_role_facts):
+        return refuse("unverified", "Read unique actual and planned role identities")
+    targets = tuple(target for target in mappings.values() if target is not None)
+    if len(set(targets)) != len(targets) or not set(targets) <= actual.keys():
+        return refuse("unverified", "Resolve unique mapped target roles from actual evidence")
+    if set(future) != {sid for sid, target in mappings.items() if target is None}:
+        return refuse("unverified", "Supply separate facts for each uncreated mapped role")
+    if any(role.permissions is None or role.rank is None for role in layout.roles):
+        return refuse("unverified", "Read every target role grant, deny and rank")
+    ranks = tuple(role.rank for role in layout.roles) + tuple(
+        role.rank for role in layout.planned_role_facts
+    )
+    if len(set(ranks)) != len(ranks):
+        return refuse("unverified", "Resolve target role priority without ambiguous rank ties")
+    selected = dict(layout.planned_channels)
+    channels = {channel.id: channel for channel in layout.channels}
+    raw_channels = {channel.id: channel for channel in source.channels}
+    if (
+        not selected
+        or len(selected) != len(layout.planned_channels)
+        or len(channels) != len(layout.channels)
+        or len(raw_channels) != len(source.channels)
+        or not selected.keys() <= raw_channels.keys()
+    ):
+        return refuse("unverified", "Bind a unique complete selected channel scope")
+    target_channels = tuple(target for target in selected.values() if target is not None)
+    if (
+        len(set(target_channels)) != len(target_channels)
+        or not set(target_channels) <= channels.keys()
+    ):
+        return refuse("unverified", "Read unique actual target channel bindings")
+    ordered = _calculation_roles(layout)
+    mapping = _permission_mapping()
+    affected = sum(1 << target for target in {bit for values in mapping.values() for bit in values})
+    for role in layout.roles:
+        assert role.permissions is not None
+        if role.permissions.deny & affected:
+            return refuse(
+                "unsupported", "Server-role deny effects require an exact supported model", role.id
+            )
+        if role.id not in targets and role.permissions.allow & affected:
+            return refuse(
+                "unsupported", "Native target role access has no source intent binding", role.id
+            )
+    for sid, target in selected.items():
+        _, problems = build_source_predicates(source, sid, ordered, (10,))
+        if problems:
+            return problems
+        if raw_channels[sid].type in {2, 4, 13}:
+            return refuse(
+                "unsupported",
+                "This source scope needs additional category or live voice evidence",
+                sid,
+            )
+        if target is None:
+            continue
+        channel = channels[target]
+        if channel.default is None or channel.roles is None:
+            return refuse("unverified", "Read complete channel defaults and role cells", target)
+        overrides = dict(channel.roles)
+        if len(overrides) != len(channel.roles):
+            return refuse("unverified", "Read unique channel role cells", target)
+        # The bound inventory is complete. The backend ignores cells for absent roles.
+        # Preserve those observed cells, including their mapped bits, in the layout.
+        if any(
+            rid in actual and rid not in targets and (cell.allow | cell.deny) & affected
+            for rid, cell in overrides.items()
+        ):
+            return refuse(
+                "unsupported", "Native channel-role effects have no source intent binding", target
+            )
+    from discord_ferry.discord.permissions import translate_permissions
+
+    for sid, planned_role in future.items():
+        raw = raw_roles[sid].permissions
+        if raw is None or planned_role.permissions != PermissionCell(translate_permissions(raw), 0):
+            return refuse(
+                "unverified", "Bind planned grants to the existing role creation owner", sid
+            )
+    everyone = raw_roles[source.guild_id].permissions
+    if not layout.server_id and (
+        everyone is None or layout.planned_server_default != translate_permissions(everyone)
+    ):
+        return refuse(
+            "unverified", "Bind the planned server default to its existing creation owner"
+        )
+    return ()
+
+
+def _predicate_terms(predicate: BitPredicate, wanted: bool) -> tuple[tuple[int, int], ...]:
+    """Expand role literals, never member subsets, into zero/one constraint cubes."""
+    terms: list[tuple[int, int]] = []
+    candidates = predicate.P if wanted else predicate.N & ~predicate.P
+    while candidates:
+        role = candidates & -candidates
+        terms.append((0 if wanted else predicate.P, role))
+        candidates ^= role
+    if wanted:
+        if predicate.c:
+            terms.append((predicate.N, 0))
+        else:
+            candidates = predicate.G & ~predicate.N
+            while candidates:
+                role = candidates & -candidates
+                terms.append((predicate.N, role))
+                candidates ^= role
+    elif not predicate.c:
+        terms.append((predicate.P | predicate.G, 0))
+    return tuple(terms)
+
+
+def _conjunction_possible(
+    conditions: tuple[tuple[BitPredicate, bool], ...], all_roles: int, zeros: int, ones: int
+) -> bool:
+    if not conditions:
+        return True
+    predicate, wanted = conditions[0]
+    constant = constant_result(predicate, all_roles, zeros, ones)
+    if constant is not None:
+        return constant is wanted and _conjunction_possible(conditions[1:], all_roles, zeros, ones)
+    for absent, present in _predicate_terms(predicate, wanted):
+        if not (zeros & present or ones & absent) and _conjunction_possible(
+            conditions[1:], all_roles, zeros | absent, ones | present
+        ):
+            return True
+    return False
+
+
+def _visible_bit_query(
+    view: BitPredicate,
+    required: tuple[BitPredicate, ...],
+    all_roles: int,
+    grants: int,
+    base: bool,
+    zeros: int,
+    ones: int,
+) -> bool | None:
+    visible = ((view, True),)
+    can_allow = _conjunction_possible(
+        visible + tuple((p, True) for p in required), all_roles, zeros, ones
+    )
+    can_deny = any(
+        _conjunction_possible(visible + ((p, False),), all_roles, zeros, ones) for p in required
+    )
+    if can_allow and can_deny:
+        return None
+    if can_allow or can_deny:
+        return can_allow
+    # No visible source member satisfies this cube. Match the fixed fallback
+    # there instead of imposing an additional restriction on hidden members.
+    return base or bool(grants & ones)
+
+
+def compile_supported_bits(
+    source: PermissionSourceEvidence, layout: TargetLayout
+) -> PermissionPlan:
+    """Compile complete validated channel scope, preserving all unrelated cells."""
+    problems = validate_calculation_inputs(source, layout)
+    if problems:
+        return PermissionPlan.refused(problems)
+    mapping = _permission_mapping()
+    affected = sum(
+        1 << bit for bit in {target for targets in mapping.values() for target in targets}
+    )
+    source_roles = {role.id: role for role in source.roles}
+    actual = {role.id: role for role in layout.roles}
+    future = {role.source_id: role for role in layout.planned_role_facts}
+    bindings = dict(layout.planned_roles)
+    ordered = _calculation_roles(layout)
+    fixed: list[PermissionCell] = []
+    for role_id in ordered:
+        actual_id = bindings[role_id]
+        cell = (
+            actual[actual_id].permissions if actual_id is not None else future[role_id].permissions
+        )
+        assert cell is not None
+        fixed.append(cell)
+    managed = tuple(
+        sorted(
+            (r for r in source.roles if r.id != source.guild_id and r.managed), key=lambda r: r.id
+        )
+    )
+    roles = tuple(source_roles[sid] for sid in ordered) + managed
+    all_roles = (1 << len(roles)) - 1
+    observed = {c.id: c for c in layout.channels}
+    raw_channels = {c.id: c for c in source.channels}
+    channels: list[ChannelPermissionPlan] = []
+    for sid, target in layout.planned_channels:
+        raw_channel = raw_channels[sid]
+        assert raw_channel.overwrites is not None
+        overwrites = {o.role_id: o for o in raw_channel.overwrites}
+        predicates = {
+            bit: _form_source_bit(source_roles[source.guild_id], roles, overwrites, bit)
+            for bit in mapping
+        }
+        view = predicates[10]
+        old = (
+            observed[target] if target is not None else TargetChannel(sid, PermissionCell(0, 0), ())
+        )
+        assert old.default is not None and old.roles is not None
+        old_cells = dict(old.roles)
+        cells = {
+            role_id: old_cells[actual_id]
+            if (actual_id := bindings[role_id]) is not None and actual_id in old_cells
+            else PermissionCell(0, 0)
+            for role_id in ordered
+        }
+        allow = old.default.allow & ~affected
+        deny = old.default.deny & ~affected
+        proposed = {
+            role_id: PermissionCell(cell.allow & ~affected, cell.deny & ~affected)
+            for role_id, cell in cells.items()
+        }
+        preserved = old.default.allow | old.default.deny
+        for _, cell in old.roles:
+            preserved |= cell.allow | cell.deny
+        for bit, targets in mapping.items():
+            required: tuple[BitPredicate, ...] = (predicates[bit],)
+            if bit in {14, 15, 17}:
+                required += (predicates[11],)
+            preferred_base = all(p.c for p in required)
+            for target_bit in targets:
+                mask = 1 << target_bit
+                grants = sum(1 << i for i, cell in enumerate(fixed) if cell.allow & mask)
+                # With no source visibility for the default member, either
+                # data-bit default is valid. Try both before declaring failure.
+                bases = (
+                    (preferred_base,)
+                    if bit == 10 or view.c
+                    else (preferred_base, not preferred_base)
+                )
+                operations = None
+                for base in bases:
+                    query: Callable[[int, int], bool | None]
+                    if bit == 10:
+                        query = partial(constant_result, view, all_roles)
+                    else:
+                        query = partial(_visible_bit_query, view, required, all_roles, grants, base)
+                    operations = synthesize_bit(len(ordered), query, grants, base)
+                    if operations is not None:
+                        break
+                if operations is None:
+                    return PermissionPlan.refused(
+                        (
+                            PermissionProblem(
+                                "unsupported",
+                                (sid,),
+                                target_bit,
+                                "Existing grants and priority cannot express exact source access",
+                            ),
+                        )
+                    )
+                allow |= mask if base else 0
+                deny |= 0 if base else mask
+                for role_id, operation in zip(ordered, operations, strict=True):
+                    cell = proposed[role_id]
+                    proposed[role_id] = PermissionCell(
+                        cell.allow | (mask if operation is True else 0),
+                        cell.deny | (mask if operation is False else 0),
+                    )
+        channels.append(
+            ChannelPermissionPlan(
+                sid,
+                frozenset({sid}),
+                PermissionCell(allow, deny),
+                tuple(proposed.items()),
+                affected,
+                preserved & ~affected,
+                layout,
+                source_predicates=tuple(sorted(predicates.items())),
+            )
+        )
+    fingerprint = sha256(
+        json.dumps(
+            {
+                "calculation_version": 1,
+                "source": asdict(source),
+                "layout": asdict(layout),
+                "mapping": mapping,
+            },
+            default=lambda value: sorted(value) if isinstance(value, frozenset) else value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return PermissionPlan(source.fingerprint, fingerprint, layout, tuple(channels))
+
+
+def compile_permission_plan(
+    source: PermissionSourceEvidence, layout: TargetLayout
+) -> PermissionPlan:
+    """Return one complete exact proposal or a whole-operation refusal."""
+    return compile_supported_bits(source, layout)
+
+
 @dataclass(frozen=True)
 class PermissionReadback:
     """Actual context and decoding problems, never expected-value fallback."""
@@ -531,6 +914,8 @@ class PermissionReadback:
 
     def __post_init__(self) -> None:
         _fact(self.layout, TargetLayout)
+        if self.layout.planned_role_facts or self.layout.planned_server_default is not None:
+            raise ValueError("Proposed role/default facts cannot stand in for observed readback")
         _records(self.problems, PermissionProblem)
 
 
