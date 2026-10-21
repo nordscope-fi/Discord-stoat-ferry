@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Capture and save versioned raw permission evidence before translation, and reject malformed permission numbers before conversion (#1172).
 - Validate raw permission evidence binding, required source facts, selected-channel coverage and agreement with translated permissions without granting target authority (#1172).
 - Calculate raw source permission predicates with administrator bypass and allow-over-deny precedence, refusing unmodelled source effects without destination writes (#1172).
+- Synthesize exact ordered role overwrites against unchanged target grants, returning no candidate when equivalence cannot be proved (#1172).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 

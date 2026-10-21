@@ -1,6 +1,7 @@
 """Contracts for permission facts, proposed values and operation-local readiness."""
 
 from dataclasses import FrozenInstanceError, replace
+from functools import partial
 from importlib import import_module
 from importlib.util import find_spec
 from itertools import product
@@ -531,3 +532,166 @@ def test_source_formation_handles_joint_managed_effects_without_assignments() ->
                     assert problems == ()
                     assert p.evaluate_source_bit(pairs[0][1], 0) == expected[frozenset()]
                     assert p.evaluate_source_bit(pairs[0][1], 1) == expected[frozenset({"112"})]
+
+
+def synthesis_functions() -> ModuleType:
+    p = source_functions()
+    assert callable(getattr(p, "constant_result", None)), "Constant query is missing"
+    assert callable(getattr(p, "synthesize_bit", None)), "Exact synthesis is missing"
+    return p
+
+
+def table_query(table: tuple[bool, ...], zeros: int, ones: int) -> bool | None:
+    values = {
+        value
+        for members, value in enumerate(table)
+        if not members & zeros and members & ones == ones
+    }
+    assert values
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def target_truth(operations: tuple[bool | None, ...], grants: int, base: bool) -> tuple[bool, ...]:
+    result = []
+    for members in range(1 << len(operations)):
+        allowed = base or bool(grants & members)
+        for index, operation in enumerate(operations):
+            if members & (1 << index) and operation is not None:
+                allowed = operation
+        result.append(allowed)
+    return tuple(result)
+
+
+def test_neutral_role_remains_a_free_membership() -> None:
+    p = synthesis_functions()
+    predicate = p.BitPredicate(P=2, N=1, G=0, c=False)
+    assert p.constant_result(predicate, 3, 0, 1) is None
+    assert p.constant_result(predicate, 3, 0, 2) is True
+
+
+def test_symbolic_constants_match_all_small_source_cofactors() -> None:
+    p = synthesis_functions()
+    for size in range(4):
+        all_roles = (1 << size) - 1
+        for allow, deny, grant, base in product(
+            range(all_roles + 1), range(all_roles + 1), range(all_roles + 1), (False, True)
+        ):
+            predicate = p.BitPredicate(allow, deny, grant, base)
+            table = tuple(p.evaluate_source_bit(predicate, members) for members in range(1 << size))
+            for states in product((0, 1, 2), repeat=size):
+                zeros = sum(1 << i for i, state in enumerate(states) if state == 1)
+                ones = sum(1 << i for i, state in enumerate(states) if state == 2)
+                assert p.constant_result(predicate, all_roles, zeros, ones) is table_query(
+                    table, zeros, ones
+                ), (predicate, zeros, ones)
+
+
+def test_synthesis_matches_independent_encodings_for_every_three_role_truth_function() -> None:
+    p = synthesis_functions()
+    for size in range(4):
+        for grants, base in product(range(1 << size), (False, True)):
+            possible = {
+                target_truth(ops, grants, base) for ops in product((None, False, True), repeat=size)
+            }
+            for table in product((False, True), repeat=1 << size):
+                result = p.synthesize_bit(size, partial(table_query, table), grants, base)
+                assert (result is not None) == (table in possible), (size, grants, base, table)
+                if result is not None:
+                    assert isinstance(result, tuple)
+                    assert all(op is None or type(op) is bool for op in result)
+                    assert target_truth(result, grants, base) == table
+
+
+def test_synthesis_matches_four_role_source_predicates_against_independent_encodings() -> None:
+    p = synthesis_functions()
+    for grants, base in product(range(16), (False, True)):
+        possible = {
+            target_truth(ops, grants, base) for ops in product((None, False, True), repeat=4)
+        }
+        for allow, deny, grant in product(range(16), repeat=3):
+            predicate = p.BitPredicate(allow, deny, grant, base)
+            table = tuple(p.evaluate_source_bit(predicate, members) for members in range(16))
+            result = p.synthesize_bit(4, partial(p.constant_result, predicate, 15), grants, base)
+            assert (result is not None) == (table in possible), (predicate, grants)
+            if result is not None:
+                assert target_truth(result, grants, base) == table
+
+
+@pytest.mark.parametrize("size", [0, 1, 2, 16, 65, 101])
+def test_synthesis_query_count_is_linear_for_large_role_universes(size: int) -> None:
+    p = synthesis_functions()
+    all_roles = (1 << size) - 1
+    predicate = p.BitPredicate(0, 0, all_roles, False)
+    calls = []
+
+    def query(zeros: int, ones: int) -> bool | None:
+        calls.append((zeros, ones))
+        assert not zeros & ones and not (zeros | ones) & ~all_roles
+        return p.constant_result(predicate, all_roles, zeros, ones)
+
+    assert p.synthesize_bit(size, query, all_roles, False) == (True,) * size
+    assert len(calls) <= 2 * size + 2
+
+
+def test_synthesis_keeps_administrator_priority_and_rejects_conflicting_rank() -> None:
+    p = synthesis_functions()
+    for administrator, expected in ((2, (False, True)), (1, None)):
+        predicate = p.BitPredicate(administrator, 0, 0, False)
+        assert p.synthesize_bit(2, partial(p.constant_result, predicate, 3), 3, False) == expected
+
+
+def test_synthesis_retains_wide_role_masks_and_sparse_constant_constraints() -> None:
+    p = synthesis_functions()
+    high = 1 << 100
+    predicate = p.BitPredicate(high, 1, 0, False)
+    assert p.constant_result(predicate, high | 1, 0, 1) is None
+    assert p.constant_result(predicate, high | 1, 0, high) is True
+    assert p.synthesize_bit(
+        101, lambda z, o: p.constant_result(predicate, (high << 1) - 1, z, o), 0, False
+    ) == (False,) * 100 + (True,)
+
+
+@pytest.mark.parametrize(
+    "all_roles,zeros,ones",
+    [
+        (True, 0, 0),
+        (-1, 0, 0),
+        (3, True, 0),
+        (3, -1, 0),
+        (3, 0, True),
+        (3, 0, -1),
+        (3, 1, 1),
+        (3, 4, 0),
+        (3, 0, 4),
+        (0, 0, 0),
+    ],
+)
+def test_constant_queries_reject_invalid_or_inconsistent_universes(all_roles, zeros, ones) -> None:
+    p = synthesis_functions()
+    with pytest.raises(ValueError):
+        p.constant_result(p.BitPredicate(1, 0, 0, False), all_roles, zeros, ones)
+
+
+@pytest.mark.parametrize(
+    "size,grants,base",
+    [
+        (True, 0, False),
+        (-1, 0, False),
+        (2, True, False),
+        (2, -1, False),
+        (2, 4, False),
+        (2, 0, 1),
+        (2, 0, None),
+    ],
+)
+def test_synthesis_rejects_invalid_fixed_layout_inputs(size, grants, base) -> None:
+    p = synthesis_functions()
+    with pytest.raises(ValueError):
+        p.synthesize_bit(size, lambda z, o: False, grants, base)
+
+
+@pytest.mark.parametrize("value", [0, 1, -1, "true", (), []])
+def test_synthesis_rejects_non_boolean_query_results(value: object) -> None:
+    p = synthesis_functions()
+    with pytest.raises(ValueError):
+        p.synthesize_bit(1, lambda z, o: value, 0, False)
