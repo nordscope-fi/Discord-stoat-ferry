@@ -28,6 +28,9 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
@@ -234,6 +237,7 @@ async def test_merge_mode_no_thread_channels_created(tmp_path: Path) -> None:
     assert "200" not in state.channel_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_mode_separator_sent(tmp_path: Path) -> None:
     """In merge mode, separator message is sent to parent channel."""
     config = _make_config(tmp_path, thread_strategy="merge", message_rate_limit=0.0)
@@ -279,6 +283,7 @@ async def test_merge_mode_separator_sent(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_mode_does_not_write_through_a_planted_link(tmp_path: Path) -> None:
     """#960: the archive file name is guessable, so a link planted there must not be followed."""
     victim = tmp_path / "owner-only.txt"
@@ -318,6 +323,7 @@ async def test_archive_mode_does_not_write_through_a_planted_link(tmp_path: Path
 
 @pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
 @pytest.mark.parametrize("planted", ["threads", "parent"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_mode_refuses_a_planted_link_as_a_folder(
     tmp_path: Path, planted: str
 ) -> None:
@@ -361,6 +367,7 @@ async def test_archive_mode_refuses_a_planted_link_as_a_folder(
     assert [w["type"] for w in state.warnings] == ["thread_archive_write_failed"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_mode_creates_markdown(tmp_path: Path) -> None:
     """Archive mode creates a markdown file for each thread."""
     config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
@@ -420,6 +427,7 @@ async def test_archive_mode_creates_markdown(tmp_path: Path) -> None:
     assert "##" in content  # markdown headings
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_mode_no_api_calls(tmp_path: Path) -> None:
     """Archive mode should NOT send thread messages to Stoat."""
     config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
@@ -457,6 +465,7 @@ async def test_archive_mode_no_api_calls(tmp_path: Path) -> None:
     assert md_path.exists()
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_mode_sanitizes_hostile_thread_name(tmp_path: Path) -> None:
     """A thread named with filesystem-illegal characters writes without error."""
     config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
@@ -495,6 +504,7 @@ async def test_archive_mode_sanitizes_hostile_thread_name(tmp_path: Path) -> Non
     assert "hostile name msg" in content
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_mode_collision_produces_distinct_files(tmp_path: Path) -> None:
     """Two threads that sanitize to the same filename get distinct archive files."""
     config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
@@ -621,6 +631,7 @@ def _merge_setup(
     return config, state, parent, thread
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_incremental_unchanged_thread_zero_posts(tmp_path: Path) -> None:
     """S1: an unchanged merged thread (all ids <= marker) makes zero POSTs."""
     from unittest.mock import patch
@@ -632,6 +643,7 @@ async def test_merge_incremental_unchanged_thread_zero_posts(tmp_path: Path) -> 
     assert keys == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_brand_new_thread_posts_all_and_records_marker(tmp_path: Path) -> None:
     """S2: a brand-new thread posts separator + all messages and records the marker."""
     from unittest.mock import patch
@@ -645,6 +657,7 @@ async def test_merge_brand_new_thread_posts_all_and_records_marker(tmp_path: Pat
     assert state.channel_high_water["200"] == "30"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_second_run_unchanged_zero_posts(tmp_path: Path) -> None:
     """S2-AC3: after a brand-new run records the marker, a 2nd run makes zero POSTs."""
     from unittest.mock import patch
@@ -660,6 +673,7 @@ async def test_merge_second_run_unchanged_zero_posts(tmp_path: Path) -> None:
     assert keys2 == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_incremental_only_new_messages(tmp_path: Path) -> None:
     """S3: a thread with K new ids > marker re-POSTs only those K; no separator."""
     from unittest.mock import patch
@@ -673,6 +687,7 @@ async def test_merge_incremental_only_new_messages(tmp_path: Path) -> None:
     assert state.channel_high_water["200"] == "40"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_event_reports_posted_count(tmp_path: Path) -> None:
     """S5: the completion event counts posted (2), not the full history (4)."""
     from unittest.mock import patch
@@ -685,6 +700,7 @@ async def test_merge_event_reports_posted_count(tmp_path: Path) -> None:
     assert any("(2 messages)" in m for m in merged)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_skip_type_trailing_high_id_marker(tmp_path: Path) -> None:
     """Critique I2: a trailing skip-type id still advances the marker (max over ALL ids)."""
     from unittest.mock import patch
@@ -720,6 +736,7 @@ async def test_merge_skip_type_trailing_high_id_marker(tmp_path: Path) -> None:
     assert state.channel_high_water["200"] == "30"  # but it advances the marker
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_non_numeric_thread_id_no_crash(tmp_path: Path) -> None:
     """S4: a non-numeric thread message id never hits int() — no ValueError."""
     from unittest.mock import patch
@@ -746,6 +763,7 @@ async def test_merge_non_numeric_thread_id_no_crash(tmp_path: Path) -> None:
     assert _merged_key(state, "30") in keys  # 30 > 20 marker -> posts
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_non_numeric_marker_no_crash(tmp_path: Path) -> None:
     """#77 parity: a non-numeric carried marker degrades to no-threshold, never crashes."""
     from unittest.mock import patch
@@ -783,6 +801,7 @@ def _fail_on(fail_ids: set[str], keys: list[str] | None = None) -> object:
     return _send
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_success_records_no_failure(tmp_path: Path) -> None:
     """SC-1: a fully-successful merge run records zero FailedMessage (non-regression)."""
     from unittest.mock import patch
@@ -796,6 +815,7 @@ async def test_merge_success_records_no_failure(tmp_path: Path) -> None:
     assert state.channel_high_water["200"] == "30"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_failure_recorded_plain_mode(tmp_path: Path) -> None:
     """SC-2: a merge POST failure is recorded as a FailedMessage even in plain mode."""
     from unittest.mock import patch
@@ -812,6 +832,7 @@ async def test_merge_failure_recorded_plain_mode(tmp_path: Path) -> None:
     assert state.channel_high_water["200"] == "30"  # marker still max(all ids)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_incremental_reattempts_prior_failed_id(tmp_path: Path) -> None:
     """SC-3: a prior-failed id below the marker is re-attempted on --incremental."""
     from unittest.mock import patch
@@ -830,6 +851,7 @@ async def test_merge_incremental_reattempts_prior_failed_id(tmp_path: Path) -> N
     assert _merged_key(state, "10") not in keys2  # already-copied, not failed -> skipped
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_reattempt_success_drops_entry(tmp_path: Path) -> None:
     """SC-4: a successful re-attempt drops the entry from failed_messages."""
     from unittest.mock import patch
@@ -843,6 +865,7 @@ async def test_merge_reattempt_success_drops_entry(tmp_path: Path) -> None:
     assert not any(fm.discord_msg_id == "20" for fm in state.failed_messages)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_reattempt_refail_collapses_to_one(tmp_path: Path) -> None:
     """SC-5: a re-failing id stays as exactly one entry (carried+re-fail collapsed)."""
     from unittest.mock import patch
@@ -856,6 +879,7 @@ async def test_merge_reattempt_refail_collapses_to_one(tmp_path: Path) -> None:
     assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "20"]) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_receipt_refail_attaches_reference_to_carried_failure(tmp_path: Path) -> None:
     """Collapsing a carried failure must retain the newly established reference."""
     from discord_ferry.state import DeliveryRef
@@ -874,6 +898,7 @@ async def test_merge_receipt_refail_attaches_reference_to_carried_failure(tmp_pa
     assert state.failed_messages[0].retry_count == 2
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_plain_mode_ignores_marker_no_failrecord_on_success(tmp_path: Path) -> None:
     """SC-6: plain mode (incremental=False) ignores the marker (no skip), no FailedMessage."""
     from unittest.mock import patch
@@ -889,6 +914,7 @@ async def test_merge_plain_mode_ignores_marker_no_failrecord_on_success(tmp_path
     assert state.failed_messages == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_multipart_failure_records_one(tmp_path: Path) -> None:
     """SC-7: a multi-part message with a failing part records exactly one FailedMessage."""
     from unittest.mock import patch
@@ -923,6 +949,7 @@ async def test_merge_multipart_failure_records_one(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("rejections", [1, 2])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_receipt_partial_recovery_rejected_retry(
     tmp_path: Path, rejections: int
 ) -> None:
@@ -996,6 +1023,7 @@ async def test_merge_receipt_partial_recovery_rejected_retry(
     assert delivery_module.read_delivery_receipt(state, tmp_path, ref) is None
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_receipt_recovers_lost_response_after_restart(tmp_path: Path) -> None:
     """A saved uncertain merged send is located, not replayed after cache loss."""
     import aiohttp
@@ -1039,6 +1067,7 @@ async def test_merge_receipt_recovers_lost_response_after_restart(tmp_path: Path
     assert not state.failed_messages
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_cross_thread_sibling_safety(tmp_path: Path) -> None:
     """SC-8: thread B completion does not drop/mangle thread A's still-failed entry."""
     from unittest.mock import patch
@@ -1081,6 +1110,7 @@ async def test_merge_cross_thread_sibling_safety(tmp_path: Path) -> None:
     assert len([fm for fm in state.failed_messages if fm.discord_msg_id == "20"]) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_fully_failed_message_is_recorded_for_retry(tmp_path: Path) -> None:
     """SC-9: a fully-failed merge message is recorded so ferry retry can recover it.
 
@@ -1103,6 +1133,7 @@ async def test_merge_fully_failed_message_is_recorded_for_retry(tmp_path: Path) 
     )  # retry posts to the parent channel
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_failure_sanitizes_token(tmp_path: Path) -> None:
     """SC-10: a token in the exception is absent from FailedMessage.error AND warnings."""
     from unittest.mock import patch
@@ -1135,6 +1166,7 @@ async def test_merge_failure_sanitizes_token(tmp_path: Path) -> None:
     assert all(token not in str(w.get("message", "")) for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_empty_thread_no_marker_no_failure(tmp_path: Path) -> None:
     """SC-11: an empty merge thread writes no marker and records no failure."""
     from unittest.mock import patch
@@ -1148,6 +1180,7 @@ async def test_merge_empty_thread_no_marker_no_failure(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("family", ["header", "separator"])
 @pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_generated_delivery_empty_thread_receipt_survives_restart(
     tmp_path: Path, family: str, empty: bool
 ) -> None:
@@ -1414,6 +1447,7 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
     assert reloaded.forum_index_message_ids == state.forum_index_message_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_separator_failure_not_recorded_as_failed(tmp_path: Path) -> None:
     """SC-12: a separator failure is warn-only, never a FailedMessage."""
     from unittest.mock import patch
@@ -1434,6 +1468,7 @@ async def test_merge_separator_failure_not_recorded_as_failed(tmp_path: Path) ->
     assert any(w.get("type") == "merge_separator_failed" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_non_numeric_id_failure_recorded(tmp_path: Path) -> None:
     """SC-13: a non-numeric merge id that fails is recorded; numeric marker unaffected."""
     from unittest.mock import patch
@@ -1462,6 +1497,7 @@ def _forwarded_msg(msg_id: str = "fwd1") -> DCEMessage:
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_strategy_recovers_forwarded_content(tmp_path: Path) -> None:
     """A forward inside a merged thread must not arrive empty.
 
@@ -1503,6 +1539,7 @@ async def test_merge_strategy_recovers_forwarded_content(tmp_path: Path) -> None
     assert "[forwarded]" in merged
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_strategy_writes_forwarded_content(tmp_path: Path) -> None:
     """Archive writes messages to markdown, so a forward must not archive as empty."""
     config = _make_config(tmp_path, thread_strategy="archive", message_rate_limit=0.0)
@@ -1587,6 +1624,7 @@ def _two_thread_setup(
     return config, state, [parent, *threads]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_crash_mid_merge_leaves_durable_record(tmp_path: Path) -> None:
     """SC-35: what reached the parent channel before the crash is on DISK afterwards.
 
@@ -1626,6 +1664,7 @@ async def test_crash_mid_merge_leaves_durable_record(tmp_path: Path) -> None:
     assert "300" not in saved.get("channel_high_water", {})
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_checkpoints_periodically_inside_a_long_thread(tmp_path: Path) -> None:
     """SC-36: mid-thread progress is persisted, not just per-thread completion.
 
@@ -1654,6 +1693,7 @@ async def test_merge_checkpoints_periodically_inside_a_long_thread(tmp_path: Pat
     assert "200" not in saved.get("channel_high_water", {})
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_does_not_remerge_already_sent_thread_messages(tmp_path: Path) -> None:
     """A resumed merge must not re-deliver what the crashed run already sent."""
     from unittest.mock import patch
@@ -1671,6 +1711,7 @@ async def test_resume_does_not_remerge_already_sent_thread_messages(tmp_path: Pa
     assert _merged_key(state, "40") in keys
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_does_not_repost_the_thread_separator(tmp_path: Path) -> None:
     """The separator is posted once per thread, not once per crash."""
     from unittest.mock import patch
@@ -1686,6 +1727,7 @@ async def test_resume_does_not_repost_the_thread_separator(tmp_path: Path) -> No
     assert _generated_key(state, "300") in keys
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_keeps_a_failed_merge_message_recoverable(tmp_path: Path) -> None:
     """`_posted` advances on a FAILED send too, so the checkpoint can name a message
     that never landed — and --resume now skips past it.
@@ -1721,6 +1763,7 @@ async def test_resume_keeps_a_failed_merge_message_recoverable(tmp_path: Path) -
     assert _merged_key(state, "40") in keys
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Path) -> None:
     """The opt-in delta mode is where the self-heal lives — unchanged by batch 6."""
     from unittest.mock import patch
@@ -1751,6 +1794,7 @@ async def test_incremental_still_reattempts_a_failed_merge_message(tmp_path: Pat
 
 
 @pytest.mark.parametrize("found", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_duplicate_requires_unique_history_match(tmp_path: Path, found: bool) -> None:
     """A cached key resolves only when history establishes the real identifier."""
     from aioresponses import CallbackResult
@@ -1796,6 +1840,7 @@ async def test_merge_duplicate_requires_unique_history_match(tmp_path: Path, fou
 
 @pytest.mark.parametrize("family", ["header", "separator"])
 @pytest.mark.parametrize("found", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_generated_delivery_duplicate_requires_history(
     tmp_path: Path, family: str, found: bool
 ) -> None:
@@ -1886,6 +1931,7 @@ def _post_bump_pair(
     return parent, thread
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_sends_a_colliding_origin_message_once(tmp_path: Path) -> None:
     """SC-3.1: the thread's resolved starter is the parent's own message, so send it once.
 
@@ -1913,6 +1959,7 @@ async def test_merge_sends_a_colliding_origin_message_once(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("thread_first", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_receipt_parent_origin_suppression_in_both_arrival_orders(
     tmp_path: Path, thread_first: bool
 ) -> None:
@@ -1967,6 +2014,7 @@ async def test_merge_receipt_parent_origin_suppression_in_both_arrival_orders(
     assert state.merge_duplicates_suppressed == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_still_delivers_when_the_parents_send_failed(tmp_path: Path) -> None:
     """SC-3.3: the suppression must not fire on a message the parent never delivered.
 
@@ -2014,6 +2062,7 @@ async def test_merge_still_delivers_when_the_parents_send_failed(tmp_path: Path)
 _FORUM_POST_ID = "1506019530294562938"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_never_suppresses_a_forum_posts_starter(tmp_path: Path) -> None:
     """SC-3.4: MANDATORY. The only test that kills the `key == channel_id` mutant.
 
@@ -2063,6 +2112,7 @@ async def test_merge_never_suppresses_a_forum_posts_starter(tmp_path: Path) -> N
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_archive_is_unaffected_by_the_merge_suppression(tmp_path: Path) -> None:
     """SC-I6: archive writes markdown and makes no API calls, so nothing is suppressed.
 
@@ -2087,6 +2137,7 @@ async def test_archive_is_unaffected_by_the_merge_suppression(tmp_path: Path) ->
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_suppressed_message_is_not_counted_as_posted(tmp_path: Path) -> None:
     """SC-3.5: the completion event must not claim a message nobody sent.
 
@@ -2133,6 +2184,7 @@ async def test_a_suppressed_message_is_not_counted_as_posted(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_the_merge_suppression_records_no_warning(tmp_path: Path) -> None:
     """SC-3.5: the suppression is silent, by choice.
 
@@ -2156,6 +2208,7 @@ async def test_the_merge_suppression_records_no_warning(tmp_path: Path) -> None:
     assert not state.failed_messages, "a suppressed message is not a failure"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_the_merge_suppression_increments_the_counter(tmp_path: Path) -> None:
     """#239: the suppression is observable in report.json via a per-run counter.
 
@@ -2179,6 +2232,7 @@ async def test_the_merge_suppression_increments_the_counter(tmp_path: Path) -> N
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_recovers_parent_duplicate_before_origin_suppression(tmp_path: Path) -> None:
     """A positively located parent id prevents the thread origin being copied twice."""
     from aioresponses import CallbackResult
@@ -2234,6 +2288,7 @@ async def test_merge_recovers_parent_duplicate_before_origin_suppression(tmp_pat
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_flatten_then_merge_under_incremental_suppresses_everything(
     tmp_path: Path,
 ) -> None:
@@ -2270,6 +2325,7 @@ async def test_flatten_then_merge_under_incremental_suppresses_everything(
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_resume_interrupted_mid_thread_does_not_resend_the_separator(
     tmp_path: Path,
 ) -> None:
@@ -2303,6 +2359,7 @@ async def test_a_resume_interrupted_mid_thread_does_not_resend_the_separator(
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_second_incremental_pass_sends_nothing(tmp_path: Path) -> None:
     """SC-I3: a completed merge, re-run with --incremental and no new messages.
 
@@ -2329,6 +2386,7 @@ async def test_a_second_incremental_pass_sends_nothing(tmp_path: Path) -> None:
     assert keys == [], f"an unchanged incremental re-run must make no sends at all: {keys}"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_thread_whose_only_message_is_suppressed_still_gets_its_separator(
     tmp_path: Path,
 ) -> None:
@@ -2407,6 +2465,7 @@ async def test_a_thread_with_no_resolvable_parent_is_skipped_before_the_suppress
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_route_masquerade_escape_warns_to_state(tmp_path: Path) -> None:
     """Chunk 3 (#1024): the merged-thread masquerade route warns on escaped avatars."""
     marker = tmp_path.parent / (tmp_path.name + "-marker.png")

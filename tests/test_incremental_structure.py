@@ -37,6 +37,9 @@ from discord_ferry.parser.models import (
     DCERole,
 )
 from discord_ferry.state import MigrationState
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 from tests.test_structure import channel_attributes_only as channel_attributes_only
 from tests.test_structure import role_ordering_only as role_ordering_only
 from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
@@ -1110,6 +1113,7 @@ async def test_incremental_gate_does_not_touch_dry_run(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_duplicate_does_not_become_a_real_duplicate_next_run(tmp_path: Path) -> None:
     """A located lost response cannot become a second creation after cache eviction."""
     import asyncio

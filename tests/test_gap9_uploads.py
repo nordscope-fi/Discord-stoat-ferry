@@ -32,6 +32,9 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader import autumn as autumn_module
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 from tests.test_delivery import seed_rejected_messages
 from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
 
@@ -205,6 +208,7 @@ async def test_engine_malformed_root_shape_falls_back(tmp_path: Path, body: str)
     assert autumn_module.get_tag_size_limit("attachments") == 20_000_000
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Path) -> None:
     attachment_path = tmp_path / "attachment.bin"
     attachment_path.write_bytes(b"four")

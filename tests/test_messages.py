@@ -42,6 +42,9 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 from tests.test_delivery import seed_rejected_messages
 
 if TYPE_CHECKING:
@@ -75,6 +78,44 @@ def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
+async def test_permission_stop_is_not_recorded_as_a_message_failure(tmp_path, monkeypatch, family):
+    from discord_ferry.errors import PermissionSafetyError
+
+    target = valid_stoat_id(29492)
+    state = _make_state(stoat_server_id=valid_stoat_id(29491), channel_map={"111": target})
+    config = _make_config(tmp_path)
+    message = _make_message(id="30001", content="must not publish")
+    send = AsyncMock(return_value={"_id": valid_stoat_id(29493)})
+    monkeypatch.setattr(delivery_module, "api_send_message", send)
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(PermissionSafetyError):
+            if family == "ordinary":
+                await _process_message(
+                    msg=message,
+                    stoat_channel_id=target,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                    export_channel_id="111",
+                )
+            else:
+                await messages_module._process_merged_message(
+                    export=_make_export(channel_id="111", messages=[message]),
+                    msg=message,
+                    stoat_channel_id=target,
+                    config=config,
+                    state=state,
+                    session=session,
+                    on_event=lambda event: None,
+                )
+    send.assert_not_awaited()
+    assert not state.failed_messages and not state.message_map
+    assert not [w for w in state.warnings if w.get("type") == "merge_message_failed"]
+
+
+@pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_outcome_counts_complete_partial_and_unresolved_sources(
     tmp_path: Path, family: str
 ) -> None:
@@ -125,6 +166,7 @@ async def test_delivery_outcome_counts_complete_partial_and_unresolved_sources(
         assert progress[-1].current == progress[-1].total == 3
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_outcome_cached_conflict_without_match_is_unresolved(tmp_path: Path) -> None:
     destination = valid_stoat_id(3650)
     state = _make_state(channel_map={"100": destination})
@@ -149,6 +191,7 @@ async def test_delivery_outcome_cached_conflict_without_match_is_unresolved(tmp_
     assert len(state.failed_messages) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_fresh_destination_uses_independent_delivery_receipt_identity(tmp_path: Path) -> None:
     from aioresponses import CallbackResult
 
@@ -192,6 +235,7 @@ async def test_fresh_destination_uses_independent_delivery_receipt_identity(tmp_
     assert states[0].delivery_namespace != states[1].delivery_namespace
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_lost_response_delivery_receipt_uses_normal_bookkeeping(tmp_path: Path) -> None:
     import asyncio
 
@@ -254,6 +298,7 @@ async def test_lost_response_delivery_receipt_uses_normal_bookkeeping(tmp_path: 
 
 
 @pytest.mark.parametrize("discard_receipt_control", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_restart_after_two_file_checkpoint_gap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -355,6 +400,7 @@ async def test_delivery_receipt_restart_after_two_file_checkpoint_gap(
 
 
 @pytest.mark.parametrize("repeated_rejection", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_incremental_retry_preserves_partial_bookkeeping_and_media(
     tmp_path: Path,
     repeated_rejection: bool,
@@ -722,6 +768,7 @@ def test_interaction_context_is_transformed_with_the_message() -> None:
     assert "!!forecast!!" in content
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_interaction_keeps_the_original_author_masquerade(tmp_path: Path) -> None:
     sent: list[dict[str, Any]] = []
     interaction = DCEInteraction(
@@ -746,6 +793,7 @@ async def test_interaction_keeps_the_original_author_masquerade(tmp_path: Path) 
     assert "invoked by Command Caller" in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_interaction_context_appears_once_across_split_parts(tmp_path: Path) -> None:
     sent: list[dict[str, Any]] = []
     interaction = DCEInteraction(
@@ -767,6 +815,7 @@ async def test_interaction_context_appears_once_across_split_parts(tmp_path: Pat
     assert sum(item["content"].count("Discord command /weather") for item in sent) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_interaction_context_is_not_duplicated_after_failed_retry(tmp_path: Path) -> None:
     from discord_ferry.errors import MessageSendFailure
 
@@ -916,6 +965,7 @@ async def test_build_masquerade_http_avatar_skipped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_skip_types_are_not_sent(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Messages with skip types are silently dropped without an API call."""
     skip_types = [
@@ -934,6 +984,7 @@ async def test_skip_types_are_not_sent(tmp_path: Path, mock_aiohttp: aioresponse
         assert msg.id not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_default_message_is_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A Default type message is sent and mapped."""
     from tests.stoat_ids import stoat_id
@@ -950,6 +1001,7 @@ async def test_default_message_is_imported(tmp_path: Path, mock_aiohttp: aioresp
     assert state.message_map["msg1"] == stoat_id(2)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reply_type_is_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A Reply type message is imported (not skipped)."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T007427233507120849206"})
@@ -969,6 +1021,7 @@ async def test_reply_type_is_imported(tmp_path: Path, mock_aiohttp: aioresponses
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_message_skipped(tmp_path: Path) -> None:
     """Empty content + no attachments + reference + Default type → forwarded, skipped."""
     events: list[MigrationEvent] = []
@@ -1001,6 +1054,7 @@ async def test_forwarded_message_skipped(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_non_forwarded_empty_content_with_attachment_not_skipped(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1032,6 +1086,7 @@ async def test_non_forwarded_empty_content_with_attachment_not_skipped(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_attachment_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Only the first 5 attachments are uploaded."""
     for i in range(7):
@@ -1057,6 +1112,7 @@ async def test_attachment_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> N
     assert len(state.upload_cache) == 5
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_http_attachment_skipped(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """An attachment with an http URL is skipped and increments attachments_skipped."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
@@ -1073,6 +1129,7 @@ async def test_http_attachment_skipped(tmp_path: Path, mock_aiohttp: aioresponse
     assert "msg1" in state.message_map  # Message still sent.
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_missing_local_attachment_skipped(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A locally referenced attachment that doesn't exist is skipped gracefully."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
@@ -1089,6 +1146,7 @@ async def test_missing_local_attachment_skipped(tmp_path: Path, mock_aiohttp: ai
     assert "msg1" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_attachment_upload_cache_used(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """If an attachment is in upload_cache, it is not re-uploaded."""
     att_file = tmp_path / "cached.png"
@@ -1116,6 +1174,7 @@ async def test_attachment_upload_cache_used(tmp_path: Path, mock_aiohttp: aiores
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embeds_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Only first 5 embeds with title/description are included."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
@@ -1131,6 +1190,7 @@ async def test_embeds_max_5(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     assert "msg1" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_without_title_or_description_excluded(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1149,6 +1209,7 @@ async def test_embed_without_title_or_description_excluded(
     assert "msg1" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
     """Embed titles, descriptions, and fields use the message remapping tables."""
     sent: list[dict[str, Any]] = []
@@ -1191,6 +1252,7 @@ async def test_embed_text_uses_message_id_maps(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reply_reference_found_in_map(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """When the referenced message is in message_map, replies list is populated."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T007427233507120849206"})
@@ -1210,6 +1272,7 @@ async def test_reply_reference_found_in_map(tmp_path: Path, mock_aiohttp: aiores
     assert "reply1" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reply_reference_allows_deleted_stoat_target(tmp_path: Path) -> None:
     """A reply is still sent when its target disappeared after Ferry mapped it."""
     sent: list[dict[str, Any]] = []
@@ -1231,6 +1294,7 @@ async def test_reply_reference_allows_deleted_stoat_target(tmp_path: Path) -> No
     ]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reply_reference_not_in_map_is_silently_skipped(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1260,6 +1324,7 @@ async def test_reply_reference_not_in_map_is_silently_skipped(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_empty_message_gets_placeholder(tmp_path: Path) -> None:
     """Empty content + no attachments + no embeds → [empty message] in the SENT content."""
     sent: list[dict[str, Any]] = []
@@ -1282,6 +1347,7 @@ async def test_empty_message_gets_placeholder(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_content_split_at_2001_chars(tmp_path: Path) -> None:
     """Content exceeding 2000 characters is split into multiple parts (not truncated)."""
     state = _make_state()
@@ -1316,6 +1382,7 @@ async def test_content_split_at_2001_chars(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_idempotency_key_format(tmp_path: Path) -> None:
     """The key binds the namespace, destination, source, family, attempt, and part."""
     sent_kwargs: list[dict[str, Any]] = []
@@ -1349,6 +1416,7 @@ async def test_idempotency_key_format(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_pinned_message_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A pinned message has its (channel_id, msg_id) tuple added to pending_pins."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T012697957824840534750"})
@@ -1363,6 +1431,7 @@ async def test_pinned_message_queued(tmp_path: Path, mock_aiohttp: aioresponses)
     assert ("01J5T013913344331853682639", "01J5T012697957824840534750") in state.pending_pins
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unpinned_message_not_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """An unpinned message does not appear in pending_pins."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
@@ -1382,6 +1451,7 @@ async def test_unpinned_message_not_queued(tmp_path: Path, mock_aiohttp: aioresp
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_custom_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Custom emoji reactions are queued via emoji_map lookup."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
@@ -1398,6 +1468,7 @@ async def test_custom_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aiores
     assert state.pending_reactions[0]["emoji"] == "stoat_emoji_1"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_custom_emoji_not_in_map_not_queued(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1415,6 +1486,7 @@ async def test_custom_emoji_not_in_map_not_queued(
     assert len(state.pending_reactions) == 0
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unicode_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Unicode emoji reactions are queued with the emoji name directly."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T009463559210097755981"})
@@ -1436,6 +1508,7 @@ async def test_unicode_emoji_reaction_queued(tmp_path: Path, mock_aiohttp: aiore
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_skips_completed_channels(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Channels in completed_channel_ids are skipped on resume."""
     # Only ch 200 should be processed (ch 100 is in completed_channel_ids).
@@ -1467,6 +1540,7 @@ async def test_resume_skips_completed_channels(tmp_path: Path, mock_aiohttp: aio
     assert "2001" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_skips_completed_messages_within_channel(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1497,6 +1571,7 @@ async def test_resume_skips_completed_messages_within_channel(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_api_failure_does_not_stop_other_messages(tmp_path: Path) -> None:
     """A send failure on one message does not prevent subsequent messages from being sent."""
     call_count = 0
@@ -1524,6 +1599,7 @@ async def test_api_failure_does_not_stop_other_messages(tmp_path: Path) -> None:
     assert len(state.errors) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_api_failure_adds_to_errors(tmp_path: Path) -> None:
     """A send failure adds an entry to state.errors."""
 
@@ -1564,6 +1640,7 @@ async def test_channel_not_in_channel_map_skipped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """End-to-end: two messages sent, state.message_map populated, pins and reactions queued."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T010382523376509579641"})
@@ -1618,6 +1695,7 @@ async def test_run_messages_e2e(tmp_path: Path, mock_aiohttp: aioresponses) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_guild_member_join_skipped(tmp_path: Path) -> None:
     """GuildMemberJoin messages are silently dropped (not sent to API)."""
     state = _make_state()
@@ -1630,6 +1708,7 @@ async def test_guild_member_join_skipped(tmp_path: Path) -> None:
     assert "join1" not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_thread_created_skipped(tmp_path: Path) -> None:
     """ThreadCreated messages are silently dropped."""
     state = _make_state()
@@ -1642,6 +1721,7 @@ async def test_thread_created_skipped(tmp_path: Path) -> None:
     assert "tc1" not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_channel_pinned_message_adds_to_pending_pins(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1671,6 +1751,7 @@ async def test_channel_pinned_message_adds_to_pending_pins(
     assert ("01J5T013913344331853682639", "01J5T005831275483271841773") in state.pending_pins
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_channel_pinned_message_unknown_ref(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1698,6 +1779,7 @@ async def test_channel_pinned_message_unknown_ref(
     ]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """A ThreadStarterMessage is not skipped; it falls through to normal handling.
 
@@ -1726,6 +1808,7 @@ async def test_thread_starter_message_imported(tmp_path: Path, mock_aiohttp: aio
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_thread_header_injected(tmp_path: Path) -> None:
     """Thread exports get a system header message before regular messages."""
     sent_contents: list[str] = []
@@ -1755,6 +1838,7 @@ async def test_thread_header_injected(tmp_path: Path) -> None:
     assert "[Thread migrated from #general]" in sent_contents[0]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_non_thread_no_header(tmp_path: Path) -> None:
     """Non-thread exports do NOT get a system header."""
     sent_contents: list[str] = []
@@ -1783,6 +1867,7 @@ async def test_non_thread_no_header(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_call_message_type_skipped(tmp_path: Path) -> None:
     """Call messages are silently dropped (not sent to API)."""
     state = _make_state()
@@ -1795,6 +1880,7 @@ async def test_call_message_type_skipped(tmp_path: Path) -> None:
     assert "call1" not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_channel_icon_change_skipped(tmp_path: Path) -> None:
     """ChannelIconChange messages are silently dropped."""
     state = _make_state()
@@ -1807,6 +1893,7 @@ async def test_channel_icon_change_skipped(tmp_path: Path) -> None:
     assert "icon1" not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_api_send_message_includes_silent(tmp_path: Path) -> None:
     """The message payload includes silent=true by default."""
     sent_kwargs: list[dict[str, Any]] = []
@@ -1830,6 +1917,7 @@ async def test_api_send_message_includes_silent(tmp_path: Path) -> None:
     assert "msg1" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_attachments_uploaded_counter_increments(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1850,6 +1938,7 @@ async def test_attachments_uploaded_counter_increments(
     assert state.attachments_uploaded == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_skip_threads_skips_thread_exports(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -1879,6 +1968,7 @@ async def test_skip_threads_skips_thread_exports(
     assert "thread1" not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_media_upload(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Embed with a local thumbnail triggers upload and sets media field on the embed."""
     # Create a local thumbnail file
@@ -1917,6 +2007,7 @@ async def test_embed_media_upload(tmp_path: Path, mock_aiohttp: aioresponses) ->
     assert state.attachments_uploaded >= 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_sticker_image_upload(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Message with a sticker that has a local image path triggers upload."""
     sticker_dir = tmp_path / "stickers"
@@ -1967,6 +2058,7 @@ def _poll_result_embed() -> dict[str, object]:
     }
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_poll_result_preserves_fallback_content_and_embed(tmp_path: Path) -> None:
     """DCE 2.48 PollResult data follows the ordinary content and embed path."""
     msg = _make_message(
@@ -2252,6 +2344,7 @@ async def test_empty_url_attachment_no_crash(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_checkpoint_interval_zero_clamped(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """checkpoint_interval=0 does not cause ZeroDivisionError."""
     mock_aiohttp.post(CHANNEL_MSG_URL, payload={"_id": "01J5T014271608871363207460"})
@@ -2279,6 +2372,7 @@ async def test_checkpoint_interval_zero_clamped(tmp_path: Path, mock_aiohttp: ai
     assert len(state.message_map) == 5
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_checkpoint_saves_are_time_throttled(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -2320,6 +2414,7 @@ async def test_checkpoint_saves_are_time_throttled(
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_checkpoint_interval_from_config(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """checkpoint_interval config field is respected in the modulo check."""
     # With checkpoint_interval=2 and 4 messages, indices 1 and 3 hit modulo.
@@ -2356,6 +2451,7 @@ async def test_checkpoint_interval_from_config(tmp_path: Path, mock_aiohttp: aio
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_successful_send_marks_referenced(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """After a successful api_send_message, autumn_ids are added to referenced_autumn_ids."""
     att_file = tmp_path / "file.png"
@@ -2377,6 +2473,7 @@ async def test_successful_send_marks_referenced(tmp_path: Path, mock_aiohttp: ai
     assert "autumn_att1" in state.referenced_autumn_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_failed_send_leaves_orphan(tmp_path: Path) -> None:
     """When api_send_message fails, uploaded files remain in autumn_uploads but NOT referenced."""
 
@@ -2414,6 +2511,7 @@ async def test_failed_send_leaves_orphan(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_message_failure_creates_failed_message(tmp_path: Path) -> None:
     """A send failure creates a FailedMessage with correct fields in state.failed_messages."""
 
@@ -2439,6 +2537,7 @@ async def test_message_failure_creates_failed_message(tmp_path: Path) -> None:
     assert fm.retry_count == 0
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_failed_message_content_preview_truncated(tmp_path: Path) -> None:
     """Content preview is truncated to 50 chars for long messages."""
 
@@ -2460,6 +2559,7 @@ async def test_failed_message_content_preview_truncated(tmp_path: Path) -> None:
     assert len(state.failed_messages[0].content_preview) == 50
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_message_failure_no_crash(tmp_path: Path) -> None:
     """Forwarded messages (empty content) that fail don't crash the preview slice."""
 
@@ -2493,6 +2593,7 @@ async def test_forwarded_message_failure_no_crash(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_text_mode_appends_reaction_summary(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -2519,6 +2620,7 @@ async def test_text_mode_appends_reaction_summary(
     assert "thumbsup 3" in sent_kwargs[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_native_mode_queues_reactions(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """reaction_mode='native' queues reactions and does not append text."""
     sent_kwargs: list[dict[str, Any]] = []
@@ -2542,6 +2644,7 @@ async def test_native_mode_queues_reactions(tmp_path: Path, mock_aiohttp: aiores
     assert "[Reactions:" not in sent_kwargs[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_skip_mode_no_reactions(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """reaction_mode='skip' produces no reaction text and no queuing."""
     sent_kwargs: list[dict[str, Any]] = []
@@ -2565,6 +2668,7 @@ async def test_skip_mode_no_reactions(tmp_path: Path, mock_aiohttp: aioresponses
     assert "[Reactions:" not in sent_kwargs[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_invalid_reaction_mode_defaults_to_text(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -2643,6 +2747,7 @@ def test_empty_content_with_edit_timestamp() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_five_attachments_no_overflow(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """5 attachments produce no overflow warning and no overflow text in content."""
     for i in range(5):
@@ -2677,6 +2782,7 @@ async def test_five_attachments_no_overflow(tmp_path: Path, mock_aiohttp: aiores
     assert not any(w.get("type") == "attachment_overflow" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_seven_attachments_overflow_text(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """7 attachments: first 5 uploaded, content includes overflow text, state updated."""
     for i in range(5):
@@ -2714,6 +2820,7 @@ async def test_seven_attachments_overflow_text(tmp_path: Path, mock_aiohttp: aio
     assert any(w.get("type") == "attachment_overflow" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_ten_attachments_overflow(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """10 attachments: 5 in overflow text."""
     for i in range(5):
@@ -2775,6 +2882,7 @@ def test_discord_links_rewritten_in_content() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_overflow_fallback_text(tmp_path: Path) -> None:
     """When embeds can't be migrated (no title/description), content gets a [N embed(s)...] note."""
     state = _make_state()
@@ -2809,6 +2917,7 @@ async def test_embed_overflow_fallback_text(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_cross_channel_reply_fallback(tmp_path: Path) -> None:
     """An unmapped source channel uses its Discord name, never its raw id."""
     sent_content: list[str] = []
@@ -2843,6 +2952,7 @@ async def test_cross_channel_reply_fallback(tmp_path: Path) -> None:
     assert any(w["type"] == "cross_channel_reply" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_same_channel_missing_reply_no_annotation(tmp_path: Path) -> None:
     """Reply to unknown message in the SAME channel gets no text annotation (handled silently)."""
     sent_content: list[str] = []
@@ -2874,6 +2984,7 @@ async def test_same_channel_missing_reply_no_annotation(tmp_path: Path) -> None:
     assert not any(w["type"] == "cross_channel_reply" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_mapped_different_destination_reply_uses_channel_fallback(tmp_path: Path) -> None:
     """A mapped source in another Stoat channel is named instead of linked."""
     sent_kwargs: list[dict[str, Any]] = []
@@ -2912,6 +3023,7 @@ async def test_mapped_different_destination_reply_uses_channel_fallback(tmp_path
     assert state.replies_linked == 0
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_flattened_thread_same_destination_reply_stays_native(tmp_path: Path) -> None:
     """A thread id can differ from its parent while sharing its Stoat destination."""
     sent_kwargs: list[dict[str, Any]] = []
@@ -2957,6 +3069,7 @@ async def test_flattened_thread_same_destination_reply_stays_native(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reaction_count_native_mode_annotation(tmp_path: Path) -> None:
     """Native mode appends [Original counts: ...] when any reaction count > 1."""
     sent_content: list[str] = []
@@ -2985,6 +3098,7 @@ async def test_reaction_count_native_mode_annotation(tmp_path: Path) -> None:
     assert "tada \u00d72" in sent_content[0]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reaction_count_single_no_annotation(tmp_path: Path) -> None:
     """Native mode does NOT append count annotation when all counts are exactly 1."""
     sent_content: list[str] = []
@@ -3010,6 +3124,7 @@ async def test_reaction_count_single_no_annotation(tmp_path: Path) -> None:
     assert "[Original counts:" not in sent_content[0]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reaction_count_mixed_some_over_one(tmp_path: Path) -> None:
     """Only reactions with count > 1 appear in the native mode annotation."""
     sent_content: list[str] = []
@@ -3037,6 +3152,7 @@ async def test_reaction_count_mixed_some_over_one(tmp_path: Path) -> None:
     assert "wave" not in sent_content[0]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_skips_at_or_below_high_water(tmp_path: Path) -> None:
     """SC-1: incremental copies only ids > the durable high-water mark."""
     sent: list[dict[str, Any]] = []
@@ -3055,6 +3171,7 @@ async def test_incremental_skips_at_or_below_high_water(tmp_path: Path) -> None:
     assert _sent_message_ids(sent, state) == ["300", "400"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_marker_written_at_completion_is_max_id(tmp_path: Path) -> None:
     """SC-2: full run writes channel_high_water=max id; transient offset popped."""
     sent: list[dict[str, Any]] = []
@@ -3070,6 +3187,7 @@ async def test_marker_written_at_completion_is_max_id(tmp_path: Path) -> None:
     assert "ch1" in state.completed_channel_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_marker_is_true_max_not_last_by_timestamp(tmp_path: Path) -> None:
     """SC-10: id order disagrees with timestamp order -> marker is the true max id."""
     sent: list[dict[str, Any]] = []
@@ -3086,6 +3204,7 @@ async def test_marker_is_true_max_not_last_by_timestamp(tmp_path: Path) -> None:
     assert state.channel_high_water["ch1"] == "300"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_empty_export_writes_no_marker(tmp_path: Path) -> None:
     """SC-11: a channel with no messages writes no marker and does not crash."""
     state = _make_state()
@@ -3096,6 +3215,7 @@ async def test_empty_export_writes_no_marker(tmp_path: Path) -> None:
     assert "ch1" in state.completed_channel_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_crashed_prior_falls_back_to_offset(tmp_path: Path) -> None:
     """SC-8: no durable marker but a carried transient offset -> max() uses the offset."""
     sent: list[dict[str, Any]] = []
@@ -3109,6 +3229,7 @@ async def test_incremental_crashed_prior_falls_back_to_offset(tmp_path: Path) ->
     assert _sent_message_ids(sent, state) == ["300"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_new_channel_full_copy(tmp_path: Path) -> None:
     """SC-9: a channel with no marker/offset copies every message."""
     sent: list[dict[str, Any]] = []
@@ -3122,6 +3243,7 @@ async def test_incremental_new_channel_full_copy(tmp_path: Path) -> None:
     assert _sent_message_ids(sent, state) == ["100", "200", "300"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_no_new_messages_count_not_inflated(tmp_path: Path) -> None:
     """SC-6: a no-new-messages incremental leaves channel_message_counts unchanged."""
     sent: list[dict[str, Any]] = []
@@ -3145,6 +3267,7 @@ async def test_incremental_no_new_messages_count_not_inflated(tmp_path: Path) ->
     assert state.channel_message_counts["ch1"] == 800
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_k_new_raises_count_by_k(tmp_path: Path) -> None:
     """SC-7: K new messages raise the per-channel count by exactly K."""
     sent: list[dict[str, Any]] = []
@@ -3167,6 +3290,7 @@ async def test_incremental_k_new_raises_count_by_k(tmp_path: Path) -> None:
     assert state.channel_message_counts["ch1"] == 802
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_old_state_degrades_to_full_copy(tmp_path: Path) -> None:
     """SC-15: incremental off an old state (no marker, no offset) re-copies all (harmless)."""
     sent: list[dict[str, Any]] = []
@@ -3178,6 +3302,7 @@ async def test_incremental_old_state_degrades_to_full_copy(tmp_path: Path) -> No
     assert _sent_message_ids(sent, state) == ["100", "200"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_uses_transient_offset_unchanged(tmp_path: Path) -> None:
     """SC-16: --resume still skips via the transient offset (byte-for-byte unchanged)."""
     sent: list[dict[str, Any]] = []
@@ -3191,6 +3316,7 @@ async def test_resume_uses_transient_offset_unchanged(tmp_path: Path) -> None:
     assert _sent_message_ids(sent, state) == ["300"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_completion_event_reports_new_and_skipped(tmp_path: Path) -> None:
     """SC-20: incremental completion event reports copied-new and skipped counts."""
     sent: list[dict[str, Any]] = []
@@ -3224,6 +3350,7 @@ async def test_dry_run_incremental_writes_no_marker(tmp_path: Path) -> None:
     assert state.channel_high_water == {"ch1": "999"}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_non_numeric_message_id_not_skipped_or_marked(tmp_path: Path) -> None:
     """isdigit guard: a non-numeric id is copied (never skipped) and never advances the marker."""
     sent: list[dict[str, Any]] = []
@@ -3252,6 +3379,7 @@ def _make_thread_export(
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unchanged_thread_makes_zero_posts(tmp_path: Path) -> None:
     """SC-4: an unchanged thread channel (marker present) posts nothing — not even the header."""
     sent: list[dict[str, Any]] = []
@@ -3263,6 +3391,7 @@ async def test_unchanged_thread_makes_zero_posts(tmp_path: Path) -> None:
     assert sent == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_new_thread_posts_header(tmp_path: Path) -> None:
     """SC-5: a brand-new thread channel (no marker) posts the header."""
     sent: list[dict[str, Any]] = []
@@ -3277,6 +3406,7 @@ async def test_new_thread_posts_header(tmp_path: Path) -> None:
     assert headers == ["[Thread migrated from #general]"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_uses_parent_id_when_two_channels_share_a_name(tmp_path: Path) -> None:
     """A thread's categoryId selects its parent without a name collision."""
     sent_channels: list[str] = []
@@ -3323,6 +3453,7 @@ async def test_merge_uses_parent_id_when_two_channels_share_a_name(tmp_path: Pat
     assert sent_channels == ["01J5T007915908829596483954", "01J5T007915908829596483954"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unchanged_forum_makes_zero_posts(tmp_path: Path) -> None:
     """#79: an unchanged forum channel (type 15, marker present) posts nothing — no header."""
     sent: list[dict[str, Any]] = []
@@ -3336,6 +3467,7 @@ async def test_unchanged_forum_makes_zero_posts(tmp_path: Path) -> None:
     assert sent == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_new_forum_posts_forum_header(tmp_path: Path) -> None:
     """#79: a brand-new forum channel (type 15/16, no marker) posts the Forum-post header."""
     for forum_type in (15, 16):
@@ -3358,6 +3490,7 @@ async def test_new_forum_posts_forum_header(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
     """SC-11: a non-numeric carried offset degrades to no-threshold, never raises."""
     sent: list[dict[str, Any]] = []
@@ -3369,6 +3502,7 @@ async def test_incremental_non_numeric_offset_does_not_crash(tmp_path: Path) -> 
     assert set(_sent_message_ids(sent, state)) == {"100", "200"}  # no threshold -> both copied
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
     """SC-12: resume path shares the guard — non-numeric offset, no ValueError."""
     sent: list[dict[str, Any]] = []
@@ -3380,6 +3514,7 @@ async def test_resume_non_numeric_offset_does_not_crash(tmp_path: Path) -> None:
     assert set(_sent_message_ids(sent, state)) == {"100", "200"}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_numeric_high_water_still_governs(tmp_path: Path) -> None:
     """SC-13: a numeric high-water still skips at-or-below it (no behaviour change)."""
     sent: list[dict[str, Any]] = []
@@ -3393,6 +3528,7 @@ async def test_incremental_numeric_high_water_still_governs(tmp_path: Path) -> N
     assert set(_sent_message_ids(sent, state)) == {"300"}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_non_numeric_offset_with_numeric_high_water(tmp_path: Path) -> None:
     """SC-14: non-numeric offset is ignored; the numeric high-water governs."""
     sent: list[dict[str, Any]] = []
@@ -3413,6 +3549,7 @@ async def test_incremental_non_numeric_offset_with_numeric_high_water(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_reattempts_failed_id(tmp_path: Path) -> None:
     """SC-4 (CRITICAL): a previously-failed id is re-POSTed alongside genuinely-new ids."""
     sent: list[dict[str, Any]] = []
@@ -3428,6 +3565,7 @@ async def test_incremental_reattempts_failed_id(tmp_path: Path) -> None:
     assert set(_sent_message_ids(sent, state)) == {"200", "400"}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_unchanged_channel_no_failures_zero_posts(tmp_path: Path) -> None:
     """SC-6: no prior failures + all ids <= marker -> zero POSTs (v2.6.3 regression guard)."""
     sent: list[dict[str, Any]] = []
@@ -3439,6 +3577,7 @@ async def test_incremental_unchanged_channel_no_failures_zero_posts(tmp_path: Pa
     assert _sent_message_ids(sent, state) == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_resume_does_not_reattempt_failed_id(tmp_path: Path) -> None:
     """SC-7: --resume must NOT consult failed_messages (no self-heal on resume)."""
     sent: list[dict[str, Any]] = []
@@ -3453,6 +3592,7 @@ async def test_resume_does_not_reattempt_failed_id(tmp_path: Path) -> None:
     assert _sent_message_ids(sent, state) == []  # 200 NOT re-attempted under resume
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_marker_monotonicity(tmp_path: Path) -> None:
     """SC-8: re-attempting low failed 200 under higher new 400 keeps the marker at 400."""
     sent: list[dict[str, Any]] = []
@@ -3467,6 +3607,7 @@ async def test_incremental_marker_monotonicity(tmp_path: Path) -> None:
     assert state.channel_high_water["ch1"] == "400"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_failed_id_equals_marker_boundary(tmp_path: Path) -> None:
     """SC-18: failed id == marker (skip uses <=) is still re-attempted."""
     sent: list[dict[str, Any]] = []
@@ -3483,6 +3624,7 @@ async def test_incremental_failed_id_equals_marker_boundary(tmp_path: Path) -> N
     assert state.channel_high_water["ch1"] == "200"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_empty_failed_is_pure_v263(tmp_path: Path) -> None:
     """SC-19: empty failed_messages -> only genuinely-new ids POST."""
     sent: list[dict[str, Any]] = []
@@ -3494,6 +3636,7 @@ async def test_incremental_empty_failed_is_pure_v263(tmp_path: Path) -> None:
     assert set(_sent_message_ids(sent, state)) == {"400"}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_multiple_failed_ids_one_channel(tmp_path: Path) -> None:
     """SC-21: multiple carried failures in one channel are all re-attempted."""
     sent: list[dict[str, Any]] = []
@@ -3534,6 +3677,7 @@ def _capture_sends_failing(sent: list[dict[str, Any]], fail_ids: set[str]) -> An
     return _send
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reconcile_drops_succeeded_failed_id(tmp_path: Path) -> None:
     """SC-9 (CRITICAL): a re-attempt that succeeds is dropped from failed_messages."""
     sent: list[dict[str, Any]] = []
@@ -3550,6 +3694,7 @@ async def test_reconcile_drops_succeeded_failed_id(tmp_path: Path) -> None:
     assert "200" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reconcile_collapses_refailed_id(tmp_path: Path) -> None:
     """SC-10 (CRITICAL): a re-attempt that fails again leaves exactly one entry, stable."""
     config = _make_config(tmp_path, incremental=True, output_dir=tmp_path)
@@ -3579,6 +3724,7 @@ async def test_reconcile_collapses_refailed_id(tmp_path: Path) -> None:
     assert _ids(state) == ["200"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reconcile_isolation_across_channels(tmp_path: Path) -> None:
     """SC-20: each channel's reconcile only touches its own failures."""
     sent: list[dict[str, Any]] = []
@@ -3616,6 +3762,7 @@ async def test_dry_run_incremental_does_not_touch_failed_messages(tmp_path: Path
     assert [fm.discord_msg_id for fm in state.failed_messages] == ["200"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reconcile_keeps_deleted_unrecoverable_failed_id(tmp_path: Path) -> None:
     """SC-23: a carried failed id absent from the re-export lingers, no POST."""
     sent: list[dict[str, Any]] = []
@@ -3636,6 +3783,7 @@ async def test_reconcile_keeps_deleted_unrecoverable_failed_id(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_complete_event_reports_retried(tmp_path: Path) -> None:
     """SC-15: incremental complete event distinguishes retried from new."""
     events: list[MigrationEvent] = []
@@ -3651,6 +3799,7 @@ async def test_incremental_complete_event_reports_retried(tmp_path: Path) -> Non
     assert msgs[-1] == "Completed 'general': 1 new, 2 already present, 1 retried."
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_complete_event_omits_retried_when_zero(tmp_path: Path) -> None:
     """SC-16: with no retries the message is byte-identical to today's form."""
     events: list[MigrationEvent] = []
@@ -3668,6 +3817,7 @@ async def test_incremental_complete_event_omits_retried_when_zero(tmp_path: Path
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_checkpoint_skips_non_numeric_offset_write(tmp_path: Path, monkeypatch: Any) -> None:
     """SC-17: a non-numeric msg.id is never persisted as a transient offset.
 
@@ -3709,6 +3859,7 @@ async def test_checkpoint_skips_non_numeric_offset_write(tmp_path: Path, monkeyp
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_empty_poll_result_preserves_its_embed(tmp_path: Path) -> None:
     """An otherwise empty PollResult keeps its generic embed and avoids the placeholder."""
     sent: list[dict[str, Any]] = []
@@ -3730,6 +3881,7 @@ async def test_empty_poll_result_preserves_its_embed(tmp_path: Path) -> None:
     assert "Favourite colour?" in sent[0]["embeds"][0]["description"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_sticker_text_only_message_preserves_sticker_text(tmp_path: Path) -> None:
     """A sticker-text-only message (remote sticker, no local image) keeps the sticker text."""
     sent: list[dict[str, Any]] = []
@@ -3752,6 +3904,7 @@ async def test_sticker_text_only_message_preserves_sticker_text(tmp_path: Path) 
     assert "[empty message]" not in content
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_placeholder_only_message_preserves_placeholder(tmp_path: Path) -> None:
     """An oversized-attachment-only message keeps the skip placeholder, not [empty message]."""
     sent: list[dict[str, Any]] = []
@@ -3772,6 +3925,7 @@ async def test_placeholder_only_message_preserves_placeholder(tmp_path: Path) ->
     assert "[empty message]" not in content
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_failed_embed_note_only_message_preserves_note(tmp_path: Path) -> None:
     """A message whose only embed cannot migrate keeps the failed-embed note."""
     sent: list[dict[str, Any]] = []
@@ -3790,6 +3944,7 @@ async def test_failed_embed_note_only_message_preserves_note(tmp_path: Path) -> 
     assert "[empty message]" not in content
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_empty_edited_message_relabeled_with_edited_marker(tmp_path: Path) -> None:
     """A truly-empty edited message is labeled [empty message] *(edited)* (S6 relabel)."""
     sent: list[dict[str, Any]] = []
@@ -3812,6 +3967,7 @@ async def test_empty_edited_message_relabeled_with_edited_marker(tmp_path: Path)
     assert sent[0]["content"] == "*[2024-01-15 12:00 UTC]* [empty message] *(edited)*"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_truly_empty_message_still_labeled_empty(tmp_path: Path) -> None:
     """A truly-empty non-edited message still gets the [empty message] placeholder (S4.1)."""
     sent: list[dict[str, Any]] = []
@@ -3829,6 +3985,7 @@ async def test_truly_empty_message_still_labeled_empty(tmp_path: Path) -> None:
     assert sent[0]["content"] == "*[2024-01-15 12:00 UTC]* [empty message]"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_attachment_only_message_not_labeled_empty(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -3850,6 +4007,7 @@ async def test_attachment_only_message_not_labeled_empty(
     assert "[empty message]" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_only_message_not_labeled_empty(tmp_path: Path) -> None:
     """An embed-only message (embed has title/description) is NOT labeled empty (S4.3)."""
     sent: list[dict[str, Any]] = []
@@ -3870,6 +4028,7 @@ async def test_embed_only_message_not_labeled_empty(tmp_path: Path) -> None:
     assert "[empty message]" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_whitespace_only_message_labeled_empty(tmp_path: Path) -> None:
     """A whitespace-only message strips to the baseline and is labeled [empty message]."""
     sent: list[dict[str, Any]] = []
@@ -3887,6 +4046,7 @@ async def test_whitespace_only_message_labeled_empty(tmp_path: Path) -> None:
     assert sent[0]["content"] == "*[2024-01-15 12:00 UTC]* [empty message]"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_emoji_only_message_not_falsely_labeled_empty(tmp_path: Path) -> None:
     """M4: a real text message (emoji/spoiler) never collapses to the empty baseline."""
     sent: list[dict[str, Any]] = []
@@ -3907,6 +4067,7 @@ async def test_emoji_only_message_not_falsely_labeled_empty(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_sticker_registered_in_autumn_uploads(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -3933,6 +4094,7 @@ async def test_sticker_registered_in_autumn_uploads(
     assert "autumn_s1" in state.referenced_autumn_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """verify_uploads on: a sticker size mismatch skips the sticker; the message still sends."""
     sticker_dir = tmp_path / "stickers"
@@ -3957,6 +4119,7 @@ async def test_sticker_verify_size_pass_through(tmp_path: Path, mock_aiohttp: ai
     assert "s" not in state.autumn_uploads  # mismatched sticker not registered
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_media_registered_and_referenced_not_orphan(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -3983,6 +4146,7 @@ async def test_embed_media_registered_and_referenced_not_orphan(
     assert "autumn_m1" not in orphans
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_media_not_a_top_level_attachment(tmp_path: Path) -> None:
     """Embed media id is set on flat['media'] but NOT in the sent attachments (5-cap untouched)."""
     media = tmp_path / "media"
@@ -4008,6 +4172,7 @@ async def test_embed_media_not_a_top_level_attachment(tmp_path: Path) -> None:
     assert any(e.get("media") == "autumn_m2" for e in (first.get("embeds") or []))
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_media_unsent_is_orphan(tmp_path: Path) -> None:
     """Embed media uploaded but send fails -> tracked but NOT referenced (orphan)."""
 
@@ -4037,6 +4202,7 @@ async def test_embed_media_unsent_is_orphan(tmp_path: Path) -> None:
     assert "autumn_m3" not in state.referenced_autumn_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """verify_uploads on: an embed-media size mismatch skips the media; the message still sends."""
     media = tmp_path / "media"
@@ -4059,6 +4225,7 @@ async def test_embed_verify_size_pass_through(tmp_path: Path, mock_aiohttp: aior
     assert "m" not in state.autumn_uploads  # mismatched media not registered
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Path) -> None:
     """SC-5: a send failure re-raises iff channel_result is None (the retry path); with a
     ChannelResult it degrades-in-loop (returns, records to the result, not to state).
@@ -4103,6 +4270,7 @@ async def test_process_message_reraises_only_when_no_channel_result(tmp_path: Pa
             assert len(state.failed_messages) == 1  # unchanged from (a) — not state-written
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_process_message_unmapped_reaction_direct_state_counts(tmp_path: Path) -> None:
     """SC-4: on the direct-state path (channel_result is None), an unmapped-emoji reaction
     increments state.reactions_dropped directly (no ChannelResult to fold)."""
@@ -4138,6 +4306,7 @@ async def test_process_message_unmapped_reaction_direct_state_counts(tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_zero_concurrent_channels_does_not_deadlock(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -4183,6 +4352,7 @@ def _forwarded(**overrides: Any) -> DCEForwardedMessage:
     return DCEForwardedMessage(**defaults)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_payload_is_recovered_not_skipped(tmp_path: Path) -> None:
     """SC-19: a DCE 2.47+ forward reaches the destination instead of being dropped.
 
@@ -4212,6 +4382,7 @@ async def test_forwarded_payload_is_recovered_not_skipped(tmp_path: Path) -> Non
     assert "the original text" in content
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_message_uses_the_original_timestamp(tmp_path: Path) -> None:
     """The recovered payload keeps the time at which its source was written."""
     sent: list[dict[str, Any]] = []
@@ -4231,6 +4402,7 @@ async def test_forwarded_message_uses_the_original_timestamp(tmp_path: Path) -> 
     assert sent[0]["content"].startswith("*[2024-02-01 09:00 UTC]*")
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_message_without_source_timestamp_keeps_wrapper_timestamp(
     tmp_path: Path,
 ) -> None:
@@ -4252,6 +4424,7 @@ async def test_forwarded_message_without_source_timestamp_keeps_wrapper_timestam
     assert sent[0]["content"].startswith("*[2024-03-01 09:00 UTC]*")
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_message_without_source_timestamp_keeps_wrapper_edited_marker(
     tmp_path: Path,
 ) -> None:
@@ -4274,6 +4447,7 @@ async def test_forwarded_message_without_source_timestamp_keeps_wrapper_edited_m
     assert sent[0]["content"].endswith("*(edited)*")
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_source_timestamp_keeps_explicit_unedited_state(tmp_path: Path) -> None:
     """A dated source without an edit time does not inherit the carrier's marker."""
     sent: list[dict[str, Any]] = []
@@ -4294,6 +4468,7 @@ async def test_forwarded_source_timestamp_keeps_explicit_unedited_state(tmp_path
     assert "*(edited)*" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_numeric_system_message_aliases_are_skipped(tmp_path: Path) -> None:
     """Historic numeric boost and thread-starter system events do not become empty posts."""
     sent: list[dict[str, Any]] = []
@@ -4313,6 +4488,7 @@ async def test_numeric_system_message_aliases_are_skipped(tmp_path: Path) -> Non
     assert state.message_map == {}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """SC-19: an attachment inside the forwarded block goes through the normal upload path.
 
@@ -4343,6 +4519,7 @@ async def test_forwarded_attachment_is_uploaded(tmp_path: Path, mock_aiohttp: ai
     assert state.attachments_uploaded == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_with_empty_content_but_attachment_still_sends(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -4379,6 +4556,7 @@ async def test_forwarded_with_empty_content_but_attachment_still_sends(
     assert state.attachments_uploaded == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_attachments_over_the_cap_are_reported_not_dropped_silently(
     tmp_path: Path, mock_aiohttp: aioresponses
 ) -> None:
@@ -4414,6 +4592,7 @@ async def test_forwarded_attachments_over_the_cap_are_reported_not_dropped_silen
     assert "f1.png" in sent[0]["content"]  # the dropped one is named to the user
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forwarded_content_posts_under_the_forwarder(tmp_path: Path) -> None:
     """SC-23: recovered content is attributed to whoever forwarded it, not the author.
 
@@ -4441,6 +4620,7 @@ async def test_forwarded_content_posts_under_the_forwarder(tmp_path: Path) -> No
     assert sent[0]["masquerade"]["name"] == "forwarder-b"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_recovered_forward_is_not_treated_as_a_reply(tmp_path: Path) -> None:
     """A forward's reference points at its SOURCE, which is not a reply relationship.
 
@@ -4474,6 +4654,7 @@ async def test_recovered_forward_is_not_treated_as_a_reply(tmp_path: Path) -> No
     assert "Replying to" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_reference_type_discriminates_forward_from_reply(tmp_path: Path) -> None:
     """SC-21: a "Default" reference is a reply and is left entirely alone."""
     sent: list[dict[str, Any]] = []
@@ -4494,6 +4675,7 @@ async def test_reference_type_discriminates_forward_from_reply(tmp_path: Path) -
     assert "[forwarded]" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_sticker_only_reply_is_not_mistaken_for_a_forward(tmp_path: Path) -> None:
     """A reply whose whole payload is a sticker must not be discarded.
 
@@ -4520,6 +4702,7 @@ async def test_sticker_only_reply_is_not_mistaken_for_a_forward(tmp_path: Path) 
     assert "sticker_reply" in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_pre_247_export_still_skips_and_warns(tmp_path: Path) -> None:
     """SC-20: an export too old to carry the payload is unchanged — skipped with a warning.
 
@@ -4612,6 +4795,7 @@ def _part_transport(
         yield seen, remote
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_duplicate_on_later_part_does_not_truncate(tmp_path: Path) -> None:
     """A recovered later part preserves all following parts and the first mapping."""
     state = _make_state()
@@ -4626,6 +4810,7 @@ async def test_duplicate_on_later_part_does_not_truncate(tmp_path: Path) -> None
     assert not any(w["type"] == "duplicate_send_unmapped" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_duplicate_on_first_part_still_sends_the_rest(tmp_path: Path) -> None:
     """A recovered first identifier follows the ordinary mapping path."""
     state = _make_state()
@@ -4640,6 +4825,7 @@ async def test_duplicate_on_first_part_still_sends_the_rest(tmp_path: Path) -> N
     assert not state.failed_messages
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_single_part_duplicate_without_match_remains_failed(tmp_path: Path) -> None:
     """Cached consumption without a match cannot produce maps or success counters."""
     state = _make_state()
@@ -4662,6 +4848,7 @@ async def test_single_part_duplicate_without_match_remains_failed(tmp_path: Path
     assert any(error["type"] == "message_send_failed" for error in state.errors)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_recovered_duplicate_uses_parallel_accumulator(tmp_path: Path) -> None:
     """A recovered id must reach ChannelResult before shared maps are changed."""
     state = _make_state()
@@ -4688,6 +4875,7 @@ async def test_recovered_duplicate_uses_parallel_accumulator(tmp_path: Path) -> 
     assert state.message_map == {"msg1": valid_stoat_id(100)}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_partial_send_commits_delivered_parts(tmp_path: Path) -> None:
     """Part one is committed while a later uncertainty remains a failure."""
     state = _make_state()
@@ -4704,6 +4892,7 @@ async def test_partial_send_commits_delivered_parts(tmp_path: Path) -> None:
     assert len([w for w in state.warnings if w["type"] == "message_partial_send"]) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_partial_send_retry_path_commits_then_reraises(tmp_path: Path) -> None:
     """The direct-state path commits the first identifier before propagating failure."""
     state = _make_state()
@@ -4723,6 +4912,7 @@ async def test_partial_send_retry_path_commits_then_reraises(tmp_path: Path) -> 
     assert len(state.failed_messages) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_all_parts_fail_no_partial_commit(tmp_path: Path) -> None:
     """Every part is attempted, but no creation is inferred from a failed send."""
     state = _make_state()
@@ -4741,6 +4931,7 @@ async def test_all_parts_fail_no_partial_commit(tmp_path: Path) -> None:
     assert any(error["type"] == "message_send_failed" for error in state.errors)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_duplicate_part1_error_part2_commits_autumn_refs(tmp_path: Path) -> None:
     """A positively recovered first part retains its original attached media."""
     state = _make_state()
@@ -4762,6 +4953,7 @@ async def test_duplicate_part1_error_part2_commits_autumn_refs(tmp_path: Path) -
     assert len(state.failed_messages) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_multi_failure_warning_counts_are_correct(tmp_path: Path) -> None:
     """Two failed parts produce one source failure with the actual part counts."""
     state = _make_state()
@@ -4788,6 +4980,7 @@ async def test_multi_failure_warning_counts_are_correct(tmp_path: Path) -> None:
 # cannot distinguish the two orders and does not test anything.
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_reply_resolves_against_the_channel_local_map_first(tmp_path: Path) -> None:
     """SC-4.1: a differing local entry wins over the shared one.
 
@@ -4856,6 +5049,7 @@ async def test_a_pin_resolves_against_the_channel_local_map_first(tmp_path: Path
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> None:
     """SC-4.3: the retry path has no local map, so the shared one still answers."""
     state = _make_state()
@@ -4890,6 +5084,7 @@ async def test_lookups_are_unchanged_with_no_channel_result(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_budget_drops_excess_embeds(tmp_path: Path) -> None:
     """When total embed description length exceeds the budget, excess embeds are dropped."""
     sent: list[dict[str, Any]] = []
@@ -4915,6 +5110,7 @@ async def test_embed_budget_drops_excess_embeds(tmp_path: Path) -> None:
     assert state.embeds_dropped >= 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_budget_counts_utf8_bytes(tmp_path: Path) -> None:
     """A multibyte content body leaves only its remaining byte budget for embeds."""
     sent: list[dict[str, Any]] = []
@@ -4935,6 +5131,7 @@ async def test_embed_budget_counts_utf8_bytes(tmp_path: Path) -> None:
     assert state.embeds_dropped == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_budget_all_fit_when_short(tmp_path: Path) -> None:
     """Short content with small embeds: all embeds survive the budget check."""
     sent: list[dict[str, Any]] = []
@@ -4957,6 +5154,7 @@ async def test_embed_budget_all_fit_when_short(tmp_path: Path) -> None:
     assert "could not be migrated" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_budget_note_omitted_when_content_near_limit(tmp_path: Path) -> None:
     """When parts[0] + note would exceed 2000, the note is omitted but embeds still drop."""
     sent: list[dict[str, Any]] = []
@@ -4979,6 +5177,7 @@ async def test_embed_budget_note_omitted_when_content_near_limit(tmp_path: Path)
     assert "could not be migrated" not in sent[0]["content"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_budget_all_dropped_ships_note_not_empty_label(tmp_path: Path) -> None:
     """An embed-only message where all embeds are budget-dropped ships with the drop
     note, not [empty message]."""
@@ -5004,6 +5203,7 @@ async def test_embed_budget_all_dropped_ships_note_not_empty_label(tmp_path: Pat
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_attachment_upload_passes_skip_cache(tmp_path: Path) -> None:
     """All three attachment-tagged upload_with_cache call sites pass skip_cache=True."""
     calls: list[dict[str, Any]] = []
@@ -5067,6 +5267,7 @@ def _recording_uploads(uploads: list[tuple[str, Path]]) -> Any:
     "variant",
     ["parent", "absolute", "symlink"],
 )
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_attachment_escape_warns_and_skips_upload(tmp_path: Path, variant: str) -> None:
     marker = _outside_marker(tmp_path)
     if variant == "parent":
@@ -5100,6 +5301,7 @@ async def test_attachment_escape_warns_and_skips_upload(tmp_path: Path, variant:
     assert state.failed_messages == []
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_sticker_escape_warns_and_sends_text_fallback(tmp_path: Path) -> None:
     marker = _outside_marker(tmp_path)
     msg = _make_message(id="m-esc-stk", stickers=[{"name": "s", "sourceUrl": f"../{marker.name}"}])
@@ -5119,6 +5321,7 @@ async def test_sticker_escape_warns_and_sends_text_fallback(tmp_path: Path) -> N
     assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_escape_warns_and_migrates_without_media(tmp_path: Path) -> None:
     marker = _outside_marker(tmp_path)
     msg = _make_message(
@@ -5141,6 +5344,7 @@ async def test_embed_escape_warns_and_migrates_without_media(tmp_path: Path) -> 
     assert len([w for w in state.warnings if w.get("type") == "unsafe_media_path"]) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_embed_mixed_escape_uploads_in_root_and_warns_once(tmp_path: Path) -> None:
     marker = _outside_marker(tmp_path)
     (tmp_path / "inside.png").write_bytes(b"x")
@@ -5172,6 +5376,7 @@ async def test_embed_mixed_escape_uploads_in_root_and_warns_once(tmp_path: Path)
     assert embeds and embeds[0].get("media")
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_masquerade_escape_sends_without_avatar_and_warns(tmp_path: Path) -> None:
     marker = _outside_marker(tmp_path)
     msg = _make_message(id="m-esc-masq", author=_make_author(avatar_url=f"../{marker.name}"))
@@ -5219,6 +5424,7 @@ async def test_build_masquerade_local_avatar_in_root_not_escaped(tmp_path: Path)
     assert len(uploads) == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_second_pass_repeats_skip_warnings_without_failed_messages(tmp_path: Path) -> None:
     marker = _outside_marker(tmp_path)
     (tmp_path / "inside.png").write_bytes(b"x")

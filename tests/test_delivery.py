@@ -30,6 +30,288 @@ if TYPE_CHECKING:
     from discord_ferry.parser.models import DCEExport
 
 
+@pytest.fixture
+def publication_permission_collaborator(monkeypatch):
+    """Isolate explicitly selected content, receipt and scheduling units.
+
+    These tests retain their actual delivery, transport and checkpoint owners.
+    They do not establish access proof. No runtime or readiness is installed in
+    state, and a supplied operation runtime always uses the real collaborators.
+    Permission integration and refusal tests do not select this fixture.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from discord_ferry.core.permissions import PermissionRuntime
+    from discord_ferry.migrator import delivery, messages
+
+    runtime = MagicMock(spec=PermissionRuntime)
+    original_require = delivery.require_permission_runtime
+    original_verify = messages.verify_permission_channel
+
+    def require(state, **kwargs):
+        if state.permission_runtime is not None:
+            return original_require(state, **kwargs)
+        return runtime
+
+    async def verify(session, config, state, target):
+        if state.permission_runtime is not None:
+            return await original_verify(session, config, state, target)
+        return None
+
+    require_call = MagicMock(side_effect=require)
+    monkeypatch.setattr(delivery, "require_permission_runtime", require_call)
+    monkeypatch.setattr(messages, "require_permission_runtime", require_call)
+    monkeypatch.setattr(messages, "verify_permission_channel", AsyncMock(side_effect=verify))
+    yield runtime
+    assert require_call.call_count > 0
+
+
+@pytest.mark.parametrize("authority", ["missing", "unready", "stopped"])
+async def test_permission_guard_refuses_before_publication_without_authority(
+    tmp_path, monkeypatch, authority
+):
+    from unittest.mock import AsyncMock
+
+    from discord_ferry.core.permissions import PermissionRuntime
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator import delivery
+
+    send = AsyncMock(return_value={"_id": stoat_id(29409)})
+    monkeypatch.setattr(delivery, "api_send_message", send)
+    config = FerryConfig(
+        export_dir=tmp_path,
+        output_dir=tmp_path,
+        stoat_url="https://api.test",
+        token="test-session",
+    )
+    state = MigrationState(stoat_server_id=stoat_id(29401))
+    if authority != "missing":
+        state.permission_runtime = PermissionRuntime()
+        if authority == "stopped":
+            state.permission_runtime.stop("readback_mismatch")
+    ref = DeliveryRef("111", "222", stoat_id(29402), "ordinary")
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(PermissionSafetyError):
+            await delivery.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="a" * 64,
+                content="synthetic",
+            )
+    send.assert_not_awaited()
+    assert not state.message_map and not state.failed_messages
+    if state.delivery_namespace:
+        receipt = read_delivery_receipt(state, tmp_path, ref)
+        assert receipt is None or all(part.status == "prepared" for part in receipt.parts)
+
+
+def permission_dispatch_context(tmp_path, *, forum=False, source_ids=("222", "333", "444")):
+    """Return complete source and mocked target facts, never runtime authority."""
+    from dataclasses import replace
+
+    from tests.test_engine import _permission_preflight_case
+
+    config, exports, meta = _permission_preflight_case(tmp_path, forum=forum, source_ids=source_ids)
+    config = replace(config, upload_delay=0, message_rate_limit=0, resume=True)
+    server_id, role_id = stoat_id(29590), stoat_id(29591)
+    mapping = {sid: stoat_id(29500 + index) for index, sid in enumerate(source_ids)}
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        roles_finalized={"112"},
+        channel_map=mapping,
+        current_phase="messages",
+    )
+    if forum:
+        group = "forum-Ideas & help"
+        state.channel_map["forum-index-" + group] = stoat_id(29580)
+        state.channel_categories = {sid: group for sid in source_ids}
+        state.forum_channel_members[group] = list(source_ids)
+        state.forum_category_names[group] = "Ideas & help"
+    server = {
+        "_id": server_id,
+        "channels": list(state.channel_map.values()),
+        "default_permissions": 0,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    channels = {
+        target: {
+            "_id": target,
+            "server": server_id,
+            "channel_type": "TextChannel",
+            "default_permissions": {"a": 0, "d": 0},
+            "role_permissions": {},
+        }
+        for target in state.channel_map.values()
+    }
+    return config, state, exports, server, channels
+
+
+def register_permission_dispatch_reads(remote, config, state, server, channels):
+    """Expose only actual mocked facts to the production preflight/readback owners."""
+    from copy import deepcopy
+
+    remote.get(
+        f"{config.stoat_url}/",
+        payload={"revolt": "0.15.7", "features": {"limits": {"global": {"server_roles": 200}}}},
+        repeat=True,
+    )
+    remote.get(
+        f"{config.stoat_url}/servers/{state.stoat_server_id}",
+        callback=lambda url, **kwargs: CallbackResult(payload=deepcopy(server)),
+        repeat=True,
+    )
+    for target in channels:
+        remote.get(
+            f"{config.stoat_url}/channels/{target}",
+            callback=lambda url, target=target, **kwargs: CallbackResult(
+                payload=deepcopy(channels[target])
+            ),
+            repeat=True,
+        )
+
+
+@pytest.mark.parametrize("changed", ["service", "server"])
+async def test_permission_guard_rejects_a_different_bound_destination(
+    tmp_path, monkeypatch, changed
+):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from discord_ferry.core.engine import _prepare_permission_operation
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator import delivery
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, source_ids=("222",)
+    )
+    target = state.channel_map["222"]
+    send = AsyncMock(return_value={"_id": stoat_id(29419)})
+    monkeypatch.setattr(delivery, "api_send_message", send)
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await _prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+            await verify_permission_channel(session, config, state, target)
+            assert target in state.permission_runtime.ready
+            if changed == "service":
+                config = replace(config, stoat_url="https://another.test")
+            else:
+                state.stoat_server_id = stoat_id(29420)
+            before = list(remote.requests)
+            with pytest.raises(PermissionSafetyError):
+                await delivery.deliver_part(
+                    session=session,
+                    config=config,
+                    state=state,
+                    ref=DeliveryRef("222", "30001", target, "ordinary"),
+                    part_index=0,
+                    part_count=1,
+                    render_digest="b" * 64,
+                    content="synthetic",
+                )
+            assert list(remote.requests) == before
+    send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tail", ["rejected", "uncertain", "recovered"])
+async def test_permission_dispatch_effects_retain_acknowledgements_and_uncertainty(tmp_path, tail):
+    from discord_ferry.core.engine import _prepare_permission_operation
+    from discord_ferry.migrator import delivery
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, source_ids=("222",)
+    )
+    target = state.channel_map["222"]
+    posts, history = [], []
+
+    async def create(url, **kwargs):
+        await asyncio.sleep(0)
+        posts.append(kwargs["headers"]["Idempotency-Key"])
+        if kwargs["json"]["content"] == "first":
+            return CallbackResult(payload={"_id": stoat_id(29901)})
+        if tail == "rejected":
+            return CallbackResult(
+                status=403, payload={"type": "MissingPermission", "permission": "SendMessage"}
+            )
+        if tail == "recovered":
+            history.append({"_id": stoat_id(29902), "channel": target, "nonce": posts[-1]})
+        raise aiohttp.ClientConnectionError("synthetic response lost")
+
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        url = f"{config.stoat_url}/channels/{target}/messages"
+        remote.post(url, callback=create, repeat=True)
+        remote.get(
+            url + "?limit=100&sort=Latest",
+            callback=lambda url, **kwargs: CallbackResult(payload=list(history)),
+            repeat=True,
+        )
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await _prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+            await verify_permission_channel(session, config, state, target)
+            first = await delivery.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=DeliveryRef("222", "30001", target, "ordinary"),
+                part_index=0,
+                part_count=1,
+                render_digest="a" * 64,
+                content="first",
+            )
+            assert first.message_id == stoat_id(29901) and not first.recovered
+            ref = DeliveryRef("222", "30002", target, "ordinary")
+            call = delivery.deliver_part(
+                session=session,
+                config=config,
+                state=state,
+                ref=ref,
+                part_index=0,
+                part_count=1,
+                render_digest="b" * 64,
+                content="last",
+            )
+            if tail == "recovered":
+                result = await call
+                assert result.recovered and result.message_id == stoat_id(29902)
+            else:
+                failure = (
+                    delivery.MessageSendFailure if tail == "rejected" else DeliveryUnresolvedError
+                )
+                with pytest.raises(failure):
+                    await call
+    assert len(posts) == 2
+    receipt = read_delivery_receipt(state, tmp_path, ref)
+    assert receipt is not None
+    expected_status = {
+        "rejected": "confirmed_rejected",
+        "uncertain": "uncertain",
+        "recovered": "acknowledged",
+    }[tail]
+    assert receipt.parts[0].status == expected_status
+    stopped = state.permission_runtime.stop("unverified")
+    assert stopped.outcome.effects == (
+        "changes_confirmed" if tail == "rejected" else "changes_possible"
+    )
+
+
 async def seed_rejected_messages(
     config: FerryConfig,
     state: MigrationState,
@@ -291,6 +573,7 @@ async def test_delivery_receipt_invalid_or_missing_history_never_authorizes_send
     assert read_delivery_receipt(state, tmp_path, ref) == receipt
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_fresh_multipart_prepares_every_part_without_replaying(
     tmp_path: Path,
 ):
@@ -472,6 +755,7 @@ async def test_legacy_delivery_converts_only_complete_unambiguous_multipart(
         assert [method for method, _ in http.requests] == ["GET"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(tmp_path: Path):
     assert importlib.util.find_spec("discord_ferry.migrator.delivery") is not None
     module = importlib.import_module("discord_ferry.migrator.delivery")
@@ -543,6 +827,7 @@ async def test_delivery_receipt_corrected_rejection_mints_one_selected_attempt(t
     assert receipt.parts[0].attempt == 1
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_concurrent_same_reference_creates_once(tmp_path: Path):
     assert importlib.util.find_spec("discord_ferry.migrator.delivery") is not None
     module = importlib.import_module("discord_ferry.migrator.delivery")
@@ -587,6 +872,7 @@ async def test_delivery_receipt_concurrent_same_reference_creates_once(tmp_path:
     assert created == [{"_id": stoat_id(7)}]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_failed_ack_write_recovers_after_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -673,6 +959,7 @@ async def test_delivery_receipt_failed_ack_write_recovers_after_restart(
     assert list(result.autumn_ids) == ["original_autumn"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_delivery_receipt_preserves_outbound_embed_media(tmp_path: Path):
     module, config, state, _, _ = _delivery_fixture(tmp_path)
     ref = DeliveryRef("123", "457", stoat_id(1), "ordinary")

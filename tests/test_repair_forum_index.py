@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
+import pytest
 from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
@@ -18,6 +19,9 @@ from discord_ferry.core.engine import _recreate_forum_index, run_repair
 from discord_ferry.migrator.api import ServerReadView
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, CheckReport, CheckResult
 from discord_ferry.state import MigrationState
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,6 +55,7 @@ def _result() -> CheckResult:
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_recreate_forum_index_creates_and_rebuilds(tmp_path: Path) -> None:
     """SC-3.1/SC-4.1: the channel is recreated at position 0 and its index message rebuilt."""
     config = _config(tmp_path)
@@ -91,6 +96,7 @@ async def test_recreate_forum_index_creates_and_rebuilds(tmp_path: Path) -> None
     assert live_categories[0]["channels"] == ["01J5T000000000000000008000"]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_path: Path) -> None:
     """Whole-branch review: a migrated forum already has a forum_index_message_ids entry.
 
@@ -138,6 +144,7 @@ async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_recreate_forum_index_clears_a_stale_present_unknown_mark(tmp_path: Path) -> None:
     """Whole-branch/second-opinion: a carried present-id-unknown mark must not suppress the send.
 

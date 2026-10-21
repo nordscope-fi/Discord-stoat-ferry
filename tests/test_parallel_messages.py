@@ -30,6 +30,9 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -149,6 +152,188 @@ def _collect_events(events: list[MigrationEvent]) -> Any:
     return callback
 
 
+@pytest.mark.parametrize("boundary", ["channel", "request", "ordinary", "header"])
+async def test_permission_stop_cancels_queued_peers_and_retains_inflight_receipts(
+    tmp_path, monkeypatch, boundary
+):
+    from dataclasses import replace
+
+    import aiohttp
+    from aioresponses import CallbackResult
+
+    from discord_ferry.core.engine import _prepare_permission_operation
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator import api as api_module
+    from discord_ferry.migrator import verify as verify_module
+    from discord_ferry.state import (
+        DeliveryRef,
+        ensure_delivery_namespace,
+        load_state,
+        read_delivery_receipt,
+    )
+    from tests.test_delivery import permission_dispatch_context, register_permission_dispatch_reads
+
+    source_ids = ("222", "333") if boundary == "header" else ("222", "333", "444")
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, forum=boundary == "header", source_ids=source_ids
+    )
+    cancel_event = asyncio.Event()
+    config = replace(
+        config,
+        max_concurrent_channels=3 if boundary == "request" else 1,
+        cancel_event=cancel_event,
+    )
+    for index, export in enumerate(exports):
+        export.messages = (
+            []
+            if boundary == "header"
+            else [_make_message(id=str(30001 + index), content=f"synthetic {index}")]
+        )
+        if boundary == "ordinary" and index == 0:
+            export.messages.append(_make_message(id="30009", content="blocked second message"))
+        export.message_count = len(export.messages)
+    ensure_delivery_namespace(state, tmp_path, config.stoat_url)
+    first, second = (state.channel_map[sid] for sid in source_ids[:2])
+    third = state.channel_map.get("444")
+    posts, tasks = [], {}
+    first_inflight, second_entered, second_queued, third_read = (asyncio.Event() for _ in range(4))
+    never_release = asyncio.Event()
+    actual_create_task = asyncio.create_task
+
+    def capture_task(coro, *args, **kwargs):
+        task = actual_create_task(coro, *args, **kwargs)
+        name = kwargs.get("name", "")
+        if name.startswith("channel-"):
+            tasks[name.removeprefix("channel-")] = task
+        return task
+
+    class ObservedSemaphore(asyncio.Semaphore):
+        async def acquire(self):
+            task = asyncio.current_task()
+            if (
+                task is not None
+                and task.get_name() == "channel-333"
+                and first_inflight.is_set()
+                and second_entered.is_set()
+                and self.locked()
+            ):
+                second_queued.set()
+            return await super().acquire()
+
+    actual_send = api_module.api_send_message
+
+    async def observe_send(*args, **kwargs):
+        if len(args) > 3 and args[3] == second:
+            second_entered.set()
+        return await actual_send(*args, **kwargs)
+
+    actual_read = verify_module.read_permission_context
+
+    async def hold_read(session, config, state, channel_ids):
+        observed = await actual_read(session, config, state, channel_ids)
+        if boundary == "request":
+            if channel_ids == (third,):
+                third_read.set()
+                await first_inflight.wait()
+                await second_queued.wait()
+            else:
+                await third_read.wait()
+        return observed
+
+    async def create_message(url, **kwargs):
+        target = url.path.split("/")[2]
+        record = {"_id": valid_stoat_id(29600 + len(posts)), "target": target}
+        posts.append(record)
+        if boundary == "request" and target == first:
+            first_inflight.set()
+            await asyncio.sleep(0)
+            await second_entered.wait()
+            # The missing-readback baseline must finish, not time out.
+            if third_read.is_set():
+                await never_release.wait()
+        else:
+            await asyncio.sleep(0)
+        if boundary == "ordinary" and target == first:
+            channels[first]["default_permissions"]["a"] = 1 << 20
+            state.permission_runtime.invalidate_channel(first)
+        return CallbackResult(payload={"_id": record["_id"]})
+
+    changed_header = False
+
+    def observe_event(event):
+        nonlocal changed_header
+        if (
+            boundary == "header"
+            and not changed_header
+            and event.status == "progress"
+            and event.message.startswith("Importing ")
+        ):
+            changed_header = True
+            channels[first]["default_permissions"]["a"] = 1 << 20
+            state.permission_runtime.invalidate_channel(first)
+
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        for target in state.channel_map.values():
+            remote.post(
+                f"{config.stoat_url}/channels/{target}/messages",
+                callback=create_message,
+                repeat=True,
+            )
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await _prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+        assert not state.permission_runtime.ready
+        assert all(method == "GET" for method, _ in remote.requests)
+        if boundary == "channel":
+            channels[first]["default_permissions"]["a"] = 1 << 20
+        elif boundary == "request":
+            channels[third]["default_permissions"]["a"] = 1 << 20
+        monkeypatch.setattr(api_module, "_request_semaphore", ObservedSemaphore(1))
+        monkeypatch.setattr(delivery_module, "api_send_message", observe_send)
+        monkeypatch.setattr(verify_module, "read_permission_context", hold_read)
+        monkeypatch.setattr(messages_module.asyncio, "create_task", capture_task)
+        with pytest.raises(PermissionSafetyError) as caught:
+            await asyncio.wait_for(run_messages(config, state, exports, observe_event), timeout=5)
+
+    assert state.permission_runtime.stopped and not state.permission_runtime.ready
+    expected_effects = (
+        "changes_possible"
+        if boundary == "request"
+        else "changes_confirmed"
+        if boundary == "ordinary"
+        else "none_confirmed"
+    )
+    assert caught.value.outcome.effects == expected_effects
+    assert not cancel_event.is_set()
+    assert not state.completed_channel_ids and not state.failed_messages
+    assert not [w for w in state.warnings if w.get("type") == "thread_header_failed"]
+    primary = "444" if boundary == "request" else "222"
+    assert caught.value is tasks[primary].exception()
+    assert all(task.cancelled() for sid, task in tasks.items() if sid != primary)
+    if boundary in {"channel", "header"}:
+        assert not posts
+    else:
+        assert len(posts) == 1 and posts[0]["target"] == first
+        reloaded = load_state(tmp_path)
+        ref = DeliveryRef("222", "30001", first, "ordinary")
+        receipt = read_delivery_receipt(reloaded, tmp_path, ref)
+        assert receipt is not None
+        if boundary == "request":
+            assert first_inflight.is_set() and second_queued.is_set()
+            assert receipt.parts[0].status == "uncertain"
+            assert receipt.parts[0].message_id == ""
+            queued = read_delivery_receipt(
+                reloaded, tmp_path, DeliveryRef("333", "30002", second, "ordinary")
+            )
+            assert queued is not None and queued.parts[0].status == "uncertain"
+        else:
+            assert receipt.parts[0].status == "acknowledged"
+            assert receipt.parts[0].message_id == posts[0]["_id"]
+        assert reloaded.permission_runtime is None
+
+
 @pytest.fixture
 def mock_aiohttp() -> aioresponses:
     with aioresponses() as m:
@@ -160,6 +345,7 @@ def mock_aiohttp() -> aioresponses:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_parallel_channels_all_complete(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """3 channels processed in parallel, all messages sent and mapped correctly."""
     # Set up 3 channels with 1 message each.
@@ -286,6 +472,7 @@ def test_channel_result_merged_correctly() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_error_in_one_channel_others_continue(tmp_path: Path) -> None:
     """An error in one channel worker does not prevent other channels from completing."""
     call_count = 0
@@ -359,6 +546,7 @@ async def test_error_in_one_channel_others_continue(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_single_channel_works(tmp_path: Path, mock_aiohttp: aioresponses) -> None:
     """Single channel backward compatibility — same behavior as before parallelism."""
     mock_aiohttp.post(
@@ -419,6 +607,7 @@ async def test_single_channel_works(tmp_path: Path, mock_aiohttp: aioresponses) 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_cancel_event_stops_all_workers(tmp_path: Path) -> None:
     """Setting cancel_event stops all channel workers."""
     cancel_event = asyncio.Event()
@@ -472,6 +661,7 @@ async def test_cancel_event_stops_all_workers(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_max_concurrent_channels_respected(tmp_path: Path) -> None:
     """Channel semaphore limits concurrent channel processing."""
     max_concurrent_seen = 0
@@ -519,6 +709,7 @@ async def test_max_concurrent_channels_respected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_run_messages_raises_on_cancel(tmp_path: Path) -> None:
     """SC-6: cancel during the parallel phase → run_messages raises CancelledError and
     emits NO messages 'completed' event (the engine's clean-cancel path handles it)."""
@@ -560,6 +751,7 @@ async def test_run_messages_raises_on_cancel(tmp_path: Path) -> None:
     assert not any(e.status == "completed" and e.phase == "messages" for e in events)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_cancel_preserves_completed_channels(tmp_path: Path) -> None:
     """SC-8: a channel finished before the cancel is checkpointed; the cancelled channel is
     NOT marked complete."""
@@ -598,6 +790,7 @@ async def test_cancel_preserves_completed_channels(tmp_path: Path) -> None:
     assert "ch2" not in state.completed_channel_ids  # cancelled mid-channel — not complete
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_cancel_before_first_send_not_marked_complete(tmp_path: Path) -> None:
     """SC-9: cancel detected at the loop-top (before any send) RAISES (not break), so the
     channel is NOT self-marked complete (:748 break→raise)."""
@@ -645,6 +838,7 @@ def _crash_on_progress(bad_name: str) -> Any:
     return cb
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_pre_loop_crash_reraises_first_exception(tmp_path: Path) -> None:
     """SC-11/13: a non-cancel worker crash propagates out of run_messages AFTER the good
     channels have self-checkpointed (their work survives); the crashed channel is not
@@ -694,6 +888,7 @@ async def test_pre_loop_crash_reraises_first_exception(tmp_path: Path) -> None:
     assert any(e["type"] == "channel_worker_failed" for e in state.errors)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_pre_loop_crash_resume_reruns_only_failed_channel(tmp_path: Path) -> None:
     """SC-12: on --resume the previously-incomplete channel is re-sent while channels already
     in completed_channel_ids are skipped (no duplicate sends)."""
@@ -731,6 +926,7 @@ async def test_pre_loop_crash_resume_reruns_only_failed_channel(tmp_path: Path) 
     assert "ch_bad" in state.completed_channel_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_channel_worker_failure_is_token_safe(tmp_path: Path) -> None:
     """SC-14: the recorded error and the emitted warning are safe_sanitize'd — no raw token."""
     secret = "stoat_secret_token_value"
@@ -760,6 +956,7 @@ async def test_channel_worker_failure_is_token_safe(tmp_path: Path) -> None:
     assert all(secret not in (e.message or "") for e in captured if e.status == "warning")
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_cancel_precedence_over_crash(tmp_path: Path) -> None:
     """SC-15: when one worker is cancelled and another crashes in the same gather, cancel
     wins (run_messages raises CancelledError) and the crashed channel stays resumable."""
@@ -800,6 +997,7 @@ async def test_cancel_precedence_over_crash(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unmapped_emoji_reaction_dropped_counted(tmp_path: Path) -> None:
     """SC-1/3: a custom reaction whose emoji is not in emoji_map increments reactions_dropped
     (folded once from the per-channel ChannelResult) and records a structured warning."""
@@ -821,6 +1019,7 @@ async def test_unmapped_emoji_reaction_dropped_counted(tmp_path: Path) -> None:
     assert any(w["type"] == "unmapped_emoji_reaction" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_mapped_and_unicode_reactions_not_dropped(tmp_path: Path) -> None:
     """SC-2: a mapped custom reaction and a Unicode reaction are queued, not counted dropped."""
     state = _make_state(
@@ -847,6 +1046,7 @@ async def test_mapped_and_unicode_reactions_not_dropped(tmp_path: Path) -> None:
     assert not any(w["type"] == "unmapped_emoji_reaction" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unmapped_emoji_reaction_warning_token_safe(tmp_path: Path) -> None:
     """SC-5: the dropped-reaction warning is safe_sanitize'd (no registered token leaks)."""
     secret = "stoat_secret_token_value"
@@ -1094,6 +1294,7 @@ _ORIGIN = "1543572368977428611"
 @pytest.mark.parametrize(
     "slow_channel", ["01J5T009775846032768230090", "01J5T014012495600676674034"]
 )
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_flatten_resolves_the_post_bump_collision_to_the_parent(
     tmp_path: Path, slow_channel: str
 ) -> None:
