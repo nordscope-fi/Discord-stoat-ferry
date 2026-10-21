@@ -688,6 +688,12 @@ def _target_effect_problems(layout: TargetLayout, affected: int) -> tuple[Permis
     return ()
 
 
+def backend_creation_default(version: str) -> int | None:
+    """Return the pinned creation contract, never an observed server value."""
+    # Backend 5fb97ec4, DEFAULT_PERMISSION_SERVER, confirmed by captured 0.15.7 creation.
+    return 77014766592 if version == "0.15.7" else None
+
+
 def validate_calculation_inputs(
     source: PermissionSourceEvidence, layout: TargetLayout
 ) -> tuple[PermissionProblem, ...]:
@@ -808,8 +814,12 @@ def validate_calculation_inputs(
                 proposed.source_id,
             )
     everyone = raw_roles[source.guild_id].permissions
+    expected_default = translate_permissions(everyone) if everyone is not None else None
+    if not layout.server_id and expected_default == 0:
+        # Existing role creation skips zero, leaving the pinned backend default unchanged.
+        expected_default = backend_creation_default("0.15.7")
     if layout.planned_server_default is not None and (
-        everyone is None or layout.planned_server_default != translate_permissions(everyone)
+        everyone is None or layout.planned_server_default != expected_default
     ):
         return refuse(
             "unverified", "Bind the planned server default to its existing creation owner"

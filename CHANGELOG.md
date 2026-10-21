@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Model the pinned new-server creation default when the existing role writer skips zero, while keeping proposed values separate from observations and requiring exact channel readback (#1172).
 - Define complete common-source permission proof for generated indexes, preserving existing keys and unrelated cells while refusing mixed access or inconsistent source membership (#1172).
 - Match existing role/default/rank writes to the bound operation plan, revoke dependent proofs before dispatch, and preserve terminal stops and write uncertainty (#1172).
 - Model expected changes made by existing role finalization, ordering and default writers separately from actual observations, requiring complete matching readback before permission readiness (#1172).
