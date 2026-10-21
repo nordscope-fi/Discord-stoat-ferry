@@ -1,6 +1,11 @@
 """Custom exceptions for Discord Ferry."""
 
-from typing import Literal
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from discord_ferry.core.permissions import PermissionOutcome
 
 
 class FerryError(Exception):
@@ -35,6 +40,17 @@ class AutumnUploadError(FerryError):
 
 class MigrationError(FerryError):
     """Error during migration phase."""
+
+
+class PermissionSafetyError(MigrationError):
+    """Preserve the permission outcome without exposing diagnostic text."""
+
+    def __init__(self, outcome: PermissionOutcome) -> None:
+        self.outcome = outcome
+        super().__init__(
+            f"Permission safety stop: {outcome.reason} during {outcome.stage}; "
+            f"destination effects: {outcome.effects}"
+        )
 
 
 class DuplicateSendError(MigrationError):

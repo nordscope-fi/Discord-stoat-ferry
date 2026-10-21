@@ -9,7 +9,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
 import pytest
@@ -7982,3 +7982,332 @@ async def test_repair_convergence_skips_dry_run(tmp_path: Path) -> None:
     assert gets == []
     assert puts == []
     assert state.warnings == []
+
+
+def _permission_stop(stage="preflight", reason="unverified", effects="none_confirmed"):
+    from discord_ferry import errors
+    from discord_ferry.core.permissions import PermissionOutcome
+
+    error_type = getattr(errors, "PermissionSafetyError", None)
+    assert error_type is not None, "Permission safety stops need a typed operation boundary"
+    outcome = PermissionOutcome(stage, reason, effects, ())
+    error = error_type(outcome)
+    assert isinstance(error, MigrationError)
+    assert error.outcome is outcome
+    return error
+
+
+def test_permission_stop_keeps_original_outcome() -> None:
+    error = _permission_stop("application", "interrupted", "changes_possible")
+    assert error.outcome.stage == "application"
+    assert error.outcome.reason == "interrupted"
+    assert error.outcome.effects == "changes_possible"
+
+
+@pytest.mark.parametrize(
+    ("stage", "reason", "effects"),
+    [
+        ("preflight", "unsupported", "none_confirmed"),
+        ("preflight", "unverified", "none_confirmed"),
+        ("application", "write_rejected", "changes_confirmed"),
+        ("application", "write_uncertain", "changes_possible"),
+        ("recheck", "readback_mismatch", "changes_confirmed"),
+        ("application", "interrupted", "changes_possible"),
+    ],
+)
+async def test_permission_stop_escapes_phase_without_success(
+    tmp_path: Path, stage: str, reason: str, effects: str
+) -> None:
+    error = _permission_stop(stage, reason, effects)
+    config = _make_config(tmp_path)
+    state = MigrationState()
+    events: list[MigrationEvent] = []
+
+    async def stopped(cfg, current, exports, emit):
+        current.channel_map["800000000000000001"] = valid_stoat_id(8101)
+        raise error
+
+    following = AsyncMock()
+    with pytest.raises(type(error)) as caught:
+        await engine_module._run_phases(
+            config,
+            state,
+            [],
+            events.append,
+            ["channels", "messages"],
+            {"channels": stopped, "messages": following},
+        )
+
+    assert caught.value is error
+    assert load_state(tmp_path).channel_map == state.channel_map
+    assert load_state(tmp_path).current_phase == "channels"
+    assert not state.failed_messages
+    assert not state.errors
+    following.assert_not_awaited()
+    failures = [event for event in events if event.status == "error"]
+    assert len(failures) == 1
+    assert failures[0].detail == {"permissions": error.outcome}
+    assert not any(event.status == "completed" for event in events)
+
+
+async def test_permission_stop_in_migration_skips_report_and_clears_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = _permission_stop("application", "write_rejected", "changes_confirmed")
+    config = _make_config(tmp_path, create_invite=True)
+    events: list[MigrationEvent] = []
+
+    async def stopped(cfg, state, exports, emit):
+        state.role_map["800000000000000002"] = valid_stoat_id(8102)
+        raise error
+
+    report = Mock()
+    invite = AsyncMock()
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "generate_report", report)
+    monkeypatch.setattr(engine_module, "_generate_invite", invite)
+    with pytest.raises(type(error)) as caught:
+        await run_migration(
+            config, events.append, phase_overrides={**_NOOP_OVERRIDES, "channels": stopped}
+        )
+    assert caught.value is error
+    assert load_state(tmp_path).role_map == {"800000000000000002": valid_stoat_id(8102)}
+    assert load_state(tmp_path).completed_at == ""
+    assert config.session is None
+    report.assert_not_called()
+    invite.assert_not_awaited()
+    assert not any(event.phase == "report" for event in events)
+
+
+async def test_permission_stop_in_report_saves_ids_without_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = _permission_stop("recheck", "readback_mismatch", "changes_possible")
+    config = _make_config(tmp_path, create_invite=True)
+    events: list[MigrationEvent] = []
+
+    async def channels(cfg, state, exports, emit):
+        state.forum_channel_members["forum"] = ["800000000000000001"]
+
+    async def stopped(cfg, state, emit):
+        state.forum_index_message_ids["forum"] = valid_stoat_id(8103)
+        raise error
+
+    report = Mock()
+    invite = AsyncMock()
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_rebuild_forum_indexes", stopped)
+    monkeypatch.setattr(engine_module, "generate_report", report)
+    monkeypatch.setattr(engine_module, "_generate_invite", invite)
+    with pytest.raises(type(error)) as caught:
+        await run_migration(
+            config, events.append, phase_overrides={**_NOOP_OVERRIDES, "channels": channels}
+        )
+    assert caught.value is error
+    saved = load_state(tmp_path)
+    assert saved.forum_index_message_ids == {"forum": valid_stoat_id(8103)}
+    assert saved.completed_at == ""
+    assert any(
+        event.phase == "report" and event.detail == {"permissions": error.outcome}
+        for event in events
+    )
+    assert not any(event.phase == "report" and event.status == "completed" for event in events)
+    report.assert_not_called()
+    invite.assert_not_awaited()
+
+
+async def test_permission_stop_in_retry_does_not_become_a_failed_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = _permission_stop("recheck", "unverified", "changes_possible")
+    config = _make_retry_config(tmp_path)
+    config.output_dir.mkdir(parents=True)
+    _write_dce_json(
+        config.export_dir, "800000000000000001", [_dce_msg_dict("101"), _dce_msg_dict("102")]
+    )
+    exports = _make_exports_from_dir(config.export_dir)
+    channel_id = valid_stoat_id(8104)
+    state = MigrationState(
+        channel_map={"800000000000000001": channel_id},
+        failed_messages=[
+            FailedMessage(discord_msg_id=mid, stoat_channel_id=channel_id, error="original")
+            for mid in ("101", "102")
+        ],
+    )
+    before = list(state.failed_messages)
+    events: list[MigrationEvent] = []
+    processor = AsyncMock(side_effect=error)
+    monkeypatch.setattr(engine_module, "_process_message", processor)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    with pytest.raises(type(error)) as caught:
+        await run_retry_failed(config, state, exports, events.append)
+    assert caught.value is error
+    assert state.failed_messages == before
+    assert load_state(config.output_dir).failed_messages == before
+    assert processor.await_count == 1
+    assert config.session is None
+    assert any(event.detail == {"permissions": error.outcome} for event in events)
+    assert not any(event.status == "completed" for event in events)
+
+
+async def test_permission_stop_in_repair_is_saved_and_not_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.migrator import verify
+
+    error = _permission_stop("application", "write_uncertain", "changes_possible")
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(
+        stoat_server_id=valid_stoat_id(8105), channel_map={R_D_CHANNEL: R_S_CHANNEL}
+    )
+    events: list[MigrationEvent] = []
+
+    async def stopped(*args, **kwargs):
+        state.channel_map["800000000000000001"] = valid_stoat_id(8106)
+        raise error
+
+    monkeypatch.setattr(
+        verify, "run_check", AsyncMock(return_value=_report_with("channel_missing", "fail"))
+    )
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(
+        engine_module,
+        "_live_server_view",
+        AsyncMock(return_value=ServerReadView(state.stoat_server_id, frozenset(), {}, {}, [])),
+    )
+    monkeypatch.setattr(engine_module, "_recreate_channel", stopped)
+    with pytest.raises(type(error)) as caught:
+        await run_repair(config, state, [], events.append)
+    assert caught.value is error
+    assert load_state(config.output_dir).channel_map == state.channel_map
+    assert not state.failed_messages
+    assert any(event.detail == {"permissions": error.outcome} for event in events)
+    assert not any(event.status == "completed" for event in events)
+
+
+@pytest.mark.parametrize("acquired", [False, True])
+async def test_permission_stop_preserves_error_when_owned_lock_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, acquired: bool
+) -> None:
+    error = _permission_stop("application", "interrupted", "changes_possible")
+    config = _make_config(tmp_path, server_id=valid_stoat_id(8107))
+    events: list[MigrationEvent] = []
+
+    async def stopped(*args, **kwargs):
+        raise error
+
+    release = AsyncMock(wraps=engine_module._release_migration_lock)
+    monkeypatch.setattr(engine_module, "_acquire_migration_lock", AsyncMock(return_value=acquired))
+    monkeypatch.setattr(engine_module, "_release_migration_lock", release)
+    monkeypatch.setattr(
+        engine_module, "api_fetch_server", AsyncMock(side_effect=RuntimeError("cleanup failed"))
+    )
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    with pytest.raises(type(error)) as caught:
+        await run_migration(
+            config, events.append, phase_overrides={**_NOOP_OVERRIDES, "channels": stopped}
+        )
+    assert caught.value is error
+    assert release.await_count == int(acquired)
+    assert any("Could not release migration lock" in event.message for event in events) is acquired
+    assert not any(event.phase == "report" for event in events)
+
+
+@pytest.mark.parametrize("operation", ["tail", "resend", "merged_threads"])
+async def test_permission_stop_escapes_repair_message_catches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    error = _permission_stop("recheck", "unverified", "none_confirmed")
+    config = _make_repair_config(tmp_path)
+    export = _export_for(R_D_CHANNEL)
+    export.messages = [
+        DCEMessage(
+            id="101",
+            type="Default",
+            timestamp="2026-10-19T00:00:00Z",
+            content="synthetic",
+            author=DCEAuthor(id="800000000000000003", name="Synthetic"),
+        )
+    ]
+    state = MigrationState(
+        channel_map={R_D_CHANNEL: R_S_CHANNEL}, channel_high_water={R_D_CHANNEL: "101"}
+    )
+    processor = AsyncMock(side_effect=error)
+    monkeypatch.setattr(engine_module, "_process_message", processor)
+    monkeypatch.setattr(engine_module, "_merge_threads", processor)
+    events: list[MigrationEvent] = []
+    with pytest.raises(type(error)) as caught:
+        if operation == "tail":
+            await engine_module._repair_tail(
+                AsyncMock(),
+                config,
+                state,
+                _report_with("tail_absent", "fail").results[0],
+                [export],
+                events.append,
+            )
+        elif operation == "resend":
+            await engine_module._resend_channel(AsyncMock(), config, state, export, events.append)
+        else:
+            thread = _export_for("800000000000000004", name="thread")
+            thread.is_thread = True
+            thread.parent_channel_name = export.channel.name
+            state.channel_high_water[thread.channel.id] = "102"
+            await engine_module._restore_merged_threads(
+                config, state, export, [export, thread], events.append
+            )
+    assert caught.value is error
+    assert processor.await_count == 1
+    assert not state.failed_messages
+    assert not any(event.status == "completed" for event in events)
+
+
+async def test_permission_stop_escapes_final_validation_warning_catch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.migrator import verify
+
+    error = _permission_stop("recheck", "unverified", "changes_confirmed")
+    config = _make_config(tmp_path, validate_after=True)
+    events: list[MigrationEvent] = []
+
+    async def channel_phase(cfg, state, exports, emit):
+        state.stoat_server_id = valid_stoat_id(8108)
+
+    report = Mock()
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "generate_report", report)
+    monkeypatch.setattr(verify, "run_check", AsyncMock(side_effect=error))
+    with pytest.raises(type(error)) as caught:
+        await run_migration(
+            config,
+            events.append,
+            phase_overrides={**_NOOP_OVERRIDES, "channels": channel_phase},
+        )
+    assert caught.value is error
+    assert load_state(tmp_path).completed_at == ""
+    assert any(
+        event.phase == "validate_migration" and event.detail == {"permissions": error.outcome}
+        for event in events
+    )
+    report.assert_not_called()
+
+
+async def test_permission_stop_escapes_repair_convergence_warning_catch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry.migrator import verify
+
+    error = _permission_stop("application", "write_rejected", "changes_confirmed")
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=valid_stoat_id(8109))
+    events: list[MigrationEvent] = []
+    monkeypatch.setattr(verify, "run_check", AsyncMock(return_value=CheckReport()))
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "api_fetch_server", AsyncMock(side_effect=error))
+    with pytest.raises(type(error)) as caught:
+        await run_repair(config, state, [], events.append)
+    assert caught.value is error
+    assert load_state(config.output_dir).stoat_server_id == state.stoat_server_id
+    assert any(event.detail == {"permissions": error.outcome} for event in events)
+    assert not any(event.status == "completed" for event in events)
