@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.permissions import (
+    PermissionProblem,
     PermissionSourceEvidence,
     SourceChannel,
     SourceOverwrite,
     SourceRole,
 )
 from discord_ferry.discord.models import normalize_channel_position
-from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
+from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS, translate_permissions
 from discord_ferry.errors import MigrationError
 
 if TYPE_CHECKING:
@@ -244,6 +245,130 @@ def _dict_to_permission_source(value: object) -> PermissionSourceEvidence | None
     except (KeyError, TypeError, ValueError, AttributeError):
         # Invalid optional evidence does not erase otherwise readable legacy metadata.
         return None
+
+
+def validate_permission_source(
+    meta: DiscordMetadata, channel_ids: frozenset[str]
+) -> tuple[PermissionProblem, ...]:
+    """Check source evidence only, without granting target authority or changing metadata."""
+    return validate_source_snapshot(meta, channel_ids)
+
+
+def _matches_source_pair(pair: object, allow: int, deny: int) -> bool:
+    return (
+        isinstance(pair, PermissionPair)
+        and _source_integer(pair.allow) == allow
+        and _source_integer(pair.deny) == deny
+    )
+
+
+def validate_source_snapshot(
+    meta: DiscordMetadata, channel_ids: frozenset[str]
+) -> tuple[PermissionProblem, ...]:
+    """Validate binding, complete selected facts and the existing translated permission cells."""
+
+    def refused(guidance: str) -> tuple[PermissionProblem, ...]:
+        entity_ids = tuple(sorted(cid for cid in channel_ids if _bad_id("channel", cid) is None))
+        return (PermissionProblem("unverified", entity_ids, None, guidance),)
+
+    source = meta.permission_source
+    if source is None:
+        return refused("Refresh source evidence")
+    if (
+        type(source.schema_version) is not int
+        or source.schema_version != 1
+        or source.translation_version != _PERMISSION_TRANSLATION_VERSION
+        or _bad_id("guild", source.guild_id) is not None
+        or source.guild_id != meta.guild_id
+    ):
+        return refused("Refresh source evidence for this guild and supported translation version")
+    roles = {role.id: role for role in source.roles}
+    channels = {channel.id: channel for channel in source.channels}
+    if (
+        len(roles) != len(source.roles)
+        or len(channels) != len(source.channels)
+        or source.guild_id not in roles
+        or source.covered_channel_ids != frozenset(channels)
+        or not channel_ids <= source.covered_channel_ids
+        or any(_bad_id("role", rid) is not None for rid in roles)
+        or any(_bad_id("channel", cid) is not None for cid in channels)
+    ):
+        return refused("Refresh complete, unique source inventories and selected-channel coverage")
+    for role in source.roles:
+        if (
+            not {"id", "permissions", "position", "managed"} <= role.capture_fields
+            or _source_integer(role.permissions) is None
+            or _source_integer(role.position) is None
+            or type(role.managed) is not bool
+        ):
+            return refused("Refresh required raw role permission, position and managed facts")
+    if roles[source.guild_id].managed is not False:
+        return refused("Refresh the source everyone role inventory")
+    for cid in sorted(channel_ids):
+        channel = channels[cid]
+        if (
+            not {"id", "type", "permission_overwrites"} <= channel.capture_fields
+            or _source_integer(channel.type) is None
+            or channel.overwrites is None
+            or _source_integer(channel.member_overwrite_count) is None
+        ):
+            return refused("Refresh required selected-channel type and overwrite facts")
+        overwrite_ids = [ow.role_id for ow in channel.overwrites]
+        if len(set(overwrite_ids)) != len(overwrite_ids) or any(
+            ow.role_id not in roles
+            or _source_integer(ow.allow) is None
+            or _source_integer(ow.deny) is None
+            for ow in channel.overwrites
+        ):
+            return refused("Refresh unique source overwrites bound to the source role inventory")
+    if source.fingerprint != _permission_source_fingerprint(source):
+        return refused("Refresh source evidence after a structural fingerprint mismatch")
+    everyone_permissions = roles[source.guild_id].permissions
+    assert everyone_permissions is not None  # Required role facts were checked above.
+    if _source_integer(meta.server_default_permissions) != translate_permissions(
+        everyone_permissions
+    ):
+        return refused("Refresh inconsistent translated server default permissions")
+    ordinary = {
+        rid: role for rid, role in roles.items() if rid != source.guild_id and not role.managed
+    }
+    if set(meta.role_permissions) != set(ordinary):
+        return refused("Refresh translated role permissions to match the raw role inventory")
+    for rid, role in ordinary.items():
+        assert role.permissions is not None  # Required role facts were checked above.
+        if not _matches_source_pair(
+            meta.role_permissions[rid], translate_permissions(role.permissions), 0
+        ):
+            return refused("Refresh inconsistent translated role permissions")
+    for cid in sorted(channel_ids):
+        channel = channels[cid]
+        translated = meta.channel_metadata.get(cid)
+        if not isinstance(translated, ChannelMeta):
+            return refused("Refresh missing translated selected-channel permissions")
+        assert channel.overwrites is not None  # Required selected facts were checked above.
+        expected = {ow.role_id: ow for ow in channel.overwrites}
+        default = expected.pop(source.guild_id, None)
+        if default is None:
+            if translated.default_override is not None:
+                return refused("Refresh inconsistent translated channel default permissions")
+        elif not _matches_source_pair(
+            translated.default_override,
+            translate_permissions(default.allow, in_overwrite=True),
+            translate_permissions(default.deny, in_overwrite=True),
+        ):
+            return refused("Refresh inconsistent translated channel default permissions")
+        if any(not isinstance(ow, RoleOverride) for ow in translated.role_overrides):
+            return refused("Refresh malformed translated channel role permissions")
+        observed = {ow.discord_role_id: ow for ow in translated.role_overrides}
+        if len(observed) != len(translated.role_overrides) or set(observed) != set(expected):
+            return refused("Refresh translated channel role permissions to match raw overwrites")
+        for rid, raw in expected.items():
+            pair = observed[rid]
+            if _source_integer(pair.allow) != translate_permissions(
+                raw.allow, in_overwrite=True
+            ) or _source_integer(pair.deny) != translate_permissions(raw.deny, in_overwrite=True):
+                return refused("Refresh inconsistent translated channel role permissions")
+    return ()
 
 
 def save_discord_metadata(meta: DiscordMetadata, output_dir: Path) -> None:
