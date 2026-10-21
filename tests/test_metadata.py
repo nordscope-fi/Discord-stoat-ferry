@@ -197,6 +197,286 @@ def test_source_save_uses_existing_atomic_owner_and_preserves_previous_bytes(
     assert path.read_bytes() == before
 
 
+def _validation_metadata() -> DiscordMetadata:
+    roles = [
+        _parse_role(
+            {"id": "111", "name": "everyone", "permissions": "0", "position": 0, "managed": False}
+        ),
+        _parse_role(
+            {
+                "id": "222",
+                "name": "ordinary",
+                "permissions": str(1 << 10),
+                "position": 1,
+                "managed": False,
+            }
+        ),
+        _parse_role(
+            {
+                "id": "555",
+                "name": "managed",
+                "permissions": str(1 << 100),
+                "position": 2,
+                "managed": True,
+            }
+        ),
+    ]
+    channels = [
+        _parse_channel(
+            {
+                "id": "333",
+                "name": "general",
+                "type": 0,
+                "permission_overwrites": [
+                    {"id": "111", "type": 0, "allow": str(1 << 10), "deny": "0"},
+                    {"id": "222", "type": 0, "allow": "0", "deny": str(1 << 11)},
+                ],
+            }
+        ),
+        _parse_channel({"id": "444", "name": "empty", "type": 0, "permission_overwrites": []}),
+        _parse_channel({"id": "666", "name": "unselected", "type": 4}),
+    ]
+    return DiscordMetadata(
+        "111",
+        "now",
+        0,
+        {"222": PermissionPair(translate_permissions(1 << 10), 0)},
+        {
+            "333": ChannelMeta(
+                False,
+                PermissionPair(translate_permissions(1 << 10), 0),
+                [RoleOverride("222", 0, translate_permissions(1 << 11))],
+            ),
+            "444": ChannelMeta(False),
+            "666": ChannelMeta(False),
+        },
+        role_metadata={"222": RoleMeta(position=1)},
+        permission_source=metadata_module.capture_permission_source("111", roles, channels),
+    )
+
+
+def _validate_source(
+    meta: DiscordMetadata, selected: frozenset[str] = frozenset({"333", "444"})
+) -> Any:
+    assert hasattr(metadata_module, "validate_permission_source"), (
+        "Source evidence validation is missing"
+    )
+    return metadata_module.validate_permission_source(meta, selected)
+
+
+def _refingerprint(meta: DiscordMetadata, **changes: Any) -> None:
+    source = replace(meta.permission_source, **changes)
+    meta.permission_source = replace(
+        source, fingerprint=metadata_module._permission_source_fingerprint(source)
+    )
+
+
+def test_legacy_metadata_cannot_prove_permissions() -> None:
+    problems = _validate_source(DiscordMetadata("111", "old", 0, {}, {}))
+    assert problems and all(p.reason == "unverified" for p in problems)
+
+
+@pytest.mark.parametrize("channel_id", ["", " ", "not-a-source-id"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_source_validation_reports_malformed_selection_as_unverified(
+    channel_id: str, legacy: bool
+) -> None:
+    meta = _validation_metadata()
+    if legacy:
+        meta.permission_source = None
+    for validate in (
+        metadata_module.validate_permission_source,
+        metadata_module.validate_source_snapshot,
+    ):
+        problems = validate(meta, frozenset({"333", channel_id}))
+        assert problems and problems[0].reason == "unverified"
+        assert problems[0].entity_ids == ("333",)
+
+
+def test_complete_selected_source_validates_without_claiming_target_authority(
+    tmp_path: Path,
+) -> None:
+    meta = _validation_metadata()
+    before = _meta_to_dict(meta)
+    assert _validate_source(meta) == ()
+    assert _meta_to_dict(meta) == before
+    save_discord_metadata(meta, tmp_path)
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None and _validate_source(loaded) == ()
+    assert "ready" not in json.dumps(_meta_to_dict(loaded))
+    assert _validate_source(meta, frozenset({"666"}))
+    assert _validate_source(meta, frozenset({"999"}))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema_version", 2),
+        ("translation_version", "unknown"),
+        ("guild_id", "999"),
+        ("fingerprint", "changed"),
+    ],
+)
+def test_source_validation_rejects_wrong_binding_or_contract(field: str, value: object) -> None:
+    meta = _validation_metadata()
+    meta.permission_source = replace(meta.permission_source, **{field: value})
+    problems = _validate_source(meta)
+    assert problems and problems[0].reason == "unverified"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "role-duplicate",
+        "channel-duplicate",
+        "overwrite-duplicate",
+        "unknown-role",
+        "everyone-missing",
+        "coverage-missing",
+        "coverage-extra",
+        "role-presence",
+        "role-permissions",
+        "role-position",
+        "role-managed",
+        "channel-presence",
+        "channel-type",
+        "channel-overwrites",
+        "member-count",
+    ],
+)
+def test_source_validation_rejects_incomplete_or_ambiguous_facts(change: str) -> None:
+    meta = _validation_metadata()
+    source = meta.permission_source
+    assert source is not None
+    role, channel = source.roles[1], source.channels[0]
+    changes: dict[str, Any]
+    if change == "role-duplicate":
+        changes = {"roles": (*source.roles, role)}
+    elif change == "channel-duplicate":
+        changes = {"channels": (*source.channels, channel)}
+    elif change in ("overwrite-duplicate", "unknown-role"):
+        assert channel.overwrites is not None
+        overwrite = channel.overwrites[0]
+        if change == "unknown-role":
+            overwrite = replace(overwrite, role_id="999")
+        changes = {
+            "channels": (
+                replace(channel, overwrites=(*channel.overwrites, overwrite)),
+                *source.channels[1:],
+            )
+        }
+    elif change == "everyone-missing":
+        changes = {"roles": source.roles[1:]}
+    elif change.startswith("coverage"):
+        changes = {
+            "covered_channel_ids": frozenset({"333"})
+            if change == "coverage-missing"
+            else source.covered_channel_ids | {"999"}
+        }
+    elif change.startswith("role-"):
+        field = change.removeprefix("role-")
+        kwargs = (
+            {"capture_fields": role.capture_fields - {"permissions"}}
+            if field == "presence"
+            else {field: None}
+        )
+        changes = {"roles": (source.roles[0], replace(role, **kwargs), *source.roles[2:])}
+    else:
+        field = change.removeprefix("channel-")
+        if field == "presence":
+            kwargs = {"capture_fields": channel.capture_fields - {"permission_overwrites"}}
+        else:
+            kwargs = {"member_overwrite_count" if field == "member-count" else field: None}
+        changes = {"channels": (replace(channel, **kwargs), *source.channels[1:])}
+    _refingerprint(meta, **changes)
+    problems = _validate_source(meta)
+    assert problems and problems[0].reason == "unverified"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "default",
+        "role-allow",
+        "role-deny",
+        "role-missing",
+        "role-extra",
+        "default-overwrite",
+        "default-overwrite-missing",
+        "role-overwrite",
+        "role-overwrite-missing",
+        "role-overwrite-extra",
+        "role-overwrite-duplicate",
+        "empty-overwrite-extra",
+        "channel-missing",
+        "boolean-default",
+        "boolean-role",
+        "boolean-overwrite",
+    ],
+)
+def test_source_validation_rejects_inconsistent_translated_permissions(change: str) -> None:
+    meta = _validation_metadata()
+    channel = meta.channel_metadata["333"]
+    if change == "default":
+        meta.server_default_permissions = translate_permissions(1 << 10)
+    elif change == "role-allow":
+        meta.role_permissions["222"].allow = 0
+    elif change == "role-deny":
+        meta.role_permissions["222"].deny = translate_permissions(1 << 10)
+    elif change == "role-missing":
+        del meta.role_permissions["222"]
+    elif change == "role-extra":
+        meta.role_permissions["555"] = PermissionPair(0, 0)
+    elif change == "default-overwrite":
+        channel.default_override = PermissionPair(0, 0)
+    elif change == "default-overwrite-missing":
+        channel.default_override = None
+    elif change == "role-overwrite":
+        channel.role_overrides[0].deny = 0
+    elif change == "role-overwrite-missing":
+        channel.role_overrides.clear()
+    elif change == "role-overwrite-extra":
+        channel.role_overrides.append(RoleOverride("555", 0, 0))
+    elif change == "role-overwrite-duplicate":
+        channel.role_overrides.append(channel.role_overrides[0])
+    elif change == "empty-overwrite-extra":
+        meta.channel_metadata["444"].default_override = PermissionPair(0, 0)
+    elif change == "channel-missing":
+        del meta.channel_metadata["333"]
+    elif change == "boolean-default":
+        meta.server_default_permissions = False
+    elif change == "boolean-role":
+        meta.role_permissions["222"].deny = False
+    else:
+        channel.role_overrides[0].allow = False
+    problems = _validate_source(meta)
+    assert problems and all(p.reason == "unverified" for p in problems)
+
+
+@pytest.mark.parametrize("value", [True, -1, 1.5, "0"])
+def test_source_validation_refuses_malformed_persisted_raw_values(value: object) -> None:
+    data = _meta_to_dict(_validation_metadata())
+    data["permission_source"]["roles"][0]["permissions"] = value
+    meta = _dict_to_meta(data)
+    assert _validate_source(meta)
+
+
+def test_source_validation_uses_existing_administrator_and_overwrite_translation() -> None:
+    meta = _validation_metadata()
+    source = meta.permission_source
+    assert source is not None
+    roles = (replace(source.roles[0], permissions=8), *source.roles[1:])
+    channel = source.channels[0]
+    assert channel.overwrites is not None
+    overwrites = (replace(channel.overwrites[0], allow=8), *channel.overwrites[1:])
+    _refingerprint(
+        meta, roles=roles, channels=(replace(channel, overwrites=overwrites), *source.channels[1:])
+    )
+    meta.server_default_permissions = ALL_STOAT_PERMISSIONS
+    meta.channel_metadata["333"].default_override = PermissionPair(0, 0)
+    assert _validate_source(meta) == ()
+
+
 def test_metadata_roundtrip_preserves_new_fields(tmp_path: Path) -> None:
     meta = DiscordMetadata(
         guild_id="123",
