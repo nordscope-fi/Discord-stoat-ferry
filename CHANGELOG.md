@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Read strict target permission evidence through existing API readers, rejecting incomplete or changed contexts while preserving observed cells and documented neutral omissions (#1172).
 - Preserve typed permission stops through migration, retry and repair boundaries, retaining confirmed identities without reporting successful completion or inventing failed sends (#1172).
 - Keep permission authority in unsaved operation state, bind created identities explicitly, and require fresh matching target evidence before channel readiness (#1172).
+- Record the approved exact-access-or-stop policy and its recovery, evidence and reporting boundaries in Ferry's local architecture decision record (#1172).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
