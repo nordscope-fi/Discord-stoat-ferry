@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Show shared permission stops and truthful repair exit codes in CLI output, retain refused repair JSON and confirmed actions, pass cached source evidence to checks, and route role backfill through the guarded engine entry (#1172).
+
 - Add an explicit source-only CLI permission refresh using selected exports and the existing metadata backend, with hidden source-token prompting and no Stoat changes (#1172).
 
 - Account for confirmed or possible duplicate-index cleanup effects through the existing permission runtime, preserving terminal safety stops without changing which messages are removed (#1172).
