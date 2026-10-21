@@ -1051,14 +1051,22 @@ class PermissionOutcome:
         return self.reason == "verified" and not self.problems
 
 
-def require_permission_runtime(state: MigrationState) -> PermissionRuntime:
+def require_permission_runtime(
+    state: MigrationState, *, service: str | None = None
+) -> PermissionRuntime:
     """Refuse a writer without this operation's complete bound permission plan."""
     runtime = state.permission_runtime
     if not isinstance(runtime, PermissionRuntime):
         raise PermissionSafetyError(
             PermissionOutcome("application", "unverified", "none_confirmed")
         )
-    runtime._active_plan("application")
+    layout = runtime._active_plan("application").target_layout
+    if (
+        not runtime._server
+        or runtime._server != state.stoat_server_id
+        or (service is not None and service.rstrip("/") != layout.service.rstrip("/"))
+    ):
+        runtime._refuse("unverified", "Match the bound operation destination", stage="application")
     return runtime
 
 
@@ -1327,6 +1335,67 @@ class PermissionRuntime:
         self._authority.clear()
         self._sync_outcome("recheck")
 
+    def _expected_role_facts(self, stage: PermissionStage) -> dict[str, tuple[PermissionCell, int]]:
+        layout = self._active_plan(stage).target_layout
+        if not self._server:
+            self._refuse(
+                "unverified", "Bind the created server before dependent writes", stage=stage
+            )
+        expected: dict[str, tuple[PermissionCell, int]] = {}
+        for role_id, role in _expected_existing_roles(layout).items():
+            assert role.permissions is not None and role.rank is not None
+            expected[role_id] = (role.permissions, role.rank)
+        for role in layout.planned_role_facts:
+            actual = self._roles[role.source_id]
+            if actual is None:
+                self._refuse(
+                    "unverified", "Bind created roles before dependent writes", stage=stage
+                )
+            expected[actual] = (role.permissions, role.rank)
+        return expected
+
+    def authorize_role_write(self, target: str, allow: int, deny: int) -> None:
+        expected = self._expected_role_facts("application").get(target)
+        if (
+            target not in self._roles.values()
+            or expected is None
+            or type(allow) is not int
+            or type(deny) is not int
+            or (allow, deny) != (expected[0].allow, expected[0].deny)
+        ):
+            self._refuse(
+                "unverified", "Match the bound existing-owner role payload", stage="application"
+            )
+        self.invalidate_layout()
+
+    def authorize_default_write(self, permissions: int) -> None:
+        layout = self._active_plan("application").target_layout
+        if not self._server:
+            self._refuse(
+                "unverified", "Bind the created server before dependent writes", stage="application"
+            )
+        expected = (
+            layout.planned_server_default
+            if layout.planned_server_default is not None
+            else layout.server_default
+        )
+        if type(permissions) is not int or permissions != expected:
+            self._refuse(
+                "unverified", "Match the bound existing-owner default payload", stage="application"
+            )
+        self.invalidate_layout()
+
+    def authorize_role_order(self, order: tuple[str, ...]) -> None:
+        expected = self._expected_role_facts("application")
+        final_order = tuple(sorted(expected, key=lambda rid: expected[rid][1]))
+        if order != final_order or any(
+            expected[role_id][1] != rank for rank, role_id in enumerate(order)
+        ):
+            self._refuse(
+                "unverified", "Match the bound existing-owner full role order", stage="application"
+            )
+        self.invalidate_layout()
+
     def require(self, target: str) -> PermissionReadback:
         self._active_plan()
         proof = self._authority.get(target)
@@ -1409,14 +1478,7 @@ class PermissionRuntime:
                 stage=stage,
             )
         base = plan.target_layout
-        expected_roles: dict[str, tuple[PermissionCell, int]] = {}
-        for role_id, role in _expected_existing_roles(base).items():
-            assert role.permissions is not None and role.rank is not None
-            expected_roles[role_id] = (role.permissions, role.rank)
-        for planned_role in base.planned_role_facts:
-            actual_id = self._roles[planned_role.source_id]
-            assert actual_id is not None
-            expected_roles[actual_id] = (planned_role.permissions, planned_role.rank)
+        expected_roles = self._expected_role_facts(stage)
         expected_default = (
             base.planned_server_default
             if base.planned_server_default is not None

@@ -84,6 +84,87 @@ def channel_attributes_only(monkeypatch):
     writer.assert_awaited()
 
 
+@pytest.fixture
+def role_ordering_only(monkeypatch):
+    """Keep identity/attribute unit checks separate from the real rank owner."""
+    ordering = AsyncMock()
+    monkeypatch.setattr(structure_module, "_apply_role_ordering", ordering)
+    yield ordering
+    ordering.assert_awaited()
+
+
+@pytest.fixture
+def role_permission_collaborator(monkeypatch):
+    """Isolate non-permission outcomes and assert the phase calls its writer."""
+    writer = AsyncMock()
+    monkeypatch.setattr(structure_module, "apply_role_permissions", writer)
+    yield writer
+    writer.assert_awaited()
+
+
+def _bind_rank_operation(state, observed_ranks, final_order, *, valid=True):
+    """Compile explicit phase-unit source/target facts, without granting readiness."""
+    from discord_ferry.core import permissions as p
+
+    bindings = tuple((sid, rid) for sid, rid in state.role_map.items() if sid != "111")
+    source = p.PermissionSourceEvidence(
+        "111",
+        "discord-to-stoat-v1",
+        tuple(
+            p.SourceRole(sid, 0, index, False, frozenset({"permissions", "position", "managed"}))
+            for index, sid in enumerate(("111", *(sid for sid, _ in bindings)))
+        ),
+        (p.SourceChannel("222", 0, (), 0, frozenset({"type", "permission_overwrites"})),),
+        frozenset({"222"}),
+        "explicit-zero-grant-rank-unit-source",
+    )
+    layout = p.TargetLayout(
+        service=STOAT_URL,
+        server_id=state.stoat_server_id,
+        server_default=0,
+        roles=tuple(
+            p.TargetRole(rid, p.PermissionCell(0, 0), rank) for rid, rank in observed_ranks.items()
+        ),
+        planned_roles=bindings,
+        planned_channels=(("222", None),),
+        planned_role_updates=tuple(
+            p.PlannedRole(sid, p.PermissionCell(0, 0), final_order.index(rid))
+            for sid, rid in bindings
+            if rid in observed_ranks and rid in final_order
+        ),
+        fingerprint="explicit-observed-rank-unit-context",
+    )
+    plan = p.compile_permission_plan(source, layout)
+    assert bool(plan.problems) is not valid, plan.problems
+    state.permission_runtime = p.PermissionRuntime(plan)
+    assert not state.permission_runtime.ready
+
+
+@pytest.fixture
+def ordering_context(monkeypatch):
+    """Supply real bound authority at a phase-unit boundary, not engine preflight.
+
+    Tests provide the actual mocked backend's before facts and desired order.
+    This covers ordering orchestration after creation, not top-level operation
+    preflight or creation-time binding, which have separate planned integration.
+    """
+    original = structure_module._apply_role_ordering
+    selected = {}
+
+    def select(observed_ranks, final_order):
+        selected["before"], selected["after"] = observed_ranks, final_order
+
+    async def bound_order(session, config, state, roles, emit):
+        assert selected, "The ordering fixture needs explicit actual-before facts"
+        _bind_rank_operation(state, selected["before"], selected["after"])
+        await original(session, config, state, roles, emit)
+
+    boundary = AsyncMock(wraps=bound_order)
+    monkeypatch.setattr(structure_module, "_apply_role_ordering", boundary)
+    yield select
+    boundary.assert_awaited()
+
+
 def test_missing_runtime_does_not_authorize_a_writer() -> None:
     from discord_ferry.core import permissions
     from discord_ferry.errors import PermissionSafetyError
@@ -94,6 +175,73 @@ def test_missing_runtime_does_not_authorize_a_writer() -> None:
         require_runtime(MigrationState())
     assert caught.value.outcome.reason == "unverified"
     assert caught.value.outcome.effects == "none_confirmed"
+
+
+def _bound_role_phase_setup(tmp_path, *, everyone_raw=0, role_raw=0, hoist=False):
+    """Resume one observed role before channel creation, with validated source facts."""
+    from discord_ferry.core import permissions as p
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import capture_permission_source, validate_permission_source
+    from discord_ferry.discord.permissions import translate_permissions
+
+    server, role = (f"01J5T{i:021d}" for i in (20001, 20002))
+    source = capture_permission_source(
+        "111",
+        [
+            client._parse_role(
+                {
+                    "id": sid,
+                    "name": sid,
+                    "permissions": str(raw),
+                    "position": position,
+                    "managed": False,
+                }
+            )
+            for sid, raw, position in (("111", everyone_raw, 0), ("112", role_raw, 1))
+        ],
+        [
+            client._parse_channel(
+                {"id": "222", "name": "selected", "type": 0, "permission_overwrites": []}
+            )
+        ],
+    )
+    default, grants = translate_permissions(everyone_raw), translate_permissions(role_raw)
+    meta = DiscordMetadata(
+        "111",
+        "2026-10-20T00:00:00+00:00",
+        default,
+        {"112": PermissionPair(grants, 0)},
+        {"222": ChannelMeta(False)},
+        role_metadata={"112": RoleMeta(name="Mod", hoist=True, position=1)} if hoist else {},
+        permission_source=source,
+    )
+    assert not validate_permission_source(meta, frozenset({"222"}))
+    save_discord_metadata(meta, tmp_path)
+    layout = p.TargetLayout(
+        service=STOAT_URL,
+        server_id=server,
+        server_default=0,
+        roles=(p.TargetRole(role, p.PermissionCell(0, 0), 0),),
+        planned_roles=(("112", role),),
+        planned_channels=(("222", None),),
+        planned_role_updates=(p.PlannedRole("112", p.PermissionCell(grants, 0), 0),),
+        planned_server_default=default if default else None,
+        fingerprint="actual-unfinished-role-before-channel-creation",
+    )
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems, plan.problems
+    state = MigrationState(
+        stoat_server_id=server, role_map={"112": role}, permission_runtime=p.PermissionRuntime(plan)
+    )
+    exports = [
+        _make_export(
+            guild_id="111",
+            channel_id="222",
+            category_id="",
+            messages=[_make_message("1001", roles=[DCERole("112", "Mod", position=1)])],
+        )
+    ]
+    return _make_config(tmp_path, upload_delay=0), state, exports, meta
 
 
 @pytest.mark.parametrize("metadata", [None, ChannelMeta(False)])
@@ -463,6 +611,476 @@ async def _assert_unbound_legacy_writer_refuses(tmp_path, metadata):
     assert (tmp_path / "discord_metadata.json").read_bytes() == before
     assert state.channel_map == {"222": remote["_id"]}
     assert not state.warnings
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+async def test_dependent_permission_writer_refuses_without_operation_authority(
+    tmp_path, monkeypatch, owner
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    setter = AsyncMock(return_value={})
+    reader = AsyncMock(return_value={"roles": {"one": {"rank": 0}, "two": {"rank": 1}}})
+    monkeypatch.setattr(structure_module, "api_set_role_permissions", setter)
+    monkeypatch.setattr(structure_module, "api_set_server_default_permissions", setter)
+    monkeypatch.setattr(structure_module, "api_edit_role_ranks", setter)
+    monkeypatch.setattr(structure_module, "api_fetch_server", reader)
+    state = MigrationState(stoat_server_id="server", role_map={"112": "one", "113": "two"})
+    with pytest.raises(PermissionSafetyError):
+        if owner == "role":
+            await structure_module.apply_role_permissions(
+                None,
+                _make_config(tmp_path),
+                state,
+                "one",
+                PermissionPair(1, 0),
+                "ordinary",
+                phase="roles",
+            )
+        elif owner == "default":
+            operation = getattr(structure_module, "_apply_server_default_permissions", None)
+            assert callable(operation), (
+                "The existing server-default writer needs its shared boundary"
+            )
+            await operation(None, _make_config(tmp_path), state, 1)
+        else:
+            await _apply_role_ordering(
+                None,
+                _make_config(tmp_path),
+                state,
+                [DCERole("112", "first", position=1), DCERole("113", "second", position=2)],
+                lambda event: None,
+            )
+    setter.assert_not_awaited()
+    reader.assert_not_awaited()
+
+
+async def _dependent_permission_state(tmp_path, *, planned_order=False):
+    from dataclasses import replace
+
+    from discord_ferry.core import permissions as p
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import capture_permission_source
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    server_id, first_role, second_role, first_channel, second_channel = (
+        f"01J5T{value:021d}" for value in range(12001, 12006)
+    )
+    raw_grants = (1 << 10) | (1 << 11)
+    grants, view, send = (1 << 20) | (1 << 22), 1 << 20, 1 << 22
+    source = capture_permission_source(
+        "111",
+        [
+            client._parse_role(
+                {
+                    "id": sid,
+                    "name": sid,
+                    "permissions": str(raw_grants),
+                    "position": index,
+                    "managed": False,
+                }
+            )
+            for index, sid in enumerate(("111", "112", "113"))
+        ],
+        [
+            client._parse_channel(
+                {
+                    "id": sid,
+                    "name": sid,
+                    "type": 0,
+                    "permission_overwrites": [
+                        {"id": "111", "type": 0, "allow": "0", "deny": str(1 << 11)}
+                    ],
+                }
+            )
+            for sid in ("222", "223")
+        ],
+    )
+    targets = (first_role, second_role)
+    channel_ids = (first_channel, second_channel)
+    layout = p.TargetLayout(
+        service=STOAT_URL,
+        server_id=server_id,
+        server_default=grants,
+        roles=tuple(
+            p.TargetRole(rid, p.PermissionCell(grants, 0), rank) for rank, rid in enumerate(targets)
+        ),
+        channels=tuple(
+            p.TargetChannel(
+                cid,
+                p.PermissionCell(view, send),
+                tuple((rid, p.PermissionCell(0, send)) for rid in targets),
+            )
+            for cid in channel_ids
+        ),
+        planned_roles=tuple(zip(("112", "113"), targets, strict=True)),
+        planned_channels=tuple(zip(("222", "223"), channel_ids, strict=True)),
+        fingerprint="observed-before-dependent-write",
+    )
+    if planned_order:
+        layout = replace(
+            layout,
+            planned_role_updates=(
+                p.PlannedRole("112", p.PermissionCell(grants, 0), 1),
+                p.PlannedRole("113", p.PermissionCell(grants, 0), 0),
+            ),
+        )
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map=dict(layout.planned_roles),
+        channel_map=dict(layout.planned_channels),
+        permission_runtime=p.PermissionRuntime(plan),
+    )
+    server = {
+        "_id": server_id,
+        "default_permissions": grants,
+        "channels": list(channel_ids),
+        "roles": {
+            rid: {"_id": rid, "permissions": {"a": grants, "d": 0}, "rank": rank}
+            for rank, rid in enumerate(targets)
+        },
+    }
+    if planned_order:
+        # A fresh operation cannot be ready before its expected rank changes.
+        # Genuine-proof invalidation for matching rank payloads is covered by
+        # test_bound_owner_payload_revokes_real_proof_without_inventing_effects.
+        assert not state.permission_runtime.ready
+        return state, server
+    channels = {
+        cid: {
+            "_id": cid,
+            "server": server_id,
+            "channel_type": "TextChannel",
+            "default_permissions": {"a": view, "d": send},
+            "role_permissions": {rid: {"a": 0, "d": send} for rid in targets},
+        }
+        for cid in channel_ids
+    }
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/servers/{server_id}", payload=server, repeat=True)
+        for cid in channel_ids:
+            mocked.get(f"{STOAT_URL}/channels/{cid}", payload=channels[cid], repeat=True)
+        async with aiohttp.ClientSession() as session:
+            for cid in channel_ids:
+                await verify_permission_channel(session, _make_config(tmp_path), state, cid)
+    assert state.permission_runtime.outcome.verified
+    assert set(state.permission_runtime.ready) == set(channel_ids)
+    return state, server
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+async def test_dependent_permission_writer_refuses_unplanned_payload_before_dispatch(
+    tmp_path, owner
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, server = await _dependent_permission_state(tmp_path)
+    runtime = state.permission_runtime
+    first_role = state.role_map["112"]
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/servers/{state.stoat_server_id}", payload=server)
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{first_role}", payload={}
+        )
+        mocked.put(f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default", payload={})
+        mocked.patch(f"{STOAT_URL}/servers/{state.stoat_server_id}/roles/ranks", payload={})
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as stopped:
+                if owner == "role":
+                    await structure_module.apply_role_permissions(
+                        session,
+                        _make_config(tmp_path),
+                        state,
+                        first_role,
+                        PermissionPair(0, 0),
+                        "first",
+                        phase="roles",
+                    )
+                elif owner == "default":
+                    await structure_module._apply_server_default_permissions(
+                        session, _make_config(tmp_path), state, 0
+                    )
+                else:
+                    await structure_module._apply_role_ordering(
+                        session,
+                        _make_config(tmp_path),
+                        state,
+                        [DCERole("112", "first", position=1), DCERole("113", "second", position=2)],
+                        lambda event: None,
+                    )
+        assert not [method for method, _ in mocked.requests if method in {"PUT", "PATCH"}]
+    assert stopped.value.outcome.stage == "application"
+    assert stopped.value.outcome.effects == "none_confirmed"
+    assert not runtime.ready and runtime.stopped
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+@pytest.mark.parametrize("change", ["server", "service"])
+async def test_dependent_permission_writer_refuses_changed_destination_before_requests(
+    tmp_path, owner, change
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, _ = await _dependent_permission_state(tmp_path, planned_order=owner == "rank")
+    config = _make_config(tmp_path)
+    if change == "server":
+        state.stoat_server_id = "01J5T000000000000000099999"
+    else:
+        config = _make_config(tmp_path, stoat_url="https://other-target.test")
+    role_id = state.role_map["112"]
+    grants = (1 << 20) | (1 << 22)
+    with aioresponses() as mocked:
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                if owner == "role":
+                    await structure_module.apply_role_permissions(
+                        session,
+                        config,
+                        state,
+                        role_id,
+                        PermissionPair(grants, 0),
+                        "role",
+                        phase="roles",
+                    )
+                elif owner == "default":
+                    await structure_module._apply_server_default_permissions(
+                        session, config, state, grants
+                    )
+                else:
+                    await structure_module._apply_role_ordering(
+                        session,
+                        config,
+                        state,
+                        [DCERole("112", "A", position=1), DCERole("113", "B", position=2)],
+                        lambda event: None,
+                    )
+        assert not mocked.requests
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert caught.value.outcome.stage == "application"
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+@pytest.mark.parametrize("result", ["accepted", "rejected", "cancelled", "unexpected"])
+async def test_dependent_permission_mutations_revoke_authority_before_dispatch(
+    tmp_path, owner, result
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, server = await _dependent_permission_state(tmp_path, planned_order=owner == "rank")
+    runtime = state.permission_runtime
+    config = _make_config(tmp_path, upload_delay=0)
+    first_role, second_role = state.role_map.values()
+    bodies = []
+
+    def mutation(_url, **kwargs):
+        assert not runtime.ready, "A dependent proof survived until permission dispatch"
+        assert runtime.effects == "changes_possible"
+        bodies.append(kwargs["json"])
+        if result == "cancelled":
+            raise asyncio.CancelledError()
+        if result == "unexpected":
+            raise RuntimeError("synthetic mutation failure")
+        return CallbackResult(status=403 if result == "rejected" else 200, payload={})
+
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/servers/{state.stoat_server_id}", payload=server, repeat=True)
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{first_role}",
+            callback=mutation,
+        )
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default", callback=mutation
+        )
+        mocked.patch(f"{STOAT_URL}/servers/{state.stoat_server_id}/roles/ranks", callback=mutation)
+        async with aiohttp.ClientSession() as session:
+
+            async def apply():
+                if owner == "role":
+                    await structure_module.apply_role_permissions(
+                        session,
+                        config,
+                        state,
+                        first_role,
+                        PermissionPair(server["default_permissions"], 0),
+                        "first",
+                        phase="roles",
+                    )
+                elif owner == "default":
+                    operation = getattr(structure_module, "_apply_server_default_permissions", None)
+                    assert callable(operation), "Server-default authority boundary is missing"
+                    await operation(session, config, state, server["default_permissions"])
+                else:
+                    await _apply_role_ordering(
+                        session,
+                        config,
+                        state,
+                        [DCERole("112", "first", position=1), DCERole("113", "second", position=2)],
+                        lambda event: None,
+                    )
+
+            if result == "accepted":
+                await apply()
+            else:
+                expected = (
+                    asyncio.CancelledError if result == "cancelled" else PermissionSafetyError
+                )
+                with pytest.raises(expected):
+                    await apply()
+    assert len(bodies) == 1
+    expected_payload = (
+        {"ranks": [second_role, first_role]}
+        if owner == "rank"
+        else {
+            "permissions": server["default_permissions"]
+            if owner == "default"
+            else {"allow": server["default_permissions"], "deny": 0}
+        }
+    )
+    assert bodies[0] == expected_payload
+    assert not runtime.ready and not runtime.outcome.verified
+    assert not state.warnings
+    if result == "accepted":
+        assert not runtime.stopped and runtime.effects == "changes_confirmed"
+    else:
+        assert runtime.stopped and runtime.effects == "changes_possible"
+        assert runtime.outcome.reason == (
+            "interrupted" if result == "cancelled" else "write_uncertain"
+        )
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+async def test_shared_terminal_stop_during_mutation_remains_primary(tmp_path, owner):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, server = await _dependent_permission_state(tmp_path, planned_order=owner == "rank")
+    runtime = state.permission_runtime
+    config = _make_config(tmp_path, upload_delay=0)
+    first_role = next(iter(state.role_map.values()))
+    errors = []
+
+    def accepted_after_stop(_url, **_kwargs):
+        errors.append(runtime.stop("unverified", stage="recheck"))
+        return CallbackResult(payload={})
+
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/servers/{state.stoat_server_id}", payload=server, repeat=True)
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{first_role}",
+            callback=accepted_after_stop,
+        )
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default",
+            callback=accepted_after_stop,
+        )
+        mocked.patch(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/roles/ranks", callback=accepted_after_stop
+        )
+        async with aiohttp.ClientSession() as session:
+            for _attempt in range(2):
+                with pytest.raises(PermissionSafetyError) as caught:
+                    if owner == "role":
+                        await structure_module.apply_role_permissions(
+                            session,
+                            config,
+                            state,
+                            first_role,
+                            PermissionPair(server["default_permissions"], 0),
+                            "first",
+                            phase="roles",
+                        )
+                    elif owner == "default":
+                        await structure_module._apply_server_default_permissions(
+                            session, config, state, server["default_permissions"]
+                        )
+                    else:
+                        await _apply_role_ordering(
+                            session,
+                            config,
+                            state,
+                            [
+                                DCERole("112", "first", position=1),
+                                DCERole("113", "second", position=2),
+                            ],
+                            lambda event: None,
+                        )
+                assert caught.value is errors[0]
+    assert len(errors) == 1
+    assert not runtime.ready and runtime.effects == "changes_possible"
+    assert runtime.outcome is errors[0].outcome
+
+
+@pytest.mark.parametrize("failure", ["rejected", "cancelled", "unexpected"])
+async def test_rank_context_failure_clears_authority_before_any_write(tmp_path, failure):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state, _ = await _dependent_permission_state(tmp_path)
+    runtime = state.permission_runtime
+    with aioresponses() as mocked:
+        url = f"{STOAT_URL}/servers/{state.stoat_server_id}"
+        if failure == "rejected":
+            mocked.get(url, status=403, payload={"type": "Forbidden"})
+        else:
+            error = (
+                asyncio.CancelledError()
+                if failure == "cancelled"
+                else RuntimeError("synthetic read failure")
+            )
+            mocked.get(url, exception=error)
+        async with aiohttp.ClientSession() as session:
+            expected = asyncio.CancelledError if failure == "cancelled" else PermissionSafetyError
+            with pytest.raises(expected):
+                await _apply_role_ordering(
+                    session,
+                    _make_config(tmp_path),
+                    state,
+                    [DCERole("112", "first", position=1), DCERole("113", "second", position=2)],
+                    lambda event: None,
+                )
+    assert all(method == "GET" for method, _ in mocked.requests)
+    assert runtime.stopped and not runtime.ready
+    assert runtime.outcome.stage == "recheck"
+    assert runtime.outcome.effects == "none_confirmed"
+    assert not state.warnings
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+async def test_dependent_permission_preview_dispatches_no_mutation(tmp_path, monkeypatch, owner):
+    state, server = await _dependent_permission_state(tmp_path)
+    runtime = state.permission_runtime
+    config = _make_config(tmp_path, dry_run=True)
+    setter = AsyncMock(return_value={})
+    reader = AsyncMock(return_value=server)
+    monkeypatch.setattr(structure_module, "api_set_role_permissions", setter)
+    monkeypatch.setattr(structure_module, "api_set_server_default_permissions", setter)
+    monkeypatch.setattr(structure_module, "api_edit_role_ranks", setter)
+    monkeypatch.setattr(structure_module, "api_fetch_server", reader)
+    if owner == "role":
+        await structure_module.apply_role_permissions(
+            None,
+            config,
+            state,
+            next(iter(state.role_map.values())),
+            PermissionPair(server["default_permissions"], 0),
+            "first",
+            phase="roles",
+        )
+    elif owner == "default":
+        await structure_module._apply_server_default_permissions(
+            None, config, state, server["default_permissions"]
+        )
+    else:
+        await _apply_role_ordering(
+            None,
+            config,
+            state,
+            [DCERole("112", "first", position=1), DCERole("113", "second", position=2)],
+            lambda event: None,
+        )
+    setter.assert_not_awaited()
+    reader.assert_not_awaited()
+    assert runtime.effects == "none_confirmed"
 
 
 def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
@@ -1100,7 +1718,7 @@ async def test_run_server_icon_uploads_from_a_foreign_working_directory(
 # ---------------------------------------------------------------------------
 
 
-async def test_run_roles_creates_roles(tmp_path: Path) -> None:
+async def test_run_roles_creates_roles(role_ordering_only, tmp_path: Path) -> None:
     """ROLES phase creates roles found in message authors."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1538,7 +2156,7 @@ async def test_run_roles_colour_without_hash(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_live_only_role_is_created(tmp_path: Path) -> None:
+async def test_live_only_role_is_created(role_ordering_only, tmp_path: Path) -> None:
     """A live role absent from every export author is still created via the union."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -1678,7 +2296,7 @@ async def test_managed_role_not_created(tmp_path: Path) -> None:
     assert state.role_map == {"r1": "stoat-r1"}
 
 
-async def test_structural_roles_counted_for_live_only(tmp_path: Path) -> None:
+async def test_structural_roles_counted_for_live_only(role_ordering_only, tmp_path: Path) -> None:
     """A live-only role (in role_metadata, absent from the export) increments
     native_fidelity_counts['structural_roles']; an overlap role does not."""
     events: list[MigrationEvent] = []
@@ -1755,7 +2373,7 @@ async def test_structural_roles_zero_when_all_overlap(tmp_path: Path) -> None:
     assert state.native_fidelity_counts.get("structural_roles") is None
 
 
-async def test_no_token_fallback_unchanged(tmp_path: Path) -> None:
+async def test_no_token_fallback_unchanged(role_ordering_only, tmp_path: Path) -> None:
     """With no discord_metadata.json, the created set equals the export-derived set."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -2899,40 +3517,23 @@ async def test_unbound_legacy_default_and_role_cells_stop_without_permission_war
     )
 
 
-async def test_run_roles_leaves_a_role_holding_every_permission_unchanged(
-    tmp_path: Path,
-) -> None:
-    """SC-2.5: the check runs on channel overwrites only, never on role permissions."""
-    events: list[MigrationEvent] = []
-    state = MigrationState(stoat_server_id="srv1")
-    save_discord_metadata(
-        DiscordMetadata(
-            guild_id="111",
-            fetched_at="t",
-            server_default_permissions=0,
-            role_permissions={"r1": PermissionPair(allow=ALL_STOAT_PERMISSIONS, deny=0)},
-            channel_metadata={},
-        ),
-        tmp_path,
-    )
-    exports = [
-        _make_export(guild_id="111", messages=[_make_message("m1", roles=[DCERole("r1", "Mod")])])
-    ]
-    bodies: list[object] = []
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
-        m.put(f"{STOAT_URL}/servers/srv1/permissions/default", payload={}, repeat=True)
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/stoat-r1",
+async def test_run_roles_leaves_a_role_holding_every_permission_unchanged(tmp_path: Path) -> None:
+    """Bound source administrator grants are never channel-inflation-cleaned."""
+    config, state, exports, meta = _bound_role_phase_setup(tmp_path, role_raw=1 << 3)
+    assert meta.role_permissions["112"].allow == ALL_STOAT_PERMISSIONS
+    bodies = []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
             payload={},
             callback=_recorder(bodies),
-            repeat=True,
         )
-        m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
-        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", payload={}, repeat=True)
-        await run_roles(_make_config(tmp_path, upload_delay=0.0), state, exports, events.append)
+        await run_roles(config, state, exports, lambda event: None)
     assert bodies == [{"permissions": {"allow": ALL_STOAT_PERMISSIONS, "deny": 0}}]
     assert _inflated_warnings(state) == []
+    assert state.roles_finalized == {"112"}
+    assert not state.permission_runtime.ready
 
 
 async def test_ordinary_legacy_overwrites_are_not_permission_authority(tmp_path):
@@ -3144,38 +3745,25 @@ async def test_run_roles_position_only_role_sends_no_patch(tmp_path: Path) -> No
 
 
 async def test_run_roles_applies_permissions(tmp_path: Path) -> None:
-    """ROLES phase applies Discord permissions from metadata."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={"r1": PermissionPair(allow=4_194_304, deny=0)},
-        channel_metadata={},
+    """The real phase applies source-bound grants without replacing role identity."""
+    config, state, exports, meta = _bound_role_phase_setup(
+        tmp_path, everyone_raw=1 << 10, role_raw=1 << 11
     )
-    save_discord_metadata(meta, tmp_path)
-
-    role = DCERole(id="r1", name="Mod")
-    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=[role])])]
-
-    perm_bodies: list[dict[str, object]] = []
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/stoat-r1",
+    role_id = state.role_map["112"]
+    bodies = []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{role_id}",
             payload={},
-            callback=lambda url, **kwargs: perm_bodies.append(  # type: ignore[misc]
-                kwargs.get("json", {})
-            ),
+            callback=_recorder(bodies),
         )
-        await run_roles(config, state, exports, events.append)
-
-    assert len(perm_bodies) == 1
-    assert perm_bodies[0] == {"permissions": {"allow": 4_194_304, "deny": 0}}
+        mocked.put(f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default", payload={})
+        await run_roles(config, state, exports, lambda event: None)
+        assert not [method for method, _ in mocked.requests if method == "POST"]
+    assert bodies == [{"permissions": {"allow": meta.role_permissions["112"].allow, "deny": 0}}]
+    assert bodies[0]["permissions"]["allow"] == 1 << 22
+    assert state.role_map["112"] == role_id and state.roles_finalized == {"112"}
 
 
 async def test_run_roles_does_not_apply_another_guilds_permissions(tmp_path: Path) -> None:
@@ -3260,78 +3848,44 @@ def test_ferry_min_permissions_value_pinned() -> None:
 
 
 async def test_run_roles_applies_server_defaults(tmp_path: Path) -> None:
-    """ROLES phase applies the translated server default permissions exactly."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    discord_default = 4_194_304  # SendMessage only
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=discord_default,
-        role_permissions={},
-        channel_metadata={},
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    role = DCERole(id="r1", name="Mod")
-    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=[role])])]
-
-    default_perm_bodies: list[dict[str, object]] = []
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/default",
+    """Apply the exact source-derived default, without the migration account floor."""
+    config, state, exports, meta = _bound_role_phase_setup(tmp_path, everyone_raw=1 << 11)
+    bodies = []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
             payload={},
-            callback=lambda url, **kwargs: default_perm_bodies.append(  # type: ignore[misc]
-                kwargs.get("json", {})
-            ),
         )
-        await run_roles(config, state, exports, events.append)
-
-    assert len(default_perm_bodies) == 1
-    expected = discord_default
-    assert default_perm_bodies[0] == {"permissions": expected}
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        await run_roles(config, state, exports, lambda event: None)
+    assert bodies == [{"permissions": meta.server_default_permissions}]
+    assert meta.server_default_permissions == 1 << 22
+    assert not state.permission_runtime.ready
 
 
 async def test_run_roles_administrator_mask_passes_through_unmerged(tmp_path: Path) -> None:
-    """SC-2.3: an Administrator-translated mask (every Stoat bit) is written as-is."""
-    from discord_ferry.discord.permissions import translate_permissions
-
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
-    expected = translate_permissions(1 << 3)  # ADMINISTRATOR translates to all Stoat bits
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=expected,
-        role_permissions={},
-        channel_metadata={},
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    role = DCERole(id="r1", name="Mod")
-    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=[role])])]
-
-    default_perm_bodies: list[dict[str, object]] = []
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/default",
+    """A validated source administrator default retains the existing translation."""
+    config, state, exports, meta = _bound_role_phase_setup(tmp_path, everyone_raw=1 << 3)
+    bodies = []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
             payload={},
-            callback=lambda url, **kwargs: default_perm_bodies.append(  # type: ignore[misc]
-                kwargs.get("json", {})
-            ),
         )
-        await run_roles(config, state, exports, events.append)
-
-    assert len(default_perm_bodies) == 1
-    assert default_perm_bodies[0] == {"permissions": expected}
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        await run_roles(config, state, exports, lambda event: None)
+    assert meta.server_default_permissions == ALL_STOAT_PERMISSIONS
+    assert bodies == [{"permissions": ALL_STOAT_PERMISSIONS}]
 
 
 async def test_run_roles_no_metadata_no_permissions(tmp_path: Path) -> None:
@@ -3355,36 +3909,26 @@ async def test_run_roles_no_metadata_no_permissions(tmp_path: Path) -> None:
     assert len(perm_warnings) == 0
 
 
-async def test_run_roles_permission_failure_non_fatal(tmp_path: Path) -> None:
-    """ROLES phase logs a warning and does not raise when permission PUT fails."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
+async def test_run_roles_permission_failure_stops_before_finalization(tmp_path: Path) -> None:
+    """A bound permission-write failure stops the real role phase, retaining its ID."""
+    from discord_ferry.errors import PermissionSafetyError
 
-    meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={"r1": PermissionPair(allow=4_194_304, deny=0)},
-        channel_metadata={},
-    )
-    save_discord_metadata(meta, tmp_path)
-
-    role = DCERole(id="r1", name="Mod")
-    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=[role])])]
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mod"})
-        # Permission PUT fails.
-        m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", status=500)
-
-        # Should NOT raise.
-        await run_roles(config, state, exports, events.append)
-
-    assert state.role_map["r1"] == "stoat-r1"
-    perm_warnings = [w for w in state.warnings if w.get("type") == "role_permissions_failed"]
-    assert len(perm_warnings) == 1
-    assert "Mod" in perm_warnings[0]["message"]
+    config, state, exports, _ = _bound_role_phase_setup(tmp_path, role_raw=1 << 11)
+    original = dict(state.role_map)
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
+            status=403,
+            payload={"type": "Forbidden"},
+        )
+        with pytest.raises(PermissionSafetyError) as caught:
+            await run_roles(config, state, exports, lambda event: None)
+    assert caught.value.outcome.reason == "write_uncertain"
+    assert caught.value.outcome.effects == "changes_possible"
+    assert state.role_map == original and state.roles_finalized == set()
+    assert not state.permission_runtime.ready
+    assert not [w for w in state.warnings if w.get("type") == "role_permissions_failed"]
 
 
 async def test_run_channels_skip_threads(channel_attributes_only, tmp_path: Path) -> None:
@@ -4008,7 +4552,7 @@ async def test_banner_download_sends_no_auth_header_even_with_a_token(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
-async def test_role_cap_truncates_and_warns(tmp_path: Path) -> None:
+async def test_role_cap_truncates_and_warns(role_ordering_only, tmp_path: Path) -> None:
     """When the union exceeds the live server_roles limit, only the top-N by
     position are created and a role_limit_exceeded warning names the dropped count."""
     events: list[MigrationEvent] = []
@@ -4117,7 +4661,7 @@ async def test_too_many_roles_backstop_non_fatal(tmp_path: Path) -> None:
     assert warnings, "expected a role_limit_exceeded backstop warning"
 
 
-async def test_resume_truncation_deterministic(tmp_path: Path) -> None:
+async def test_resume_truncation_deterministic(role_ordering_only, tmp_path: Path) -> None:
     """Two runs over identical discord_metadata truncate to the same top-N set."""
     config = _make_config(tmp_path, upload_delay=0)
 
@@ -4559,35 +5103,34 @@ def _meta_with_role(role_id: str = "r1") -> DiscordMetadata:
 
 
 async def test_resume_finalizes_unfinalized_role(tmp_path: Path) -> None:
-    """S3 SC-9: a created-but-unfinalized role gets attrs PATCH + perms PUT on resume."""
-    config = _make_config(tmp_path)
-    state = MigrationState(
-        stoat_server_id="srv1", role_map={"r1": "stoat-r1"}, roles_finalized=set()
-    )
-    exports = [_make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="Mods")])])]
-    save_discord_metadata(_meta_with_role("r1"), tmp_path)
-    patched: list[dict[str, object]] = []
-    putted: list[dict[str, object]] = []
-    with aioresponses() as m:
-        # No POST /roles mock — create must NOT fire for the already-mapped role.
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
+    """Resume applies real attributes and bound grants to the existing identity."""
+    config, state, exports, _ = _bound_role_phase_setup(tmp_path, role_raw=1 << 11, hoist=True)
+    role_id = state.role_map["112"]
+    attrs, grants = [], []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.patch(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/roles/{role_id}",
             payload={},
             repeat=True,
-            callback=lambda url, **kw: patched.append(kw.get("json", {})),  # type: ignore[misc]
+            callback=_recorder(attrs),
         )
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/stoat-r1",
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{role_id}",
             payload={},
-            repeat=True,
-            callback=lambda url, **kw: putted.append(kw.get("json", {})),  # type: ignore[misc]
+            callback=_recorder(grants),
         )
-        await run_roles(config, state, exports, lambda e: None)
-    assert patched and putted  # attrs + perms both applied on resume
-    assert "r1" in state.roles_finalized
+        await run_roles(config, state, exports, lambda event: None)
+        assert not [method for method, _ in mocked.requests if method == "POST"]
+    assert any(body.get("hoist") is True for body in attrs)
+    assert grants == [{"permissions": {"allow": 1 << 22, "deny": 0}}]
+    assert state.role_map["112"] == role_id and state.roles_finalized == {"112"}
+    assert not state.permission_runtime.ready
 
 
-async def test_resume_does_not_recreate_mapped_role(tmp_path: Path) -> None:
+async def test_resume_does_not_recreate_mapped_role(
+    role_permission_collaborator, tmp_path: Path
+) -> None:
     """S3 SC-10: the create pass skips an already-mapped role (no duplicate api_create_role)."""
     config = _make_config(tmp_path)
     state = MigrationState(
@@ -4690,7 +5233,9 @@ async def test_colour_applied_without_discord_metadata(tmp_path: Path) -> None:
     assert "r1" in state.roles_finalized
 
 
-async def test_invalid_colour_does_not_block_hoist(tmp_path: Path) -> None:
+async def test_invalid_colour_does_not_block_hoist(
+    role_permission_collaborator, tmp_path: Path
+) -> None:
     """SC-1.7: a bad colour hex produces a warning but hoist still fires."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -4734,7 +5279,9 @@ async def test_mark_at_end_finalizes_without_metadata(tmp_path: Path) -> None:
     assert "r1" in state.roles_finalized
 
 
-async def test_completed_run_finalizes_all_created_roles(tmp_path: Path) -> None:
+async def test_completed_run_finalizes_all_created_roles(
+    role_ordering_only, tmp_path: Path
+) -> None:
     """S3 SC-13: a normal completed run finalizes every created role."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -4748,7 +5295,7 @@ async def test_completed_run_finalizes_all_created_roles(tmp_path: Path) -> None
     assert state.roles_finalized == {"r1", "r2"}
 
 
-async def test_run_roles_mid_phase_save(tmp_path: Path) -> None:
+async def test_run_roles_mid_phase_save(role_ordering_only, tmp_path: Path) -> None:
     """S3 SC-14: the create loop persists after every role (hard-kill durability)."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -4765,7 +5312,7 @@ async def test_run_roles_mid_phase_save(tmp_path: Path) -> None:
     assert spy.call_count == 3
 
 
-async def test_role_kill_and_resume_no_duplicates(tmp_path: Path) -> None:
+async def test_role_kill_and_resume_no_duplicates(role_ordering_only, tmp_path: Path) -> None:
     """A hard kill after role 2 of 3 persists both mappings; resume creates only role 3."""
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="01J5T000000000000000009000")
@@ -5809,7 +6356,12 @@ def _server_payload(ranks: dict[str, int]) -> dict[str, object]:
     """Build a GET /servers/{id} payload whose roles carry the given ranks."""
     return {
         "_id": "srv1",
-        "roles": {rid: {"name": rid, "rank": rank} for rid, rank in ranks.items()},
+        "default_permissions": 0,
+        "channels": [],
+        "roles": {
+            rid: {"_id": rid, "name": rid, "rank": rank, "permissions": {"a": 0, "d": 0}}
+            for rid, rank in ranks.items()
+        },
     }
 
 
@@ -5831,6 +6383,15 @@ async def test_apply_role_ordering_sorts_position_descending(tmp_path: Path) -> 
     ]
 
     bodies: list[dict[str, object]] = []
+    _bind_rank_operation(
+        state,
+        {"stoat-low": 0, "stoat-mid": 1, "stoat-high": 2},
+        (
+            "stoat-high",
+            "stoat-mid",
+            "stoat-low",
+        ),
+    )
     with aioresponses() as m:
         m.get(
             f"{STOAT_URL}/servers/srv1",
@@ -5865,6 +6426,14 @@ async def test_apply_role_ordering_tie_breaks_on_ascending_id(tmp_path: Path) ->
     ]
 
     bodies: list[dict[str, object]] = []
+    _bind_rank_operation(
+        state,
+        {"stoat-30": 0, "stoat-20": 1},
+        (
+            "stoat-20",
+            "stoat-30",
+        ),
+    )
     with aioresponses() as m:
         m.get(
             f"{STOAT_URL}/servers/srv1",
@@ -5897,6 +6466,16 @@ async def test_apply_role_ordering_keeps_unknown_roles_at_their_index(tmp_path: 
     ]
 
     bodies: list[dict[str, object]] = []
+    _bind_rank_operation(
+        state,
+        {"stoat-a": 0, "stoat-manual": 1, "stoat-b": 2, "stoat-other": 3},
+        (
+            "stoat-b",
+            "stoat-manual",
+            "stoat-a",
+            "stoat-other",
+        ),
+    )
     with aioresponses() as m:
         m.get(
             f"{STOAT_URL}/servers/srv1",
@@ -5970,34 +6549,27 @@ async def test_apply_role_ordering_one_known_role_makes_no_request(tmp_path: Pat
             await _apply_role_ordering(session, config, state, roles, lambda e: None)
 
 
-async def test_apply_role_ordering_server_with_one_role_sends_read_back_only(
+async def test_apply_role_ordering_refuses_incomplete_bound_inventory_before_requests(
     tmp_path: Path,
 ) -> None:
-    """SC-3.9. A server holding fewer than two roles is judged only after the read-back.
+    """A mapped role absent from complete preflight evidence cannot authorize ordering."""
+    from discord_ferry.errors import PermissionSafetyError
 
-    Ferry knows two roles here, so the local guard passes. The server's own count
-    is not knowable without asking, which is why this guard cannot move earlier.
-    No PATCH route is registered, so an ordering call would raise.
-    """
     config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    state.role_map = {"a": "stoat-a", "b": "stoat-b"}
-    roles = [
-        DCERole(id="a", name="A", position=1),
-        DCERole(id="b", name="B", position=9),
-    ]
-
-    gets: list[str] = []
-    with aioresponses() as m:
-        m.get(
-            f"{STOAT_URL}/servers/srv1",
-            payload=_server_payload({"stoat-a": 0}),
-            callback=lambda url, **kwargs: gets.append("hit"),  # type: ignore[misc]
-        )
+    state = MigrationState(stoat_server_id="srv1", role_map={"a": "stoat-a", "b": "stoat-b"})
+    _bind_rank_operation(state, {"stoat-a": 0}, ("stoat-a",), valid=False)
+    with aioresponses() as mocked:
         async with aiohttp.ClientSession() as session:
-            await _apply_role_ordering(session, config, state, roles, lambda e: None)
-
-    assert gets == ["hit"]
+            with pytest.raises(PermissionSafetyError):
+                await _apply_role_ordering(
+                    session,
+                    config,
+                    state,
+                    [DCERole("a", "A", position=1), DCERole("b", "B", position=9)],
+                    lambda event: None,
+                )
+        assert not mocked.requests
+    assert not state.permission_runtime.ready
 
 
 async def test_apply_role_ordering_skips_a_no_op_submission(tmp_path: Path) -> None:
@@ -6016,6 +6588,14 @@ async def test_apply_role_ordering_skips_a_no_op_submission(tmp_path: Path) -> N
     ]
 
     gets: list[str] = []
+    _bind_rank_operation(
+        state,
+        {"stoat-b": 0, "stoat-a": 1},
+        (
+            "stoat-b",
+            "stoat-a",
+        ),
+    )
     with aioresponses() as m:
         # b outranks a and already sits first, which is exactly what the sort wants.
         m.get(
@@ -6029,199 +6609,221 @@ async def test_apply_role_ordering_skips_a_no_op_submission(tmp_path: Path) -> N
     assert gets == ["hit"]
 
 
-async def test_run_roles_ordering_failure_is_non_fatal(tmp_path: Path) -> None:
-    """SC-3.10. A generic ordering failure warns, and the phase still completes.
+async def test_run_roles_ordering_failure_stops_before_finalization(tmp_path: Path) -> None:
+    """The real phase retains known identities and propagates an uncertain rank write."""
+    from discord_ferry.errors import PermissionSafetyError
 
-    Replaces the coverage of the retired test_run_roles_rank_failure_is_non_fatal,
-    which drove a failure of the discarded per-role rank PATCH.
-    """
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    roles = [
-        DCERole(id="a", name="A", position=1),
-        DCERole(id="b", name="B", position=9),
-    ]
-    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
-        m.get(
-            f"{STOAT_URL}/servers/srv1",
-            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
-            repeat=True,
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1", role_map={"a": "stoat-a", "b": "stoat-b"})
+    _bind_rank_operation(state, {"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
+    exports = [
+        _make_export(
+            messages=[
+                _make_message(
+                    "m1", roles=[DCERole("a", "A", position=1), DCERole("b", "B", position=9)]
+                )
+            ]
         )
-        m.patch(f"{STOAT_URL}/servers/srv1/roles/ranks", status=500, payload={}, repeat=True)
-
-        await run_roles(config, state, exports, events.append)
-
-    warning_message = "Failed to apply role ordering: API error 500: {}"
-    failures = [w for w in state.warnings if w["type"] == "role_ordering_failed"]
-    assert failures == [
-        {"phase": "roles", "type": "role_ordering_failed", "message": warning_message}
     ]
-    # The rest of the phase's work survives the degradation.
+    with aioresponses() as mocked:
+        mocked.get(
+            f"{STOAT_URL}/servers/srv1", payload=_server_payload({"stoat-a": 0, "stoat-b": 1})
+        )
+        mocked.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks",
+            exception=RuntimeError("synthetic rank transport failure"),
+        )
+        with pytest.raises(PermissionSafetyError) as caught:
+            await run_roles(config, state, exports, lambda event: None)
+    assert caught.value.outcome.reason == "write_uncertain"
+    assert caught.value.outcome.effects == "changes_possible"
     assert state.role_map == {"a": "stoat-a", "b": "stoat-b"}
-    assert "a" in state.roles_finalized and "b" in state.roles_finalized
-    event_records = [(e.phase, e.status, e.message) for e in events]
-    assert ("roles", "warning", warning_message) in event_records
-    assert event_records[-1] == ("roles", "progress", "Created 2 roles")
+    assert state.roles_finalized == set() and not state.permission_runtime.ready
+    assert not [w for w in state.warnings if w["type"].startswith("role_ordering")]
 
 
 @pytest.mark.parametrize("err_type", ["NotElevated", "MissingPermission"])
-async def test_run_roles_ordering_forbidden_warns_about_permissions(
-    tmp_path: Path, err_type: str
-) -> None:
-    """SC-3.11. A 403 gets its own warning type, naming permissions rather than a bug.
+async def test_run_roles_ordering_forbidden_stops(tmp_path: Path, err_type: str) -> None:
+    """A rejected rank write cannot become warning-only completion."""
+    from discord_ferry.errors import PermissionSafetyError
 
-    On the --server-id path this is the ordinary outcome when the account holds no
-    role on the target, because the upstream elevation check protects every role
-    when the caller's top rank is None.
-    """
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    roles = [
-        DCERole(id="a", name="A", position=1),
-        DCERole(id="b", name="B", position=9),
-    ]
-    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
-        m.get(
-            f"{STOAT_URL}/servers/srv1",
-            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
-            repeat=True,
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1", role_map={"a": "stoat-a", "b": "stoat-b"})
+    _bind_rank_operation(state, {"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
+    exports = [
+        _make_export(
+            messages=[
+                _make_message(
+                    "m1", roles=[DCERole("a", "A", position=1), DCERole("b", "B", position=9)]
+                )
+            ]
         )
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/ranks",
-            status=403,
-            payload={"type": err_type},
-            repeat=True,
+    ]
+    with aioresponses() as mocked:
+        mocked.get(
+            f"{STOAT_URL}/servers/srv1", payload=_server_payload({"stoat-a": 0, "stoat-b": 1})
         )
+        mocked.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks", status=403, payload={"type": err_type}
+        )
+        with pytest.raises(PermissionSafetyError) as caught:
+            await run_roles(config, state, exports, lambda event: None)
+    assert caught.value.outcome.stage == "application"
+    assert caught.value.outcome.effects == "changes_possible"
+    assert state.roles_finalized == set() and not state.permission_runtime.ready
+    assert not [w for w in state.warnings if w["type"].startswith("role_ordering")]
 
-        await run_roles(config, state, exports, events.append)
 
-    warned = [w for w in state.warnings if w["type"] == "role_ordering_not_permitted"]
-    assert len(warned) == 1
-    assert "permission" in warned[0]["message"].lower()
-    # It must NOT be classified as a generic failure, or the user is told to file a bug.
-    assert not [w for w in state.warnings if w["type"] == "role_ordering_failed"]
+async def test_run_roles_rank_read_failure_stops_without_a_write(tmp_path: Path) -> None:
+    """A failed rank-context read stops the phase before permission mutation."""
+    from discord_ferry.errors import PermissionSafetyError
 
-
-async def test_run_roles_read_back_failure_is_non_fatal(tmp_path: Path) -> None:
-    """SC-3.10. A failed read-back degrades the same way the ordering call does."""
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    roles = [
-        DCERole(id="a", name="A", position=1),
-        DCERole(id="b", name="B", position=9),
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1", role_map={"a": "stoat-a", "b": "stoat-b"})
+    _bind_rank_operation(state, {"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
+    exports = [
+        _make_export(
+            messages=[
+                _make_message(
+                    "m1", roles=[DCERole("a", "A", position=1), DCERole("b", "B", position=9)]
+                )
+            ]
+        )
     ]
-    exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
-
-    with aioresponses() as m:
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
-        m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
-        m.get(f"{STOAT_URL}/servers/srv1", status=500, payload={}, repeat=True)
-
-        await run_roles(config, state, exports, events.append)
-
-    assert [w["type"] for w in state.warnings if "ordering" in w["type"]] == [
-        "role_ordering_failed"
-    ]
-    assert state.role_map == {"a": "stoat-a", "b": "stoat-b"}
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/servers/srv1", status=403, payload={"type": "Forbidden"})
+        with pytest.raises(PermissionSafetyError) as caught:
+            await run_roles(config, state, exports, lambda event: None)
+        assert not [method for method, _ in mocked.requests if method in {"PUT", "PATCH", "POST"}]
+    assert caught.value.outcome.stage == "recheck"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert state.roles_finalized == set() and not state.permission_runtime.ready
 
 
 async def test_run_roles_ordering_is_the_last_request(tmp_path: Path) -> None:
-    """SC-3.1 and SC-I1. Ordering runs last, after every create and after the
-    permissions pass, and exactly once.
+    """Real bound finalization writes permissions before its final rank request."""
+    from discord_ferry.core import permissions as p
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import capture_permission_source, validate_permission_source
 
-    The route rejects any list that does not name every role, so it cannot run
-    until the creates have landed.
-
-    FIXTURE NOTE, measured rather than assumed. Supplying Discord metadata takes
-    run_roles down the live-role union path, which sorts roles_to_create
-    position-descending (structure.py:676). So role "b" (position 9) is created
-    FIRST and receives "stoat-a", the reverse of the export-only path. The union
-    path also calls api_fetch_root, which returns {} on any client error instead
-    of raising (api.py:443-458), so an unregistered root route degrades quietly
-    and the limit falls back to 200. Both permission routes are registered here
-    because of that id flip; registering only one made this test fail while the
-    code was correct.
-    """
-    events: list[MigrationEvent] = []
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-
+    server_id, role_a, role_b = (f"01J5T{i:021d}" for i in range(20101, 20104))
+    view, send = 1 << 20, 1 << 22
+    source = capture_permission_source(
+        "111",
+        [
+            client._parse_role(
+                {
+                    "id": sid,
+                    "name": sid,
+                    "permissions": str(raw),
+                    "position": position,
+                    "managed": False,
+                }
+            )
+            for sid, raw, position in (
+                ("111", 1 << 10, 0),
+                ("112", 1 << 11, 1),
+                ("113", 1 << 11, 9),
+            )
+        ],
+        [
+            client._parse_channel(
+                {"id": "222", "name": "selected", "type": 0, "permission_overwrites": []}
+            )
+        ],
+    )
     meta = DiscordMetadata(
-        guild_id="111",
-        fetched_at="t",
-        server_default_permissions=0,
-        role_permissions={"a": PermissionPair(allow=4_194_304, deny=0)},
-        channel_metadata={},
+        "111",
+        "2026-10-20T00:00:00+00:00",
+        view,
+        {"112": PermissionPair(send, 0), "113": PermissionPair(send, 0)},
+        {"222": ChannelMeta(False)},
+        permission_source=source,
     )
+    assert not validate_permission_source(meta, frozenset({"222"}))
     save_discord_metadata(meta, tmp_path)
-
-    roles = [
-        DCERole(id="a", name="A", position=1),
-        DCERole(id="b", name="B", position=9),
-    ]
-    exports = [_make_export(guild_id="111", messages=[_make_message("m1", roles=roles)])]
-
-    seen: list[str] = []
-    with aioresponses() as m:
-        m.post(
-            f"{STOAT_URL}/servers/srv1/roles",
-            payload={"id": "stoat-a", "name": "A"},
-            callback=lambda url, **kwargs: seen.append("create"),  # type: ignore[misc]
-        )
-        m.post(
-            f"{STOAT_URL}/servers/srv1/roles",
-            payload={"id": "stoat-b", "name": "B"},
-            callback=lambda url, **kwargs: seen.append("create"),  # type: ignore[misc]
-        )
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/stoat-a",
-            payload={},
-            repeat=True,
-            callback=lambda url, **kwargs: seen.append("perms"),  # type: ignore[misc]
-        )
-        m.put(
-            f"{STOAT_URL}/servers/srv1/permissions/stoat-b",
-            payload={},
-            repeat=True,
-            callback=lambda url, **kwargs: seen.append("perms"),  # type: ignore[misc]
-        )
-        # Ranks deliberately opposite to the target order, so ordering has real
-        # work to do. Note the union-path id flip described above: role "b" holds
-        # "stoat-a". Seeding this the other way makes the permutation an identity
-        # and the no-op guard correctly skips the call, which would leave this
-        # test asserting nothing about ordering being last.
-        m.get(
-            f"{STOAT_URL}/servers/srv1",
-            payload=_server_payload({"stoat-b": 0, "stoat-a": 1}),
-            repeat=True,
-            callback=lambda url, **kwargs: seen.append("read"),  # type: ignore[misc]
-        )
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/ranks",
-            payload={"_id": "srv1"},
-            repeat=True,
-            callback=lambda url, **kwargs: seen.append("ranks"),  # type: ignore[misc]
-        )
-
-        await run_roles(config, state, exports, events.append)
-
-    assert "perms" in seen, (
-        f"the permissions pass must have run, or the ordering is not last. "
-        f"seen={seen} warnings={[w['type'] for w in state.warnings]}"
+    layout = p.TargetLayout(
+        service=STOAT_URL,
+        server_id=server_id,
+        server_default=0,
+        roles=(
+            p.TargetRole(role_a, p.PermissionCell(0, 0), 0),
+            p.TargetRole(role_b, p.PermissionCell(0, 0), 1),
+        ),
+        planned_roles=(("112", role_a), ("113", role_b)),
+        planned_channels=(("222", None),),
+        planned_role_updates=(
+            p.PlannedRole("112", p.PermissionCell(send, 0), 1),
+            p.PlannedRole("113", p.PermissionCell(send, 0), 0),
+        ),
+        planned_server_default=view,
+        fingerprint="observed-unfinished-roles-before-phase",
     )
-    assert seen[-2:] == ["read", "ranks"]
-    assert seen.count("ranks") == 1
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_a, "113": role_b},
+        permission_runtime=p.PermissionRuntime(plan),
+    )
+    exports = [
+        _make_export(
+            channel_id="222",
+            category_id="",
+            messages=[
+                _make_message(
+                    "1001", roles=[DCERole("112", "A", position=1), DCERole("113", "B", position=9)]
+                )
+            ],
+        )
+    ]
+    server = {
+        "_id": server_id,
+        "default_permissions": 0,
+        "channels": [],
+        "roles": {
+            rid: {"_id": rid, "rank": rank, "permissions": {"a": 0, "d": 0}}
+            for rank, rid in enumerate((role_a, role_b))
+        },
+    }
+    seen = []
+
+    def role_write(url, **kwargs):
+        rid = str(url).rsplit("/", 1)[1]
+        pair = kwargs["json"]["permissions"]
+        server["roles"][rid]["permissions"] = {"a": pair["allow"], "d": pair["deny"]}
+        seen.append(rid)
+        return CallbackResult(payload={})
+
+    def default_write(_url, **kwargs):
+        server["default_permissions"] = kwargs["json"]["permissions"]
+        seen.append("default")
+        return CallbackResult(payload={})
+
+    def read_server(_url, **_kwargs):
+        seen.append("read")
+        return CallbackResult(payload=server)
+
+    def rank_write(_url, **kwargs):
+        for rank, rid in enumerate(kwargs["json"]["ranks"]):
+            server["roles"][rid]["rank"] = rank
+        seen.append("ranks")
+        return CallbackResult(payload=server)
+
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        for rid in (role_a, role_b):
+            mocked.put(f"{STOAT_URL}/servers/{server_id}/permissions/{rid}", callback=role_write)
+        mocked.put(f"{STOAT_URL}/servers/{server_id}/permissions/default", callback=default_write)
+        mocked.get(f"{STOAT_URL}/servers/{server_id}", callback=read_server)
+        mocked.patch(f"{STOAT_URL}/servers/{server_id}/roles/ranks", callback=rank_write)
+        await run_roles(_make_config(tmp_path, upload_delay=0), state, exports, lambda event: None)
+        assert not [method for method, _ in mocked.requests if method == "POST"]
+    assert set(seen[:2]) == {role_a, role_b}
+    assert seen[2:] == ["default", "read", "ranks"]
+    assert server["roles"][role_b]["rank"] == 0 and server["roles"][role_a]["rank"] == 1
+    assert state.role_map == {"112": role_a, "113": role_b}
+    assert state.roles_finalized == {"112", "113"} and not state.permission_runtime.ready
 
 
 async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
@@ -6243,7 +6845,7 @@ async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
 
 
 async def test_run_roles_export_only_path_never_fetches_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    role_ordering_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """SC-I2. With no discord_metadata, run_roles must not call api_fetch_root.
 
@@ -6283,7 +6885,9 @@ async def test_run_roles_export_only_path_never_fetches_root(
     # Reaching here without the AssertionError means the guard held.
 
 
-async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> None:
+async def test_run_roles_ordering_converges_on_a_second_run(
+    ordering_context, tmp_path: Path
+) -> None:
     """SC-3.12. A second pass reaches the same order and creates no duplicate roles.
 
     Idempotence comes from recomputing off a fresh read-back rather than from a
@@ -6300,6 +6904,7 @@ async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> N
     exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
 
     first: list[dict[str, object]] = []
+    ordering_context({"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
@@ -6316,6 +6921,7 @@ async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> N
         )
         await run_roles(config, state, exports, events.append)
 
+    ordering_context({"stoat-b": 0, "stoat-a": 1}, ("stoat-b", "stoat-a"))
     creates: list[str] = []
     second: list[dict[str, object]] = []
     with aioresponses() as m:
@@ -6347,43 +6953,32 @@ async def test_run_roles_ordering_converges_on_a_second_run(tmp_path: Path) -> N
     assert second == []
 
 
-async def test_apply_role_ordering_tolerates_a_stale_role_map(tmp_path: Path) -> None:
-    """A role_map entry naming a role the server no longer has must not crash.
+async def test_apply_role_ordering_stops_on_a_stale_bound_role_map(tmp_path: Path) -> None:
+    """A missing mapped identity needs the existing repair owner, not a partial rank write."""
+    from discord_ferry.errors import PermissionSafetyError
 
-    role_map can lag the server in both directions. #389 records the create loop
-    persisting only every ten roles, and a role can also be deleted on the server
-    between runs. The `state.role_map[r.id] in on_server` filter is what keeps
-    such an entry out of the submitted list, which in turn keeps `slots` and
-    `ordered_known` the same length so `zip(..., strict=True)` cannot raise.
-    """
     config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    # "ghost" maps to a Stoat role that is absent from the read-back.
-    state.role_map = {"a": "stoat-a", "b": "stoat-b", "ghost": "stoat-ghost"}
-    roles = [
-        DCERole(id="a", name="A", position=1),
-        DCERole(id="b", name="B", position=9),
-        DCERole(id="ghost", name="Ghost", position=5),
-    ]
-
-    bodies: list[dict[str, object]] = []
-    with aioresponses() as m:
-        m.get(
-            f"{STOAT_URL}/servers/srv1",
-            payload=_server_payload({"stoat-a": 0, "stoat-b": 1}),
-        )
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/ranks",
-            payload={"_id": "srv1"},
-            callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
-        )
+    state = MigrationState(
+        stoat_server_id="srv1", role_map={"a": "stoat-a", "b": "stoat-b", "ghost": "stoat-ghost"}
+    )
+    _bind_rank_operation(state, {"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"), valid=False)
+    with aioresponses() as mocked:
         async with aiohttp.ClientSession() as session:
-            await _apply_role_ordering(session, config, state, roles, lambda e: None)
-
-    # No exception, and the ghost never reaches the payload. Submitting it would
-    # be rejected wholesale: the route requires the list to match the server's
-    # role set exactly.
-    assert bodies == [{"ranks": ["stoat-b", "stoat-a"]}]
+            with pytest.raises(PermissionSafetyError):
+                await _apply_role_ordering(
+                    session,
+                    config,
+                    state,
+                    [
+                        DCERole("a", "A", position=1),
+                        DCERole("b", "B", position=9),
+                        DCERole("ghost", "Ghost", position=10),
+                    ],
+                    lambda event: None,
+                )
+        assert not mocked.requests
+    assert state.role_map["ghost"] == "stoat-ghost"
+    assert not state.permission_runtime.ready
 
 
 async def test_run_roles_retries_ordering_when_every_role_is_finalized(tmp_path: Path) -> None:
@@ -6411,6 +7006,14 @@ async def test_run_roles_retries_ordering_when_every_role_is_finalized(tmp_path:
 
     bodies: list[dict[str, object]] = []
     creates: list[str] = []
+    _bind_rank_operation(
+        state,
+        {"stoat-a": 0, "stoat-b": 1},
+        (
+            "stoat-b",
+            "stoat-a",
+        ),
+    )
     with aioresponses() as m:
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
@@ -6442,6 +7045,7 @@ async def test_run_roles_retries_ordering_when_every_role_is_finalized(tmp_path:
 
 
 async def test_run_roles_ordering_request_budget_is_one_read_and_one_write(
+    ordering_context,
     tmp_path: Path,
 ) -> None:
     """SC-3.7. The ordering step costs one GET and one PATCH, and no more.
@@ -6463,6 +7067,7 @@ async def test_run_roles_ordering_request_budget_is_one_read_and_one_write(
 
     reads: list[str] = []
     writes: list[str] = []
+    ordering_context({"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
@@ -6488,6 +7093,7 @@ async def test_run_roles_ordering_request_budget_is_one_read_and_one_write(
 
 
 async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
+    ordering_context,
     tmp_path: Path,
 ) -> None:
     """SC-I3. A role added on an --incremental run is ordered against the WHOLE server.
@@ -6510,6 +7116,7 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
     ]
     first_exports = [_make_export(messages=[_make_message("m1", roles=first_roles)])]
 
+    ordering_context({"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
     with aioresponses() as m:
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-a", "name": "A"})
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-b", "name": "B"})
@@ -6533,6 +7140,7 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
     ]
     second_exports = [_make_export(messages=[_make_message("m2", roles=second_roles)])]
 
+    ordering_context({"stoat-b": 0, "stoat-a": 1, "stoat-c": 2}, ("stoat-c", "stoat-b", "stoat-a"))
     created: list[str] = []
     bodies: list[dict[str, object]] = []
     with aioresponses() as m:
@@ -6565,7 +7173,9 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
     assert bodies == [{"ranks": ["stoat-c", "stoat-b", "stoat-a"]}]
 
 
-async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Path) -> None:
+async def test_run_roles_ordering_survives_an_interrupt_and_resume(
+    ordering_context, tmp_path: Path
+) -> None:
     """SC-I2. An interrupted run, resumed, submits the same order as an uninterrupted one.
 
     The first attempt fails in the colour step of the ATTRIBUTES pass, after both
@@ -6586,6 +7196,7 @@ async def test_run_roles_ordering_survives_an_interrupt_and_resume(tmp_path: Pat
     ]
     exports = [_make_export(messages=[_make_message("m1", roles=roles)])]
 
+    ordering_context({"stoat-a": 0, "stoat-b": 1}, ("stoat-b", "stoat-a"))
     # --- the uninterrupted baseline, in its own output dir ---
     clean_dir = tmp_path / "clean"
     clean_dir.mkdir()
@@ -6693,6 +7304,14 @@ async def test_run_role_backfill_orders_live_only_roles(tmp_path: Path) -> None:
     export = _make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="A")])])
 
     bodies: list[dict[str, object]] = []
+    _bind_rank_operation(
+        state,
+        {"s-r1": 0, "s-r2": 1},
+        (
+            "s-r2",
+            "s-r1",
+        ),
+    )
     with aioresponses() as m:
         m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-r1": 0, "s-r2": 1}))
         m.patch(
@@ -6723,6 +7342,14 @@ async def test_run_role_backfill_export_only_orders_by_export_position(tmp_path:
     )
 
     bodies: list[dict[str, object]] = []
+    _bind_rank_operation(
+        state,
+        {"s-a": 0, "s-b": 1},
+        (
+            "s-b",
+            "s-a",
+        ),
+    )
     with aioresponses() as m:
         m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}))
         m.patch(
@@ -6757,6 +7384,15 @@ async def test_run_role_backfill_never_orders_everyone(tmp_path: Path) -> None:
     )
 
     bodies: list[dict[str, object]] = []
+    _bind_rank_operation(
+        state,
+        {"s-everyone": 0, "s-r1": 1, "s-r2": 2},
+        (
+            "s-everyone",
+            "s-r2",
+            "s-r1",
+        ),
+    )
     with aioresponses() as m:
         m.get(
             f"{STOAT_URL}/servers/srv1",
@@ -6796,6 +7432,14 @@ async def test_run_role_backfill_is_idempotent(tmp_path: Path) -> None:
         nonlocal patches
         patches += 1
 
+    _bind_rank_operation(
+        state,
+        {"s-a": 0, "s-b": 1},
+        (
+            "s-a",
+            "s-b",
+        ),
+    )
     with aioresponses() as m:
         # Already position-desc: s-a rank 0, s-b rank 1.
         m.get(
@@ -6821,35 +7465,36 @@ async def test_run_role_backfill_single_known_role_makes_no_write(tmp_path: Path
         await run_role_backfill(config, state, [export], lambda e: None)
 
 
-async def test_run_role_backfill_permission_refusal_warns(tmp_path: Path) -> None:
-    """SC-3.3. A NotElevated refusal degrades to a warning, not an exception."""
-    config = _make_config(tmp_path)
-    state = MigrationState(stoat_server_id="srv1")
-    state.role_map = {"a": "s-a", "b": "s-b"}
+async def test_run_role_backfill_permission_refusal_stops(tmp_path: Path) -> None:
+    """A real bound backfill refusal preserves the primary terminal stop on retry."""
+    from discord_ferry.errors import PermissionSafetyError
+
+    config = _make_config(tmp_path, upload_delay=0)
+    state = MigrationState(stoat_server_id="srv1", role_map={"a": "s-a", "b": "s-b"})
+    _bind_rank_operation(state, {"s-a": 0, "s-b": 1}, ("s-b", "s-a"))
     export = _make_export(
         messages=[
             _make_message(
-                "m1",
-                roles=[
-                    DCERole(id="a", name="A", position=1),
-                    DCERole(id="b", name="B", position=9),
-                ],
+                "m1", roles=[DCERole("a", "A", position=1), DCERole("b", "B", position=9)]
             )
         ]
     )
-
-    with aioresponses() as m:
-        m.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}))
-        m.patch(
-            f"{STOAT_URL}/servers/srv1/roles/ranks",
-            payload={"type": "NotElevated"},
-            status=403,
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/servers/srv1", payload=_server_payload({"s-a": 0, "s-b": 1}))
+        mocked.patch(
+            f"{STOAT_URL}/servers/srv1/roles/ranks", status=403, payload={"type": "NotElevated"}
         )
-        await run_role_backfill(config, state, [export], lambda e: None)
-
-    warned = [w for w in state.warnings if w["type"] == "role_ordering_not_permitted"]
-    assert len(warned) == 1
-    assert not [w for w in state.warnings if w["type"] == "role_ordering_failed"]
+        with pytest.raises(PermissionSafetyError) as first:
+            await run_role_backfill(config, state, [export], lambda event: None)
+        with pytest.raises(PermissionSafetyError) as second:
+            await run_role_backfill(config, state, [export], lambda event: None)
+        assert (
+            sum(len(calls) for (method, _), calls in mocked.requests.items() if method == "PATCH")
+            == 1
+        )
+    assert second.value is first.value and state.permission_runtime.outcome is first.value.outcome
+    assert not state.permission_runtime.ready
+    assert not [w for w in state.warnings if w["type"].startswith("role_ordering")]
 
 
 async def test_run_role_backfill_rerun_does_not_grow_warnings(tmp_path: Path) -> None:
@@ -6865,6 +7510,14 @@ async def test_run_role_backfill_rerun_does_not_grow_warnings(tmp_path: Path) ->
     state.role_map = {"r1": "s-r1", "r2": "s-r2"}
     export = _make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="A")])])
 
+    _bind_rank_operation(
+        state,
+        {"s-r1": 0, "s-r2": 1},
+        (
+            "s-r2",
+            "s-r1",
+        ),
+    )
     with aioresponses() as m:
         m.get(
             f"{STOAT_URL}/servers/srv1",

@@ -38,6 +38,7 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import MigrationState
 from tests.test_structure import channel_attributes_only as channel_attributes_only
+from tests.test_structure import role_ordering_only as role_ordering_only
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -162,6 +163,7 @@ def _make_role_export(roles: list[DCERole], guild_id: str = "111") -> DCEExport:
 
 
 async def test_run_roles_skips_all_passes_for_already_migrated_roles(
+    role_ordering_only,
     tmp_path: Path,
 ) -> None:
     """SC-3: re-run with all roles already in role_map → 0 creates, 0 edits, 0 perm calls.
@@ -246,6 +248,7 @@ async def test_run_roles_skips_all_passes_for_already_migrated_roles(
 
 
 async def test_run_roles_creates_only_new_roles_on_incremental_rerun(
+    role_ordering_only,
     tmp_path: Path,
 ) -> None:
     """SC-4: prior role_map has r1; export now also has r2 → only r2 created."""
@@ -294,6 +297,7 @@ async def test_run_roles_creates_only_new_roles_on_incremental_rerun(
 
 
 async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
+    role_ordering_only,
     tmp_path: Path,
 ) -> None:
     """SC-5: empty state → pre_existing_role_ids is empty → every role created AND

@@ -1479,6 +1479,86 @@ def test_owner_transition_fingerprint_binds_separate_expectations():
     assert first.calculation_fingerprint != second.calculation_fingerprint
 
 
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+@pytest.mark.parametrize("matches", [False, True])
+def test_bound_owner_payload_revokes_real_proof_without_inventing_effects(owner, matches):
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, source, layout, new = owner_transition_case()
+    runtime = p.PermissionRuntime(p.compile_permission_plan(source, layout))
+    runtime.bind_role("113", new)
+    actual = owner_transition_readback(p, layout, runtime, new)
+    cid = layout.channels[0].id
+    runtime.verify(cid, actual)
+    assert runtime.require(cid) is actual
+    native, old = layout.roles
+
+    def authorize():
+        if owner == "role":
+            runtime.authorize_role_write(old.id, (1 << 22) if matches else 0, 0)
+        elif owner == "default":
+            runtime.authorize_default_write((1 << 20) if matches else 0)
+        else:
+            runtime.authorize_role_order(
+                (native.id, new, old.id) if matches else (native.id, old.id, new)
+            )
+
+    if matches:
+        authorize()
+        assert not runtime.stopped
+    else:
+        with pytest.raises(PermissionSafetyError):
+            authorize()
+        assert runtime.stopped
+    assert not runtime.ready and runtime.effects == "none_confirmed"
+    with pytest.raises(PermissionSafetyError):
+        runtime.require(cid)
+
+
+@pytest.mark.parametrize("sparse", ["mapped", "native"])
+def test_role_order_payload_must_encode_the_bound_numeric_ranks(sparse):
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, source, layout, new = owner_transition_case()
+    if sparse == "mapped":
+        layout = replace(
+            layout,
+            planned_role_updates=(replace(layout.planned_role_updates[0], rank=7),),
+        )
+    else:
+        layout = replace(layout, roles=(replace(layout.roles[0], rank=7), layout.roles[1]))
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    runtime = p.PermissionRuntime(plan)
+    runtime.bind_role("113", new)
+    native, old = layout.roles
+    order = (native.id, new, old.id) if sparse == "mapped" else (new, old.id, native.id)
+    # The existing rank request encodes numeric ranks by list index.
+    with pytest.raises(PermissionSafetyError):
+        runtime.authorize_role_order(order)
+    assert runtime.effects == "none_confirmed" and not runtime.ready
+
+
+@pytest.mark.parametrize("owner", ["role", "default", "rank"])
+def test_dependent_payload_requires_actual_created_server_binding(owner):
+    from discord_ferry.errors import PermissionSafetyError
+
+    p = compiler_functions()
+    source = source_evidence((0, (1 << 10) | (1 << 11)), ())
+    layout = compiler_layout(source, new_server=True)
+    runtime = p.PermissionRuntime(p.compile_permission_plan(source, layout))
+    runtime.bind_role("112", "created-role")
+    grants = layout.planned_role_facts[0].permissions
+    with pytest.raises(PermissionSafetyError):
+        if owner == "role":
+            runtime.authorize_role_write("created-role", grants.allow, grants.deny)
+        elif owner == "default":
+            runtime.authorize_default_write(layout.planned_server_default)
+        else:
+            runtime.authorize_role_order(("created-role",))
+    assert runtime.effects == "none_confirmed" and not runtime.ready
+
+
 def test_permission_plan_is_not_runtime_authority() -> None:
     from discord_ferry.errors import PermissionSafetyError
 

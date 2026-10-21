@@ -656,26 +656,17 @@ async def apply_role_permissions(
     *,
     phase: str,
 ) -> None:
-    """Apply ONE role's translated Discord permissions to its Stoat role.
+    """Retain the existing one-role payload and revoke dependent proof before writes.
 
-    Deliberately scoped to one role. The ``api_set_server_default_permissions``
-    call that follows the loop this was extracted from is NOT included, and that
-    boundary is the point of the extraction rather than an accident of it: that
-    call restores the translated Discord @everyone mask onto the server's
-    DEFAULT ROLE, so it is server-wide and tied to no single recreated entity.
-    It no longer merges the migration floor (#957): the floor belongs to the
-    migration account's own grants, and a repair that re-fired a floor merge
-    would re-impose authority on every member, the class of defect batch 5 of
-    #107 existed to fix and #957 extends to the floor itself.
-
-    The ``roles_finalized`` and ``role_map`` guards stay at the call site. They
-    decide WHETHER to apply, which is caller policy, not application.
-
-    ``str(exc)`` needs no scrub at this append site for the same reason as
-    ``apply_channel_permissions``: ADR-014 redacts at the writer.
+    Server defaults and the migration account's floor retain their separate owners.
+    Finalization and map guards remain caller policy. ADR-045 requires a typed
+    terminal stop when this existing permission mutation cannot be confirmed.
     """
-    if not role_perms:
+    if not role_perms or config.dry_run:
         return
+    runtime = require_permission_runtime(state, service=config.stoat_url)
+    runtime.authorize_role_write(stoat_role_id, role_perms.allow, role_perms.deny)
+    runtime.note_write()
     try:
         await api_set_role_permissions(
             session,
@@ -686,14 +677,46 @@ async def apply_role_permissions(
             allow=role_perms.allow,
             deny=role_perms.deny,
         )
+    except asyncio.CancelledError:
+        runtime.stop("interrupted", stage="application")
+        raise
+    except PermissionSafetyError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        state.warnings.append(
-            {
-                "phase": phase,
-                "type": "role_permissions_failed",
-                "message": f"Failed to set permissions for role '{label}': {exc}",
-            }
+        raise runtime.stop("write_uncertain", stage="application") from exc
+    runtime.note_write_confirmed()
+    require_permission_runtime(state, service=config.stoat_url)
+
+
+async def _apply_server_default_permissions(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    permissions: int,
+) -> None:
+    """Keep the existing server-default choice and revoke its dependent proofs."""
+    if config.dry_run:
+        return
+    runtime = require_permission_runtime(state, service=config.stoat_url)
+    runtime.authorize_default_write(permissions)
+    runtime.note_write()
+    try:
+        await api_set_server_default_permissions(
+            session,
+            config.stoat_url,
+            config.token,
+            state.stoat_server_id,
+            permissions=permissions,
         )
+    except asyncio.CancelledError:
+        runtime.stop("interrupted", stage="application")
+        raise
+    except PermissionSafetyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise runtime.stop("write_uncertain", stage="application") from exc
+    runtime.note_write_confirmed()
+    require_permission_runtime(state, service=config.stoat_url)
 
 
 async def _apply_role_ordering(
@@ -730,21 +753,21 @@ async def _apply_role_ordering(
     # would be written back into the slot it already occupies. Guarding here
     # rather than after the read-back saves BOTH requests, and both land in the
     # `servers` bucket, which is the tightest in the run at 5 per 10 seconds.
-    if len(state.role_map) < 2:
+    if len(state.role_map) < 2 or config.dry_run:
         return
-
-    def _degrade(message: str, warning_type: str = "role_ordering_failed") -> None:
-        """Record an ordering failure without failing the phase."""
-        state.warnings.append({"phase": "roles", "type": warning_type, "message": message})
-        on_event(MigrationEvent(phase="roles", status="warning", message=message))
-
+    runtime = require_permission_runtime(state, service=config.stoat_url)
+    runtime.invalidate_layout()
     try:
         server = await api_fetch_server(
             session, config.stoat_url, config.token, state.stoat_server_id
         )
-    except MigrationError as exc:
-        _degrade(f"Failed to apply role ordering: {exc}")
-        return
+    except asyncio.CancelledError:
+        runtime.stop("interrupted", stage="recheck")
+        raise
+    except PermissionSafetyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise runtime.stop("unverified", stage="recheck") from exc
     # Upstream omits `roles` entirely when the map is empty, so this cannot be a
     # plain subscript.
     server_roles: dict[str, Any] = server.get("roles") or {}
@@ -786,26 +809,21 @@ async def _apply_role_ordering(
         # it again spends a request in the tightest bucket to change nothing.
         return
 
+    runtime.authorize_role_order(tuple(new_order))
+    runtime.note_write()
     try:
         await api_edit_role_ranks(
             session, config.stoat_url, config.token, state.stoat_server_id, new_order
         )
-    except MigrationError as exc:
-        # Classify on the message, matching the TooManyRoles branch in the create
-        # loop. _api_request folds the status and the raw body into the message,
-        # and neither 403 nor 400 is retryable, so this has already failed fast.
-        text = str(exc)
-        if "NotElevated" in text or "MissingPermission" in text:
-            _degrade(
-                "Role ordering was refused: Ferry lacks the ManageRole permission, "
-                "or holds no role ranked above the roles it tried to reorder. The "
-                "roles were created, but their hierarchy was left at the server "
-                f"default ({exc}).",
-                "role_ordering_not_permitted",
-            )
-        else:
-            _degrade(f"Failed to apply role ordering: {exc}")
-        return
+    except asyncio.CancelledError:
+        runtime.stop("interrupted", stage="application")
+        raise
+    except PermissionSafetyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise runtime.stop("write_uncertain", stage="application") from exc
+    runtime.note_write_confirmed()
+    require_permission_runtime(state, service=config.stoat_url)
 
     on_event(
         MigrationEvent(
@@ -882,14 +900,14 @@ async def run_role_backfill(
     ``_collect_roles_to_order``, then reuses ``_apply_role_ordering``. It creates
     nothing and touches no role attribute. ``_apply_role_ordering`` already
     returns early when the order is correct or fewer than two known roles are
-    present, and degrades a permission refusal to a ``state.warnings`` entry
-    rather than raising, so this function does neither of those itself. #388.
+    present. A missing or mismatched bound plan, permission-write failure or
+    uncertain result propagates as a typed terminal stop, never a warning-only
+    completion. This function adds no rank policy or separate writer. #388.
     """
     roles, _export_role_ids, _discord_metadata = _collect_roles_to_order(config, exports)
     if config.dry_run:
-        # `_apply_role_ordering` writes unconditionally; in `run_roles` it is
-        # reached only under `not config.dry_run`. A backfill must guard it the
-        # same way, or `--dry-run` would read the server and PATCH the ranks.
+        # Report the existing backfill intent without reading or writing target
+        # ranks. The shared ordering owner also guards dry-run callers.
         on_event(
             MigrationEvent(
                 phase="roles",
@@ -1098,22 +1116,9 @@ async def run_roles(
             # had them. The migration floor is no longer merged here (#957): it
             # belongs to the migration account's own grants, not to every member.
             if discord_metadata.server_default_permissions:
-                try:
-                    await api_set_server_default_permissions(
-                        session,
-                        config.stoat_url,
-                        config.token,
-                        state.stoat_server_id,
-                        permissions=discord_metadata.server_default_permissions,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    state.warnings.append(
-                        {
-                            "phase": "roles",
-                            "type": "server_default_permissions_failed",
-                            "message": f"Failed to set server default permissions: {exc}",
-                        }
-                    )
+                await _apply_server_default_permissions(
+                    session, config, state, discord_metadata.server_default_permissions
+                )
 
     # Ordering is the last thing the phase does: the ranks route rejects any list
     # that does not name every role on the server, so it cannot run until every
