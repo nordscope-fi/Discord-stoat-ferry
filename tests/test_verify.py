@@ -13,10 +13,11 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
+from copy import deepcopy
 
 import aiohttp
 import pytest
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 
 from discord_ferry.errors import CheckError, MigrationError
 from discord_ferry.migrator.verify import (
@@ -2268,3 +2269,418 @@ def test_repair_outcome_carries_recreated_emoji() -> None:
     assert row["new_id"] == "n"
     assert row["messages_rewritten"] == 2
     assert row["name"] == "smile"
+
+
+PERMISSION_SERVER = "01M4T13BVE9P80WR51EWTAWMKQ"
+PERMISSION_CHANNEL = "01M4T13BVED8EKJ4KAHZ7HJDKT"
+PERMISSION_ROLE = "01M4T13BVX18ECH3D281K6NGAC"
+DELETED_PERMISSION_ROLE = "01M4T13BVTR4JFT1QM7QN1GFSG"
+
+
+def permission_server():
+    return {
+        "_id": PERMISSION_SERVER,
+        "channels": [PERMISSION_CHANNEL],
+        "default_permissions": 1 << 20,
+        "roles": {
+            PERMISSION_ROLE: {
+                "_id": PERMISSION_ROLE,
+                "permissions": {"a": 1 << 22, "d": 0},
+                "rank": 2,
+            }
+        },
+    }
+
+
+def permission_channel():
+    return {
+        "_id": PERMISSION_CHANNEL,
+        "server": PERMISSION_SERVER,
+        "channel_type": "TextChannel",
+        "default_permissions": {"a": 0, "d": 1 << 22},
+        "role_permissions": {PERMISSION_ROLE: {"a": 1 << 22, "d": 0}},
+    }
+
+
+def permission_decoder():
+    from discord_ferry.migrator import verify
+
+    decoder = getattr(verify, "decode_permission_readback", None)
+    assert callable(decoder), "Strict permission decoder is missing"
+    return decoder
+
+
+def decode_permissions(server=None, channel=None, after=None, **kwargs):
+    server = permission_server() if server is None else server
+    channel = permission_channel() if channel is None else channel
+    return permission_decoder()(
+        server,
+        (channel,),
+        deepcopy(server) if after is None else after,
+        MigrationState(stoat_server_id=PERMISSION_SERVER, role_map={"d-role": "old-role"}),
+        service=BASE_URL,
+        channel_ids=(PERMISSION_CHANNEL,),
+        **kwargs,
+    )
+
+
+def test_permission_readback_decodes_observations_without_expected_fallback() -> None:
+    from discord_ferry.core.permissions import PermissionCell
+
+    result = decode_permissions()
+    assert not result.problems
+    layout = result.layout
+    assert (layout.service, layout.server_id, layout.server_default) == (
+        BASE_URL,
+        PERMISSION_SERVER,
+        1 << 20,
+    )
+    assert layout.roles[0].id == PERMISSION_ROLE
+    assert layout.roles[0].permissions == PermissionCell(1 << 22, 0)
+    assert layout.roles[0].rank == 2
+    assert layout.channels[0].default == PermissionCell(0, 1 << 22)
+    assert layout.channels[0].roles == ((PERMISSION_ROLE, PermissionCell(1 << 22, 0)),)
+    assert layout.planned_role_facts == () and layout.planned_server_default is None
+    assert len(layout.fingerprint) == 64
+
+
+def test_permission_readback_accepts_only_documented_omitted_neutral_fields() -> None:
+    from discord_ferry.core.permissions import PermissionCell
+
+    server = permission_server()
+    server.pop("roles")
+    channel = permission_channel()
+    channel.pop("default_permissions")
+    channel.pop("role_permissions")
+    result = decode_permissions(server, channel)
+    assert not result.problems and result.layout.roles == ()
+    assert result.layout.channels[0].default == PermissionCell(0, 0)
+    assert result.layout.channels[0].roles == ()
+    assert permission_decoder()({}, (), {}, MigrationState()).problems
+
+
+@pytest.mark.parametrize(
+    ("owner", "path", "value"),
+    [
+        ("server", ("_id",), "wrong-server"),
+        ("server", ("channels",), None),
+        ("server", ("channels",), [PERMISSION_CHANNEL, PERMISSION_CHANNEL]),
+        ("server", ("channels",), []),
+        ("server", ("roles",), None),
+        ("server", ("roles", PERMISSION_ROLE, "_id"), "wrong-role"),
+        ("server", ("roles", PERMISSION_ROLE, "permissions"), None),
+        ("server", ("roles", PERMISSION_ROLE, "rank"), True),
+        ("server", ("roles", PERMISSION_ROLE, "rank"), -1),
+        ("server", ("roles", PERMISSION_ROLE, "rank"), "2"),
+        ("server", ("default_permissions",), True),
+        ("server", ("default_permissions",), "0"),
+        ("server", ("default_permissions",), 0.5),
+        ("server", ("default_permissions",), 1 << 63),
+        ("server", ("default_permissions",), -(1 << 63) - 1),
+        ("channel", ("_id",), "wrong-channel"),
+        ("channel", ("server",), "wrong-server"),
+        ("channel", ("channel_type",), None),
+        ("channel", ("default_permissions",), None),
+        ("channel", ("default_permissions",), {"a": 0}),
+        ("channel", ("default_permissions",), {"allow": 0, "deny": 0}),
+        ("channel", ("default_permissions", "a"), False),
+        ("channel", ("role_permissions",), None),
+        ("channel", ("role_permissions",), []),
+        ("channel", ("role_permissions", PERMISSION_ROLE), {}),
+    ],
+)
+def test_permission_readback_refuses_malformed_or_misbound_evidence(owner, path, value) -> None:
+    server, channel = permission_server(), permission_channel()
+    row = server if owner == "server" else channel
+    for key in path[:-1]:
+        row = row[key]
+    row[path[-1]] = value
+    result = decode_permissions(server, channel)
+    assert result.problems and not result.layout.fingerprint
+
+
+@pytest.mark.parametrize("field", ["_id", "channels", "default_permissions"])
+def test_permission_readback_missing_required_server_field_is_unverified(field) -> None:
+    server = permission_server()
+    server.pop(field)
+    assert decode_permissions(server).problems[0].reason == "unverified"
+
+
+@pytest.mark.parametrize("value", [-1, -(1 << 63), (1 << 62) + (1 << 20)])
+def test_permission_readback_preserves_signed_backend_masks_and_inactive_cells(value) -> None:
+    from discord_ferry.core.permissions import PermissionCell
+
+    server, channel = permission_server(), permission_channel()
+    server["default_permissions"] = value
+    channel["role_permissions"][DELETED_PERMISSION_ROLE] = {"a": value, "d": value}
+    result = decode_permissions(server, channel)
+    assert not result.problems
+    expected = value & ((1 << 64) - 1)
+    assert result.layout.server_default == expected
+    assert dict(result.layout.channels[0].roles)[DELETED_PERMISSION_ROLE] == PermissionCell(
+        expected, expected
+    )
+
+
+@pytest.mark.parametrize("change", ["grants", "rank", "default", "inventory"])
+def test_permission_readback_rejects_changed_server_context(change) -> None:
+    after = permission_server()
+    if change == "grants":
+        after["roles"][PERMISSION_ROLE]["permissions"]["a"] = 0
+    elif change == "rank":
+        after["roles"][PERMISSION_ROLE]["rank"] = 1
+    elif change == "default":
+        after["default_permissions"] = 0
+    else:
+        after["roles"] = {}
+    result = decode_permissions(after=after)
+    assert result.problems[0].reason == "unverified" and not result.layout.fingerprint
+
+
+def test_permission_readback_ignores_cosmetic_changes_but_binds_channel_cells() -> None:
+    after = permission_server()
+    after["name"] = "new display name"
+    after["roles"][PERMISSION_ROLE]["name"] = "renamed role"
+    result = decode_permissions(after=after)
+    assert not result.problems and result == decode_permissions()
+    changed = permission_channel()
+    changed["default_permissions"]["d"] = 0
+    assert decode_permissions(channel=changed).layout.fingerprint != result.layout.fingerprint
+
+
+@pytest.mark.parametrize("failure", [None, "server-before", "channel", "server-after", "changed"])
+async def test_permission_context_uses_existing_bracketed_readers(
+    mock_aiohttp: aioresponses,
+    tmp_path,
+    failure,
+) -> None:
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.migrator import verify
+
+    reader = getattr(verify, "read_permission_context", None)
+    assert callable(reader), "Permission context reader is missing"
+    server_url = f"{BASE_URL}/servers/{PERMISSION_SERVER}"
+    channel_url = f"{BASE_URL}/channels/{PERMISSION_CHANNEL}"
+    mock_aiohttp.get(
+        server_url, status=403 if failure == "server-before" else 200, payload=permission_server()
+    )
+    mock_aiohttp.get(
+        channel_url, status=403 if failure == "channel" else 200, payload=permission_channel()
+    )
+    after = permission_server()
+    if failure == "changed":
+        after["default_permissions"] = 0
+    mock_aiohttp.get(server_url, status=403 if failure == "server-after" else 200, payload=after)
+    if failure == "channel":
+        mock_aiohttp.get(
+            f"{server_url}?include_channels=true", payload={**permission_server(), "channels": []}
+        )
+    config = FerryConfig(tmp_path, BASE_URL, TOKEN)
+    state = MigrationState(stoat_server_id=PERMISSION_SERVER)
+    before_state = deepcopy(state)
+    async with aiohttp.ClientSession() as session:
+        result = await reader(session, config, state, (PERMISSION_CHANNEL,))
+        assert not session.closed
+    if failure:
+        assert result.problems and not result.layout.fingerprint
+        assert TOKEN not in repr(result)
+    else:
+        assert result == decode_permissions()
+        assert (
+            len(
+                mock_aiohttp.requests[
+                    (
+                        "GET",
+                        next(
+                            url for method, url in mock_aiohttp.requests if str(url) == server_url
+                        ),
+                    )
+                ]
+            )
+            == 2
+        )
+    assert all(method == "GET" for method, _ in mock_aiohttp.requests)
+    assert state == before_state
+
+
+@pytest.mark.parametrize("field", ["_id", "permissions", "rank"])
+def test_permission_readback_requires_each_observed_role_field(field) -> None:
+    server = permission_server()
+    server["roles"][PERMISSION_ROLE].pop(field)
+    assert decode_permissions(server).problems[0].reason == "unverified"
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        "",
+        "https://user:dummy@api.test",
+        "https://api.test?q=1",
+        "https://api.test/#fragment",
+        "not-a-url",
+        "http://api.test",
+    ],
+)
+def test_permission_readback_rejects_unbound_or_unsafe_service(service) -> None:
+    result = permission_decoder()(
+        permission_server(),
+        (permission_channel(),),
+        permission_server(),
+        MigrationState(stoat_server_id=PERMISSION_SERVER),
+        service=service,
+        channel_ids=(PERMISSION_CHANNEL,),
+    )
+    assert result.problems[0].reason == "unverified" and not result.layout.fingerprint
+    assert "dummy" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        None,
+        (),
+        (PERMISSION_CHANNEL, PERMISSION_CHANNEL),
+        (DELETED_PERMISSION_ROLE,),
+        ("../channel",),
+    ],
+)
+def test_permission_readback_requires_exact_requested_channel_coverage(scope) -> None:
+    result = permission_decoder()(
+        permission_server(),
+        (permission_channel(),),
+        permission_server(),
+        MigrationState(stoat_server_id=PERMISSION_SERVER),
+        service=BASE_URL,
+        channel_ids=scope,
+    )
+    assert result.problems and not result.layout.fingerprint
+
+
+async def test_permission_context_brackets_reads_in_actual_http_order(
+    mock_aiohttp: aioresponses,
+    tmp_path,
+) -> None:
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.migrator.verify import read_permission_context
+
+    order = []
+
+    def server_response(_url, **_kwargs):
+        order.append("server")
+        return CallbackResult(payload=permission_server())
+
+    def channel_response(_url, **_kwargs):
+        order.append("channel")
+        return CallbackResult(payload=permission_channel())
+
+    mock_aiohttp.get(f"{BASE_URL}/servers/{PERMISSION_SERVER}", callback=server_response)
+    mock_aiohttp.get(f"{BASE_URL}/channels/{PERMISSION_CHANNEL}", callback=channel_response)
+    mock_aiohttp.get(f"{BASE_URL}/servers/{PERMISSION_SERVER}", callback=server_response)
+    async with aiohttp.ClientSession() as session:
+        result = await read_permission_context(
+            session,
+            FerryConfig(tmp_path, BASE_URL, TOKEN),
+            MigrationState(stoat_server_id=PERMISSION_SERVER),
+            (PERMISSION_CHANNEL,),
+        )
+    assert not result.problems
+    assert order == ["server", "channel", "server"]
+
+
+@pytest.mark.parametrize("hidden", [True, False])
+async def test_permission_context_classifies_hidden_and_missing_without_neutral_fallback(
+    mock_aiohttp: aioresponses,
+    tmp_path,
+    hidden,
+) -> None:
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.migrator.verify import read_permission_context
+
+    server_url = f"{BASE_URL}/servers/{PERMISSION_SERVER}"
+    mock_aiohttp.get(server_url, payload=permission_server())
+    mock_aiohttp.get(f"{BASE_URL}/channels/{PERMISSION_CHANNEL}", status=403)
+    classified = permission_server()
+    if not hidden:
+        classified["channels"] = []
+    mock_aiohttp.get(server_url, payload=classified)
+    mock_aiohttp.get(f"{server_url}?include_channels=true", payload={**classified, "channels": []})
+    async with aiohttp.ClientSession() as session:
+        result = await read_permission_context(
+            session,
+            FerryConfig(tmp_path, BASE_URL, TOKEN),
+            MigrationState(stoat_server_id=PERMISSION_SERVER),
+            (PERMISSION_CHANNEL,),
+        )
+    assert result.problems[0].reason == "unverified" and not result.layout.fingerprint
+    assert ("hidden" if hidden else "missing") in result.problems[0].guidance
+    assert result.problems[0].entity_ids == (PERMISSION_CHANNEL,)
+
+
+async def test_permission_context_refuses_conflicting_binding_before_http(
+    mock_aiohttp: aioresponses,
+    tmp_path,
+) -> None:
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.migrator.verify import read_permission_context
+
+    async with aiohttp.ClientSession() as session:
+        result = await read_permission_context(
+            session,
+            FerryConfig(tmp_path, BASE_URL, TOKEN, server_id=DELETED_PERMISSION_ROLE),
+            MigrationState(stoat_server_id=PERMISSION_SERVER),
+            (PERMISSION_CHANNEL,),
+        )
+    assert result.problems and not mock_aiohttp.requests
+
+
+def test_permission_readback_accepts_captured_backend_shapes() -> None:
+    import json
+
+    from discord_ferry.core.permissions import PermissionCell
+
+    root = pathlib.Path(__file__).parent / "fixtures" / "stoat_0_15_7"
+    server = json.loads((root / "owner-plain.json").read_text())
+    expanded = json.loads((root / "owner-expanded.json").read_text())
+    channel = next(row for row in expanded["channels"] if row["_id"] == PERMISSION_CHANNEL)
+    result = decode_permissions(server, channel)
+    assert not result.problems
+    assert result.layout.server_default == 77014766592
+    assert result.layout.roles[0].permissions == PermissionCell(0, 0)
+    assert result.layout.channels[0].default == PermissionCell(0, 0)
+
+
+def test_permission_readback_can_observe_server_context_before_channels_exist() -> None:
+    result = permission_decoder()(
+        permission_server(),
+        (),
+        permission_server(),
+        MigrationState(stoat_server_id=PERMISSION_SERVER),
+        service=BASE_URL,
+        channel_ids=(),
+    )
+    assert not result.problems and result.layout.channels == ()
+    assert result.layout.roles[0].id == PERMISSION_ROLE
+
+
+async def test_permission_context_propagates_cancellation(
+    mock_aiohttp: aioresponses,
+    tmp_path,
+) -> None:
+    import asyncio
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.migrator.verify import read_permission_context
+
+    mock_aiohttp.get(f"{BASE_URL}/servers/{PERMISSION_SERVER}", payload=permission_server())
+    mock_aiohttp.get(
+        f"{BASE_URL}/channels/{PERMISSION_CHANNEL}", exception=asyncio.CancelledError()
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(asyncio.CancelledError):
+            await read_permission_context(
+                session,
+                FerryConfig(tmp_path, BASE_URL, TOKEN),
+                MigrationState(stoat_server_id=PERMISSION_SERVER),
+                (PERMISSION_CHANNEL,),
+            )
+    assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 2

@@ -21,24 +21,215 @@ check is a recorded result, not the absence of one.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field, replace
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Final, Literal, get_args
+from urllib.parse import urlsplit
 
+from discord_ferry.core.credential_transport import credential_transport_allowed
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session
+from discord_ferry.core.permissions import (
+    PermissionCell,
+    PermissionProblem,
+    PermissionReadback,
+    TargetChannel,
+    TargetLayout,
+    TargetRole,
+)
 from discord_ferry.core.security import strip_control
 from discord_ferry.errors import CheckError, FerryError
 from discord_ferry.migrator.api import (
+    api_fetch_channel,
     api_fetch_emoji_list,
     api_fetch_messages,
+    api_fetch_server,
     api_fetch_server_view,
 )
+from discord_ferry.state import is_stoat_id
 
 if TYPE_CHECKING:
     import aiohttp
 
+    from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
     from discord_ferry.state import MigrationState
+
+
+def _permission_object(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Permission response must be an object")
+    return value
+
+
+def _permission_id(value: object) -> str:
+    if not isinstance(value, str) or not is_stoat_id(value):
+        raise ValueError("Permission response must contain a target identity")
+    return value
+
+
+def _permission_service(value: str) -> str:
+    if not isinstance(value, str) or not credential_transport_allowed(value):
+        raise ValueError("Permission service must satisfy the credential transport policy")
+    parsed = urlsplit(value)
+    if parsed.username is not None or parsed.query or parsed.fragment:
+        raise ValueError("Permission service must be an API base URL")
+    return value.rstrip("/")
+
+
+def _permission_mask(value: object) -> int:
+    # Pinned OverrideField/server masks are i64, cast to u64 by the backend.
+    if type(value) is not int or not -(1 << 63) <= value < (1 << 63):
+        raise ValueError("Permission mask must be a signed 64-bit integer")
+    return value & ((1 << 64) - 1)
+
+
+def _permission_cell(value: object) -> PermissionCell:
+    raw = _permission_object(value)
+    if set(raw) != {"a", "d"}:
+        raise ValueError("Permission override must contain actual allow and deny fields")
+    return PermissionCell(_permission_mask(raw["a"]), _permission_mask(raw["d"]))
+
+
+def _permission_server(
+    value: object, server_id: str
+) -> tuple[int, tuple[TargetRole, ...], frozenset[str]]:
+    raw = _permission_object(value)
+    if _permission_id(raw.get("_id")) != server_id:
+        raise ValueError("Permission server identity differs")
+    channel_ids = raw.get("channels")
+    if not isinstance(channel_ids, list):
+        raise ValueError("Complete server channel membership is required")
+    members = frozenset(_permission_id(cid) for cid in channel_ids)
+    if len(members) != len(channel_ids):
+        raise ValueError("Server channel membership must be unique")
+    roles = []
+    # Empty roles are omitted by the pinned server serializer.
+    for role_id, value in _permission_object(raw.get("roles", {})).items():
+        role = _permission_object(value)
+        if _permission_id(role_id) != _permission_id(role.get("_id")):
+            raise ValueError("Permission role identity differs")
+        rank = role.get("rank")
+        if type(rank) is not int or not 0 <= rank < (1 << 63):
+            raise ValueError("Permission role rank must be observed and representable")
+        roles.append(TargetRole(role_id, _permission_cell(role.get("permissions")), rank))
+    return (
+        _permission_mask(raw.get("default_permissions")),
+        tuple(sorted(roles, key=lambda role: role.id)),
+        members,
+    )
+
+
+def _permission_unverified(guidance: str, *ids: str) -> PermissionReadback:
+    return PermissionReadback(
+        problems=(PermissionProblem("unverified", tuple(ids), None, guidance),)
+    )
+
+
+def decode_permission_readback(
+    before: object,
+    channels: tuple[object, ...],
+    after: object,
+    state: MigrationState,
+    *,
+    service: str = "",
+    channel_ids: tuple[str, ...] | None = None,
+) -> PermissionReadback:
+    """Decode complete observed facts from the pinned backend, without expected values."""
+    try:
+        service = _permission_service(service)
+        server_id = _permission_id(state.stoat_server_id)
+        if not isinstance(channel_ids, tuple) or not isinstance(channels, tuple):
+            raise ValueError("Explicit requested channel scope is required")
+        requested = frozenset(_permission_id(cid) for cid in channel_ids)
+        if len(requested) != len(channel_ids) or len(channels) != len(requested):
+            raise ValueError("Requested channel scope must be unique and complete")
+        first, last = _permission_server(before, server_id), _permission_server(after, server_id)
+        if first[:2] != last[:2] or not requested <= first[2] & last[2]:
+            raise ValueError("Relevant server permission facts changed or are incomplete")
+        observed = {}
+        for value in channels:
+            raw = _permission_object(value)
+            cid = _permission_id(raw.get("_id"))
+            if (
+                cid not in requested
+                or cid in observed
+                or _permission_id(raw.get("server")) != server_id
+                or raw.get("channel_type") != "TextChannel"
+            ):
+                raise ValueError("Channel response is outside its bound scope")
+            # None defaults and empty role cells are omitted, never serialized as null.
+            default = _permission_cell(raw.get("default_permissions", {"a": 0, "d": 0}))
+            roles = tuple(
+                sorted(
+                    (_permission_id(rid), _permission_cell(cell))
+                    for rid, cell in _permission_object(raw.get("role_permissions", {})).items()
+                )
+            )
+            # Keep absent-role cells: the complete inventory proves them inactive.
+            observed[cid] = TargetChannel(cid, default, roles)
+        layout = TargetLayout(
+            service=service,
+            server_id=server_id,
+            roles=first[1],
+            server_default=first[0],
+            channels=tuple(observed[cid] for cid in sorted(observed)),
+        )
+        fingerprint = sha256(
+            json.dumps(asdict(layout), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return PermissionReadback(replace(layout, fingerprint=fingerprint))
+    except (ValueError, TypeError):
+        return _permission_unverified(
+            "Read complete, matching target permission facts before continuing"
+        )
+
+
+async def read_permission_context(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    channel_ids: tuple[str, ...],
+) -> PermissionReadback:
+    """Bracket channel evidence through the existing transport and supplied session."""
+    try:
+        service = _permission_service(config.stoat_url)
+        server_id = _permission_id(state.stoat_server_id)
+        if config.server_id is not None and config.server_id != server_id:
+            raise ValueError("Configured target differs from recorded target")
+        if not isinstance(channel_ids, tuple) or len(set(channel_ids)) != len(channel_ids):
+            raise ValueError("Requested permission scope must be unique")
+        for cid in channel_ids:
+            _permission_id(cid)
+        before = await api_fetch_server(session, service, config.token, server_id)
+        channels = []
+        for cid in channel_ids:
+            try:
+                channels.append(await api_fetch_channel(session, service, config.token, cid))
+            except (FerryError, ValueError, TimeoutError):
+                try:
+                    view = await api_fetch_server_view(session, service, config.token, server_id)
+                    if cid not in view.all_channel_ids:
+                        return _permission_unverified(
+                            "Channel is missing; inspect the target before explicit repair", cid
+                        )
+                    if cid not in view.visible_channels:
+                        return _permission_unverified(
+                            "Channel is hidden; complete permission evidence is unavailable", cid
+                        )
+                except (FerryError, ValueError, TimeoutError):
+                    pass
+                return _permission_unverified(
+                    "Channel permission read failed; obtain fresh target evidence", cid
+                )
+        after = await api_fetch_server(session, service, config.token, server_id)
+        return decode_permission_readback(
+            before, tuple(channels), after, state, service=service, channel_ids=channel_ids
+        )
+    except (FerryError, ValueError, TypeError, TimeoutError):
+        return _permission_unverified("Target permission context could not be read and bound")
+
 
 #: Every status the tool can report.
 #:
