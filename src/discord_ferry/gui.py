@@ -28,7 +28,7 @@ from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.discord import refresh_permission_metadata
-from discord_ferry.errors import MigrationError, StateError
+from discord_ferry.errors import MigrationError, PermissionSafetyError, StateError
 from discord_ferry.feedback import FeedbackInterface
 from discord_ferry.feedback_gui import FeedbackGuiContext, render_feedback_action
 from discord_ferry.gui_native import BrowserFallback, ScopedNativeLauncher
@@ -1547,6 +1547,7 @@ async def migrate_page() -> None:
     error_count = 0
     warning_count = 0
     total_messages = 0
+    report_completed = False
     report_path: list[Path] = []  # mutable container so the closure can write to it
     feedback_context = FeedbackGuiContext(
         interface=FeedbackInterface.GUI,
@@ -1841,7 +1842,7 @@ async def migrate_page() -> None:
 
     def _update_ui(event: MigrationEvent) -> None:
         nonlocal messages_sent, messages_partial, messages_unresolved, failed_records
-        nonlocal error_count, warning_count, total_messages
+        nonlocal error_count, warning_count, total_messages, report_completed
 
         if event.phase == "messages" and isinstance(event.detail, dict):
             delivery = event.detail.get("delivery")
@@ -1908,8 +1909,7 @@ async def migrate_page() -> None:
                 warnings_label.set_text(f"Warnings: {warning_count}")
             case "completed":
                 if event.phase == "report":
-                    # Final completion — switch UI
-                    _on_migration_complete()
+                    report_completed = True
                 else:
                     # Post-pipeline phases (e.g. "validate_migration") have no
                     # progress slot; _phase_progress returns None for them rather
@@ -2052,6 +2052,19 @@ async def migrate_page() -> None:
                 await run_migration(config, on_event=on_event)
                 if config.cancel_event and config.cancel_event.is_set():
                     _on_migration_cancelled()
+                elif report_completed:
+                    _on_migration_complete()
+            except PermissionSafetyError as exc:
+                message = sanitize_secrets(str(exc))
+                feedback_context.last_error = message
+                log_display.push(f"[ERROR] {message}")
+                for problem in exc.outcome.problems:
+                    log_display.push(sanitize_secrets(problem.guidance))
+                completion_card.classes(add="hidden")
+                pause_btn.disable()
+                cancel_btn.disable()
+                errors_label.set_text(f"Errors: {error_count} (FAILED)")
+                ui.notify(message, type="negative")
             except StateError as exc:
                 storage["resume"] = False
                 feedback_context.last_error = str(exc)
