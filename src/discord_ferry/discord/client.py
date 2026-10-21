@@ -250,6 +250,7 @@ def _parse_role(data: dict[str, Any]) -> DiscordRole:
         managed=data.get("managed", False),
         icon=str(data.get("icon") or ""),
         unicode_emoji=str(data.get("unicode_emoji") or ""),
+        capture_fields=frozenset(data),
     )
 
 
@@ -272,4 +273,5 @@ def _parse_channel(data: dict[str, Any]) -> DiscordChannel:
         rate_limit_per_user=data.get("rate_limit_per_user", 0),
         user_limit=data.get("user_limit", 0),
         permission_overwrites=overwrites,
+        capture_fields=frozenset(data),
     )
