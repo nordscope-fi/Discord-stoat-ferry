@@ -36,6 +36,7 @@ from discord_ferry.discord import (
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
     MigrationError,
+    PermissionSafetyError,
     StateError,
 )
 from discord_ferry.exporter import (
@@ -198,6 +199,26 @@ def _safe(config: FerryConfig, text: str) -> str:
     persist-or-emit contract.
     """
     return safe_sanitize(config.token_store, text)
+
+
+def _record_permission_stop(
+    config: FerryConfig,
+    state: MigrationState,
+    on_event: EventCallback,
+    phase: str,
+    error: PermissionSafetyError,
+) -> None:
+    """Save confirmed identities and emit the unchanged in-memory outcome."""
+    if not config.dry_run:
+        save_state(state, config.output_dir)
+    on_event(
+        MigrationEvent(
+            phase=phase,
+            status="error",
+            message=_safe(config, str(error)),
+            detail={"permissions": error.outcome},
+        )
+    )
 
 
 def _ensure_token_store(config: FerryConfig) -> None:
@@ -828,6 +849,9 @@ async def run_migration(
 
         try:
             await _run_phases(config, state, exports, on_event, runnable_phases, phase_overrides)
+        except PermissionSafetyError:
+            config.session = None
+            raise
         finally:
             if lock_acquired and config.server_id and not config.dry_run:
                 await _release_migration_lock(config, state, session, on_event)
@@ -841,11 +865,13 @@ async def run_migration(
     # Phase 11: REPORT — generate and save inline
     state.current_phase = "report"
     on_event(MigrationEvent(phase="report", status="started", message="Generating report..."))
-    state.completed_at = datetime.now(UTC).isoformat()
-
     # S15: Rebuild forum index messages with actual migration data.
     if state.forum_channel_members and not config.dry_run:
-        await _rebuild_forum_indexes(config, state, on_event)
+        try:
+            await _rebuild_forum_indexes(config, state, on_event)
+        except PermissionSafetyError as exc:
+            _record_permission_stop(config, state, on_event, "report", exc)
+            raise
 
     # S16: Detect orphaned Autumn uploads when requested.
     if config.cleanup_orphans and not config.dry_run:
@@ -919,6 +945,9 @@ async def run_migration(
                         message=msg,
                     )
                 )
+            except PermissionSafetyError as exc:
+                _record_permission_stop(config, state, on_event, "validate_migration", exc)
+                raise
             except Exception as exc:  # noqa: BLE001
                 on_event(
                     MigrationEvent(
@@ -932,6 +961,7 @@ async def run_migration(
     if config.cancel_event and config.cancel_event.is_set():
         return state
 
+    state.completed_at = datetime.now(UTC).isoformat()
     generate_report(config, state, exports)
     generate_markdown_report(config, state, exports)
     save_state(state, config.output_dir)
@@ -1056,6 +1086,9 @@ async def _run_phases(
 
         try:
             await phase_fn(config, state, exports, on_event)
+        except PermissionSafetyError as exc:
+            _record_permission_stop(config, state, on_event, phase_name, exc)
+            raise
         except asyncio.CancelledError:
             save_state(state, config.output_dir)
             on_event(
@@ -1759,8 +1792,34 @@ async def run_retry_failed(
     """Re-process failed messages from state.failed_messages.
 
     Uses a single-scan strategy: collects all failed message IDs, then
-    scans exports once to find matching DCEMessage objects.
+    scans exports once to find matching DCEMessage objects. A permission
+    safety stop remains an operation failure, not a failed message send.
     """
+    try:
+        await _run_retry_failed(
+            config,
+            state,
+            exports,
+            on_event,
+            _upload_limits_ready=_upload_limits_ready,
+            _delivery_outcomes=_delivery_outcomes,
+        )
+    except PermissionSafetyError as exc:
+        config.session = None
+        _record_permission_stop(config, state, on_event, "retry", exc)
+        raise
+
+
+async def _run_retry_failed(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+    *,
+    _upload_limits_ready: bool = False,
+    _delivery_outcomes: DeliveryOutcomes | None = None,
+) -> None:
+    """Execute the existing retry work inside its public error boundary."""
     # Same reason run_rollback calls it: this coroutine is invoked directly by a
     # shell, which never sets the store, so without this every safe_sanitize on
     # the retry path is an identity no-op and a Stoat token in an exception
@@ -1937,6 +1996,8 @@ async def run_retry_failed(
                     raise DeliveryUnresolvedError("Selected message is not fully delivered")
                 resolved_sources.add(logical_ref)
                 retried += 1
+            except PermissionSafetyError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 if delivery_outcomes.revision == before_outcomes:
                     delivery_outcomes.record(ref, acknowledged=False, complete=False)
@@ -2257,6 +2318,8 @@ async def _restore_merged_threads(
             reconcile_failed=True,
             delivery_outcomes=delivery_outcomes,
         )
+    except PermissionSafetyError:
+        raise
     except Exception as exc:  # noqa: BLE001
         # One channel's failure must not stop the rest of the repair. Per-message
         # send failures never reach here: _merge_threads queues them in
@@ -2382,6 +2445,8 @@ async def _resend_channel(
                     )
                 )
             ]
+        except PermissionSafetyError:
+            raise
         except Exception:  # noqa: BLE001
             # _process_message appends a FailedMessage and re-raises when
             # channel_result is None, so the failure is already durable. Carrying
@@ -2491,6 +2556,8 @@ async def _repair_tail(
         )
         if not resolved:
             return False
+    except PermissionSafetyError:
+        raise
     except Exception:  # noqa: BLE001
         # Already durable in state.failed_messages, and re-raised by
         # _process_message when channel_result is None. `ferry retry` drains it.
@@ -3196,10 +3263,25 @@ async def run_repair(
     work.
 
     Raises:
-        CheckError: the state is from a dry run, or records no server. Both come
-            from ``run_check`` and are deliberately not caught here, because the
-            shell turns them into an exit code and a sentence.
+        CheckError: The state is from a dry run, or records no server.
+        PermissionSafetyError: Preserve the original outcome and confirmed identities.
     """
+    try:
+        return await _run_repair(config, state, exports, on_event, session=session)
+    except PermissionSafetyError as exc:
+        _record_permission_stop(config, state, on_event, "repair", exc)
+        raise
+
+
+async def _run_repair(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> RepairOutcome:
+    """Execute the existing repair work inside its public error boundary."""
     # #308: accumulate what this run does into a structured outcome and return
     # it on every path. warnings_start is snapshotted before any work, so the
     # declined set is scoped to THIS run's repair-phase warnings and never
@@ -3671,6 +3753,8 @@ async def run_repair(
                         message="Server default permissions need manual review (#957).",
                     )
                 )
+        except PermissionSafetyError:
+            raise
         except Exception as exc:  # noqa: BLE001
             state.warnings.append(
                 {
