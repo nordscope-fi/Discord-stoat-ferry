@@ -12,13 +12,14 @@ import uuid
 from collections.abc import Callable, Coroutine, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import aiohttp  # noqa: TCH002
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.core.http import format_proxy_notices, new_session
+from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
 from discord_ferry.core.security import (
     SecureTokenStore,
     register_secret,
@@ -33,6 +34,7 @@ from discord_ferry.discord import (
     resume_refusal,
     save_discord_metadata,
 )
+from discord_ferry.discord.metadata import _bad_id
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
     MigrationError,
@@ -1339,6 +1341,93 @@ async def _recover_forum_index_id(
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def _permission_index_sources(
+    exports: list[DCEExport], state: MigrationState
+) -> dict[str, tuple[str, ...]]:
+    """Cross-check complete actual source membership without changing saved identity."""
+
+    def refuse() -> NoReturn:
+        raise PermissionSafetyError(
+            PermissionOutcome(
+                "preflight",
+                "unverified",
+                "none_confirmed",
+                (
+                    PermissionProblem(
+                        "unverified",
+                        (),
+                        None,
+                        "Reconcile complete generated-index source membership",
+                    ),
+                ),
+            )
+        )
+
+    if any(not isinstance(group, str) for group in state.channel_categories.values()):
+        refuse()
+    selected: dict[str, str | None] = {}
+    groups: dict[str, set[str]] = {}
+    for export in exports:
+        sid = export.channel.id
+        if _bad_id("source channel", sid) is not None:
+            refuse()
+        group = (
+            f"forum-{export.parent_channel_name}"
+            if export.is_thread and export.channel.type in {15, 16} and export.parent_channel_name
+            else None
+        )
+        if sid in selected and selected[sid] != group:
+            refuse()
+        selected[sid] = group
+        if group is not None:
+            groups.setdefault(group, set()).add(sid)
+        prior = state.channel_categories.get(sid)
+        if prior is not None and prior.startswith("forum-") and prior != group:
+            refuse()
+    for key in state.channel_map:
+        if key.startswith("forum-index-"):
+            groups.setdefault(key.removeprefix("forum-index-"), set())
+    for group in state.forum_category_names:
+        if not isinstance(group, str):
+            refuse()
+        groups.setdefault(group, set())
+    for group, members in state.forum_channel_members.items():
+        if (
+            not isinstance(group, str)
+            or not group.startswith("forum-")
+            or not isinstance(members, list)
+            or not members
+            or any(not isinstance(sid, str) for sid in members)
+            or len(set(members)) != len(members)
+        ):
+            refuse()
+        for sid in members:
+            if (
+                _bad_id("source channel", sid) is not None
+                or not state.channel_map.get(sid)
+                or state.channel_categories.get(sid) != group
+                or (sid in selected and selected[sid] != group)
+            ):
+                refuse()
+            groups.setdefault(group, set()).add(sid)
+    for sid, group in state.channel_categories.items():
+        if group.startswith("forum-") and (
+            sid not in state.forum_channel_members.get(group, []) or not state.channel_map.get(sid)
+        ):
+            refuse()
+    for group, source_ids in groups.items():
+        if (
+            not group.startswith("forum-")
+            or len(group) <= len("forum-")
+            or not group.isprintable()
+            or not source_ids
+        ):
+            refuse()
+    return {
+        f"forum-index-{group}": tuple(sorted(members)) for group, members in sorted(groups.items())
+    }
 
 
 async def _rebuild_one_forum_index(

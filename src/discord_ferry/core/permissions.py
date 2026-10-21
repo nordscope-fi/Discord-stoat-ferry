@@ -50,6 +50,16 @@ def _identity(value: str) -> None:
         raise ValueError("Structural identity must be a nonempty string without whitespace")
 
 
+def _channel_key(value: str) -> None:
+    """Keep existing generated keys distinct from actual structural identities."""
+    prefix = "forum-index-forum-"
+    if isinstance(value, str) and value.startswith(prefix):
+        if len(value) > len(prefix) and value.isprintable():
+            return
+        raise ValueError("Generated channel key needs a printable existing forum suffix")
+    _identity(value)
+
+
 def _immutable(value: object, expected: type = tuple) -> None:
     if not isinstance(value, expected):
         raise ValueError("Permission fact collections must be immutable")
@@ -257,8 +267,12 @@ class TargetLayout:
         _integer(self.planned_server_default, "planned server default", unknown=True)
         _pairs(self.planned_roles)
         _pairs(self.planned_channels)
-        for source, target in (*self.planned_roles, *self.planned_channels):
+        for source, target in self.planned_roles:
             _identity(source)
+            if target is not None:
+                _identity(target)
+        for source, target in self.planned_channels:
+            _channel_key(source)
             if target is not None:
                 _identity(target)
 
@@ -540,7 +554,7 @@ class ChannelPermissionPlan:
     source_predicates: tuple[tuple[int, BitPredicate], ...] = ()
 
     def __post_init__(self) -> None:
-        _identity(self.source_key)
+        _channel_key(self.source_key)
         _fact(self.default, PermissionCell, unknown=True)
         _fact(self.target_layout, TargetLayout)
         _immutable(self.source_ids, frozenset)
@@ -559,7 +573,8 @@ class ChannelPermissionPlan:
 
     @classmethod
     def unverified(cls, key: str, guidance: str) -> ChannelPermissionPlan:
-        return cls(key, problems=(PermissionProblem("unverified", (key,), None, guidance),))
+        ids = () if key.startswith("forum-index-") else (key,)
+        return cls(key, problems=(PermissionProblem("unverified", ids, None, guidance),))
 
 
 @dataclass(frozen=True)
@@ -1008,6 +1023,141 @@ def compile_permission_plan(
 ) -> PermissionPlan:
     """Return one complete exact proposal or a whole-operation refusal."""
     return compile_supported_bits(source, layout)
+
+
+def common_index_plan(
+    index_key: str, source_ids: tuple[str, ...], plans: tuple[ChannelPermissionPlan, ...]
+) -> ChannelPermissionPlan:
+    """Require complete real-source proof, never a display name or receipt digest."""
+    if not source_ids or len(source_ids) != len(plans):
+        return ChannelPermissionPlan.unverified(index_key, "Complete source evidence is required")
+    return prove_common_channel_plan(index_key, source_ids, plans)
+
+
+def prove_common_channel_plan(
+    index_key: str, source_ids: tuple[str, ...], plans: tuple[ChannelPermissionPlan, ...]
+) -> ChannelPermissionPlan:
+    """Prove equality for every role assignment using the existing symbolic queries."""
+    refused = partial(ChannelPermissionPlan.unverified, index_key)
+    if (
+        not isinstance(source_ids, tuple)
+        or not isinstance(plans, tuple)
+        or not plans
+        or len(source_ids) != len(plans)
+        or len(set(source_ids)) != len(source_ids)
+    ):
+        return refused("Bind one complete plan to each unique real source channel")
+    layout = plans[0].target_layout
+    mapping = _permission_mapping()
+    affected = sum(1 << bit for bit in {b for targets in mapping.values() for b in targets})
+    selected = dict(layout.planned_channels)
+    if (
+        not index_key.startswith("forum-index-forum-")
+        or index_key not in selected
+        or len(selected) != len(layout.planned_channels)
+        or not layout.fingerprint
+        or not layout.service
+    ):
+        return refused("Bind the existing generated channel key under one complete target layout")
+    role_ids = set(dict(layout.planned_roles))
+    for sid, channel in zip(source_ids, plans, strict=True):
+        if (
+            channel.problems
+            or channel.source_key != sid
+            or channel.source_ids != frozenset({sid})
+            or sid not in selected
+            or sid.startswith("forum-index-")
+            or channel.target_layout != layout
+            or channel.default is None
+            or channel.affected_mask != affected
+            or {rid for rid, _ in channel.roles} != role_ids
+            or len(channel.roles) != len(role_ids)
+            or {bit for bit, _ in channel.source_predicates} != mapping.keys()
+            or len(channel.source_predicates) != len(mapping)
+        ):
+            return refused("Read complete supported member plans under the same target layout")
+    problems = _target_effect_problems(layout, affected)
+    if problems:
+        return ChannelPermissionPlan(index_key, problems=problems)
+    # Sort the proved source set so selection order never chooses index intent.
+    ordered_plans = sorted(plans, key=lambda channel: channel.source_key)
+    reference = dict(ordered_plans[0].source_predicates)
+    all_roles = (1 << len(layout.planned_roles)) - 1
+    for channel in plans:
+        for _, predicate in channel.source_predicates:
+            all_roles |= predicate.P | predicate.N | predicate.G
+    for channel in ordered_plans[1:]:
+        other = dict(channel.source_predicates)
+        for bit in mapping:
+            left: tuple[BitPredicate, ...] = (reference[bit],)
+            right: tuple[BitPredicate, ...] = (other[bit],)
+            if bit != 10:
+                left = (reference[10], *left)
+                right = (other[10], *right)
+            if bit in {14, 15, 17}:
+                left += (reference[11],)
+                right += (other[11],)
+            different = any(
+                _conjunction_possible(
+                    tuple((p, True) for p in allowed) + ((denied, False),), all_roles, 0, 0
+                )
+                for allowed, rejected in ((left, right), (right, left))
+                for denied in rejected
+            )
+            if different:
+                return ChannelPermissionPlan(
+                    index_key,
+                    problems=(
+                        PermissionProblem(
+                            "unsupported",
+                            tuple(sorted(source_ids)),
+                            mapping[bit][0],
+                            "Indexed source channels do not share one exact mapped access result",
+                        ),
+                    ),
+                )
+    target = selected[index_key]
+    observed = next((channel for channel in layout.channels if channel.id == target), None)
+    if target is not None and (
+        observed is None or observed.default is None or observed.roles is None
+    ):
+        return refused("Read complete actual index cells before proposing their mapped changes")
+    # A new destination has proposed neutral cells, not an observed target identity.
+    old_default = observed.default if observed is not None else PermissionCell(0, 0)
+    old_roles = observed.roles if observed is not None else ()
+    assert old_default is not None and old_roles is not None
+    chosen = ordered_plans[0]
+    assert chosen.default is not None
+    old_cells = dict(old_roles)
+    bindings = dict(layout.planned_roles)
+    roles: list[tuple[str, PermissionCell]] = []
+    preserved = old_default.allow | old_default.deny
+    for _, cell in old_roles:
+        preserved |= cell.allow | cell.deny
+    for sid, cell in chosen.roles:
+        before = old_cells.get(bindings[sid] or "", PermissionCell(0, 0))
+        roles.append(
+            (
+                sid,
+                PermissionCell(
+                    (before.allow & ~affected) | (cell.allow & affected),
+                    (before.deny & ~affected) | (cell.deny & affected),
+                ),
+            )
+        )
+    return ChannelPermissionPlan(
+        index_key,
+        frozenset(source_ids),
+        PermissionCell(
+            (old_default.allow & ~affected) | (chosen.default.allow & affected),
+            (old_default.deny & ~affected) | (chosen.default.deny & affected),
+        ),
+        tuple(roles),
+        affected,
+        preserved & ~affected,
+        layout,
+        source_predicates=chosen.source_predicates,
+    )
 
 
 @dataclass(frozen=True)

@@ -1559,6 +1559,199 @@ def test_dependent_payload_requires_actual_created_server_binding(owner):
     assert runtime.effects == "none_confirmed" and not runtime.ready
 
 
+def _common_index_case(*, second_overwrites=(), hidden=False, extra_bits=0):
+    p = permissions()
+    view, send = 1 << 10, 1 << 11
+    source = source_evidence(
+        (0 if hidden else view | send | extra_bits, view | send | extra_bits), ()
+    )
+    second = replace(source.channels[0], id="333", overwrites=second_overwrites)
+    source = replace(
+        source, channels=(*source.channels, second), covered_channel_ids=frozenset({"222", "333"})
+    )
+    layout = compiler_layout(source)
+    index = p.TargetChannel(
+        "index-target",
+        p.PermissionCell(1 << 100, 1 << 99),
+        (("r-112", p.PermissionCell(1 << 98, 0)), ("deleted-role", p.PermissionCell(1 << 97, 0))),
+    )
+    layout = replace(layout, channels=(*layout.channels, index))
+    compiled = p.compile_permission_plan(source, layout)
+    assert not compiled.problems, compiled.problems
+    # The operation owner adds a generated destination after real-source compilation.
+    # No synthetic key is presented as a raw Discord permission-source identity.
+    key = "forum-index-forum-name"
+    layout = replace(layout, planned_channels=(*layout.planned_channels, (key, index.id)))
+    return p, source, layout, tuple(replace(c, target_layout=layout) for c in compiled.channels)
+
+
+def test_empty_index_source_set_is_unverified():
+    p = permissions()
+    result = p.common_index_plan("forum-index-forum-name", (), ())
+    assert result.problems[0].reason == "unverified"
+    assert result.default is None and not result.roles
+
+
+def test_common_index_supports_new_legacy_named_destination_without_inventing_observations():
+    p, _, layout, plans = _common_index_case()
+    key = "forum-index-forum-Ω Ideas & help"
+    layout = replace(
+        layout,
+        channels=layout.channels[:-1],
+        planned_channels=(*layout.planned_channels[:-1], (key, None)),
+    )
+    plans = tuple(replace(c, target_layout=layout) for c in plans)
+    original = replace(layout)
+    result = p.common_index_plan(key, ("222", "333"), plans)
+    assert not result.problems and result.source_key == key
+    assert result.target_layout == original and result.preserved_mask == 0
+    assert layout.channels == original.channels
+
+
+def test_common_index_proves_effective_equality_with_different_raw_overwrites():
+    p = permissions()
+    overwrite = p.SourceOverwrite("112", 1 << 10, 0)
+    p, source, layout, plans = _common_index_case(second_overwrites=(overwrite,))
+    assert source.channels[0].overwrites != source.channels[1].overwrites
+    result = p.common_index_plan("forum-index-forum-name", ("333", "222"), plans[::-1])
+    assert not result.problems
+    assert result.source_ids == frozenset({"222", "333"})
+    assert result.target_layout == layout and result.source_key == "forum-index-forum-name"
+    assert result.default.allow & (1 << 100) and result.default.deny & (1 << 99)
+    assert dict(result.roles)["112"].allow & (1 << 98)
+    assert not dict(result.roles)["112"].allow & (1 << 97)
+    for assigned in (frozenset(), frozenset({"112"})):
+        value = compiled_target_value(result, layout, assigned)
+        assert bool(value & (1 << 20)) == source_oracle(source, assigned, 10)
+        assert bool(value & (1 << 22)) == (
+            source_oracle(source, assigned, 10) and source_oracle(source, assigned, 11)
+        )
+    assert p.prove_common_channel_plan("forum-index-forum-name", ("222", "333"), plans) == result
+
+
+@pytest.mark.parametrize(
+    "change", ["count", "duplicate", "wrong_id", "layout", "missing_predicate", "problem"]
+)
+def test_common_index_refuses_incomplete_or_mismatched_proof(change):
+    p, _, layout, plans = _common_index_case()
+    ids = ("222", "333")
+    if change == "count":
+        plans = plans[:1]
+    elif change == "duplicate":
+        ids, plans = ("222", "222"), (plans[0], plans[0])
+    elif change == "wrong_id":
+        ids = ("222", "444")
+    elif change == "layout":
+        plans = (plans[0], replace(plans[1], target_layout=replace(layout, fingerprint="changed")))
+    elif change == "missing_predicate":
+        plans = (plans[0], replace(plans[1], source_predicates=plans[1].source_predicates[1:]))
+    else:
+        plans = (plans[0], p.ChannelPermissionPlan.unverified("333", "Refresh source evidence"))
+    result = p.common_index_plan("forum-index-forum-name", ids, plans)
+    assert result.problems[0].reason == "unverified"
+    assert result.default is None and not result.roles
+
+
+@pytest.mark.parametrize("bit", [10, 11, 14, 15, 17])
+def test_common_index_refuses_mixed_effective_access(bit):
+    p = permissions()
+    overwrite = p.SourceOverwrite("111", 0, 1 << bit)
+    p, _, _, plans = _common_index_case(second_overwrites=(overwrite,), extra_bits=1 << bit)
+    result = p.common_index_plan("forum-index-forum-name", ("222", "333"), plans)
+    assert result.problems[0].reason == "unsupported"
+    assert result.default is None and not result.roles
+
+
+@pytest.mark.parametrize("administrator", [False, True])
+def test_common_index_symbolic_proof_matches_independent_full_membership_arithmetic(administrator):
+    from discord_ferry.discord.permissions import DISCORD_TO_STOAT
+
+    p = permissions()
+    view, send, embed = 1 << 10, 1 << 11, 1 << 14
+    patterns = (
+        (),
+        (p.SourceOverwrite("111", 0, view),),
+        (p.SourceOverwrite("111", 0, send),),
+        (p.SourceOverwrite("112", view, 0),),
+        (p.SourceOverwrite("112", 0, send),),
+        (p.SourceOverwrite("112", 0, send), p.SourceOverwrite("113", send, 0)),
+    )
+    assignments = (frozenset(), frozenset({"112"}), frozenset({"113"}), frozenset({"112", "113"}))
+    equal = mixed = unavailable = 0
+    for first, second in product(patterns, repeat=2):
+        source = source_evidence(
+            (view | send | embed, 8 if administrator else view | send, view | send), ()
+        )
+        source = replace(
+            source,
+            channels=(
+                replace(source.channels[0], overwrites=first),
+                replace(source.channels[0], id="333", overwrites=second),
+            ),
+            covered_channel_ids=frozenset({"222", "333"}),
+        )
+        layout = compiler_layout(source)
+        compiled = p.compile_permission_plan(source, layout)
+        if compiled.problems:
+            unavailable += 1
+            assert all(problem.reason == "unsupported" for problem in compiled.problems)
+            continue
+        layout = replace(
+            layout, planned_channels=(*layout.planned_channels, ("forum-index-forum-name", None))
+        )
+        plans = tuple(replace(c, target_layout=layout) for c in compiled.channels)
+        result = p.common_index_plan("forum-index-forum-name", ("222", "333"), plans)
+
+        def access(raw_channel, assigned, bit, *, source=source):
+            raw = replace(source, channels=(raw_channel,))
+            return (
+                source_oracle(raw, assigned, 10)
+                and source_oracle(raw, assigned, bit)
+                and (bit not in {14, 15, 17} or source_oracle(raw, assigned, 11))
+            )
+
+        same = all(
+            access(source.channels[0], assigned, bit) == access(source.channels[1], assigned, bit)
+            for assigned in assignments
+            for bit in DISCORD_TO_STOAT
+        )
+        if same:
+            equal += 1
+            assert not result.problems
+        else:
+            mixed += 1
+            assert result.problems[0].reason == "unsupported"
+    assert equal > 0 and mixed > 0
+    assert equal + mixed + unavailable == len(patterns) ** 2
+
+
+def test_common_index_compares_data_only_where_the_shared_source_is_visible():
+    p = permissions()
+    p, _, _, plans = _common_index_case(
+        hidden=True, second_overwrites=(p.SourceOverwrite("111", 1 << 11, 0),)
+    )
+    assert plans[0].source_predicates != plans[1].source_predicates
+    result = p.common_index_plan("forum-index-forum-name", ("222", "333"), plans)
+    assert not result.problems
+
+
+@pytest.mark.parametrize("name", ["Ideas & help", "Ω Ideas & help"])
+def test_common_index_preserves_legacy_display_name_key_without_weakening_real_ids(name):
+    p, _, layout, plans = _common_index_case()
+    key = f"forum-index-forum-{name}"
+    layout = replace(
+        layout, planned_channels=(*layout.planned_channels[:-1], (key, "index-target"))
+    )
+    plans = tuple(replace(c, target_layout=layout) for c in plans)
+    result = p.common_index_plan(key, ("222", "333"), plans)
+    assert not result.problems and result.source_key == key
+    with pytest.raises(ValueError):
+        p.SourceChannel("actual source with spaces")
+    refused = p.common_index_plan(key, (), ())
+    assert refused.problems[0].reason == "unverified"
+    assert name not in repr(refused.problems)
+
+
 def test_permission_plan_is_not_runtime_authority() -> None:
     from discord_ferry.errors import PermissionSafetyError
 
