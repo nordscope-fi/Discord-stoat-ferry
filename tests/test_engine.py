@@ -262,11 +262,18 @@ def repair_permission_unit_boundary(monkeypatch, request):
     runtime = Mock(spec=PermissionRuntime)
     runtime.plan = Mock()
     runtime.plan.target_layout.planned_channels = ()
-    runtime.outcome = PermissionOutcome.unverified()
+    runtime.plan.target_layout.planned_role_facts = ()
+    runtime._active_plan.return_value = runtime.plan
+    # A successful collaborator response lets these unrelated units reach their
+    # own completion paths. It is not access evidence; real integration tests
+    # never select this fixture or receive this response.
+    runtime.outcome = PermissionOutcome("recheck", "verified", "none_confirmed")
     monkeypatch.setattr(
         engine_module, "_prepare_permission_operation", AsyncMock(return_value=runtime)
     )
     monkeypatch.setattr(engine_module, "apply_channel_permissions", AsyncMock())
+    monkeypatch.setattr(engine_module, "apply_role_permissions", AsyncMock())
+    monkeypatch.setattr(engine_module, "_repair_dependent_channel_permissions", AsyncMock())
     return runtime
 
 
@@ -571,9 +578,12 @@ async def test_explicit_channel_repair_healthy_access_needs_no_target_writes(tmp
 @pytest.mark.parametrize("missing", [False, True])
 @pytest.mark.parametrize("reject_permissions", [None, "reject", "readback"])
 @pytest.mark.parametrize("converge_default", [False, True])
+@pytest.mark.parametrize("with_emoji", [False, True])
 async def test_explicit_channel_repair_binds_and_proves_before_resend(
-    tmp_path, monkeypatch, missing, reject_permissions, converge_default
+    tmp_path, monkeypatch, missing, reject_permissions, converge_default, with_emoji
 ):
+    from discord_ferry.parser.models import DCEReaction
+
     config, exports, state, server, channel = _explicit_channel_repair_case(
         tmp_path, missing=missing
     )
@@ -604,6 +614,38 @@ async def test_explicit_channel_repair_binds_and_proves_before_resend(
     monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
     monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
     actions = []
+    if with_emoji:
+        old_emoji, new_emoji = valid_stoat_id(29111), valid_stoat_id(29112)
+        state.emoji_map["777"] = old_emoji
+        state.message_map["101"] = valid_stoat_id(29113)
+        (tmp_path / "channel-repair-emoji.png").write_bytes(b"synthetic")
+        exports[0].messages[0].content = "<:synthetic:777>"
+        exports[0].messages[0].reactions = [
+            DCEReaction(
+                emoji=DCEEmoji(id="777", name="synthetic", image_url="channel-repair-emoji.png"),
+                count=1,
+            )
+        ]
+        report.add(
+            name="emoji:777",
+            status="fail",
+            kind="emoji_missing",
+            detail="missing",
+            discord_id="777",
+            stoat_id=old_emoji,
+        )
+        monkeypatch.setattr(
+            engine_module,
+            "upload_and_create_emoji",
+            AsyncMock(return_value=(new_emoji, "synthetic")),
+        )
+
+        async def edit(*args, **kwargs):
+            state.permission_runtime.require(args[3])
+            actions.append("emoji_edit")
+            return {}
+
+        monkeypatch.setattr(engine_module, "api_edit_message", AsyncMock(side_effect=edit))
 
     async def process(**kwargs):
         target = kwargs["stoat_channel_id"]
@@ -674,11 +716,17 @@ async def test_explicit_channel_repair_binds_and_proves_before_resend(
         )
         outcome = await run_repair(config, state, exports, events.append)
     assert "permissions" in actions
+    if with_emoji and (missing or not reject_permissions):
+        assert state.emoji_map["777"] == new_emoji
+        assert outcome.recreated_emoji[0]["messages_rewritten"] == (0 if missing else 1)
     if converge_default:
         assert server["default_permissions"] == original_default
         assert actions.index("default") < actions.index("permissions")
     assert outcome.permissions.verified is (not reject_permissions)
     if missing:
+        if with_emoji:
+            engine_module.api_edit_message.assert_not_awaited()
+        assert "emoji_edit" not in actions
         assert state.channel_map["222"] == new_id
         assert outcome.recreated_channels[0]["stoat_id"] == new_id
         assert outcome.recreated_channels[0]["resent_count"] == (0 if reject_permissions else 1)
@@ -10112,3 +10160,388 @@ async def test_explicit_channel_repair_keeps_non_permission_effects_on_later_sto
     assert outcome.permissions.reason == "readback_mismatch"
     assert outcome.permissions.effects == "changes_confirmed"
     assert outcome.recreated_categories if kind == "category" else outcome.recreated_emoji
+
+
+def _dependent_role_repair_case(tmp_path, *, role_count=1):
+    config, exports, meta = _permission_preflight_case(
+        tmp_path,
+        everyone=(1 << 10) | (1 << 11),
+        mixed=True,
+        source_ids=("333",),
+        ordinary=(("112", (1 << 10) | (1 << 11), 1), ("113", (1 << 10) | (1 << 11), 2))
+        if role_count == 2
+        else None,
+    )
+    config = dataclasses.replace(config, upload_delay=0, message_rate_limit=0)
+    server_id, old_role, native_role, channel_id = (valid_stoat_id(n) for n in range(29200, 29204))
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": old_role},
+        channel_map={"333": channel_id},
+        created_role_names={"112": "ordinary"},
+        created_channel_names={"333": "selected"},
+        roles_finalized={"112"},
+        channel_high_water={"333": "101"},
+        message_map={"101": valid_stoat_id(29204)},
+    )
+    if role_count == 2:
+        state.role_map["113"] = valid_stoat_id(29208)
+        state.created_role_names["113"] = "second"
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {native_role: {"_id": native_role, "rank": 0, "permissions": {"a": 0, "d": 0}}},
+    }
+    channel = {
+        "_id": channel_id,
+        "name": "selected",
+        "channel_type": "TextChannel",
+        "server": server_id,
+        "default_permissions": {"a": 1 << 12, "d": 0},
+        "role_permissions": {old_role: {"a": 0, "d": 1 << 20}, native_role: {"a": 1 << 12, "d": 0}},
+    }
+    exports[0].messages = [
+        DCEMessage(
+            id="101",
+            type="Default",
+            timestamp="2026-10-20T00:00:00Z",
+            content="synthetic",
+            author=DCEAuthor(id="114", name="Synthetic"),
+        )
+    ]
+    return config, exports, state, server, channel
+
+
+async def test_dependent_role_repair_preflight_keeps_actual_absence_separate(tmp_path):
+    config, exports, state, server, channel = _dependent_role_repair_case(tmp_path)
+    old_role = state.role_map["112"]
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        async with aiohttp.ClientSession() as session:
+            runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="repair"
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert not runtime.ready and not runtime.outcome.verified
+    layout = runtime.plan.target_layout
+    assert dict(layout.planned_roles) == {"112": None}
+    assert len(layout.planned_role_facts) == 1
+    assert layout.planned_role_facts[0].source_id == "112"
+    assert layout.planned_role_facts[0].rank == 1
+    assert old_role not in {role.id for role in layout.roles}
+    assert state.role_map == {"112": old_role}
+    assert not layout.planned_role_updates
+
+
+async def test_dependent_role_repair_requires_bound_authority(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    operation = getattr(engine_module, "_repair_dependent_channel_permissions", None)
+    assert callable(operation), "Dependent role repair needs its existing-engine owner"
+    with pytest.raises(PermissionSafetyError):
+        await operation(AsyncMock(), _make_repair_config(tmp_path), MigrationState(), "112")
+
+
+@pytest.mark.parametrize("failure", [None, "role_rejected", "role_readback", "channel_readback"])
+@pytest.mark.parametrize("with_emoji", [False, True])
+@pytest.mark.parametrize("role_count", [1, 2])
+async def test_dependent_role_repair_rebinds_and_proves_before_content(
+    tmp_path, monkeypatch, failure, with_emoji, role_count
+):
+    from discord_ferry.parser.models import DCEReaction
+
+    config, exports, state, server, channel = _dependent_role_repair_case(
+        tmp_path, role_count=role_count
+    )
+    old_role = state.role_map["112"]
+    native_role = next(iter(server["roles"]))
+    new_role = valid_stoat_id(29205)
+    report = CheckReport()
+    report.add(
+        name="role:112",
+        status="fail",
+        kind="role_missing",
+        detail="missing",
+        discord_id="112",
+        stoat_id=old_role,
+    )
+    report.add(
+        name="channel:333",
+        status="fail",
+        kind="tail_absent",
+        detail="missing",
+        discord_id="333",
+        stoat_id=channel["_id"],
+    )
+    if role_count == 2:
+        report.add(
+            name="role:113",
+            status="fail",
+            kind="role_missing",
+            detail="missing",
+            discord_id="113",
+            stoat_id=state.role_map["113"],
+        )
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", AsyncMock(return_value=report))
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    order = []
+    if with_emoji:
+        old_emoji, new_emoji = valid_stoat_id(29206), valid_stoat_id(29207)
+        state.emoji_map["777"] = old_emoji
+        (tmp_path / "role-repair-emoji.png").write_bytes(b"synthetic")
+        exports[0].messages[0].content = "<@&112> <:synthetic:777>"
+        report.add(
+            name="emoji:777",
+            status="fail",
+            kind="emoji_missing",
+            detail="missing",
+            discord_id="777",
+            stoat_id=old_emoji,
+        )
+        # The existing emoji collector accepts this export's inline image reference.
+        exports[0].messages[0].reactions = [
+            DCEReaction(
+                emoji=DCEEmoji(id="777", name="synthetic", image_url="role-repair-emoji.png"),
+                count=1,
+            )
+        ]
+        monkeypatch.setattr(
+            engine_module,
+            "upload_and_create_emoji",
+            AsyncMock(return_value=(new_emoji, "synthetic")),
+        )
+
+        async def emoji_edit(*args, **kwargs):
+            state.permission_runtime.require(channel["_id"])
+            assert old_role in kwargs["content"]
+            assert new_role not in kwargs["content"]
+            assert new_emoji in kwargs["content"]
+            order.append("emoji_edit")
+            return {}
+
+        monkeypatch.setattr(engine_module, "api_edit_message", emoji_edit)
+
+    def server_read(url, **kwargs):
+        return CallbackResult(payload=server)
+
+    def view_read(url, **kwargs):
+        return CallbackResult(payload={**server, "channels": [channel]})
+
+    def channel_read(url, **kwargs):
+        return CallbackResult(payload=channel)
+
+    def create_role(url, **kwargs):
+        order.append("create_role")
+        role_id = valid_stoat_id(29209) if kwargs["json"]["name"] == "second" else new_role
+        server["roles"][role_id] = {
+            "_id": role_id,
+            "rank": len(server["roles"]),
+            "permissions": {"a": 0, "d": 0},
+        }
+        return CallbackResult(payload={"id": role_id, "name": kwargs["json"]["name"]})
+
+    def role_permissions(url, **kwargs):
+        order.append("role_permissions")
+        if failure == "role_rejected":
+            return CallbackResult(status=403, payload={"type": "Forbidden"})
+        if failure != "role_readback":
+            pair = kwargs["json"]["permissions"]
+            role_id = str(url).rsplit("/", 1)[1]
+            server["roles"][role_id]["permissions"] = {"a": pair["allow"], "d": pair["deny"]}
+        return CallbackResult(payload={})
+
+    def channel_permissions(url, **kwargs):
+        order.append("channel_permissions")
+        if failure != "channel_readback":
+            pair = kwargs["json"]["permissions"]
+            cell = {"a": pair["allow"], "d": pair["deny"]}
+            if str(url).endswith("/default"):
+                channel["default_permissions"] = cell
+            else:
+                channel["role_permissions"][str(url).rsplit("/", 1)[1]] = cell
+        return CallbackResult(payload={})
+
+    async def content(**kwargs):
+        state.permission_runtime.require(channel["_id"])
+        assert state.role_map["112"] == new_role
+        order.append("content")
+        return True
+
+    monkeypatch.setattr(engine_module, "_process_message", content)
+    events = []
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server['_id']}", callback=server_read, repeat=True)
+        remote.get(
+            f"{config.stoat_url}/servers/{server['_id']}?include_channels=true",
+            callback=view_read,
+            repeat=True,
+        )
+        remote.get(
+            f"{config.stoat_url}/channels/{channel['_id']}", callback=channel_read, repeat=True
+        )
+        remote.post(
+            f"{config.stoat_url}/servers/{server['_id']}/roles", callback=create_role, repeat=True
+        )
+        remote.patch(
+            f"{config.stoat_url}/servers/{server['_id']}/roles/{new_role}", payload={}, repeat=True
+        )
+        remote.put(
+            re.compile(
+                f"{config.stoat_url}/servers/{server['_id']}/permissions/(?:{new_role}|{valid_stoat_id(29209)})"
+            ),
+            callback=role_permissions,
+            repeat=True,
+        )
+        remote.patch(
+            f"{config.stoat_url}/servers/{server['_id']}/roles/{valid_stoat_id(29209)}",
+            payload={},
+            repeat=True,
+        )
+        remote.put(
+            re.compile(r".*/channels/.*/permissions/.*"), callback=channel_permissions, repeat=True
+        )
+        outcome = await run_repair(config, state, exports, events.append)
+        assert not any(
+            "/permissions/default" in str(url) and "/servers/" in str(url)
+            for _, url in remote.requests
+        )
+        assert not any(str(url).endswith("/roles/ranks") for _, url in remote.requests)
+    assert state.role_map["112"] == new_role
+    assert outcome.recreated_roles[0]["stoat_id"] == new_role
+    assert len(outcome.recreated_roles) == role_count
+    if role_count == 2:
+        assert state.role_map["113"] == valid_stoat_id(29209)
+        assert order[:2] == ["create_role", "create_role"]
+    assert outcome.permissions.verified is (failure is None)
+    assert channel["role_permissions"][old_role] == {"a": 0, "d": 1 << 20}
+    assert channel["role_permissions"][native_role] == {"a": 1 << 12, "d": 0}
+    if failure is None:
+        assert (
+            order.index("create_role")
+            < order.index("role_permissions")
+            < order.index("channel_permissions")
+            < order.index("content")
+        )
+        assert outcome.restored_tails
+        if with_emoji:
+            assert (
+                order.index("channel_permissions")
+                < order.index("emoji_edit")
+                < order.index("content")
+            )
+            assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
+    else:
+        assert "content" not in order
+        assert "emoji_edit" not in order
+        assert not any(event.status == "completed" for event in events)
+        assert outcome.permissions.reason == (
+            "write_uncertain" if failure == "role_rejected" else "readback_mismatch"
+        )
+
+
+@pytest.mark.parametrize("entity", ["role", "channel"])
+async def test_dependent_role_repair_requires_selected_owners_for_every_proposal(
+    tmp_path, monkeypatch, entity
+):
+    if entity == "role":
+        config, exports, state, server, channel = _dependent_role_repair_case(tmp_path)
+    else:
+        config, exports, state, server, channel = _explicit_channel_repair_case(
+            tmp_path, missing=True
+        )
+    monkeypatch.setattr(
+        "discord_ferry.migrator.verify.run_check", AsyncMock(return_value=CheckReport())
+    )
+    limits, cleanup = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", limits)
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", cleanup)
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(
+            remote, config, server, channel, missing=entity == "channel"
+        )
+        outcome = await run_repair(config, state, exports, lambda event: None)
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert outcome.permissions.reason == "unverified"
+    assert outcome.permissions.stage == "preflight"
+    assert outcome.permissions.effects == "none_confirmed"
+    limits.assert_not_awaited()
+    cleanup.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["migration", "retry", "backfill"])
+async def test_dependent_role_repair_does_not_allow_implicit_recreation(tmp_path, mode):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, state, server, channel = _dependent_role_repair_case(tmp_path)
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode=mode
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert caught.value.outcome.reason == "unverified"
+
+
+@pytest.mark.parametrize("change", ["missing_name", "capacity", "priority_collision"])
+async def test_dependent_role_repair_refuses_unowned_or_impossible_creation(tmp_path, change):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, state, server, channel = _dependent_role_repair_case(tmp_path)
+    if change == "missing_name":
+        state.created_role_names.clear()
+    if change == "priority_collision":
+        next(iter(server["roles"].values()))["rank"] = 1
+    before = dataclasses.asdict(state)
+    with aioresponses() as remote:
+        if change == "capacity":
+            remote.get(
+                f"{config.stoat_url}/",
+                payload={
+                    "revolt": "0.15.7",
+                    "features": {"limits": {"global": {"server_roles": 1}}},
+                },
+                repeat=True,
+            )
+        _register_explicit_repair_reads(remote, config, server, channel)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode="repair"
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert dataclasses.asdict(state) == before
+
+
+async def test_dependent_role_repair_does_not_complete_a_declined_channel_proposal(
+    tmp_path, monkeypatch
+):
+    config, exports, state, server, channel = _explicit_channel_repair_case(tmp_path, missing=True)
+    report = CheckReport()
+    report.add(
+        name="channel:222",
+        status="fail",
+        kind="channel_missing",
+        detail="missing",
+        discord_id="222",
+        stoat_id=channel["_id"],
+    )
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", AsyncMock(return_value=report))
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_recreate_channel", AsyncMock(return_value=False))
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    events = []
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel, missing=True)
+        outcome = await run_repair(config, state, exports, events.append)
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert not outcome.permissions.verified
+    assert outcome.permissions.reason == "unverified"
+    assert not any(event.status == "completed" for event in events)
