@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 ProblemReason = Literal[
     "unsupported",
@@ -256,6 +259,72 @@ def evaluate_source_bit(predicate: BitPredicate, members: int) -> bool:
         (predicate.P & members)
         or (not (predicate.N & members) and (predicate.c or predicate.G & members))
     )
+
+
+def constant_result(p: BitPredicate, all_roles: int, zeros: int, ones: int = 0) -> bool | None:
+    """Return a source constant for every membership satisfying the constraints."""
+    for name, value in (("all_roles", all_roles), ("zeros", zeros), ("ones", ones)):
+        _integer(value, name)
+    if (p.P | p.N | p.G | zeros | ones) & ~all_roles or zeros & ones:
+        raise ValueError("Predicate and disjoint constraints must share the role universe")
+    unknown = all_roles & ~(zeros | ones)
+    if p.P & ones:
+        return True
+    if not (p.N & ones) and not (p.N & unknown & ~p.P) and (p.c or p.G & ones):
+        return True
+    if p.P & unknown:
+        return None
+    if p.N & ones:
+        return False
+    if not p.c and not (p.G & ones) and not (p.G & unknown & ~p.N):
+        return False
+    return None
+
+
+def synthesize_bit(
+    role_count: int,
+    query: Callable[[int, int], bool | None],
+    target_grants: int,
+    base: bool,
+) -> tuple[bool | None, ...] | None:
+    """Return exact low-to-high-priority overrides, or None when unsupported.
+
+    A tuple entry is an explicit allow/deny Boolean or None for neutral.
+    Query answers describe all memberships satisfying its zero/one masks.
+    The fixed fallback is base OR assigned target grants. Higher-priority
+    roles are visited first; neutral roles stay free in subsequent queries.
+    """
+    _integer(role_count, "role_count")
+    _integer(target_grants, "target_grants")
+    all_roles = (1 << role_count) - 1
+    if target_grants & ~all_roles or type(base) is not bool:
+        raise ValueError("Fixed target grants and base must match the role universe")
+
+    def ask(zeros: int, ones: int = 0) -> bool | None:
+        result = query(zeros, ones)
+        if result is not None and type(result) is not bool:
+            raise ValueError("Constant queries must return Boolean or None")
+        return result
+
+    operations: list[bool | None] = [None] * role_count
+    zeros = 0
+    for index in range(role_count - 1, -1, -1):
+        role = 1 << index
+        result = ask(zeros, role)
+        if result is not None:
+            operations[index] = result
+            zeros |= role
+    if base:
+        if ask(zeros) is not True:
+            return None
+    else:
+        if ask(zeros | target_grants) is not False:
+            return None
+        for index in range(role_count):
+            role = 1 << index
+            if target_grants & role and not zeros & role and ask(zeros, role) is not True:
+                return None
+    return tuple(operations)
 
 
 def _source_role_changes_bit(predicate: BitPredicate, role: int) -> bool:
