@@ -5,6 +5,7 @@ from functools import partial
 from importlib import import_module
 from importlib.util import find_spec
 from itertools import product
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -786,7 +787,8 @@ def compiler_layout(source, *, new_server: bool = False):
         )
         if new_server
         else (),
-        planned_server_default=translate_permissions(source.roles[0].permissions)
+        # The existing role writer skips zero, preserving the captured creation default.
+        planned_server_default=(translate_permissions(source.roles[0].permissions) or 77014766592)
         if new_server
         else None,
     )
@@ -815,6 +817,128 @@ def compiled_target_value(channel, layout, assigned: frozenset[str]) -> int:
         if sid in assigned:
             value = (value | cells[sid].allow) & ~cells[sid].deny
     return value if value & (1 << 20) else 0
+
+
+def test_creation_default_helper_requires_exact_pinned_contract() -> None:
+    import json
+
+    p = compiler_functions()
+    helper = getattr(p, "backend_creation_default", None)
+    assert callable(helper), "Pinned backend creation facts need an explicit version boundary"
+    root = Path(__file__).parent / "fixtures" / "stoat_0_15_7"
+    captured = json.loads((root / "create-wrapped.json").read_text())
+    assert helper("0.15.7") == captured["server"]["default_permissions"] == 77014766592
+    for version in ("", "unknown", "0.15.6", "0.15.8", "0.15.7-custom", " 0.15.7"):
+        assert helper(version) is None
+
+
+def test_creation_default_zero_source_matches_independent_access() -> None:
+    p = compiler_functions()
+    for grants in ((0, 0), (0, (1 << 10) | (1 << 11)), (1 << 100, 1 << 10)):
+        source = source_evidence(grants, ())
+        layout = compiler_layout(source, new_server=True)
+        plan = p.compile_permission_plan(source, layout)
+        assert not plan.problems and len(plan.channels) == 1
+        assert layout.planned_server_default == 77014766592
+        assert layout.server_default is None and not layout.server_id
+        assert layout.roles == layout.channels == ()
+        for members in (frozenset(), frozenset({"112"})):
+            actual = compiled_target_value(plan.channels[0], layout, members)
+            assert bool(actual & (1 << 20)) == source_oracle(source, members, 10)
+            assert bool(actual & (1 << 22)) == (
+                source_oracle(source, members, 10) and source_oracle(source, members, 11)
+            )
+        assert not p.PermissionRuntime(plan).ready
+
+
+def test_creation_default_rejects_hypothetical_zero_missing_and_arbitrary_values() -> None:
+    p = compiler_functions()
+    source = source_evidence((0,), ())
+    layout = compiler_layout(source, new_server=True)
+    for value in (0, None, 1, 77014766593):
+        plan = p.compile_permission_plan(source, replace(layout, planned_server_default=value))
+        assert not plan.channels and plan.problems[0].reason == "unverified"
+
+
+def test_creation_default_preserves_nonzero_writer_and_existing_target_rules() -> None:
+    from discord_ferry.discord.permissions import translate_permissions
+
+    p = compiler_functions()
+    for grants in (1 << 10, (1 << 10) | (1 << 11)):
+        source = source_evidence((grants,), ())
+        layout = compiler_layout(source, new_server=True)
+        assert layout.planned_server_default == translate_permissions(grants)
+        assert not p.compile_permission_plan(source, layout).problems
+        wrong = replace(layout, planned_server_default=77014766592)
+        assert p.compile_permission_plan(source, wrong).problems
+    source = source_evidence((0,), ())
+    layout = replace(compiler_layout(source), server_default=77014766592)
+    unchanged = p.compile_permission_plan(source, layout)
+    assert not unchanged.problems
+    zero_proposal = p.compile_permission_plan(source, replace(layout, planned_server_default=0))
+    assert not zero_proposal.problems
+    assert unchanged.calculation_fingerprint != zero_proposal.calculation_fingerprint
+    assert p.compile_permission_plan(
+        source, replace(layout, planned_server_default=77014766592)
+    ).problems
+
+
+def test_creation_default_requires_fresh_decoded_access_and_exact_server_default() -> None:
+    import json
+
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator.verify import decode_permission_readback
+    from discord_ferry.state import MigrationState
+
+    p = compiler_functions()
+    source = source_evidence((0,), ())
+    layout = compiler_layout(source, new_server=True)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    root = Path(__file__).parent / "fixtures" / "stoat_0_15_7"
+    captured = json.loads((root / "create-wrapped.json").read_text())
+    server, channel = captured["server"], captured["channels"][0]
+    cid = channel["_id"]
+    state = MigrationState(stoat_server_id=server["_id"])
+
+    def bound_runtime():
+        runtime = p.PermissionRuntime(plan)
+        runtime.bind_server(server["_id"])
+        runtime.bind_channel("222", cid)
+        assert not runtime.ready
+        return runtime
+
+    with pytest.raises(PermissionSafetyError):
+        bound_runtime().require(cid)
+    # The real creation response has broad access, not the zero-source result.
+    initial = decode_permission_readback(
+        server, (channel,), server, state, service=layout.service, channel_ids=(cid,)
+    )
+    assert not initial.problems
+    with pytest.raises(PermissionSafetyError):
+        bound_runtime().verify(cid, initial)
+    cell = plan.channels[0].default
+    corrected = {**channel, "default_permissions": {"a": cell.allow, "d": cell.deny}}
+    observed = decode_permission_readback(
+        server, (corrected,), server, state, service=layout.service, channel_ids=(cid,)
+    )
+    assert not observed.problems and observed.layout.planned_server_default is None
+    runtime = bound_runtime()
+    runtime.verify(cid, observed)
+    assert runtime.require(cid) is observed
+    changed_server = {**server, "default_permissions": 0}
+    changed = decode_permission_readback(
+        changed_server,
+        (corrected,),
+        changed_server,
+        state,
+        service=layout.service,
+        channel_ids=(cid,),
+    )
+    assert not changed.problems
+    with pytest.raises(PermissionSafetyError):
+        bound_runtime().verify(cid, changed)
+    assert layout.server_default is None and layout.channels == ()
 
 
 def test_incomplete_layout_cannot_produce_writable_cells() -> None:
