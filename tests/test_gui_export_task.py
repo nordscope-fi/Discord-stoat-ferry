@@ -20,14 +20,14 @@ without an explicit assertion.
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from nicegui.testing import User
 
 pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_app.py")
@@ -50,6 +50,171 @@ def _seed_orchestrated_session(store: dict[str, object], export_dir: Path) -> No
             "stoat_url": "https://example.invalid",
         }
     )
+
+
+@pytest.mark.parametrize("result_kind", ["success", "error", "cancel", "parse-error"])
+async def test_cached_permission_refresh_uses_selected_context_and_no_exporter(
+    user, tmp_path, user_store, tab_store, monkeypatch, result_kind
+):
+    from aioresponses import aioresponses
+    from nicegui import ui
+
+    from discord_ferry import discord, gui
+    from discord_ferry.discord.metadata import DiscordMetadata, save_discord_metadata
+    from discord_ferry.errors import MigrationError
+    from tests.test_metadata_refresh import BASE, GUILD, channel_payload, role_payload
+
+    export_dir = tmp_path / "selected-exports"
+    export_dir.mkdir()
+    data = json.loads((Path(__file__).parent / "fixtures" / "simple_channel.json").read_text())
+    data["guild"]["id"], data["channel"]["id"] = GUILD, "333"
+    (export_dir / "channel.json").write_text(json.dumps(data))
+    output = tmp_path / "selected-output"
+    save_discord_metadata(DiscordMetadata(GUILD, "old", 0, {}, {}), output)
+    (output / "state.json").write_bytes(b'{"keep":"confirmed-id"}')
+    before = {p.name: p.read_bytes() for p in output.iterdir()}
+    _seed_orchestrated_session(user_store, export_dir)
+    user_store.update({"discord_server_id": GUILD, "output_dir": str(output)})
+    tab_store.update({"discord_token": DISCORD_TOKEN, "token": STOAT_TOKEN})
+    sessions = []
+    actual_refresh = discord.refresh_permission_metadata
+
+    async def refresh(session, credential, guild, exports, destination):
+        sessions.append(session)
+        assert credential == DISCORD_TOKEN and guild == GUILD
+        assert destination == output and {e.channel.id for e in exports} == {"333"}
+        if result_kind == "cancel":
+            raise asyncio.CancelledError
+        if result_kind == "error":
+            raise MigrationError("Synthetic source refusal " + credential)
+        return await actual_refresh(session, credential, guild, exports, destination)
+
+    monkeypatch.setattr(gui, "refresh_permission_metadata", refresh, raising=False)
+    if result_kind == "parse-error":
+
+        def bad_export(*args, **kwargs):
+            raise MigrationError("Synthetic export refusal " + DISCORD_TOKEN)
+
+        monkeypatch.setattr(gui, "parse_export_directory", bad_export)
+    exporter = AsyncMock(side_effect=AssertionError("Permission refresh launched exporter"))
+    monkeypatch.setattr("discord_ferry.exporter.run_dce_export", exporter)
+    with aioresponses() as remote:
+        remote.get(BASE, payload={"id": GUILD, "name": "source"})
+        remote.get(BASE + "/roles", payload=role_payload())
+        remote.get(BASE + "/channels", payload=channel_payload())
+        await user.open("/export")
+        await user.should_see("Refresh source permissions")
+        user.find("Refresh source permissions").click()
+        await user.should_see(
+            {
+                "success": "Source permission metadata refreshed",
+                "error": "Source permission refresh failed",
+                "cancel": "Source permission refresh cancelled",
+                "parse-error": "Source permission refresh failed",
+            }[result_kind]
+        )
+        assert len(remote.requests) == (3 if result_kind == "success" else 0)
+        assert all(method == "GET" and str(url).startswith(BASE) for method, url in remote.requests)
+    assert (
+        (not sessions)
+        if result_kind == "parse-error"
+        else (sessions and all(session.closed for session in sessions))
+    )
+    assert all(DISCORD_TOKEN not in str(element.text) for element in user.find(ui.label).elements)
+    assert tab_store == {"token": STOAT_TOKEN}
+    source_inputs = [
+        element
+        for element in user.find(ui.input).elements
+        if element.label == "Source Discord token"
+    ]
+    assert len(source_inputs) == 1 and source_inputs[0].value == ""
+    after = {p.name: p.read_bytes() for p in output.iterdir()}
+    if result_kind == "success":
+        assert after.pop("discord_metadata.json") != before.pop("discord_metadata.json")
+    assert after == before
+    exporter.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["output", "guild", "missing-directory", "output-is-file"])
+async def test_cached_permission_refresh_requires_explicit_context(
+    user, tmp_path, user_store, tab_store, monkeypatch, missing
+):
+    from nicegui import ui
+
+    from discord_ferry import gui
+
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    (export_dir / "channel.json").write_text("{}")
+    _seed_orchestrated_session(user_store, export_dir)
+    output = tmp_path / "output"
+    if missing == "output-is-file":
+        output.write_text("not a directory")
+    elif missing != "missing-directory":
+        output.mkdir()
+    if missing != "output":
+        user_store["output_dir"] = str(output)
+    if missing == "guild":
+        user_store["discord_server_id"] = ""
+    tab_store["discord_token"] = DISCORD_TOKEN
+    backend = AsyncMock(side_effect=AssertionError("Incomplete selection reached source refresh"))
+    monkeypatch.setattr(gui, "refresh_permission_metadata", backend, raising=False)
+    await user.open("/export")
+    await user.should_see("Refresh source permissions")
+    buttons = [
+        element
+        for element in user.find(ui.button).elements
+        if element.text == "Refresh source permissions"
+    ]
+    assert len(buttons) == 1 and not buttons[0].enabled
+    backend.assert_not_called()
+
+
+async def test_cached_permission_refresh_allows_only_one_running_action(
+    user, tmp_path, user_store, tab_store, monkeypatch
+):
+    from nicegui import ui
+
+    from discord_ferry import gui
+    from tests.test_metadata_refresh import exports
+
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    (export_dir / "channel.json").write_text("{}")
+    output = tmp_path / "output"
+    output.mkdir()
+    _seed_orchestrated_session(user_store, export_dir)
+    user_store["output_dir"] = str(output)
+    tab_store.update({"discord_token": DISCORD_TOKEN, "token": STOAT_TOKEN})
+    monkeypatch.setattr(gui, "parse_export_directory", lambda *args, **kwargs: exports())
+    release = asyncio.Event()
+    sessions = []
+
+    async def refresh(session, *args):
+        sessions.append(session)
+        await release.wait()
+
+    backend = AsyncMock(side_effect=refresh)
+    monkeypatch.setattr(gui, "refresh_permission_metadata", backend)
+    exporter = AsyncMock(side_effect=AssertionError("Concurrent exporter started"))
+    monkeypatch.setattr("discord_ferry.exporter.run_dce_export", exporter)
+    await user.open("/export")
+    await user.should_see("Refresh source permissions")
+    user.find("Refresh source permissions").click()
+    user.find("Refresh source permissions").click()
+    try:
+        await user.should_see("Refreshing source permissions")
+        assert backend.await_count == 1
+        for element in user.find(ui.button).elements:
+            if element.text in {"Use Cached", "Re-export", "Refresh source permissions"}:
+                assert not element.enabled
+    finally:
+        release.set()
+    await user.should_see("Source permission metadata refreshed")
+    assert backend.await_count == 1
+    assert len(sessions) == 1 and sessions[0].closed
+    assert tab_store == {"token": STOAT_TOKEN}
+    exporter.assert_not_called()
 
 
 async def test_export_page_reaches_the_first_progress_event(

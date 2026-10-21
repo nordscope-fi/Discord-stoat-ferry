@@ -32,6 +32,51 @@ if TYPE_CHECKING:
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+@pytest.mark.parametrize("result", ["success", "error", "cancel"])
+async def test_permission_refresh_handler_closes_session_and_clears_only_source_token(
+    tmp_path, monkeypatch, result
+):
+    from types import SimpleNamespace
+
+    from discord_ferry import gui
+    from discord_ferry.core.security import sanitize_secrets
+    from discord_ferry.errors import MigrationError
+
+    class TokenInput:
+        value = "synthetic-gui-source-refresh"
+
+        def set_value(self, value):
+            self.value = value
+
+    token_input = TokenInput()
+    tab = {"discord_token": token_input.value, "token": "synthetic-target-preserved"}
+    monkeypatch.setattr(gui, "app", SimpleNamespace(storage=SimpleNamespace(tab=tab)))
+    sessions = []
+
+    async def refresh(session, credential, guild, exports, output):
+        sessions.append(session)
+        assert not session.closed
+        assert credential == token_input.value
+        assert credential not in sanitize_secrets(credential)
+        assert (guild, exports, output) == ("111", [], tmp_path)
+        if result == "error":
+            raise MigrationError("Synthetic source refusal")
+        if result == "cancel":
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(gui, "refresh_permission_metadata", refresh, raising=False)
+    operation = getattr(gui, "_run_permission_refresh", None)
+    assert callable(operation), "Explicit GUI source refresh handler is missing"
+    if result == "success":
+        await operation(token_input, "111", [], tmp_path)
+    else:
+        with pytest.raises(MigrationError if result == "error" else asyncio.CancelledError):
+            await operation(token_input, "111", [], tmp_path)
+    assert token_input.value == ""
+    assert tab == {"token": "synthetic-target-preserved"}
+    assert len(sessions) == 1 and sessions[0].closed
+
+
 # ---------------------------------------------------------------------------
 # Helper unit tests
 # ---------------------------------------------------------------------------
