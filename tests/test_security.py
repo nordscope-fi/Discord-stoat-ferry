@@ -25,6 +25,39 @@ def make_store(**tokens: str) -> SecureTokenStore:
     return SecureTokenStore(tokens)
 
 
+def test_scrub_document_masks_only_classified_permission_guidance() -> None:
+    from copy import deepcopy
+
+    register_secret("registry", "registry-secret")
+    doc = {
+        "permissions": {
+            "schema_version": 1,
+            "stage": "recheck",
+            "reason": "unverified",
+            "effects": "changes_possible",
+            "verified": False,
+            "problems": [
+                {
+                    "reason": "unverified",
+                    "entity_ids": ["123-role"],
+                    "bit": 123,
+                    "guidance": "Read 123 and registry-secret",
+                }
+            ],
+        },
+        "maps": {"channels": {"123": "123-target"}},
+        "raw_source_mask": 123,
+    }
+    before = deepcopy(doc)
+    store = make_store(proxy="123")
+    out = scrub_document(doc, store)
+    assert out["permissions"]["problems"][0]["guidance"] == "Read **** and ****cret"
+    assert out["permissions"]["problems"][0]["entity_ids"] == ["123-role"]
+    assert out["permissions"]["problems"][0]["bit"] == 123
+    assert out["maps"] == before["maps"] and out["raw_source_mask"] == 123
+    assert doc == before and scrub_document(out, store) == out
+
+
 # ---------------------------------------------------------------------------
 # masked()
 # ---------------------------------------------------------------------------

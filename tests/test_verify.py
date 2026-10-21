@@ -2417,6 +2417,100 @@ class TestRepairOutcome:
         assert doc["actions"]["dead_letter"] == {"drained": 0, "remaining": 0}
 
 
+def test_absent_permission_evidence_is_not_verified() -> None:
+    from discord_ferry.core.permissions import PermissionOutcome
+
+    assert PermissionOutcome.unverified().to_dict() == {
+        "schema_version": 1,
+        "stage": "preflight",
+        "reason": "unverified",
+        "effects": "none_confirmed",
+        "verified": False,
+        "problems": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "reason,effects",
+    [
+        ("unsupported", "none_confirmed"),
+        ("unverified", "none_confirmed"),
+        ("write_rejected", "changes_confirmed"),
+        ("write_uncertain", "changes_possible"),
+        ("readback_mismatch", "changes_confirmed"),
+        ("interrupted", "changes_possible"),
+    ],
+)
+def test_permission_serialization_preserves_failures_and_completed_actions(reason, effects) -> None:
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES
+
+    permissions = PermissionOutcome(
+        "application", reason, effects, (PermissionProblem(reason, ("123-entity",), 20, "Inspect"),)
+    )
+    outcome = RepairOutcome(
+        permissions=permissions,
+        recreated_channels=[{"discord_id": "123", "stoat_id": "target", "resent_count": 3}],
+        dead_letter={"drained": 2, "remaining": 1},
+        failed_messages=[{"discord_msg_id": "456", "error": "send failed"}],
+    )
+    document = outcome.to_dict()
+    assert document["permissions"] == {
+        "schema_version": 1,
+        "stage": "application",
+        "reason": reason,
+        "effects": effects,
+        "verified": False,
+        "problems": [
+            {"reason": reason, "entity_ids": ["123-entity"], "bit": 20, "guidance": "Inspect"}
+        ],
+    }
+    assert document["actions"]["recreated_channels"][0]["resent_count"] == 3
+    assert document["actions"]["dead_letter"] == {"drained": 2, "remaining": 1}
+    assert document["failed_messages"][0]["discord_msg_id"] == "456"
+    assert f"permission_{reason}" in UNREPAIRED_WARNING_TYPES
+
+
+def test_repair_permission_diagnostics_are_scrubbed_without_rewriting_ids() -> None:
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.core.security import register_secret
+
+    register_secret("proxy", "123", fully_mask=True)
+    permissions = PermissionOutcome(
+        "recheck",
+        "unverified",
+        "none_confirmed",
+        (PermissionProblem("unverified", ("123-entity",), 20, "Read 123\x07"),),
+    )
+    document = RepairOutcome(permissions=permissions).to_dict()
+    assert document["permissions"]["problems"][0]["guidance"] == "Read ****"
+    assert document["permissions"]["problems"][0]["entity_ids"] == ["123-entity"]
+
+
+@pytest.mark.parametrize("secret", ["synthetic\nproxy-password", "syntheticproxy-password"])
+def test_repair_permission_redaction_masks_before_and_after_cleaning(secret: str) -> None:
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.core.security import register_secret
+
+    register_secret("proxy", secret, fully_mask=True)
+    permissions = PermissionOutcome(
+        "recheck",
+        "unverified",
+        "none_confirmed",
+        (
+            PermissionProblem(
+                "unverified",
+                ("syntheticproxy-password-role",),
+                20,
+                "Read synthetic\nproxy-password",
+            ),
+        ),
+    )
+    document = RepairOutcome(permissions=permissions).to_dict()
+    assert document["permissions"]["problems"][0]["guidance"] == "Read ****"
+    assert document["permissions"]["problems"][0]["entity_ids"] == ["syntheticproxy-password-role"]
+
+
 def test_repair_outcome_carries_recreated_emoji() -> None:
     """SC-4.2: recreated_emoji appears under actions and is control-stripped."""
     outcome = RepairOutcome()

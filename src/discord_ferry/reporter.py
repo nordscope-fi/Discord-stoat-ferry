@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.core.permissions import PermissionOutcome
 from discord_ferry.core.security import (
     safe_sanitize,
     sanitize_secrets,
@@ -203,9 +204,12 @@ def generate_report(
 
     # Build post-migration checklist
     discord_meta = load_bound_discord_metadata(config, exports)
+    runtime = state.permission_runtime
+    permissions = runtime.outcome if runtime is not None else PermissionOutcome.unverified()
+    report["permissions"] = permissions.to_dict()
     checklist = _build_checklist(
         state,
-        has_permissions=discord_meta is not None,
+        has_permissions=permissions.verified,
         discord_meta=discord_meta,
     )
     report["checklist"] = checklist
@@ -226,7 +230,7 @@ def _build_checklist(
 
     Args:
         state: Migration state with maps and counters.
-        has_permissions: Whether Discord permissions were migrated.
+        has_permissions: Whether the current operation verified mapped permissions.
         discord_meta: Optional Discord metadata for user override info.
 
     Returns:
@@ -265,7 +269,10 @@ def _build_checklist(
     else:
         items.append(
             {
-                "task": "Set up role permissions manually (not migrated — no Discord token)",
+                "task": (
+                    "Set up role permissions manually or run explicit check and repair "
+                    "(not verified)"
+                ),
                 "status": "todo",
             }
         )
@@ -447,6 +454,17 @@ def generate_markdown_report(
 
     def _text(value: str) -> str:
         return _mask(_display_safe(_mask(value)))
+
+    runtime = state.permission_runtime
+    permissions = runtime.outcome if runtime is not None else PermissionOutcome.unverified()
+    lines.append("## Permissions\n")
+    lines.append(f"**Verified:** {'yes' if permissions.verified else 'no'}")
+    lines.append(f"**Stage:** {permissions.stage}")
+    lines.append(f"**Reason:** {permissions.reason}")
+    lines.append(f"**Destination effects:** {permissions.effects}\n")
+    for problem in permissions.problems:
+        entities = ", ".join(_display_safe(identity) for identity in problem.entity_ids)
+        lines.append(f"- {problem.reason} ({entities}): {_text(problem.guidance)}")
 
     lines.append("## Errors\n")
     if state.failed_messages:

@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from hashlib import sha256
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from discord_ferry.errors import PermissionSafetyError
 
@@ -1209,6 +1209,25 @@ class PermissionOutcome:
     @property
     def verified(self) -> bool:
         return self.reason == "verified" and not self.problems
+
+    @classmethod
+    def unverified(cls) -> PermissionOutcome:
+        """Represent absent operation evidence without claiming success or mutation."""
+        return cls("preflight", "unverified", "none_confirmed")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize facts without granting authority; writers redact diagnostic text."""
+        return {
+            "schema_version": 1,
+            "stage": self.stage,
+            "reason": self.reason,
+            "effects": self.effects,
+            "verified": self.verified,
+            "problems": [
+                {**asdict(problem), "entity_ids": list(problem.entity_ids)}
+                for problem in self.problems
+            ],
+        }
 
 
 def _reindex_predicate(
