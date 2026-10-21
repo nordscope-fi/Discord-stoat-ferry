@@ -24,9 +24,10 @@ from discord_ferry import gui_tools  # noqa: F401 -- registers the /tools routes
 from discord_ferry.config import FerryConfig
 from discord_ferry.core import entry
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
-from discord_ferry.core.http import format_proxy_notices
+from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
 from discord_ferry.core.security import register_secret, sanitize_secrets
+from discord_ferry.discord import refresh_permission_metadata
 from discord_ferry.errors import MigrationError, StateError
 from discord_ferry.feedback import FeedbackInterface
 from discord_ferry.feedback_gui import FeedbackGuiContext, render_feedback_action
@@ -240,6 +241,27 @@ def _clear_tokens(storage: MutableMapping[str, Any], keys: Iterable[str]) -> Non
     """
     for key in keys:
         storage.pop(key, None)
+
+
+async def _run_permission_refresh(
+    discord_token_input: ui.input,
+    guild_id: str,
+    exports: list[DCEExport],
+    output_dir: Path,
+) -> None:
+    """Invoke the source metadata owner and clear this action's source credential."""
+    token_now = str(discord_token_input.value or "").strip()
+    tab = app.storage.tab
+    try:
+        if not token_now:
+            raise MigrationError("Enter a source Discord token to refresh permission evidence")
+        register_secret("discord", token_now)
+        async with new_session() as session:
+            await refresh_permission_metadata(session, token_now, guild_id, exports, output_dir)
+    finally:
+        token_now = ""
+        _clear_tokens(tab, ("discord_token",))
+        discord_token_input.set_value("")
 
 
 def _stash_output_dir(storage: MutableMapping[str, Any], output_dir: Path) -> None:
@@ -942,14 +964,21 @@ async def export_page() -> None:
                     # leak; the Stoat token survives for /validate). The client is
                     # connected during a click, so the tab-store access is safe.
                     def _use_cached() -> None:
+                        if refresh_running:
+                            return
                         _clear_tokens(app.storage.tab, ("discord_token",))
+                        refresh_token_input.set_value("")
                         ui.navigate.to("/validate")
 
-                    ui.button("Use Cached", on_click=_use_cached).props("color=green")
+                    use_cached_btn = ui.button("Use Cached", on_click=_use_cached).props(
+                        "color=green"
+                    )
 
                     # export_view / _run_export are defined below; closures are only
                     # invoked on click.
                     def _re_export() -> None:
+                        if refresh_running:
+                            return
                         # Re-read the token at CLICK time, not from a value captured
                         # in the builder. A previous run's `finally` clears it, so a
                         # captured value would be stale on a second Re-export and we
@@ -962,11 +991,106 @@ async def export_page() -> None:
                         # S8: one export at a time. Without this, repeated clicks stack
                         # concurrent tasks writing into the same export directory.
                         reexport_btn.disable()
+                        refresh_btn.disable()
+                        use_cached_btn.disable()
                         cached_view.set_visibility(False)
                         export_view.set_visibility(True)
                         background_tasks.create(_run_export(token_now))
 
                     reexport_btn = ui.button("Re-export", on_click=_re_export).props("color=grey")
+
+                refresh_running = False
+                with ui.expansion("Source permission evidence").classes("w-full mt-4"):
+                    ui.label(
+                        "Refresh replaces only discord_metadata.json in the selected output "
+                        "directory. Existing exports, migration state and Stoat are unchanged."
+                    ).classes("text-sm text-gray-600")
+
+                    def _refresh_selection_ready() -> bool:
+                        output = str(refresh_output_input.value or "").strip()
+                        selected = str(storage.get("export_dir") or "").strip()
+                        return bool(
+                            not refresh_running
+                            and str(storage.get("discord_server_id") or "").strip()
+                            and selected
+                            and Path(selected).is_dir()
+                            and output
+                            and Path(output).is_dir()
+                            and str(refresh_token_input.value or "").strip()
+                        )
+
+                    def _sync_refresh_selection() -> None:
+                        refresh_btn.set_enabled(_refresh_selection_ready())
+
+                    refresh_output_input = ui.input(
+                        "Metadata output directory",
+                        value=str(storage.get("output_dir") or ""),
+                        on_change=_sync_refresh_selection,
+                    ).classes("w-full")
+                    refresh_token_input = ui.input(
+                        "Source Discord token",
+                        value=str(app.storage.tab.get("discord_token") or ""),
+                        password=True,
+                        password_toggle_button=True,
+                        on_change=_sync_refresh_selection,
+                    ).classes("w-full")
+                    refresh_status = ui.label("").classes("text-sm")
+
+                    async def _refresh_selected() -> None:
+                        nonlocal refresh_running
+                        if refresh_running:
+                            return
+                        if not _refresh_selection_ready():
+                            refresh_status.set_text(
+                                "Select source, export and output context first"
+                            )
+                            return
+                        tab = app.storage.tab
+                        refresh_running = True
+                        for control in (
+                            refresh_btn,
+                            use_cached_btn,
+                            reexport_btn,
+                            refresh_output_input,
+                            refresh_token_input,
+                        ):
+                            control.disable()
+                        refresh_status.set_text("Refreshing source permissions")
+                        try:
+                            register_secret("discord", str(refresh_token_input.value or "").strip())
+                            selected_exports = parse_export_directory(
+                                Path(str(storage["export_dir"])), metadata_only=True
+                            )
+                            await _run_permission_refresh(
+                                refresh_token_input,
+                                str(storage["discord_server_id"]).strip(),
+                                selected_exports,
+                                Path(str(refresh_output_input.value).strip()),
+                            )
+                            refresh_status.set_text("Source permission metadata refreshed")
+                        except asyncio.CancelledError:
+                            refresh_status.set_text("Source permission refresh cancelled")
+                        except (MigrationError, OSError) as exc:
+                            refresh_status.set_text(
+                                "Source permission refresh failed: " + sanitize_secrets(str(exc))
+                            )
+                        finally:
+                            _clear_tokens(tab, ("discord_token",))
+                            refresh_token_input.set_value("")
+                            refresh_running = False
+                            for control in (
+                                use_cached_btn,
+                                reexport_btn,
+                                refresh_output_input,
+                                refresh_token_input,
+                            ):
+                                control.enable()
+                            _sync_refresh_selection()
+
+                    refresh_btn = ui.button(
+                        "Refresh source permissions", on_click=_refresh_selected
+                    )
+                    _sync_refresh_selection()
 
     # --- Normal export UI ---
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10") as export_view:

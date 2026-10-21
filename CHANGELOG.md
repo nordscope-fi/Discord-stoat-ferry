@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Add an explicit source-permission refresh action to cached GUI exports, requiring selected context and clearing source credentials after success, failure or cancellation without target or exporter work (#1172).
+
 - Show shared permission stops and truthful repair exit codes in CLI output, retain refused repair JSON and confirmed actions, pass cached source evidence to checks, and route role backfill through the guarded engine entry (#1172).
 
 - Add an explicit source-only CLI permission refresh using selected exports and the existing metadata backend, with hidden source-token prompting and no Stoat changes (#1172).
