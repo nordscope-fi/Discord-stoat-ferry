@@ -22,6 +22,7 @@ from discord_ferry.state import MigrationState
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
 )
+from tests.test_engine import repair_permission_unit_boundary as repair_permission_unit_boundary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -281,6 +282,7 @@ async def test_repair_skips_a_reappearing_hidden_forum_index(tmp_path: Path) -> 
     assert view.categories[0]["channels"] == ["old-idx", "s1"]
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_recreates_lone_forum_index(tmp_path: Path) -> None:
     """SC-I2/SC-3.2/SC-3.3: the forum index as the ONLY broken entity is still repaired.
 
@@ -307,6 +309,7 @@ async def test_repair_recreates_lone_forum_index(tmp_path: Path) -> None:
     assert not any(w.get("type") == "forum_index_not_repairable" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_routes_tail_absent_to_rebuild_without_create(tmp_path: Path) -> None:
     """SC-I4: a forum index whose channel survives but message is gone rebuilds, no create."""
     config = _config(tmp_path)
@@ -348,6 +351,7 @@ async def test_repair_forum_index_dry_run_mutates_nothing(tmp_path: Path) -> Non
     assert state.channel_map["forum-index-f"] == "old-idx"  # unchanged
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_tail_rebuild_records_a_restored_tail(tmp_path: Path) -> None:
     """Second-opinion finding 4: a successful tail rebuild is recorded in the outcome.
 
@@ -426,6 +430,7 @@ def _warning_types(state: MigrationState) -> list[str]:
     return [str(w.get("type")) for w in state.warnings]
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_removes_only_the_unrecorded_ferry_copy(tmp_path: Path) -> None:
     """Two pinned Ferry copies, one recorded: only the unrecorded one is deleted."""
     config = _config(tmp_path)
@@ -509,6 +514,7 @@ async def test_repair_dry_run_reports_the_duplicate_and_deletes_nothing(tmp_path
     assert state.forum_index_message_ids == {"f": "rebuilt"}
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_failed_delete_warns_and_continues(tmp_path: Path) -> None:
     config = _config(tmp_path)
     state = _dup_state()
@@ -525,6 +531,7 @@ async def test_repair_failed_delete_warns_and_continues(tmp_path: Path) -> None:
     assert any(d["type"] == "forum_index_duplicate_remove_failed" for d in outcome.declined)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_skips_forums_that_are_not_recorded_index_channels(tmp_path: Path) -> None:
     """No recorded id, or no mapped index channel: no search and no delete."""
     config = _config(tmp_path)
@@ -540,6 +547,7 @@ async def test_repair_skips_forums_that_are_not_recorded_index_channels(tmp_path
     assert searched == [_SEARCH]
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_without_a_known_self_id_deletes_nothing(tmp_path: Path) -> None:
     config = _config(tmp_path)
     state = _dup_state()
@@ -571,6 +579,7 @@ _NO_POSTS_CREATE = "No posts migrated."
 _NO_POSTS_REBUILT = "**Forum: F**\nNo posts migrated."
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_removes_the_headerless_copy_of_a_forum_with_no_posts(tmp_path: Path) -> None:
     """The create path sent exactly `No posts migrated.`; the rebuild sent it under a heading."""
     config = _config(tmp_path)

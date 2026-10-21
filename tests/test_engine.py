@@ -243,6 +243,33 @@ async def test_permission_preflight_missing_source_stops_actual_migration_before
         assert config.session is None
 
 
+@pytest.fixture
+def repair_permission_unit_boundary(monkeypatch, request):
+    """Isolate permission collaborators only for explicitly selected repair units.
+
+    These units assert naming, delivery receipts, categories, attributes or
+    accounting. They neither run permission guards nor claim access proof.
+    Real preflight, writer and refusal scenarios never select this fixture.
+    """
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionRuntime
+
+    if "publication_permission_collaborator" in request.fixturenames:
+        request.getfixturevalue("publication_permission_collaborator")
+        # Keep that fixture's observed call counter, but isolate the supplied
+        # operation too. No real guard consumes the unit collaborator.
+        delivery_module.require_permission_runtime.side_effect = lambda *a, **k: runtime
+        monkeypatch.setattr(messages_module, "verify_permission_channel", AsyncMock())
+    runtime = Mock(spec=PermissionRuntime)
+    runtime.plan = Mock()
+    runtime.plan.target_layout.planned_channels = ()
+    runtime.outcome = PermissionOutcome.unverified()
+    monkeypatch.setattr(
+        engine_module, "_prepare_permission_operation", AsyncMock(return_value=runtime)
+    )
+    monkeypatch.setattr(engine_module, "apply_channel_permissions", AsyncMock())
+    return runtime
+
+
 def _permission_preflight_case(
     tmp_path,
     *,
@@ -336,6 +363,342 @@ def _permission_preflight_operation():
     operation = getattr(engine_module, "_prepare_permission_operation", None)
     assert callable(operation), "The engine needs whole-operation permission preflight"
     return operation
+
+
+def _explicit_channel_repair_case(tmp_path, *, missing=False, unsupported=False):
+    config, exports, meta = _permission_preflight_case(
+        tmp_path,
+        everyone=(1 << 10) | (1 << 11),
+        source_ids=("222", "333") if unsupported else None,
+        unsupported_source="333" if unsupported else None,
+    )
+    config = dataclasses.replace(config, upload_delay=0, message_rate_limit=0)
+    server_id, role_id, channel_id = (valid_stoat_id(n) for n in (29100, 29101, 29102))
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        channel_map={"222": channel_id},
+        roles_finalized={"112"},
+        created_channel_names={"222": "selected"},
+    )
+    if unsupported:
+        state.channel_map["333"] = valid_stoat_id(29107)
+        state.created_channel_names["333"] = "unsupported"
+    server = {
+        "_id": server_id,
+        "channels": [] if missing else [channel_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "name": "ordinary",
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow | (1 << 27), "d": 0},
+            }
+        },
+    }
+    channel = {
+        "_id": channel_id,
+        "name": "selected",
+        "channel_type": "TextChannel",
+        "server": server_id,
+        "default_permissions": {"a": 1 << 12, "d": 0},
+        "role_permissions": {role_id: {"a": 0, "d": 1 << 20}},
+    }
+    return config, exports, state, server, channel
+
+
+def _register_explicit_repair_reads(remote, config, server, channel, *, missing=False):
+    remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+    remote.get(f"{config.stoat_url}/servers/{server['_id']}", payload=server, repeat=True)
+    remote.get(
+        f"{config.stoat_url}/servers/{server['_id']}?include_channels=true",
+        payload={**server, "channels": [] if missing else [channel]},
+        repeat=True,
+    )
+    remote.get(
+        f"{config.stoat_url}/channels/{channel['_id']}",
+        status=404 if missing else 200,
+        payload={} if missing else channel,
+        repeat=True,
+    )
+
+
+@pytest.mark.parametrize("mode", ["migration", "retry", "backfill"])
+@pytest.mark.parametrize("missing", [False, True])
+async def test_explicit_channel_repair_does_not_relax_other_operation_modes(
+    tmp_path, mode, missing
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, state, server, channel = _explicit_channel_repair_case(
+        tmp_path, missing=missing
+    )
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel, missing=missing)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode=mode
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert caught.value.outcome.reason == ("unverified" if missing else "readback_mismatch")
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_explicit_channel_repair_stop_retains_actual_dead_letter_totals(
+    tmp_path, monkeypatch
+):
+    config = _make_repair_config(tmp_path)
+    state = MigrationState(stoat_server_id=valid_stoat_id(29105))
+    state.failed_messages = [
+        FailedMessage(discord_msg_id=str(n), stoat_channel_id=valid_stoat_id(29106), error="old")
+        for n in (101, 102)
+    ]
+    error = _permission_stop("recheck", "readback_mismatch", "changes_confirmed")
+
+    async def retry(*args, **kwargs):
+        state.failed_messages.pop(0)
+        raise error
+
+    monkeypatch.setattr(
+        "discord_ferry.migrator.verify.run_check", AsyncMock(return_value=CheckReport())
+    )
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(
+        engine_module, "api_fetch_server", AsyncMock(return_value={"default_permissions": 0})
+    )
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    monkeypatch.setattr(engine_module, "run_retry_failed", retry)
+    outcome = await run_repair(config, state, [], lambda event: None)
+    assert outcome.permissions is error.outcome
+    assert outcome.dead_letter == {"drained": 1, "remaining": 1}
+    assert outcome.failed_messages == [
+        {"discord_msg_id": "102", "stoat_channel_id": valid_stoat_id(29106)}
+    ]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_explicit_channel_repair_preflight_proposes_correction_without_authority(
+    tmp_path, missing
+):
+    config, exports, state, server, channel = _explicit_channel_repair_case(
+        tmp_path, missing=missing
+    )
+    before = dataclasses.asdict(state)
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel, missing=missing)
+        async with aiohttp.ClientSession() as session:
+            runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="repair"
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert not runtime.stopped
+    assert not runtime.ready
+    assert not runtime.outcome.verified
+    layout = runtime.plan.target_layout
+    assert dict(layout.planned_channels)["222"] == (None if missing else channel["_id"])
+    assert len(layout.channels) == (0 if missing else 1)
+    if not missing:
+        assert layout.channels[0].default.allow == 1 << 12
+        assert dict(layout.channels[0].roles)[state.role_map["112"]].deny == 1 << 20
+    assert dataclasses.asdict(state) == before
+
+
+async def test_explicit_channel_repair_unsupported_preflight_returns_outcome_before_writes(
+    tmp_path, monkeypatch
+):
+    config, exports, state, server, channel = _explicit_channel_repair_case(
+        tmp_path, missing=True, unsupported=True
+    )
+    report = CheckReport()
+    report.add(
+        name="channel:222",
+        status="fail",
+        kind="channel_missing",
+        detail="missing",
+        discord_id="222",
+        stoat_id=channel["_id"],
+    )
+    report.add(
+        name="emoji:999",
+        status="fail",
+        kind="emoji_missing",
+        detail="missing",
+        discord_id="999",
+        stoat_id=valid_stoat_id(29103),
+    )
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", AsyncMock(return_value=report))
+    writes = AsyncMock()
+    monkeypatch.setattr(engine_module, "_run_emoji_repair_pass", writes)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", writes)
+    events = []
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel, missing=True)
+        outcome = await run_repair(config, state, exports, events.append)
+        assert all(method == "GET" for method, _ in remote.requests)
+    writes.assert_not_awaited()
+    assert outcome.permissions.reason == "unsupported"
+    assert outcome.permissions.effects == "none_confirmed"
+    assert not outcome.permissions.verified
+    assert not outcome.recreated_channels
+    assert not any(event.status == "completed" for event in events)
+
+
+async def test_explicit_channel_repair_healthy_access_needs_no_target_writes(tmp_path, monkeypatch):
+    config, exports, state, server, channel = _explicit_channel_repair_case(tmp_path)
+    channel["role_permissions"][state.role_map["112"]] = {"a": 0, "d": 1 << 27}
+    ids = dict(state.channel_map)
+    monkeypatch.setattr(
+        "discord_ferry.migrator.verify.run_check", AsyncMock(return_value=CheckReport())
+    )
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    events = []
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        outcome = await run_repair(config, state, exports, events.append)
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert outcome.permissions.verified
+    assert outcome.permissions.effects == "none_confirmed"
+    assert not outcome.recreated_channels
+    assert state.channel_map == ids
+    assert any(event.status == "completed" for event in events)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("reject_permissions", [None, "reject", "readback"])
+@pytest.mark.parametrize("converge_default", [False, True])
+async def test_explicit_channel_repair_binds_and_proves_before_resend(
+    tmp_path, monkeypatch, missing, reject_permissions, converge_default
+):
+    config, exports, state, server, channel = _explicit_channel_repair_case(
+        tmp_path, missing=missing
+    )
+    old_id, new_id = channel["_id"], valid_stoat_id(29104)
+    original_default = server["default_permissions"]
+    if converge_default:
+        server["default_permissions"] |= FERRY_MIN_PERMISSIONS
+    report = CheckReport()
+    if missing:
+        report.add(
+            name="channel:222",
+            status="fail",
+            kind="channel_missing",
+            detail="missing",
+            discord_id="222",
+            stoat_id=old_id,
+        )
+    exports[0].messages = [
+        DCEMessage(
+            id="101",
+            type="Default",
+            timestamp="2026-10-20T00:00:00Z",
+            content="synthetic",
+            author=DCEAuthor(id="114", name="Synthetic"),
+        )
+    ]
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", AsyncMock(return_value=report))
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    actions = []
+
+    async def process(**kwargs):
+        target = kwargs["stoat_channel_id"]
+        state.permission_runtime.require(target)
+        actions.append("content")
+        return True
+
+    monkeypatch.setattr(engine_module, "_process_message", process)
+
+    def read_server(url, **kwargs):
+        return CallbackResult(payload=server)
+
+    def read_view(url, **kwargs):
+        return CallbackResult(
+            payload={**server, "channels": [channel] if server["channels"] else []}
+        )
+
+    def read_channel(url, **kwargs):
+        return CallbackResult(payload=channel)
+
+    def create(url, **kwargs):
+        actions.append("create")
+        channel.update(_id=new_id, default_permissions={"a": 0, "d": 0}, role_permissions={})
+        server["channels"] = [new_id]
+        return CallbackResult(payload={"_id": new_id, "name": "selected"})
+
+    def apply(url, **kwargs):
+        actions.append("permissions")
+        if reject_permissions == "reject":
+            return CallbackResult(status=403, payload={"type": "Forbidden"})
+        if reject_permissions == "readback":
+            return CallbackResult(payload={})
+        permissions = kwargs["json"]["permissions"]
+        cell = {"a": permissions["allow"], "d": permissions["deny"]}
+        if str(url).endswith("/default"):
+            channel["default_permissions"] = cell
+        else:
+            channel["role_permissions"][state.role_map["112"]] = cell
+        return CallbackResult(payload={})
+
+    def converge(url, **kwargs):
+        actions.append("default")
+        server["default_permissions"] = kwargs["json"]["permissions"]
+        return CallbackResult(payload={})
+
+    events = []
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server['_id']}", callback=read_server, repeat=True)
+        remote.get(
+            f"{config.stoat_url}/servers/{server['_id']}?include_channels=true",
+            callback=read_view,
+            repeat=True,
+        )
+        if missing:
+            remote.get(f"{config.stoat_url}/channels/{old_id}", status=404, repeat=True)
+        remote.get(
+            f"{config.stoat_url}/channels/{new_id if missing else old_id}",
+            callback=read_channel,
+            repeat=True,
+        )
+        remote.post(f"{config.stoat_url}/servers/{server['_id']}/channels", callback=create)
+        remote.put(re.compile(r".*/channels/.*/permissions/.*"), callback=apply, repeat=True)
+        remote.put(
+            f"{config.stoat_url}/servers/{server['_id']}/permissions/default",
+            callback=converge,
+            repeat=True,
+        )
+        outcome = await run_repair(config, state, exports, events.append)
+    assert "permissions" in actions
+    if converge_default:
+        assert server["default_permissions"] == original_default
+        assert actions.index("default") < actions.index("permissions")
+    assert outcome.permissions.verified is (not reject_permissions)
+    if missing:
+        assert state.channel_map["222"] == new_id
+        assert outcome.recreated_channels[0]["stoat_id"] == new_id
+        assert outcome.recreated_channels[0]["resent_count"] == (0 if reject_permissions else 1)
+        assert ("content" in actions) is (not reject_permissions)
+        if not reject_permissions:
+            assert actions.index("permissions") < actions.index("content")
+    else:
+        assert state.channel_map["222"] == old_id
+        assert not outcome.recreated_channels
+        assert channel["default_permissions"]["a"] & (1 << 12)
+    if reject_permissions:
+        assert outcome.permissions.reason == (
+            "write_uncertain" if reject_permissions == "reject" else "readback_mismatch"
+        )
+        assert outcome.permissions.effects == (
+            "changes_possible" if reject_permissions == "reject" else "changes_confirmed"
+        )
+        assert not any(event.status == "completed" for event in events)
+    else:
+        assert any(event.status == "completed" for event in events)
 
 
 async def test_permission_preflight_new_target_keeps_proposals_unready(tmp_path):
@@ -3725,6 +4088,7 @@ async def test_retry_delivery_outcome_counts_selected_source(
 
 @pytest.mark.parametrize("partial_then_drained", [False, True])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_delivery_outcome_counts_real_tail_and_retry_drain(
     tmp_path: Path, partial_then_drained: bool
 ) -> None:
@@ -5408,6 +5772,7 @@ async def test_run_repair_rollback_refusal_returns_empty_outcome(tmp_path: Path)
     assert outcome.declined == []
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_run_repair_records_recreated_entities(tmp_path: Path) -> None:
     """#308. Each recreation is recorded with its discord id, new stoat id and name."""
     config = _make_repair_config(tmp_path)
@@ -5502,6 +5867,7 @@ async def test_run_repair_records_recreated_entities(tmp_path: Path) -> None:
     assert outcome.recreated_categories[0]["title"] == "Text Channels"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_run_repair_records_dead_letter_and_scoped_declined(tmp_path: Path) -> None:
     """#308. dead_letter counts the drain; declined excludes legacy non-repair warnings."""
     config = _make_repair_config(tmp_path)
@@ -5729,6 +6095,7 @@ async def test_category_write_failure_does_not_advance_working_copy(tmp_path: Pa
     assert state.category_map == {"d-a": "s-a"}
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_category_repair_resume_matches_uninterrupted_run(tmp_path: Path) -> None:
     server = "01M4T13BVE9P80WR51EWTAWMKQ"
 
@@ -5811,6 +6178,7 @@ async def test_category_repair_resume_matches_uninterrupted_run(tmp_path: Path) 
     assert await run_case(True) == expected
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_preserves_the_original_category_evidence(tmp_path: Path) -> None:
     config = _make_repair_config(tmp_path)
     state = MigrationState(
@@ -5848,6 +6216,7 @@ async def test_repair_preserves_the_original_category_evidence(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("stage", ["initial", "fresh"])
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_invalid_server_read_stops_repair_writes(tmp_path: Path, stage: str) -> None:
     config = _make_repair_config(tmp_path)
     state = MigrationState(
@@ -5875,7 +6244,7 @@ async def test_invalid_server_read_stops_repair_writes(tmp_path: Path, stage: st
                 patch("discord_ferry.migrator.verify.run_check", new=AsyncMock(return_value=report))
             )
         plain = {"_id": R_SERVER, "channels": [], "roles": {}}
-        mock.get(f"{BASE_URL}/servers/{R_SERVER}", payload=plain)
+        mock.get(f"{BASE_URL}/servers/{R_SERVER}", payload=plain, repeat=True)
         mock.get(
             f"{BASE_URL}/servers/{R_SERVER}?include_channels=true",
             payload={**plain, "categories": None},
@@ -6041,6 +6410,7 @@ def _assert_repair_baseline_requests(requests: list[Any]) -> None:
         "category_title_unknown",
     ],
 )
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_never_acts_on_an_unverifiable_result(tmp_path: Path, kind: str) -> None:
     """The check could not look, so there is nothing to act on.
 
@@ -6057,6 +6427,7 @@ async def test_repair_never_acts_on_an_unverifiable_result(tmp_path: Path, kind:
 
 
 @pytest.mark.parametrize("kind", ["channel_renamed", "role_renamed", "category_title_mismatch"])
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_never_acts_on_a_warn_result(tmp_path: Path, kind: str) -> None:
     """A rename almost always means the operator renamed it on purpose.
 
@@ -6081,6 +6452,7 @@ async def test_repair_never_acts_on_a_warn_result(tmp_path: Path, kind: str) -> 
         "tail_window_exhausted",
     ],
 )
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_never_acts_on_a_non_actionable_tail_kind(tmp_path: Path, kind: str) -> None:
     """Only tail_absent and tail_and_after_absent are repairable tails."""
     status = "fail" if kind == "channel_empty" else "ok"
@@ -6092,6 +6464,7 @@ async def test_repair_never_acts_on_a_non_actionable_tail_kind(tmp_path: Path, k
     assert _partition_counts(events) == (0, 0), f"{kind} entered the work lists"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_recreates_a_missing_forum_index_channel(tmp_path: Path) -> None:
     """#311. No longer a deliberate exclusion: a deleted forum index is recreated.
 
@@ -6186,6 +6559,7 @@ async def test_repair_saves_state_when_not_a_dry_run(tmp_path: Path) -> None:
     assert saves, "a real run wrote no state at all"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_an_interrupted_repair_keeps_what_it_already_recreated(tmp_path: Path) -> None:
     """The finding the chunk 4 review produced, and the reason for the per-entity save.
 
@@ -6277,6 +6651,7 @@ async def test_repair_does_not_swallow_a_check_error(tmp_path: Path) -> None:
         await run_repair(config, state, [], lambda _e: None)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_rebuilds_a_forum_index_whose_tail_is_missing(tmp_path: Path) -> None:
     """#311. A forum index whose channel survives but message is gone now rebuilds.
 
@@ -6434,6 +6809,7 @@ async def test_repair_fetches_the_collision_set_only_when_recreating(tmp_path: P
     assert fetches == [], "repair fetched the collision set with nothing to recreate"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_fetches_the_collision_set_when_there_is_work(tmp_path: Path) -> None:
     """The other half, so the assertion above can fail."""
     config = _make_repair_config(tmp_path)
@@ -6551,6 +6927,7 @@ async def _repair_recreating_role(
     return state, requests, events
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_recreates_a_missing_role_and_records_its_new_id(tmp_path: Path) -> None:
     """role_map moves to the new Stoat id under the UNCHANGED Discord key."""
     state, _, _ = await _repair_recreating_role(tmp_path)
@@ -6560,6 +6937,7 @@ async def test_repair_recreates_a_missing_role_and_records_its_new_id(tmp_path: 
     assert D_ROLE in state.role_map, "the Discord key changed, which it must never do"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_role_records_the_name_from_the_response(tmp_path: Path) -> None:
     """The RESPONSE, not the local variable, per the rule 2.17.0 established.
 
@@ -6577,6 +6955,7 @@ async def test_a_recreated_role_records_the_name_from_the_response(tmp_path: Pat
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_declines_a_role_it_has_no_recorded_name_for(tmp_path: Path) -> None:
     """A KNOWN LIMIT for a state written before 2.17.0, not a missing feature.
 
@@ -6663,6 +7042,7 @@ def _created_channel_body(mock: aioresponses) -> dict[str, Any] | None:
     return None
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_recreates_a_missing_channel_and_records_its_new_id(
     tmp_path: Path,
 ) -> None:
@@ -6672,6 +7052,7 @@ async def test_repair_recreates_a_missing_channel_and_records_its_new_id(
     assert state.created_channel_names[R_D_CHANNEL] == "general"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channel_drops_a_suffix_its_partner_no_longer_needs(
     tmp_path: Path,
 ) -> None:
@@ -6693,6 +7074,7 @@ async def test_a_recreated_channel_drops_a_suffix_its_partner_no_longer_needs(
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channel_avoids_a_name_the_server_now_holds(tmp_path: Path) -> None:
     """A name taken since the migration must not be reused.
 
@@ -6707,6 +7089,7 @@ async def test_a_recreated_channel_avoids_a_name_the_server_now_holds(tmp_path: 
     assert sent["name"].startswith("general-"), f"unexpected disambiguation: {sent['name']}"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_voice_channel_is_recreated_as_voice(tmp_path: Path) -> None:
     """The type comes from the export, because state records none.
 
@@ -6720,6 +7103,7 @@ async def test_a_recreated_voice_channel_is_recreated_as_voice(tmp_path: Path) -
     assert sent.get("type") == "Voice", f"a voice channel was recreated as {sent.get('type')}"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_truncates_a_long_channel_topic(tmp_path: Path) -> None:
     """A topic longer than 1024 chars is truncated before reaching the Stoat API."""
     long_topic = "t" * 2000
@@ -6732,6 +7116,7 @@ async def test_repair_truncates_a_long_channel_topic(tmp_path: Path) -> None:
     assert len(desc) == 1024
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_declines_a_channel_missing_from_the_export(tmp_path: Path) -> None:
     """A KNOWN LIMIT, not a missing feature.
 
@@ -6746,6 +7131,7 @@ async def test_repair_declines_a_channel_missing_from_the_export(tmp_path: Path)
     assert any(w.get("type") == "not_in_export" for w in state.warnings), state.warnings
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_collision_set_is_not_built_from_the_export(tmp_path: Path) -> None:
     """The case that separates the live set from an export-derived one.
 
@@ -6840,6 +7226,7 @@ async def _repair_with_metadata(
     write_metadata: bool = True,
     bodies_out: dict[str, Any] | None = None,
     export_guild_id: str | None = None,
+    outcomes_out: list[RepairOutcome] | None = None,
 ) -> tuple[MigrationState, list[str], list[MigrationEvent]]:
     config = _make_repair_config(tmp_path)
     repair_export = _export_for(R_D_CHANNEL)
@@ -6887,7 +7274,9 @@ async def _repair_with_metadata(
         m.post(f"{BASE_URL}/servers/{R_SERVER}/roles", payload={"id": S_ROLE_NEW})
         m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
         try:
-            await run_repair(config, state, [repair_export], events.append)
+            outcome = await run_repair(config, state, [repair_export], events.append)
+            if outcomes_out is not None:
+                outcomes_out.append(outcome)
         finally:
             urls = _permission_calls(m)
             if bodies_out is not None:
@@ -6898,45 +7287,54 @@ async def _repair_with_metadata(
 async def test_repair_ignores_another_servers_metadata_file(tmp_path: Path) -> None:
     """#971 review: repair bound the file to the configured server only, which repair
     configs leave unset, so another server's overrides reached a recreated channel."""
+    outcomes: list[RepairOutcome] = []
     state, urls, _ = await _repair_with_metadata(
-        tmp_path, _report_with("channel_missing", "fail"), export_guild_id="555555555555555555"
+        tmp_path,
+        _report_with("channel_missing", "fail"),
+        export_guild_id="555555555555555555",
+        outcomes_out=outcomes,
     )
     assert urls == [], f"another server's permissions were applied: {urls}"
-    assert any(w.get("type") == "no_discord_metadata" for w in state.warnings), state.warnings
+    assert outcomes[0].permissions.reason == "unverified"
+    assert outcomes[0].permissions.effects == "none_confirmed"
+    assert state.channel_map[R_D_CHANNEL] == R_S_CHANNEL
 
 
 async def test_a_recreated_channel_refuses_unbound_recorded_overrides(tmp_path: Path) -> None:
-    from discord_ferry.errors import PermissionSafetyError
-
     bodies: dict[str, Any] = {}
-    with pytest.raises(PermissionSafetyError) as caught:
-        await _repair_with_metadata(
-            tmp_path, _report_with("channel_missing", "fail"), bodies_out=bodies
-        )
-    assert caught.value.outcome.reason == "unverified"
+    outcomes: list[RepairOutcome] = []
+    await _repair_with_metadata(
+        tmp_path,
+        _report_with("channel_missing", "fail"),
+        bodies_out=bodies,
+        outcomes_out=outcomes,
+    )
+    assert outcomes[0].permissions.reason == "unverified"
+    assert outcomes[0].permissions.effects == "none_confirmed"
     assert bodies == {}, "Legacy translated cells must not authorize a channel permission PUT"
 
 
 async def test_repair_refuses_inflated_legacy_cells_without_a_bound_plan(tmp_path: Path) -> None:
-    from discord_ferry.errors import PermissionSafetyError
-
     output_dir = tmp_path / "output"
     output_dir.mkdir(parents=True)
     _write_discord_metadata(output_dir, default_allow=0x3FF00CDF, role_allow=0x3FF00CDF)
     before = (output_dir / "discord_metadata.json").read_bytes()
     bodies: dict[str, Any] = {}
-    with pytest.raises(PermissionSafetyError) as caught:
-        await _repair_with_metadata(
-            tmp_path,
-            _report_with("channel_missing", "fail"),
-            write_metadata=False,
-            bodies_out=bodies,
-        )
-    assert caught.value.outcome.reason == "unverified"
+    outcomes: list[RepairOutcome] = []
+    await _repair_with_metadata(
+        tmp_path,
+        _report_with("channel_missing", "fail"),
+        write_metadata=False,
+        bodies_out=bodies,
+        outcomes_out=outcomes,
+    )
+    assert outcomes[0].permissions.reason == "unverified"
+    assert outcomes[0].permissions.effects == "none_confirmed"
     assert bodies == {}
     assert (output_dir / "discord_metadata.json").read_bytes() == before
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) -> None:
     """SC-4.6, and the highest-consequence assertion in this chunk.
 
@@ -6980,8 +7378,6 @@ async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) ->
 
 
 async def test_repair_preserves_shared_writer_refusal_as_a_repair_error(tmp_path: Path) -> None:
-    from discord_ferry.errors import PermissionSafetyError
-
     config = _make_repair_config(tmp_path)
     _write_discord_metadata(config.output_dir)
     state = MigrationState(
@@ -7005,33 +7401,34 @@ async def test_repair_preserves_shared_writer_refusal_as_a_repair_error(tmp_path
             payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
         mocked.put(re.compile(r".*/permissions/.*"), status=403, repeat=True)
-        with pytest.raises(PermissionSafetyError) as caught:
-            await run_repair(config, state, [_export_for(R_D_CHANNEL)], events.append)
+        outcome = await run_repair(config, state, [_export_for(R_D_CHANNEL)], events.append)
         assert _permission_calls(mocked) == []
-    assert caught.value.outcome.reason == "unverified"
+        assert all(method == "GET" for method, _ in mocked.requests)
+    assert outcome.permissions.reason == "unverified"
+    assert outcome.permissions.effects == "none_confirmed"
     assert any(
-        event.phase == "repair" and event.detail == {"permissions": caught.value.outcome}
+        event.phase == "repair" and event.detail == {"permissions": outcome.permissions}
         for event in events
     )
     assert not any(event.status == "completed" for event in events)
-    assert state.channel_map[R_D_CHANNEL] == "01J5T000000000000000009500"
+    assert state.channel_map[R_D_CHANNEL] == R_S_CHANNEL
     assert not state.failed_messages
 
 
-async def test_repair_warns_by_name_when_the_metadata_file_is_absent(tmp_path: Path) -> None:
-    """SC-4.4. Naming the file, and making no permission call.
-
-    A silent pass here reproduces batch 5's defect exactly: a channel that looks
-    migrated and grants nobody the right to use it.
-    """
+async def test_repair_refuses_missing_metadata_before_recreation(tmp_path: Path) -> None:
+    """Missing evidence stops the whole repair before any entity is recreated."""
+    outcomes: list[RepairOutcome] = []
     state, urls, _ = await _repair_with_metadata(
-        tmp_path, _report_with("channel_missing", "fail"), write_metadata=False
+        tmp_path,
+        _report_with("channel_missing", "fail"),
+        write_metadata=False,
+        outcomes_out=outcomes,
     )
     assert urls == [], f"permissions were applied with no metadata to apply: {urls}"
-    assert any(
-        w.get("type") == "no_discord_metadata" and "discord_metadata.json" in w["message"]
-        for w in state.warnings
-    ), f"nothing named the missing file: {state.warnings}"
+    assert outcomes[0].permissions.reason == "unverified"
+    assert outcomes[0].permissions.effects == "none_confirmed"
+    assert not outcomes[0].recreated_channels
+    assert state.channel_map[R_D_CHANNEL] == R_S_CHANNEL
 
 
 D_CAT = "700000000000000001"
@@ -7089,6 +7486,7 @@ async def _repair_recreating_category(
     return state, sent, events
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_category_carries_its_channels(tmp_path: Path) -> None:
     """An empty category is a recreation that restores nothing.
 
@@ -7106,6 +7504,7 @@ async def test_a_recreated_category_carries_its_channels(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_recreating_one_category_does_not_delete_the_others(tmp_path: Path) -> None:
     """The destructive failure mode this whole helper is shaped around.
 
@@ -7129,6 +7528,7 @@ async def test_recreating_one_category_does_not_delete_the_others(tmp_path: Path
     assert "Announcements" in titles
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_declines_a_category_it_has_no_recorded_title_for(tmp_path: Path) -> None:
     """The same known limit as the channel and role cases."""
     state, sent, _ = await _repair_recreating_category(tmp_path, title=None)
@@ -7250,6 +7650,7 @@ def _state_for_rewrite(**overrides: Any) -> MigrationState:
     return MigrationState(**defaults)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channels_new_id_lands_under_the_unchanged_key(
     tmp_path: Path,
 ) -> None:
@@ -7259,6 +7660,7 @@ async def test_a_recreated_channels_new_id_lands_under_the_unchanged_key(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
     tmp_path: Path,
 ) -> None:
@@ -7282,6 +7684,7 @@ async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_only_this_channels_message_map_entries_are_dropped(tmp_path: Path) -> None:
     """The scan is channel-scoped, so another channel's entries survive.
 
@@ -7299,6 +7702,7 @@ async def test_only_this_channels_message_map_entries_are_dropped(tmp_path: Path
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_stale_message_count_does_not_survive_a_repair_that_resends_nothing(
     tmp_path: Path,
 ) -> None:
@@ -7327,6 +7731,7 @@ async def test_a_stale_message_count_does_not_survive_a_repair_that_resends_noth
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_offsets_clear_is_invisible_to_the_check_by_construction(
     tmp_path: Path,
 ) -> None:
@@ -7344,6 +7749,7 @@ async def test_the_offsets_clear_is_invisible_to_the_check_by_construction(
     assert R_D_CHANNEL not in state.channel_message_offsets
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_queued_pins_and_reactions_for_the_deleted_channel_are_dropped(
     tmp_path: Path,
 ) -> None:
@@ -7444,6 +7850,7 @@ def _thread_export(channel_id: str, *, parent: str, ch_type: int = 0) -> Any:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_thread_channel_gets_its_origin_header_back(
     tmp_path: Path,
 ) -> None:
@@ -7465,6 +7872,7 @@ async def test_a_recreated_thread_channel_gets_its_origin_header_back(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_forum_post_gets_the_forum_wording(tmp_path: Path) -> None:
     """Discord channel types 15 and 16 are forums, and say so."""
     export = _thread_export(R_D_CHANNEL, parent="ideas", ch_type=15)
@@ -7487,6 +7895,7 @@ async def test_an_ordinary_channel_gets_no_origin_header(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_high_water_mark_covers_a_message_that_failed_to_send(
     tmp_path: Path,
 ) -> None:
@@ -7515,6 +7924,7 @@ async def test_the_high_water_mark_covers_a_message_that_failed_to_send(
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_non_numeric_message_id_does_not_break_the_mark(tmp_path: Path) -> None:
     """A system message can carry a non-snowflake id, and int() on it would abort."""
     export = _export_for(R_D_CHANNEL)
@@ -7656,6 +8066,7 @@ def _merge_fixture() -> list[Any]:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
     tmp_path: Path,
 ) -> None:
@@ -7689,6 +8100,7 @@ async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
     tmp_path: Path,
 ) -> None:
@@ -7720,6 +8132,7 @@ async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) -> None:
     """The parent is resent FIRST, so the thread's duplicate of it is suppressed.
 
@@ -7742,6 +8155,7 @@ async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) 
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_merge_repair_records_thread_messages_the_way_a_merge_does(
     tmp_path: Path,
 ) -> None:
@@ -7765,6 +8179,7 @@ async def test_merge_repair_records_thread_messages_the_way_a_merge_does(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_thread_message_repair_delivers_leaves_the_failed_queue(
     tmp_path: Path,
 ) -> None:
@@ -7784,6 +8199,7 @@ async def test_a_thread_message_repair_delivers_leaves_the_failed_queue(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_failed_thread_message_is_queued_against_the_new_channel(
     tmp_path: Path,
 ) -> None:
@@ -7812,6 +8228,7 @@ async def test_a_dry_run_repair_sends_no_thread_content(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("strategy", ["flatten", "archive"])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_flatten_and_archive_repair_send_no_merged_thread_content(
     tmp_path: Path, strategy: str
 ) -> None:
@@ -7826,6 +8243,7 @@ async def test_flatten_and_archive_repair_send_no_merged_thread_content(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_thread_under_another_parent_is_left_alone(tmp_path: Path) -> None:
     """Only threads whose parent is the recreated channel are merged, by name."""
     other_id = "800000000000000002"
@@ -7849,6 +8267,7 @@ async def test_a_thread_under_another_parent_is_left_alone(tmp_path: Path) -> No
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_thread_with_no_record_of_a_merge_is_not_sent_and_is_named(
     tmp_path: Path,
 ) -> None:
@@ -7876,6 +8295,7 @@ async def test_a_thread_with_no_record_of_a_merge_is_not_sent_and_is_named(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_an_error_escaping_the_merge_is_recorded_and_repair_carries_on(
     tmp_path: Path,
 ) -> None:
@@ -7911,6 +8331,7 @@ async def test_a_flatten_parent_gets_no_merge_warning(tmp_path: Path) -> None:
     ], "a flatten migration was warned about merged thread content"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_resend_sends_in_timestamp_order_not_list_order(tmp_path: Path) -> None:
     """The case that separates sorted from as-listed, added after a survivor.
 
@@ -7981,6 +8402,7 @@ async def test_unsalted_migration_reuses_base_delivery_without_reposting(tmp_pat
     assert state.channel_message_counts == {"123": 1}
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_resend_passes_persisted_replacement_identity(
     tmp_path: Path,
 ) -> None:
@@ -8024,6 +8446,7 @@ async def test_a_resend_passes_persisted_replacement_identity(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_origin_header_uses_persisted_replacement_identity(tmp_path: Path) -> None:
     """The header uses its own saved generation and current destination."""
     export = _thread_export(R_D_CHANNEL, parent="general")
@@ -8419,6 +8842,7 @@ async def _repair_tail_run(
 
 
 @pytest.mark.parametrize("kind", ["tail_absent", "tail_and_after_absent"])
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_lost_tail_is_re_sent(tmp_path: Path, kind: str) -> None:
     """Both repairable tail kinds resolve to the same one message.
 
@@ -8434,6 +8858,7 @@ async def test_a_lost_tail_is_re_sent(tmp_path: Path, kind: str) -> None:
     assert calls[0]["channel"] == R_S_CHANNEL, "it went to the wrong channel"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_tail_repair_passes_persisted_replacement_identity(tmp_path: Path) -> None:
     """Same-channel replacement cannot reuse an earlier delivery acknowledgement."""
     state, calls, _ = await _repair_tail_run(tmp_path)
@@ -8443,6 +8868,7 @@ async def test_tail_repair_passes_persisted_replacement_identity(tmp_path: Path)
     assert ref.generation in state.pending_delivery_replacements.values()
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_tail_repair_declines_a_message_the_export_lacks(tmp_path: Path) -> None:
     """A narrower re-export than the migration used cannot restore it.
 
@@ -8478,6 +8904,7 @@ async def test_a_tail_repair_leaves_the_mark_exactly_where_it_was(tmp_path: Path
     assert state.channel_high_water[R_D_CHANNEL] == "100000000000000009"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_failed_tail_repair_is_counted_as_unrestored(tmp_path: Path) -> None:
     """A repair that could not send must not report that it did."""
     _, _, events = await _repair_tail_run(tmp_path, fail=True)
@@ -8486,6 +8913,7 @@ async def test_a_failed_tail_repair_is_counted_as_unrestored(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_drains_the_dead_letter_queue(tmp_path: Path) -> None:
     """Whatever the two passes left failed, plus anything already queued.
 
@@ -8560,6 +8988,7 @@ async def test_repair_skips_the_drain_when_nothing_is_queued(tmp_path: Path) -> 
     assert called == [], "repair ran the drain with an empty queue"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channels_backlog_is_pointed_at_the_new_channel(
     tmp_path: Path,
 ) -> None:
@@ -8599,6 +9028,7 @@ async def test_a_recreated_channels_backlog_is_pointed_at_the_new_channel(
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_resent_message_is_dropped_from_the_dead_letter_queue(
     tmp_path: Path,
 ) -> None:
@@ -8749,6 +9179,7 @@ async def _repair_with_live_categories(
     return state, patches, edits
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channel_goes_back_into_its_category(tmp_path: Path) -> None:
     """Found by the whole-branch review, and invisible to every chunk review.
 
@@ -8786,6 +9217,7 @@ async def test_a_recreated_channel_goes_back_into_its_category(tmp_path: Path) -
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_channel_with_no_category_sends_no_patch(tmp_path: Path) -> None:
     """The other half, so the assertion above cannot be met by patching always."""
     _, patches, _ = await _repair_with_live_categories(
@@ -8797,6 +9229,7 @@ async def test_a_channel_with_no_category_sends_no_patch(tmp_path: Path) -> None
     assert patches == [], f"a category PATCH was sent for a channel in no category: {patches}"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channel_gets_its_slowmode_back(tmp_path: Path) -> None:
     """run_channels sets slowmode with api_edit_channel after the permission pass.
 
@@ -8813,6 +9246,7 @@ async def test_a_recreated_channel_gets_its_slowmode_back(tmp_path: Path) -> Non
     assert any(e and e.get("slowmode") == 30 for e in edits), f"slowmode was not restored: {edits}"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_voice_channel_gets_its_user_limit_back(tmp_path: Path) -> None:
     """Repair sends Stoat's nested voice.max_users field for a voice user limit."""
     _, _, edits = await _repair_with_live_categories(
@@ -8828,6 +9262,7 @@ async def test_a_recreated_voice_channel_gets_its_user_limit_back(tmp_path: Path
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_channel_with_no_attributes_sends_no_edit(tmp_path: Path) -> None:
     """The other half again: no attributes means no request."""
     _, _, edits = await _repair_with_live_categories(
@@ -8836,6 +9271,7 @@ async def test_a_recreated_channel_with_no_attributes_sends_no_edit(tmp_path: Pa
     assert edits == [], f"an edit was sent for a channel with nothing to set: {edits}"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_a_recreated_role_says_its_attributes_are_not_restored(tmp_path: Path) -> None:
     """A DECLINE when there is no Discord metadata to restore from.
 
@@ -8851,6 +9287,7 @@ async def test_a_recreated_role_says_its_attributes_are_not_restored(tmp_path: P
     ), f"the role attribute decline was not recorded: {state.warnings}"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_restores_colour_and_hoist_when_metadata_present(tmp_path: Path) -> None:
     """With a RoleMeta, repair restores colour and hoist and does NOT decline."""
     from discord_ferry.discord.metadata import RoleMeta
@@ -8868,6 +9305,7 @@ async def test_repair_restores_colour_and_hoist_when_metadata_present(tmp_path: 
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_restores_icon_when_metadata_has_hash(tmp_path: Path) -> None:
     """A RoleMeta with an icon_hash drives a re-download, an Autumn upload, and an icon edit."""
     from discord_ferry.discord.metadata import RoleMeta
@@ -8885,6 +9323,7 @@ async def test_repair_restores_icon_when_metadata_has_hash(tmp_path: Path) -> No
     )
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_skips_an_emoji_role_icon(tmp_path: Path) -> None:
     """An emoji icon (unicode_emoji, no icon_hash) is skipped, tagged phase=repair."""
     from discord_ferry.discord.metadata import RoleMeta
@@ -8899,6 +9338,7 @@ async def test_repair_skips_an_emoji_role_icon(tmp_path: Path) -> None:
     assert not any("/icons" in str(k[1]) for k in requests), requests
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_declines_when_role_absent_from_metadata(tmp_path: Path) -> None:
     """Metadata present, but no RoleMeta for this role: still declined, no attribute edit."""
     state, requests, _ = await _repair_recreating_role(tmp_path, metadata_present=True)
@@ -8910,6 +9350,7 @@ async def test_repair_declines_when_role_absent_from_metadata(tmp_path: Path) ->
     ), requests
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_re_attaching_removes_the_dead_channel_id(tmp_path: Path) -> None:
     """Both ids can be present, and leaving the dead one is a category that lies.
 
@@ -9166,6 +9607,7 @@ def _warnings_of(state: MigrationState, *types: str) -> list[dict]:
     return [w for w in state.warnings if w.get("type") in types]
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_resets_exact_prefix_default(tmp_path: Path) -> None:
     mask = 4_194_304
     state, gets, puts, _ = await _repair_with_server_default(
@@ -9192,6 +9634,7 @@ async def test_repair_convergence_noop_for_administrator_mask(tmp_path: Path) ->
     assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_warns_on_owner_edited_default(tmp_path: Path) -> None:
     mask = 4_194_304
     state, _, puts, _ = await _repair_with_server_default(
@@ -9201,6 +9644,7 @@ async def test_repair_convergence_warns_on_owner_edited_default(tmp_path: Path) 
     assert len(_warnings_of(state, "server_default_manual")) == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_warns_without_metadata(tmp_path: Path) -> None:
     state, _, puts, _ = await _repair_with_server_default(
         tmp_path, stored=FERRY_MIN_PERMISSIONS, write_metadata=False
@@ -9209,6 +9653,7 @@ async def test_repair_convergence_warns_without_metadata(tmp_path: Path) -> None
     assert len(_warnings_of(state, "server_default_manual")) == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_warns_on_zero_mask(tmp_path: Path) -> None:
     state, _, puts, _ = await _repair_with_server_default(
         tmp_path, stored=FERRY_MIN_PERMISSIONS, mask=0
@@ -9225,6 +9670,7 @@ async def test_repair_convergence_ignores_stock_default(tmp_path: Path) -> None:
     assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_fetch_failure_nonfatal(tmp_path: Path) -> None:
     state, _, puts, _ = await _repair_with_server_default(
         tmp_path, stored=4_194_304, server_status=500
@@ -9233,6 +9679,7 @@ async def test_repair_convergence_fetch_failure_nonfatal(tmp_path: Path) -> None
     assert len(_warnings_of(state, "server_default_check_failed")) == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_put_failure_nonfatal(tmp_path: Path) -> None:
     mask = 4_194_304
     state, _, puts, _ = await _repair_with_server_default(
@@ -9241,12 +9688,14 @@ async def test_repair_convergence_put_failure_nonfatal(tmp_path: Path) -> None:
     assert len(_warnings_of(state, "server_default_check_failed")) == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_non_integer_stored(tmp_path: Path) -> None:
     state, _, puts, _ = await _repair_with_server_default(tmp_path, stored="1022361624")
     assert puts == []
     assert len(_warnings_of(state, "server_default_check_failed")) == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_structure_free_single_get(tmp_path: Path) -> None:
     state, gets, _, _ = await _repair_with_server_default(tmp_path, stored=4_194_304)
     assert len(gets) == 1
@@ -9430,6 +9879,7 @@ async def test_permission_stop_in_retry_does_not_become_a_failed_send(
     assert not any(event.status == "completed" for event in events)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_permission_stop_in_repair_is_saved_and_not_completed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9456,9 +9906,8 @@ async def test_permission_stop_in_repair_is_saved_and_not_completed(
         AsyncMock(return_value=ServerReadView(state.stoat_server_id, frozenset(), {}, {}, [])),
     )
     monkeypatch.setattr(engine_module, "_recreate_channel", stopped)
-    with pytest.raises(type(error)) as caught:
-        await run_repair(config, state, [], events.append)
-    assert caught.value is error
+    outcome = await run_repair(config, state, [], events.append)
+    assert outcome.permissions is error.outcome
     assert load_state(config.output_dir).channel_map == state.channel_map
     assert not state.failed_messages
     assert any(event.detail == {"permissions": error.outcome} for event in events)
@@ -9575,6 +10024,7 @@ async def test_permission_stop_escapes_final_validation_warning_catch(
     report.assert_not_called()
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_permission_stop_escapes_repair_convergence_warning_catch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9587,9 +10037,78 @@ async def test_permission_stop_escapes_repair_convergence_warning_catch(
     monkeypatch.setattr(verify, "run_check", AsyncMock(return_value=CheckReport()))
     monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
     monkeypatch.setattr(engine_module, "api_fetch_server", AsyncMock(side_effect=error))
-    with pytest.raises(type(error)) as caught:
-        await run_repair(config, state, [], events.append)
-    assert caught.value is error
+    outcome = await run_repair(config, state, [], events.append)
+    assert outcome.permissions is error.outcome
     assert load_state(config.output_dir).stoat_server_id == state.stoat_server_id
     assert any(event.detail == {"permissions": error.outcome} for event in events)
     assert not any(event.status == "completed" for event in events)
+
+
+@pytest.mark.parametrize("kind", ["category", "emoji", "emoji_resume"])
+async def test_explicit_channel_repair_keeps_non_permission_effects_on_later_stop(
+    tmp_path, monkeypatch, kind
+):
+    from discord_ferry.parser.models import DCEReaction
+
+    config, exports, state, server, channel = _explicit_channel_repair_case(tmp_path)
+    channel["role_permissions"][state.role_map["112"]] = {"a": 0, "d": 1 << 27}
+    entity_id = valid_stoat_id(29108)
+    state.category_map["777"] = entity_id
+    state.category_names["777"] = "category"
+    report = CheckReport()
+    if kind != "emoji_resume":
+        report.add(
+            name=f"{kind}:777",
+            status="fail",
+            kind=f"{kind}_missing",
+            detail="missing",
+            discord_id="777",
+            stoat_id=entity_id,
+        )
+    if kind != "category":
+        state.emoji_map["777"] = entity_id
+        (tmp_path / "synthetic.png").write_bytes(b"synthetic")
+        exports[0].messages = [
+            DCEMessage(
+                id="101",
+                type="Default",
+                timestamp="2026-10-20T00:00:00Z",
+                content="<:synthetic:777>",
+                author=DCEAuthor(id="114", name="Synthetic"),
+                reactions=[
+                    DCEReaction(
+                        emoji=DCEEmoji(id="777", name="synthetic", image_url="synthetic.png"),
+                        count=1,
+                    )
+                ],
+            )
+        ]
+    monkeypatch.setattr("discord_ferry.migrator.verify.run_check", AsyncMock(return_value=report))
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(
+        engine_module,
+        "upload_and_create_emoji",
+        AsyncMock(return_value=(valid_stoat_id(29109), "synthetic")),
+    )
+    if kind == "emoji_resume":
+        new_id = valid_stoat_id(29109)
+        state.emoji_map["777"] = new_id
+        state.pending_emoji_rewrites["777"] = {"old": entity_id, "new": new_id}
+        state.message_map["101"] = valid_stoat_id(29110)
+        monkeypatch.setattr(engine_module, "api_edit_message", AsyncMock(return_value={}))
+    else:
+        monkeypatch.setattr(
+            engine_module, "_rewrite_emoji_references", AsyncMock(return_value=(0, 0, 0))
+        )
+
+    async def stop(*args, **kwargs):
+        raise state.permission_runtime.stop("readback_mismatch", stage="recheck")
+
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", stop)
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        remote.patch(f"{config.stoat_url}/servers/{server['_id']}", payload={})
+        outcome = await run_repair(config, state, exports, lambda event: None)
+    assert outcome.permissions.reason == "readback_mismatch"
+    assert outcome.permissions.effects == "changes_confirmed"
+    assert outcome.recreated_categories if kind == "category" else outcome.recreated_emoji

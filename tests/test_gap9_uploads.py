@@ -36,6 +36,7 @@ from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
 )
 from tests.test_delivery import seed_rejected_messages
+from tests.test_engine import repair_permission_unit_boundary as repair_permission_unit_boundary
 from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
 
 if TYPE_CHECKING:
@@ -276,6 +277,7 @@ async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Pa
     assert state.failed_messages == []
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_nested_retry_reuses_initialized_limits(tmp_path: Path) -> None:
     config = _config(tmp_path)
     state = MigrationState(

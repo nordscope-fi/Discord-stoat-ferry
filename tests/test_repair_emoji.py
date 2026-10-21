@@ -20,6 +20,7 @@ from discord_ferry.parser.models import (
     DCEReaction,
 )
 from discord_ferry.state import MigrationState
+from tests.test_engine import repair_permission_unit_boundary as repair_permission_unit_boundary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -108,6 +109,7 @@ def _present_report() -> CheckReport:
     return report
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_acts_on_emoji_missing(tmp_path: Path) -> None:
     """SC-1.1: repair recreates a missing emoji instead of declining it."""
     _with_image(tmp_path)
@@ -126,6 +128,7 @@ async def test_repair_acts_on_emoji_missing(tmp_path: Path) -> None:
     assert state.created_emoji_names[EMOJI_ID] == "smile"
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_recovers_an_inline_only_emoji_asset(tmp_path: Path) -> None:
     _with_image(tmp_path)
     config, state = _config(tmp_path), _state()
@@ -143,6 +146,7 @@ async def test_repair_recovers_an_inline_only_emoji_asset(tmp_path: Path) -> Non
     assert [record["discord_id"] for record in outcome.recreated_emoji] == [EMOJI_ID]
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_recreate_writes_map_and_record_in_one_save(tmp_path: Path) -> None:
     """SC-1.3: the new id and the resume record land in a single save_state."""
     _with_image(tmp_path)
@@ -171,6 +175,7 @@ async def test_recreate_writes_map_and_record_in_one_save(tmp_path: Path) -> Non
     assert first_new["pending"].get(EMOJI_ID) == {"old": OLD_ID, "new": NEW_ID}
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_missing_image_declines_no_record(tmp_path: Path) -> None:
     """SC-1.5: no usable export image declines, writes no resume record."""
     # No image file on disk; the reaction still names smile.png but it is absent.
@@ -220,6 +225,7 @@ async def _run_with_messages(tmp_path: Path, messages: list[DCEMessage]) -> Any:
     return outcome, edit, state
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_only_edits_message_map_messages(tmp_path: Path) -> None:
     """SC-2.1: a referencing message not in message_map is never edited."""
     m1 = _message()  # id "m1", in message_map
@@ -237,6 +243,7 @@ async def test_rewrite_only_edits_message_map_messages(tmp_path: Path) -> None:
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_content_points_at_new_id(tmp_path: Path) -> None:
     """SC-2.2: the edited content carries the new emoji id, not the old one."""
     outcome, edit, _ = await _run_with_messages(tmp_path, [_message()])
@@ -245,6 +252,7 @@ async def test_rewrite_content_points_at_new_id(tmp_path: Path) -> None:
     assert f":{OLD_ID}:" not in content
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_split_first_edits_first_part(tmp_path: Path) -> None:
     """SC-2.3: emoji in the first split part edits that part."""
     long_tail = " ".join(["word"] * 600)  # well over 2000 chars once rendered
@@ -257,6 +265,7 @@ async def test_rewrite_split_first_edits_first_part(tmp_path: Path) -> None:
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_split_first_edits_even_when_emoji_also_in_tail(tmp_path: Path) -> None:
     """Chunk-3 review guard: emoji in the first part AND a later part still edits.
 
@@ -272,6 +281,7 @@ async def test_rewrite_split_first_edits_even_when_emoji_also_in_tail(tmp_path: 
     assert outcome.recreated_emoji[0]["messages_declined"] == 0
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_split_tail_declines(tmp_path: Path) -> None:
     """SC-2.4: emoji in a later split part is declined, not edited."""
     long_head = " ".join(["word"] * 600)
@@ -282,6 +292,7 @@ async def test_rewrite_split_tail_declines(tmp_path: Path) -> None:
     assert any(d.get("type") == "emoji_in_split_tail" for d in outcome.declined)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_reaction_only_makes_no_edit(tmp_path: Path) -> None:
     """SC-2.5: an emoji used only in a reaction rewrites nothing."""
     m = _message(content="no emoji here", with_reaction=True)
@@ -290,6 +301,7 @@ async def test_rewrite_reaction_only_makes_no_edit(tmp_path: Path) -> None:
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 0
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_rewrite_counts_all_referencing_messages(tmp_path: Path) -> None:
     """SC-2.6: every mapped referencing message is counted."""
     msgs = []
@@ -331,6 +343,7 @@ async def test_rewrite_counts_all_referencing_messages(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_resume_finishes_a_crashed_rewrite(tmp_path: Path) -> None:
     """SC-3.2: a pending record from a prior crash is finished before the check."""
     _with_image(tmp_path)
@@ -356,6 +369,7 @@ async def test_resume_finishes_a_crashed_rewrite(tmp_path: Path) -> None:
     assert row["messages_rewritten"] == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_edit_failure_keeps_the_record(tmp_path: Path) -> None:
     """SC-3.3: a failed edit keeps the resume record and counts the failure."""
     _with_image(tmp_path)
@@ -396,6 +410,7 @@ def test_run_repair_docstring_admits_the_checkpoint() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_human_output_names_emoji_and_rewrite_count(tmp_path: Path) -> None:
     """SC-4.1: progress events name the recreated emoji and the rewrite count."""
     _with_image(tmp_path)
@@ -412,6 +427,7 @@ async def test_human_output_names_emoji_and_rewrite_count(tmp_path: Path) -> Non
     assert any("Rewrote 1 reference" in m for m in messages)
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_outcome_to_dict_carries_recreated_emoji_end_to_end(tmp_path: Path) -> None:
     """SC-4.2: a real run's outcome document carries recreated_emoji under actions."""
     outcome, _, _ = await _run_with_messages(tmp_path, [_message()])
@@ -440,6 +456,7 @@ def _two_referencing_messages() -> list[DCEMessage]:
     ]
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_integration_recreate_rewrite_and_verifiable(tmp_path: Path) -> None:
     """SC-I1: end to end. The emoji is recreated once, both messages rewritten, and
     emoji_map now points at the new id, which is exactly what makes a later check
@@ -462,6 +479,7 @@ async def test_integration_recreate_rewrite_and_verifiable(tmp_path: Path) -> No
     assert outcome.recreated_emoji[0]["messages_rewritten"] == 2
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_integration_interrupted_run_matches_clean_run(tmp_path: Path) -> None:
     """SC-I2: a failed edit keeps the record; a second run resumes to the same end
     state as an uninterrupted run (both messages on the new id, one emoji, cleared).
@@ -492,6 +510,7 @@ async def test_integration_interrupted_run_matches_clean_run(tmp_path: Path) -> 
     assert EMOJI_ID not in state.pending_emoji_rewrites  # same end state as a clean run
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_integration_emoji_pass_runs_before_structure(tmp_path: Path) -> None:
     """SC-I3 (ordering): the load-bearing guarantee behind the self-healing channel
     case. When both an emoji and a channel are missing, the emoji pass runs before
@@ -589,6 +608,7 @@ async def test_dry_run_lists_an_outstanding_resume_record(tmp_path: Path) -> Non
     assert row["messages_rewritten"] == 1  # would finish the stranded message
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_skips_escaped_emoji_image(tmp_path: Path) -> None:
     """Chunk 5 (#1029): an escaped repair image_url skips recreation with a warning."""
     marker = tmp_path.parent / (tmp_path.name + "-marker.png")

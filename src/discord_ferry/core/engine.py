@@ -1583,6 +1583,27 @@ async def _prepare_permission_operation(
     requested = tuple(sorted({tid for _, tid in bindings if tid is not None}))
     observed = None
     if target:
+        if mode == "repair":
+            view = await _live_server_view(
+                session, config, dataclasses.replace(state, stoat_server_id=target)
+            )
+            missing = {
+                sid for sid, tid in bindings if tid is not None and tid not in view.all_channel_ids
+            }
+            exported = {export.channel.id for export in selected}
+            if any(
+                sid.startswith("forum-index-")
+                or sid not in exported
+                or not state.created_channel_names.get(sid)
+                for sid in missing
+            ) or any(tid is None for sid, tid in bindings if sid not in missing):
+                _permission_preflight_unverified(
+                    "Bind missing channels to the selected recorded recreation owner"
+                )
+            # A complete server inventory proves absence. Retain actual facts
+            # and saved mappings; only the proposal awaits a new identity.
+            bindings = tuple((sid, None if sid in missing else tid) for sid, tid in bindings)
+            requested = tuple(sorted({tid for _, tid in bindings if tid is not None}))
         # Bind an explicit existing-server choice without persisting an unobserved identity.
         observed = await read_permission_context(
             session, config, dataclasses.replace(state, stoat_server_id=target), requested
@@ -1626,6 +1647,13 @@ async def _prepare_permission_operation(
         role_limit=role_limit,
         source_fingerprint=meta.permission_source.fingerprint,
     )
+    if (
+        mode == "repair"
+        and meta.server_default_permissions
+        and layout.server_default != meta.server_default_permissions
+        and layout.server_default == meta.server_default_permissions | FERRY_MIN_PERMISSIONS
+    ):
+        layout = dataclasses.replace(layout, planned_server_default=meta.server_default_permissions)
     base = dataclasses.replace(
         layout, planned_channels=tuple((sid, tid) for sid, tid in bindings if sid in source_ids)
     )
@@ -1666,7 +1694,12 @@ async def _prepare_permission_operation(
     complete = PermissionPlan(meta.permission_source.fingerprint, digest, layout, channels)
     runtime = PermissionRuntime()
     runtime.bind(complete)
-    if observed is not None:
+    if mode == "repair":
+        # Explicit repair may correct these selected migrated channels. The
+        # compiler still binds their actual cells and preserves unrelated bits;
+        # neither proposed corrections nor creations establish readiness.
+        runtime._active_plan("preflight")
+    elif observed is not None:
         problems = prove_carried_channel_access(complete, observed)
         if problems:
             _permission_preflight_stop(problems)
@@ -3131,15 +3164,25 @@ async def _recreate_channel(
     # dropped when its collision partner is gone, and forces a new one when the
     # server has taken the name since.
     unique_name = make_unique_channel_name(recorded, existing_names)
-    created = await api_create_channel(
-        session,
-        config.stoat_url,
-        config.token,
-        state.stoat_server_id,
-        name=unique_name,
-        channel_type=_stoat_channel_type(export.channel.type),
-        description=export.channel.topic[:1024] or None,
-    )
+    runtime = state.permission_runtime
+    if runtime is not None:
+        runtime.note_write()
+    try:
+        created = await api_create_channel(
+            session,
+            config.stoat_url,
+            config.token,
+            state.stoat_server_id,
+            name=unique_name,
+            channel_type=_stoat_channel_type(export.channel.type),
+            description=export.channel.topic[:1024] or None,
+        )
+    except MigrationError as exc:
+        if runtime is not None:
+            raise runtime.stop("write_uncertain", stage="application") from exc
+        raise
+    if runtime is not None:
+        runtime.note_write_confirmed()
     # `_id` here, `id` for roles. Upstream's spelling, not ours.
     new_id: str = created["_id"]
     state.channel_map[discord_id] = new_id
@@ -3400,9 +3443,14 @@ async def _recreate_category(
     rebuilt = [c for c in live_categories if c.get("id") != new_id]
     rebuilt.append({"id": new_id, "title": title, "channels": stoat_channel_ids})
 
+    runtime = state.permission_runtime
+    if runtime is not None:
+        runtime.note_write()
     await api_upsert_categories(
         session, config.stoat_url, config.token, state.stoat_server_id, rebuilt
     )
+    if runtime is not None:
+        runtime.note_write_confirmed()
     live_categories[:] = rebuilt
     state.category_map[discord_id] = new_id
     on_event(
@@ -3462,6 +3510,9 @@ async def _rewrite_emoji_references(
             continue
 
         try:
+            runtime = state.permission_runtime
+            if runtime is not None:
+                runtime.note_write()
             await api_edit_message(
                 session,
                 config.stoat_url,
@@ -3470,7 +3521,11 @@ async def _rewrite_emoji_references(
                 stoat_msg,
                 content=parts[0],
             )
+            if runtime is not None:
+                runtime.note_write_confirmed()
             rewritten += 1
+        except PermissionSafetyError:
+            raise
         except Exception as exc:  # noqa: BLE001
             failed += 1
             message = safe_sanitize(
@@ -3608,9 +3663,14 @@ async def _run_emoji_repair_pass(
             continue
 
         name = record["name"]
+        runtime = state.permission_runtime
+        if runtime is not None:
+            runtime.note_write()
         new_id, emoji_name = await upload_and_create_emoji(
             session, config, state, file_path=file_path, name=name, used_names=used_names
         )
+        if runtime is not None:
+            runtime.note_write_confirmed()
         # ONE save writes the new map value AND the resume record together, so a
         # crash between here and the rewrite strands neither without the other.
         # From this point emoji_map already points at the new emoji, so a re-run's
@@ -3684,13 +3744,25 @@ async def run_repair(
 
     Raises:
         CheckError: The state is from a dry run, or records no server.
-        PermissionSafetyError: Preserve the original outcome and confirmed identities.
+        PermissionSafetyError: Returned in the outcome with confirmed identities and actions.
     """
+    from discord_ferry.migrator.verify import RepairOutcome
+
+    outcome = RepairOutcome(dry_run=config.dry_run)
+    warnings_start = len(state.warnings)
+    state.permission_runtime = None
     try:
-        return await _run_repair(config, state, exports, on_event, session=session)
+        return await _run_repair(config, state, exports, on_event, outcome=outcome, session=session)
     except PermissionSafetyError as exc:
         _record_permission_stop(config, state, on_event, "repair", exc)
-        raise
+        outcome.permissions = exc.outcome
+        outcome.declined = _repair_declined(state, warnings_start)
+        outcome.failed_messages = [
+            {"discord_msg_id": fm.discord_msg_id, "stoat_channel_id": fm.stoat_channel_id}
+            for fm in state.failed_messages
+        ]
+        outcome.dead_letter["remaining"] = len(state.failed_messages)
+        return outcome
 
 
 async def _run_repair(
@@ -3699,6 +3771,7 @@ async def _run_repair(
     exports: list[DCEExport],
     on_event: EventCallback,
     *,
+    outcome: RepairOutcome,
     session: aiohttp.ClientSession | None = None,
 ) -> RepairOutcome:
     """Execute the existing repair work inside its public error boundary."""
@@ -3707,9 +3780,6 @@ async def _run_repair(
     # declined set is scoped to THIS run's repair-phase warnings and never
     # includes the migration's own historical warnings, which state.warnings
     # keeps and never clears.
-    from discord_ferry.migrator.verify import RepairOutcome
-
-    outcome = RepairOutcome(dry_run=config.dry_run)
     delivery_outcomes = DeliveryOutcomes()
     warnings_start = len(state.warnings)
 
@@ -3873,7 +3943,121 @@ async def _run_repair(
     own_limits_session = session is None
     limits_session = session or new_session()
     try:
+        state.permission_runtime = await _prepare_permission_operation(
+            config, state, exports, limits_session, mode="repair"
+        )
         await _initialize_upload_limits(limits_session, config)
+        _permission_preflight_cancel(config, state.permission_runtime)
+        metadata = load_bound_discord_metadata(config, exports)
+        assert state.permission_runtime is not None
+        assert state.permission_runtime.plan is not None
+        # Convergence check for the pre-fix server-default floor (#957). Runs on
+        # every non-dry repair, including structure-free ones: one GET on the
+        # /servers bucket is the price of detecting a shared-default overgrant on
+        # servers that are otherwise complete.
+        if state.stoat_server_id and not config.dry_run:
+            own_conv_session = session is None
+            conv_sess = session or new_session()
+            try:
+                convergence_metadata = load_bound_discord_metadata(config, exports)
+                server_doc = await api_fetch_server(
+                    conv_sess, config.stoat_url, config.token, state.stoat_server_id
+                )
+                raw_default = server_doc.get("default_permissions")
+                stored = raw_default if isinstance(raw_default, int) else None
+                mask = (
+                    convergence_metadata.server_default_permissions
+                    if convergence_metadata is not None
+                    else 0
+                )
+                floor = FERRY_MIN_PERMISSIONS
+                if stored is None:
+                    state.warnings.append(
+                        {
+                            "phase": "repair",
+                            "type": "server_default_check_failed",
+                            "message": "Server default permissions missing or not an integer.",
+                        }
+                    )
+                elif stored == mask:
+                    pass
+                elif mask and stored == mask | floor:
+                    runtime = state.permission_runtime
+                    runtime.authorize_default_write(mask)
+                    runtime.note_write()
+                    try:
+                        await api_set_server_default_permissions(
+                            conv_sess,
+                            config.stoat_url,
+                            config.token,
+                            state.stoat_server_id,
+                            permissions=mask,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        raise runtime.stop("write_uncertain", stage="application") from exc
+                    runtime.note_write_confirmed()
+                    await asyncio.sleep(config.upload_delay)
+                    state.warnings.append(
+                        {
+                            "phase": "repair",
+                            "type": "server_default_reset",
+                            "message": (
+                                f"Removed the migration floor from server "
+                                f"{state.stoat_server_id} default permissions (#957)."
+                            ),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="repair",
+                            status="warning",
+                            message="Server default permissions converged (#957).",
+                        )
+                    )
+                elif stored & floor == floor:
+                    state.warnings.append(
+                        {
+                            "phase": "repair",
+                            "type": "server_default_manual",
+                            "message": (
+                                f"Server {state.stoat_server_id} default permissions still "
+                                "carry the migration floor but differ from the recorded "
+                                "mask; review and edit them in Stoat server settings."
+                            ),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="repair",
+                            status="warning",
+                            message="Server default permissions need manual review (#957).",
+                        )
+                    )
+            except PermissionSafetyError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                state.warnings.append(
+                    {
+                        "phase": "repair",
+                        "type": "server_default_check_failed",
+                        "message": f"Server default convergence check failed: {exc}",
+                    }
+                )
+            finally:
+                if own_conv_session:
+                    await conv_sess.close()
+
+        for source, target in state.permission_runtime.plan.target_layout.planned_channels:
+            if target is not None:
+                await apply_channel_permissions(
+                    limits_session,
+                    config,
+                    state,
+                    target,
+                    metadata.channel_metadata.get(source) if metadata else None,
+                    state.created_channel_names.get(source, source),
+                    phase="repair",
+                )
     finally:
         if own_limits_session:
             await limits_session.close()
@@ -4023,6 +4207,26 @@ async def _run_repair(
                         matching = next((e for e in exports if e.channel.id == discord_id), None)
                         label = state.created_channel_names.get(discord_id, discord_id)
                         count = 0
+                        action = {
+                            "discord_id": discord_id,
+                            "stoat_id": state.channel_map.get(discord_id),
+                            "name": label,
+                            "resent_count": count,
+                        }
+                        outcome.recreated_channels.append(action)
+                        runtime = state.permission_runtime
+                        assert runtime is not None
+                        runtime.bind_channel(discord_id, state.channel_map[discord_id])
+                        save_state(state, config.output_dir)
+                        await apply_channel_permissions(
+                            sess,
+                            config,
+                            state,
+                            state.channel_map[discord_id],
+                            metadata.channel_metadata.get(discord_id) if metadata else None,
+                            label,
+                            phase="repair",
+                        )
                         if matching is not None:
                             count = await _resend_channel(
                                 sess,
@@ -4032,6 +4236,7 @@ async def _run_repair(
                                 on_event,
                                 delivery_outcomes=delivery_outcomes,
                             )
+                            action["resent_count"] = count
                             on_event(
                                 MigrationEvent(
                                     phase="repair",
@@ -4056,14 +4261,6 @@ async def _run_repair(
                                             message=(f"Re-merged {merged} thread(s) into {label}."),
                                         )
                                     )
-                        outcome.recreated_channels.append(
-                            {
-                                "discord_id": discord_id,
-                                "stoat_id": state.channel_map.get(discord_id),
-                                "name": label,
-                                "resent_count": count,
-                            }
-                        )
                     if created:
                         await _reattach_to_category(
                             sess,
@@ -4076,15 +4273,6 @@ async def _run_repair(
                             on_event,
                         )
                     if created and metadata:
-                        await apply_channel_permissions(
-                            sess,
-                            config,
-                            state,
-                            state.channel_map[discord_id],
-                            metadata.channel_metadata.get(discord_id),
-                            state.created_channel_names.get(discord_id, discord_id),
-                            phase="repair",
-                        )
                         await _apply_channel_attributes(
                             sess,
                             config,
@@ -4097,95 +4285,6 @@ async def _run_repair(
         finally:
             if own_session:
                 await sess.close()
-
-    # Convergence check for the pre-fix server-default floor (#957). Runs on
-    # every non-dry repair, including structure-free ones: one GET on the
-    # /servers bucket is the price of detecting a shared-default overgrant on
-    # servers that are otherwise complete.
-    if state.stoat_server_id and not config.dry_run:
-        own_conv_session = session is None
-        conv_sess = session or new_session()
-        try:
-            convergence_metadata = load_bound_discord_metadata(config, exports)
-            server_doc = await api_fetch_server(
-                conv_sess, config.stoat_url, config.token, state.stoat_server_id
-            )
-            raw_default = server_doc.get("default_permissions")
-            stored = raw_default if isinstance(raw_default, int) else None
-            mask = (
-                convergence_metadata.server_default_permissions
-                if convergence_metadata is not None
-                else 0
-            )
-            floor = FERRY_MIN_PERMISSIONS
-            if stored is None:
-                state.warnings.append(
-                    {
-                        "phase": "repair",
-                        "type": "server_default_check_failed",
-                        "message": "Server default permissions missing or not an integer.",
-                    }
-                )
-            elif stored == mask:
-                pass
-            elif mask and stored == mask | floor:
-                await api_set_server_default_permissions(
-                    conv_sess,
-                    config.stoat_url,
-                    config.token,
-                    state.stoat_server_id,
-                    permissions=mask,
-                )
-                await asyncio.sleep(config.upload_delay)
-                state.warnings.append(
-                    {
-                        "phase": "repair",
-                        "type": "server_default_reset",
-                        "message": (
-                            f"Removed the migration floor from server "
-                            f"{state.stoat_server_id} default permissions (#957)."
-                        ),
-                    }
-                )
-                on_event(
-                    MigrationEvent(
-                        phase="repair",
-                        status="warning",
-                        message="Server default permissions converged (#957).",
-                    )
-                )
-            elif stored & floor == floor:
-                state.warnings.append(
-                    {
-                        "phase": "repair",
-                        "type": "server_default_manual",
-                        "message": (
-                            f"Server {state.stoat_server_id} default permissions still "
-                            "carry the migration floor but differ from the recorded "
-                            "mask; review and edit them in Stoat server settings."
-                        ),
-                    }
-                )
-                on_event(
-                    MigrationEvent(
-                        phase="repair",
-                        status="warning",
-                        message="Server default permissions need manual review (#957).",
-                    )
-                )
-        except PermissionSafetyError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            state.warnings.append(
-                {
-                    "phase": "repair",
-                    "type": "server_default_check_failed",
-                    "message": f"Server default convergence check failed: {exc}",
-                }
-            )
-        finally:
-            if own_conv_session:
-                await conv_sess.close()
 
     # Forum-index repair (#311). Its own session block, like every other work list:
     # run_repair opens a session per non-empty list, and _live_server_view is fetched
@@ -4291,18 +4390,20 @@ async def _run_repair(
     # empty queue, so this costs nothing when there is nothing to drain.
     if state.failed_messages:
         before = len(state.failed_messages)
-        await run_retry_failed(
-            config,
-            state,
-            exports,
-            on_event,
-            _upload_limits_ready=True,
-            _delivery_outcomes=delivery_outcomes,
-        )
-        outcome.dead_letter = {
-            "drained": before - len(state.failed_messages),
-            "remaining": len(state.failed_messages),
-        }
+        try:
+            await run_retry_failed(
+                config,
+                state,
+                exports,
+                on_event,
+                _upload_limits_ready=True,
+                _delivery_outcomes=delivery_outcomes,
+            )
+        finally:
+            outcome.dead_letter = {
+                "drained": before - len(state.failed_messages),
+                "remaining": len(state.failed_messages),
+            }
 
     # One save, at the end. Never under --dry-run, and not merely a save that
     # happens to change nothing: run_check REFUSES a dry-run state outright,
@@ -4310,6 +4411,8 @@ async def _run_repair(
     # nobody created. Writing those into a real state file would leave the user
     # with a migration that can never be checked again.
     outcome.declined = _repair_declined(state, warnings_start)
+    if state.permission_runtime is not None:
+        outcome.permissions = state.permission_runtime.outcome
     outcome.failed_messages = [
         {"discord_msg_id": fm.discord_msg_id, "stoat_channel_id": fm.stoat_channel_id}
         for fm in state.failed_messages
