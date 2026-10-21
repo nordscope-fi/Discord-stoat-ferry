@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Check mapped channel and generated-index access against source evidence without changing permissions or installing operation authority; distinguish verified, mismatched, unsupported and unverified results in check schema version 2 (#1172).
 - Require fresh channel access proof at message-batch entry and synchronous authority before publication; cancel queued peers on a typed safety stop, preserving in-flight receipts and truthful confirmed or possible destination effects (#1172).
 - Bind confirmed structure identities to the operation's permission plan and verify new or carried channel access before initial forum-index send and pin (#1172).
 - Check existing target roles plus planned creations against the backend's total-role limit before migration writes, preserving reuse and skipped-creation behavior (#1172).

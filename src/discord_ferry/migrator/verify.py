@@ -35,11 +35,15 @@ from discord_ferry.core.permissions import (
     PermissionOutcome,
     PermissionProblem,
     PermissionReadback,
+    PermissionRuntime,
     TargetChannel,
     TargetLayout,
     TargetRole,
+    common_index_plan,
+    compile_permission_plan,
 )
 from discord_ferry.core.security import strip_control
+from discord_ferry.discord.metadata import validate_permission_source
 from discord_ferry.errors import CheckError, FerryError, PermissionSafetyError
 from discord_ferry.migrator.api import (
     api_fetch_channel,
@@ -55,6 +59,7 @@ if TYPE_CHECKING:
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
+    from discord_ferry.discord.metadata import DiscordMetadata
     from discord_ferry.state import MigrationState
 
 
@@ -194,23 +199,36 @@ async def read_permission_context(
     channel_ids: tuple[str, ...],
 ) -> PermissionReadback:
     """Bracket channel evidence through the existing transport and supplied session."""
+    if config.server_id is not None and config.server_id != state.stoat_server_id:
+        return _permission_unverified("Target permission context could not be read and bound")
+    return await _read_permission_context(
+        session, config.stoat_url, config.token, state, channel_ids
+    )
+
+
+async def _read_permission_context(
+    session: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+    channel_ids: tuple[str, ...],
+) -> PermissionReadback:
+    """Share bracketed readback with read-only checks that do not own a migration config."""
     try:
-        service = _permission_service(config.stoat_url)
+        service = _permission_service(stoat_url)
         server_id = _permission_id(state.stoat_server_id)
-        if config.server_id is not None and config.server_id != server_id:
-            raise ValueError("Configured target differs from recorded target")
         if not isinstance(channel_ids, tuple) or len(set(channel_ids)) != len(channel_ids):
             raise ValueError("Requested permission scope must be unique")
         for cid in channel_ids:
             _permission_id(cid)
-        before = await api_fetch_server(session, service, config.token, server_id)
+        before = await api_fetch_server(session, service, token, server_id)
         channels = []
         for cid in channel_ids:
             try:
-                channels.append(await api_fetch_channel(session, service, config.token, cid))
+                channels.append(await api_fetch_channel(session, service, token, cid))
             except (FerryError, ValueError, TimeoutError):
                 try:
-                    view = await api_fetch_server_view(session, service, config.token, server_id)
+                    view = await api_fetch_server_view(session, service, token, server_id)
                     if cid not in view.all_channel_ids:
                         return _permission_unverified(
                             "Channel is missing; inspect the target before explicit repair", cid
@@ -224,7 +242,7 @@ async def read_permission_context(
                 return _permission_unverified(
                     "Channel permission read failed; obtain fresh target evidence", cid
                 )
-        after = await api_fetch_server(session, service, config.token, server_id)
+        after = await api_fetch_server(session, service, token, server_id)
         return decode_permission_readback(
             before, tuple(channels), after, state, service=service, channel_ids=channel_ids
         )
@@ -281,7 +299,7 @@ STATUSES: tuple[CheckStatus, ...] = get_args(CheckStatus)
 #: Machine-readable ``CheckReport`` contract version. Increment for any field,
 #: data type, status, kind, or meaning change. Ordinary result values and free-form
 #: detail text do not change the contract.
-CHECK_REPORT_SCHEMA_VERSION: Final[int] = 1
+CHECK_REPORT_SCHEMA_VERSION: Final[int] = 2
 
 
 @dataclass
@@ -311,6 +329,8 @@ class CheckResult:
                         ``tail_absent``, ``tail_and_after_absent``,
                         ``tail_not_recorded``, ``tail_window_exhausted``
     Failure to look     ``check_error``
+    Permissions         ``permission_verified``, ``permission_mismatch``,
+                        ``permission_unverified``, ``permission_unsupported``
     ==================  ====================================================
 
     Two pairs are deliberately NOT collapsed, both for the same reason.
@@ -541,6 +561,7 @@ async def run_check(
     on_event: EventCallback,
     *,
     session: aiohttp.ClientSession | None = None,
+    permission_metadata: DiscordMetadata | None = None,
 ) -> CheckReport:
     """Verify a finished migration against a live Stoat server.
 
@@ -576,11 +597,140 @@ async def run_check(
     try:
         verified: set[str] = set()
         await _check_structure(sess, stoat_url, token, state, report, on_event, verified)
+        await _check_permissions(sess, stoat_url, token, state, report, permission_metadata)
         await _check_tails(sess, stoat_url, token, state, report, on_event, verified)
     finally:
         if own_session:
             await sess.close()
     return report
+
+
+async def _check_permissions(
+    sess: aiohttp.ClientSession,
+    stoat_url: str,
+    token: str,
+    state: MigrationState,
+    report: CheckReport,
+    metadata: DiscordMetadata | None,
+) -> None:
+    """Diagnose exact mapped access without correction or installing operation authority."""
+
+    def problems(
+        items: tuple[PermissionProblem, ...], source: str | None = None, target: str | None = None
+    ) -> None:
+        for problem in items:
+            report.add(
+                name=f"permission:{source}" if source else "permissions",
+                status=(
+                    "fail"
+                    if problem.reason in {"readback_mismatch", "unsupported"}
+                    else "unverifiable"
+                ),
+                kind=(
+                    "permission_mismatch"
+                    if problem.reason == "readback_mismatch"
+                    else "permission_unsupported"
+                    if problem.reason == "unsupported"
+                    else "permission_unverified"
+                ),
+                detail=problem.guidance,
+                discord_id=source,
+                stoat_id=target,
+            )
+
+    if metadata is None or not state.channel_map:
+        problems(
+            (
+                PermissionProblem(
+                    "unverified",
+                    (),
+                    None,
+                    "Provide bound source permission evidence and recorded channels",
+                ),
+            )
+        )
+        return
+    indexes: dict[str, tuple[str, ...]] = {}
+    for key, index_target in state.channel_map.items():
+        if not key.startswith("forum-index-"):
+            continue
+        group = key.removeprefix("forum-index-")
+        members = state.forum_channel_members.get(group, [])
+        expected = {
+            source for source, category in state.channel_categories.items() if category == group
+        }
+        if not members or len(set(members)) != len(members) or set(members) != expected:
+            problems(
+                (
+                    PermissionProblem(
+                        "unverified",
+                        (),
+                        None,
+                        "Reconcile complete generated-index source membership",
+                    ),
+                ),
+                key,
+                index_target,
+            )
+            return
+        indexes[key] = tuple(sorted(members))
+    source_ids = frozenset(state.channel_map.keys() - indexes.keys()).union(
+        source for members in indexes.values() for source in members
+    )
+    issues = validate_permission_source(metadata, source_ids)
+    if issues:
+        problems(issues)
+        return
+    observed = await _read_permission_context(
+        sess, stoat_url, token, state, tuple(sorted(set(state.channel_map.values())))
+    )
+    if observed.problems:
+        problems(observed.problems)
+        return
+    layout = replace(
+        observed.layout,
+        planned_roles=tuple(sorted(state.role_map.items())),
+        planned_channels=tuple((sid, state.channel_map.get(sid)) for sid in sorted(source_ids)),
+    )
+    assert (
+        metadata.permission_source is not None
+    )  # Source validation established complete evidence.
+    plan = compile_permission_plan(metadata.permission_source, layout)
+    if plan.problems:
+        problems(plan.problems)
+        return
+    layout = replace(
+        layout,
+        planned_channels=tuple(
+            sorted({**dict(layout.planned_channels), **state.channel_map}.items())
+        ),
+    )
+    channels = tuple(replace(channel, target_layout=layout) for channel in plan.channels)
+    by_source = {channel.source_key: channel for channel in channels}
+    for key, sources in indexes.items():
+        index = common_index_plan(key, sources, tuple(by_source[source] for source in sources))
+        if index.problems:
+            problems(index.problems, key, state.channel_map[key])
+            return
+        channels += (index,)
+    plan = replace(plan, target_layout=layout, channels=channels)
+    for channel in channels:
+        target = state.channel_map.get(channel.source_key)
+        if target is None:
+            continue  # Proof-only source membership does not invent a destination channel.
+        try:
+            PermissionRuntime(plan).verify(target, observed)
+        except PermissionSafetyError as error:
+            problems(error.outcome.problems, channel.source_key, target)
+        else:
+            report.add(
+                name=f"permission:{channel.source_key}",
+                status="ok",
+                kind="permission_verified",
+                detail="Mapped channel access matches the bound source evidence",
+                discord_id=channel.source_key,
+                stoat_id=target,
+            )
 
 
 async def _check_structure(
