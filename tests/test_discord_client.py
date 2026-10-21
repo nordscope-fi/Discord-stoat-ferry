@@ -14,16 +14,90 @@ from discord_ferry import __version__
 from discord_ferry.discord import fetch_and_translate_guild_metadata
 from discord_ferry.discord.client import (
     _parse_channel,
+    _parse_role,
     download_role_icon,
     fetch_guild_channels,
     fetch_guild_roles,
 )
+from discord_ferry.discord.models import DiscordChannel, DiscordRole
 from discord_ferry.errors import DiscordAuthError
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 
 DISCORD_API = "https://discord.com/api/v10"
 TOKEN = "test-discord-token"
 GUILD_ID = "111222333"
+
+
+def test_omitted_overwrites_are_not_verified_empty() -> None:
+    omitted = _parse_channel({"id": "222", "name": "general", "type": 0})
+    explicit = _parse_channel(
+        {"id": "222", "name": "general", "type": 0, "permission_overwrites": []}
+    )
+    assert getattr(omitted, "capture_fields", None) == frozenset({"id", "name", "type"})
+    assert explicit.capture_fields == frozenset({"id", "name", "type", "permission_overwrites"})
+    assert omitted.permission_overwrites == explicit.permission_overwrites == []
+
+
+def test_role_defaults_do_not_prove_capture() -> None:
+    omitted = _parse_role({"id": "111", "name": "ordinary", "permissions": "0"})
+    explicit = _parse_role(
+        {"id": "111", "name": "ordinary", "permissions": "0", "position": 0, "managed": False}
+    )
+    assert getattr(omitted, "capture_fields", None) == frozenset({"id", "name", "permissions"})
+    assert explicit.capture_fields == frozenset(
+        {"id", "name", "permissions", "position", "managed"}
+    )
+    assert omitted.permissions == explicit.permissions == 0
+    assert omitted.position == explicit.position == 0
+    assert omitted.managed is explicit.managed is False
+
+
+def test_manual_rest_models_have_no_capture_evidence() -> None:
+    role = DiscordRole("111", "ordinary", 0)
+    channel = DiscordChannel("222", "general", 0)
+    assert getattr(role, "capture_fields", None) == frozenset()
+    assert getattr(channel, "capture_fields", None) == frozenset()
+
+
+def test_capture_fields_snapshot_received_keys_without_filtering() -> None:
+    role_raw = {
+        "id": "111",
+        "name": "managed",
+        "permissions": "0",
+        "managed": True,
+        "position": 1,
+        "extra": "not retained as a value",
+    }
+    channel_raw = {
+        "id": "222",
+        "name": "general",
+        "type": 0,
+        "permission_overwrites": [],
+        "extra": "not retained as a value",
+    }
+    role = _parse_role(role_raw)
+    channel = _parse_channel(channel_raw)
+    assert getattr(role, "capture_fields", None) == frozenset(role_raw)
+    assert getattr(channel, "capture_fields", None) == frozenset(channel_raw)
+    assert isinstance(role.capture_fields, frozenset)
+    assert isinstance(channel.capture_fields, frozenset)
+    del role_raw["managed"]
+    del channel_raw["permission_overwrites"]
+    assert "managed" in role.capture_fields and role.managed is True
+    assert "permission_overwrites" in channel.capture_fields
+
+
+def test_present_malformed_values_are_not_misclassified_as_missing() -> None:
+    role = _parse_role(
+        {"id": "111", "name": "ordinary", "permissions": "0", "position": None, "managed": None}
+    )
+    channel = _parse_channel({"id": "222", "name": "general", "type": None})
+    assert getattr(role, "capture_fields", None) == frozenset(
+        {"id", "name", "permissions", "position", "managed"}
+    )
+    assert getattr(channel, "capture_fields", None) == frozenset({"id", "name", "type"})
+    assert role.position is None and role.managed is None
+    assert channel.type is None
 
 
 @pytest.fixture

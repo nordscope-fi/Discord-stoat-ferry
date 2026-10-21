@@ -32,6 +32,7 @@ class DiscordRole:
     managed: bool = False
     icon: str = ""
     unicode_emoji: str = ""
+    capture_fields: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -46,3 +47,4 @@ class DiscordChannel:
     rate_limit_per_user: int = 0  # slowmode seconds (text channels)
     user_limit: int = 0  # voice channel capacity cap (0 = unlimited)
     permission_overwrites: list[PermissionOverwrite] = field(default_factory=list)
+    capture_fields: frozenset[str] = frozenset()
