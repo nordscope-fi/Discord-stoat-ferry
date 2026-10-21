@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import PhaseFunction, run_migration
 from discord_ferry.state import FailedMessage, MigrationState, save_state
 from tests.stoat_ids import SERVER_ID
+from tests.test_engine import migration_preflight_unit_boundary as migration_preflight_unit_boundary
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback, MigrationEvent
@@ -63,6 +66,7 @@ def _make_prior_state(tmp_path: Path, **kwargs: object) -> MigrationState:
     return prior
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     """Incremental mode carries forward ID maps and offsets from prior state."""
     prior = _make_prior_state(
@@ -114,6 +118,7 @@ async def test_incremental_loads_prior_state(tmp_path: Path) -> None:
     assert len(progress_events) >= 1
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_no_prior_state_runs_fresh(tmp_path: Path) -> None:
     """Incremental mode with no prior state falls back to a fresh migration."""
     events: list[MigrationEvent] = []
@@ -129,6 +134,7 @@ async def test_incremental_no_prior_state_runs_fresh(tmp_path: Path) -> None:
     assert len(warning_events) >= 1
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_skips_old_messages(tmp_path: Path) -> None:
     """SC-19: incremental carries the durable marker the real phase skips against.
 
@@ -151,6 +157,7 @@ async def test_incremental_skips_old_messages(tmp_path: Path) -> None:
     assert state.completed_channel_ids == set()
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_new_channel_full_migration(tmp_path: Path) -> None:
     """A channel not present in the prior channel_map gets full migration (no offset)."""
     processed_ids: list[str] = []
@@ -186,6 +193,7 @@ async def test_incremental_new_channel_full_migration(tmp_path: Path) -> None:
     assert "300" in processed_ids
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> None:
     """SC-8: incremental carry-over copies forum fields + counts + category maps.
 
@@ -237,6 +245,7 @@ async def test_incremental_carries_forum_state_and_counts(tmp_path: Path) -> Non
     assert state.forum_channel_members[forum_key] is not prior.forum_channel_members[forum_key]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_delta_stats_in_report(tmp_path: Path) -> None:
     """Report includes delta stats: this_run, cumulative, prior_run_total."""
     from discord_ferry.reporter import generate_report
@@ -267,6 +276,7 @@ async def test_incremental_delta_stats_in_report(tmp_path: Path) -> None:
     assert delta["this_run"] == len(state.message_map) - 10
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carries_channel_high_water(tmp_path: Path) -> None:
     """Incremental carry-over copies channel_high_water and resets completed_channel_ids."""
     _make_prior_state(
@@ -280,6 +290,7 @@ async def test_incremental_carries_channel_high_water(tmp_path: Path) -> None:
     assert state.completed_channel_ids == set()
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carries_failed_messages(tmp_path: Path) -> None:
     """SC-1: incremental carry-over copies prior.failed_messages forward."""
     _make_prior_state(
@@ -292,6 +303,7 @@ async def test_incremental_carries_failed_messages(tmp_path: Path) -> None:
     assert [fm.discord_msg_id for fm in state.failed_messages] == ["200"]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carried_failed_messages_are_independent_copies(tmp_path: Path) -> None:
     """SC-2: mutating a carried FailedMessage must not affect the prior state object."""
     prior = _make_prior_state(
@@ -306,6 +318,7 @@ async def test_incremental_carried_failed_messages_are_independent_copies(tmp_pa
     assert state.failed_messages[0] is not prior.failed_messages[0]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carries_pending_emoji_rewrites(tmp_path: Path) -> None:
     """#307: a repair resume record survives an incremental run.
 
@@ -323,6 +336,7 @@ async def test_incremental_carries_pending_emoji_rewrites(tmp_path: Path) -> Non
     assert state.pending_emoji_rewrites == {"851": {"old": "old_stoat", "new": "new_stoat"}}
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carries_roles_finalized(tmp_path: Path) -> None:
     """SC-19: incremental carry-over copies prior.roles_finalized (C1)."""
     _make_prior_state(
@@ -335,6 +349,7 @@ async def test_incremental_carries_roles_finalized(tmp_path: Path) -> None:
     assert state.roles_finalized == {"810"}
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_seeds_then_carries_roles_finalized_for_old_state(tmp_path: Path) -> None:
     """SC-19 (seed+carry): a completed prior state with no roles_finalized is seeded."""
     # _make_prior_state sets completed_at; roles_finalized defaults empty -> simulates an old ferry.

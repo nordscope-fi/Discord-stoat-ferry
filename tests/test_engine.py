@@ -191,6 +191,1042 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
     return FerryConfig(**defaults)  # type: ignore[arg-type]
 
 
+@pytest.fixture
+def migration_preflight_unit_boundary(monkeypatch: pytest.MonkeyPatch):
+    """Isolate unrelated pipeline units, never permission integration or readiness."""
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    # Legacy pipeline fixtures include mixed guilds and unsupported thread exports.
+    # They test other collaborators, not whether those exports may be migrated.
+    # Explicit opt-in keeps every real preflight regression on the actual owner.
+    operation = AsyncMock(side_effect=lambda *args, **kwargs: PermissionRuntime())
+    monkeypatch.setattr(engine_module, "_prepare_permission_operation", operation)
+    return operation
+
+
+async def test_permission_preflight_missing_source_stops_actual_migration_before_lock(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    for target in (None, valid_stoat_id(29001)):
+        config = _make_config(tmp_path, server_id=target)
+        lock = AsyncMock(return_value=True)
+        connect = AsyncMock()
+        with (
+            patch("discord_ferry.core.engine._initialize_upload_limits", new=AsyncMock()),
+            patch("discord_ferry.core.engine._acquire_migration_lock", new=lock),
+            patch("discord_ferry.core.engine._release_migration_lock", new=AsyncMock()),
+            pytest.raises(PermissionSafetyError) as caught,
+        ):
+            await run_migration(
+                config,
+                lambda event: None,
+                phase_overrides={**_NOOP_OVERRIDES, "connect": connect},
+            )
+        assert caught.value.outcome.stage == "preflight"
+        assert caught.value.outcome.reason == "unverified"
+        assert caught.value.outcome.effects == "none_confirmed"
+        lock.assert_not_awaited()
+        connect.assert_not_awaited()
+        assert config.session is None
+
+
+def _permission_preflight_case(
+    tmp_path,
+    *,
+    everyone=0,
+    forum=False,
+    mixed=False,
+    ordinary=None,
+    source_ids=None,
+    unsupported_source=None,
+):
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import (
+        ChannelMeta,
+        DiscordMetadata,
+        PermissionPair,
+        RoleMeta,
+        RoleOverride,
+        capture_permission_source,
+        save_discord_metadata,
+    )
+    from discord_ferry.discord.permissions import translate_permissions
+
+    view_send = (1 << 10) | (1 << 11)
+    ordinary = (("112", view_send, 1),) if ordinary is None else ordinary
+    raw_roles = [
+        client._parse_role(
+            {
+                "id": "111",
+                "name": "everyone",
+                "permissions": str(everyone),
+                "position": 0,
+                "managed": False,
+            }
+        ),
+        *(
+            client._parse_role(
+                {
+                    "id": sid,
+                    "name": "ordinary",
+                    "permissions": str(grants),
+                    "position": position,
+                    "managed": False,
+                }
+            )
+            for sid, grants, position in ordinary
+        ),
+    ]
+    ids = source_ids if source_ids is not None else ("222", "333") if forum else ("222",)
+    channels = []
+    translated = {}
+    for sid in ids:
+        deny = (1 << 10) if mixed and sid == "333" else 0
+        overwrites = [{"id": "112", "type": 0, "allow": "0", "deny": str(deny)}]
+        if sid == unsupported_source:
+            overwrites.append({"id": "999", "type": 1, "allow": "1024", "deny": "0"})
+        channels.append(
+            client._parse_channel(
+                {
+                    "id": sid,
+                    "name": "selected",
+                    "type": 15 if forum else 0,
+                    "permission_overwrites": overwrites,
+                }
+            )
+        )
+        translated[sid] = ChannelMeta(
+            False, role_overrides=[RoleOverride("112", 0, translate_permissions(deny))]
+        )
+    meta = DiscordMetadata(
+        "111",
+        "2026-10-20T08:00:00+00:00",
+        translate_permissions(everyone),
+        {sid: PermissionPair(translate_permissions(grants), 0) for sid, grants, _ in ordinary},
+        translated,
+        role_metadata={
+            sid: RoleMeta(position=position, name="ordinary") for sid, _, position in ordinary
+        },
+        permission_source=capture_permission_source("111", raw_roles, channels),
+    )
+    save_discord_metadata(meta, tmp_path)
+    exports = [
+        _index_export(sid)
+        if forum
+        else DCEExport(DCEGuild("111", "source"), DCEChannel(sid, 0, "selected"))
+        for sid in ids
+    ]
+    return _make_config(tmp_path, export_dir=tmp_path), exports, meta
+
+
+def _permission_preflight_operation():
+    operation = getattr(engine_module, "_prepare_permission_operation", None)
+    assert callable(operation), "The engine needs whole-operation permission preflight"
+    return operation
+
+
+async def test_permission_preflight_new_target_keeps_proposals_unready(tmp_path):
+    from discord_ferry.discord.permissions import translate_permissions
+
+    for everyone in (0, (1 << 10) | (1 << 11)):
+        config, exports, _ = _permission_preflight_case(tmp_path, everyone=everyone)
+        state = MigrationState()
+        before = dataclasses.asdict(state)
+        with aioresponses() as remote:
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            async with aiohttp.ClientSession() as session:
+                runtime = await _permission_preflight_operation()(
+                    config, state, exports, session, mode="migration"
+                )
+        assert not runtime.ready and not runtime.stopped and not runtime.plan.problems
+        layout = runtime.plan.target_layout
+        assert not layout.server_id and layout.server_default is None
+        assert layout.roles == layout.channels == ()
+        assert layout.planned_server_default == (translate_permissions(everyone) or 77014766592)
+        assert layout.planned_roles == (("112", None),)
+        assert layout.planned_channels == (("222", None),)
+        assert layout.planned_role_facts[0].rank == 0
+        assert dataclasses.asdict(state) == before
+        assert remote.requests and all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_new_target_refuses_unknown_creation_contract(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    for root in ({}, {"revolt": "0.15.8"}, {"revolt": "0.15.7-custom"}):
+        config, exports, _ = _permission_preflight_case(tmp_path)
+        with aioresponses() as remote:
+            remote.get(f"{config.stoat_url}/", payload=root, repeat=True)
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await _permission_preflight_operation()(
+                        config, MigrationState(), exports, session, mode="migration"
+                    )
+        assert caught.value.outcome.reason == "unverified"
+        assert caught.value.outcome.effects == "none_confirmed"
+        assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_binds_all_generated_index_sources_or_stops(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    for mixed in (False, True):
+        config, exports, _ = _permission_preflight_case(
+            tmp_path, everyone=(1 << 10) | (1 << 11), forum=True, mixed=mixed
+        )
+        with aioresponses() as remote:
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            async with aiohttp.ClientSession() as session:
+                if mixed:
+                    with pytest.raises(PermissionSafetyError) as caught:
+                        await _permission_preflight_operation()(
+                            config, MigrationState(), exports, session, mode="migration"
+                        )
+                    assert caught.value.outcome.reason == "unsupported"
+                else:
+                    runtime = await _permission_preflight_operation()(
+                        config, MigrationState(), exports, session, mode="migration"
+                    )
+                    index = next(
+                        c for c in runtime.plan.channels if c.source_key.startswith("forum-index-")
+                    )
+                    assert index.source_ids == frozenset({"222", "333"})
+                    assert index.source_key == "forum-index-forum-Ideas & help"
+                    assert not runtime.ready
+        assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_carried_channel_reads_without_correcting(tmp_path):
+    from discord_ferry.discord.permissions import translate_permissions
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, meta = _permission_preflight_case(tmp_path, everyone=(1 << 10) | (1 << 11))
+    server_id, role_id, channel_id = (valid_stoat_id(n) for n in (29010, 29011, 29012))
+    config.server_id = server_id
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        channel_map={"222": channel_id},
+        roles_finalized={"112"},
+    )
+    before = dataclasses.asdict(state)
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": translate_permissions((1 << 10) | (1 << 11)), "d": 0},
+            }
+        },
+    }
+    for mismatched in (False, True):
+        channel = {
+            "_id": channel_id,
+            "channel_type": "TextChannel",
+            "server": server_id,
+            "default_permissions": {"a": 1 << 12, "d": 0},
+            "role_permissions": {role_id: {"a": 0, "d": (1 << 20) if mismatched else 0}},
+        }
+        with aioresponses() as remote:
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+            remote.get(f"{config.stoat_url}/channels/{channel_id}", payload=channel, repeat=True)
+            async with aiohttp.ClientSession() as session:
+                if mismatched:
+                    with pytest.raises(PermissionSafetyError) as caught:
+                        await _permission_preflight_operation()(
+                            config, state, exports, session, mode="migration"
+                        )
+                    assert caught.value.outcome.reason == "readback_mismatch"
+                    assert caught.value.outcome.effects == "none_confirmed"
+                else:
+                    runtime = await _permission_preflight_operation()(
+                        config, state, exports, session, mode="migration"
+                    )
+                    assert not runtime.stopped
+                    assert (
+                        runtime.plan.target_layout.server_default == server["default_permissions"]
+                    )
+                    assert runtime.plan.target_layout.channels[0].default.allow & (1 << 12)
+            assert all(method == "GET" for method, _ in remote.requests)
+        assert dataclasses.asdict(state) == before
+
+
+async def test_permission_preflight_carried_exact_access_survives_pending_role_creation(tmp_path):
+    config, exports, meta = _permission_preflight_case(tmp_path, everyone=(1 << 10) | (1 << 11))
+    server_id, channel_id = (valid_stoat_id(n) for n in (29020, 29021))
+    state = MigrationState(stoat_server_id=server_id, channel_map={"222": channel_id})
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": meta.server_default_permissions,
+    }
+    channel = {"_id": channel_id, "channel_type": "TextChannel", "server": server_id}
+    # Check the independent arithmetic before exercising the missing boundary.
+    for has_role in (False, True):
+        source_value = ((1 << 10) | (1 << 11)) | (((1 << 10) | (1 << 11)) if has_role else 0)
+        target_value = server["default_permissions"] | (
+            meta.role_permissions["112"].allow if has_role else 0
+        )
+        assert bool(source_value & (1 << 10)) == bool(target_value & (1 << 20))
+        assert bool(source_value & (1 << 11)) == bool(target_value & (1 << 22))
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        remote.get(f"{config.stoat_url}/channels/{channel_id}", payload=channel, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+    assert not runtime.stopped and not runtime.ready
+    assert runtime.plan.target_layout.roles == ()
+    assert runtime.plan.target_layout.planned_roles == (("112", None),)
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_actual_pipeline_binds_before_limits_lock_and_phases(tmp_path):
+    for existing in (False, True):
+        config, exports, _ = _permission_preflight_case(tmp_path)
+        target = valid_stoat_id(29030)
+        config.server_id = target if existing else None
+        order = []
+        lock = AsyncMock(return_value=False)
+
+        async def limits(*args, order=order):
+            assert remote.requests
+            order.append("limits")
+
+        async def connect(config, state, exports, emit, *, order=order):
+            assert state.permission_runtime is not None
+            assert not state.permission_runtime.ready
+            assert not state.permission_runtime.plan.problems
+            assert state.stoat_server_id == ""
+            order.append("phase")
+
+        with (
+            aioresponses() as remote,
+            patch("discord_ferry.core.engine.parse_export_directory", return_value=exports),
+            patch("discord_ferry.core.engine._initialize_upload_limits", new=limits),
+            patch("discord_ferry.core.engine._acquire_migration_lock", new=lock),
+        ):
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            if existing:
+                remote.get(
+                    f"{config.stoat_url}/servers/{target}",
+                    payload={
+                        "_id": target,
+                        "channels": [],
+                        "default_permissions": 0,
+                    },
+                    repeat=True,
+                )
+            result = await run_migration(
+                config,
+                lambda event: None,
+                phase_overrides={**_NOOP_OVERRIDES, "connect": connect},
+            )
+            assert all(method == "GET" for method, _ in remote.requests)
+        assert order == ["limits", "phase"]
+        assert lock.await_count == int(existing)
+        assert result.stoat_server_id == "" and result.role_map == result.channel_map == {}
+        assert config.session is None
+
+
+async def test_permission_preflight_actual_pipeline_refuses_incomplete_cache_without_reads(
+    tmp_path,
+):
+    from discord_ferry.discord.metadata import save_discord_metadata
+    from discord_ferry.errors import PermissionSafetyError
+
+    for change in ("legacy", "foreign", "fingerprint", "coverage"):
+        config, exports, meta = _permission_preflight_case(tmp_path)
+        config.server_id = valid_stoat_id(29031)
+        if change == "legacy":
+            meta.permission_source = None
+        elif change == "foreign":
+            meta.guild_id = "999"
+        elif change == "fingerprint":
+            meta.permission_source = dataclasses.replace(
+                meta.permission_source, fingerprint="changed"
+            )
+        else:
+            meta.permission_source = dataclasses.replace(
+                meta.permission_source, covered_channel_ids=frozenset()
+            )
+        save_discord_metadata(meta, tmp_path)
+        limits, lock, connect = AsyncMock(), AsyncMock(), AsyncMock()
+        with (
+            aioresponses() as remote,
+            patch("discord_ferry.core.engine.parse_export_directory", return_value=exports),
+            patch("discord_ferry.core.engine._initialize_upload_limits", new=limits),
+            patch("discord_ferry.core.engine._acquire_migration_lock", new=lock),
+            pytest.raises(PermissionSafetyError) as caught,
+        ):
+            await run_migration(
+                config, lambda event: None, phase_overrides={**_NOOP_OVERRIDES, "connect": connect}
+            )
+        assert caught.value.outcome.reason == "unverified"
+        assert caught.value.outcome.stage == "preflight"
+        assert not remote.requests
+        limits.assert_not_awaited()
+        lock.assert_not_awaited()
+        connect.assert_not_awaited()
+        assert config.session is None
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        {"revolt": "0.15.7", "features": None},
+        {"revolt": "0.15.7", "features": {"limits": []}},
+        {"revolt": "0.15.7", "features": {"limits": {"global": None}}},
+        *(
+            {"revolt": "0.15.7", "features": {"limits": {"global": {"server_roles": value}}}}
+            for value in (None, "200", True, -1, 1 << 63)
+        ),
+    ],
+)
+async def test_permission_preflight_malformed_root_is_typed_before_writes(tmp_path, root):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload=root, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.stage == "preflight"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_actual_cancel_before_lock_retains_no_authority(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    for when in ("entry", "limits"):
+        config, exports, _ = _permission_preflight_case(tmp_path)
+        config.server_id = target = valid_stoat_id(29032)
+        config.cancel_event = asyncio.Event()
+        if when == "entry":
+            config.cancel_event.set()
+        lock = AsyncMock(return_value=False)
+        connect = AsyncMock()
+
+        async def limits(*args, config=config):
+            config.cancel_event.set()
+
+        with (
+            aioresponses() as remote,
+            patch("discord_ferry.core.engine.parse_export_directory", return_value=exports),
+            patch("discord_ferry.core.engine._initialize_upload_limits", new=limits),
+            patch("discord_ferry.core.engine._acquire_migration_lock", new=lock),
+            pytest.raises(PermissionSafetyError) as caught,
+        ):
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            remote.get(
+                f"{config.stoat_url}/servers/{target}",
+                payload={
+                    "_id": target,
+                    "channels": [],
+                    "default_permissions": 0,
+                },
+                repeat=True,
+            )
+            await run_migration(
+                config, lambda event: None, phase_overrides={**_NOOP_OVERRIDES, "connect": connect}
+            )
+        assert caught.value.outcome.reason == "interrupted"
+        assert caught.value.outcome.stage == "preflight"
+        assert caught.value.outcome.effects == "none_confirmed"
+        lock.assert_not_awaited()
+        connect.assert_not_awaited()
+        assert config.session is None
+        assert all(method == "GET" for method, _ in remote.requests)
+        if when == "entry":
+            assert not remote.requests
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+async def test_permission_preflight_counts_existing_roles_against_total_creation_capacity(
+    tmp_path, limit
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    server_id, native_id = (valid_stoat_id(n) for n in (29310, 29311))
+    state = MigrationState(stoat_server_id=server_id)
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": 0,
+        "roles": {native_id: {"_id": native_id, "rank": 0, "permissions": {"a": 0, "d": 0}}},
+    }
+    with aioresponses() as remote:
+        remote.get(
+            f"{config.stoat_url}/",
+            payload={
+                "revolt": "0.15.7",
+                "features": {"limits": {"global": {"server_roles": limit}}},
+            },
+            repeat=True,
+        )
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            if limit == 1:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await _permission_preflight_operation()(
+                        config, state, exports, session, mode="migration"
+                    )
+                assert caught.value.outcome.reason == "unverified"
+                assert caught.value.outcome.stage == "preflight"
+                assert caught.value.outcome.effects == "none_confirmed"
+            else:
+                runtime = await _permission_preflight_operation()(
+                    config, state, exports, session, mode="migration"
+                )
+                layout = runtime.plan.target_layout
+                assert len(layout.roles) + len(layout.planned_role_facts) == limit
+                assert not runtime.ready
+    assert not state.role_map
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_resume_does_not_apply_a_skipped_creation_cap(tmp_path):
+    config, exports, meta = _permission_preflight_case(tmp_path, everyone=(1 << 10) | (1 << 11))
+    config.resume = True
+    server_id, role_id, channel_id = (valid_stoat_id(n) for n in (29040, 29041, 29042))
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        channel_map={"222": channel_id},
+        roles_finalized={"112"},
+        current_phase="messages",
+    )
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    with aioresponses() as remote:
+        remote.get(
+            f"{config.stoat_url}/",
+            payload={"revolt": "0.15.7", "features": {"limits": {"global": {"server_roles": 0}}}},
+            repeat=True,
+        )
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        remote.get(
+            f"{config.stoat_url}/channels/{channel_id}",
+            payload={"_id": channel_id, "channel_type": "TextChannel", "server": server_id},
+            repeat=True,
+        )
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+    assert runtime.plan.target_layout.planned_role_updates == ()
+    assert runtime.plan.target_layout.planned_role_facts == ()
+    assert runtime.plan.target_layout.planned_server_default is None
+    assert not runtime.ready
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_cap_projection_matches_the_actual_role_owner(tmp_path):
+    from discord_ferry.migrator.structure import run_roles
+
+    bits = (1 << 10) | (1 << 11)
+    config, exports, meta = _permission_preflight_case(
+        tmp_path, everyone=bits, ordinary=(("112", bits, 1), ("113", bits, 2))
+    )
+    server_id, low, high = (valid_stoat_id(n) for n in (29050, 29051, 29052))
+    state = MigrationState(stoat_server_id=server_id, role_map={"112": low, "113": high})
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            rid: {"_id": rid, "rank": i, "permissions": {"a": 0, "d": 0}}
+            for i, rid in enumerate((low, high))
+        },
+    }
+    with aioresponses() as remote:
+        remote.get(
+            f"{config.stoat_url}/",
+            payload={"revolt": "0.15.7", "features": {"limits": {"global": {"server_roles": 1}}}},
+            repeat=True,
+        )
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        remote.patch(
+            f"{config.stoat_url}/servers/{server_id}/roles/{high}", payload={}, repeat=True
+        )
+        remote.put(f"{config.stoat_url}/servers/{server_id}/permissions/{high}", payload={})
+        remote.put(f"{config.stoat_url}/servers/{server_id}/permissions/default", payload={})
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+            assert {r.source_id for r in runtime.plan.target_layout.planned_role_updates} == {"113"}
+            state.permission_runtime = runtime
+            config.session = session
+            try:
+                await run_roles(config, state, exports, lambda event: None)
+            finally:
+                config.session = None
+        assert state.roles_finalized == {"113"}
+        permission_urls = {str(url) for method, url in remote.requests if method == "PUT"}
+        assert f"{config.stoat_url}/servers/{server_id}/permissions/{high}" in permission_urls
+        assert f"{config.stoat_url}/servers/{server_id}/permissions/{low}" not in permission_urls
+        assert not runtime.ready
+
+
+async def test_permission_preflight_order_projection_matches_existing_rank_owner(tmp_path):
+    from discord_ferry.migrator.structure import _apply_role_ordering, _collect_roles_to_order
+
+    bits = (1 << 10) | (1 << 11)
+    config, exports, meta = _permission_preflight_case(
+        tmp_path, everyone=bits, ordinary=(("112", 0, 1), ("113", 0, 2))
+    )
+    server_id, low, native, high = (valid_stoat_id(n) for n in (29060, 29061, 29062, 29063))
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": low, "113": high},
+        roles_finalized={"112", "113"},
+    )
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            rid: {"_id": rid, "rank": i, "permissions": {"a": 0, "d": 0}}
+            for i, rid in enumerate((low, native, high))
+        },
+    }
+    url = f"{config.stoat_url}/servers/{server_id}/roles/ranks"
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        remote.patch(url, payload={})
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+            updates = {r.source_id: r for r in runtime.plan.target_layout.planned_role_updates}
+            assert updates["113"].rank == 0 and updates["112"].rank == 2
+            assert next(r.rank for r in runtime.plan.target_layout.roles if r.id == native) == 1
+            state.permission_runtime = runtime
+            roles, _, _ = _collect_roles_to_order(config, exports)
+            await _apply_role_ordering(session, config, state, roles, lambda event: None)
+        calls = [
+            call
+            for (method, called), entries in remote.requests.items()
+            if method == "PATCH" and str(called) == url
+            for call in entries
+        ]
+        assert len(calls) == 1 and calls[0].kwargs["json"] == {"ranks": [high, native, low]}
+        assert not runtime.ready and runtime.effects == "changes_confirmed"
+
+
+async def test_permission_preflight_duplicate_role_binding_is_typed_before_ordering(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.state import check_state_ids
+
+    config, exports, meta = _permission_preflight_case(
+        tmp_path, everyone=(1 << 10) | (1 << 11), ordinary=(("112", 0, 1), ("113", 0, 2))
+    )
+    server_id, role_id = valid_stoat_id(29070), valid_stoat_id(29071)
+    state = MigrationState(stoat_server_id=server_id, role_map={"112": role_id, "113": role_id})
+    # The checkpoint ID validator accepts both well-shaped values. Permission
+    # preflight must reject the ambiguous binding before the ordering owner.
+    check_state_ids(state)
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {role_id: {"_id": role_id, "rank": 0, "permissions": {"a": 0, "d": 0}}},
+    }
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, state, exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.stage == "preflight"
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_resume_refuses_uncreated_skipped_channel(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, meta = _permission_preflight_case(tmp_path, everyone=(1 << 10) | (1 << 11))
+    config.resume = True
+    server_id, role_id = valid_stoat_id(29080), valid_stoat_id(29081)
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        roles_finalized={"112"},
+        current_phase="messages",
+    )
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, state, exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert not state.channel_map
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_rejects_source_snapshot_changed_during_planning(
+    tmp_path, monkeypatch
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    original = engine_module._collect_roles_to_order
+
+    def changed(config, exports):
+        # A valid replacement snapshot, not a malformed mask, changes only source
+        # role position. Planning must not combine two evidence generations.
+        _permission_preflight_case(tmp_path, ordinary=(("112", (1 << 10) | (1 << 11), 2),))
+        return original(config, exports)
+
+    monkeypatch.setattr(engine_module, "_collect_roles_to_order", changed)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_channel_budget_tracks_only_actual_destinations(tmp_path):
+    config, exports, _ = _permission_preflight_case(tmp_path, source_ids=("222", "333"))
+    config.max_channels = 1
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, MigrationState(), exports, session, mode="migration"
+            )
+    assert dict(runtime.plan.target_layout.planned_channels) == {"222": None}
+    assert {c.source_key for c in runtime.plan.channels} == {"222"}
+    assert not runtime.ready
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_unindexed_dropped_channel_needs_no_unused_proof(tmp_path):
+    config, exports, _ = _permission_preflight_case(
+        tmp_path, source_ids=("222", "333"), unsupported_source="333"
+    )
+    config.max_channels = 1
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, MigrationState(), exports, session, mode="migration"
+            )
+    assert {c.source_key for c in runtime.plan.channels} == {"222"}
+    assert not runtime.ready
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_permission_preflight_budget_never_drops_index_source_obligations(tmp_path, mixed):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(
+        tmp_path, everyone=(1 << 10) | (1 << 11), forum=True, mixed=mixed
+    )
+    config.max_channels = 2  # One source destination plus its generated index.
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            if mixed:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await _permission_preflight_operation()(
+                        config, MigrationState(), exports, session, mode="migration"
+                    )
+                assert caught.value.outcome.reason == "unsupported"
+            else:
+                runtime = await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+                assert {c.source_key for c in runtime.plan.channels} == {
+                    "222",
+                    "forum-index-forum-Ideas & help",
+                }
+                index = next(
+                    c for c in runtime.plan.channels if c.source_key.startswith("forum-index-")
+                )
+                assert index.source_ids == frozenset({"222", "333"})
+                assert not runtime.ready
+        assert all(method == "GET" for method, _ in remote.requests)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_permission_preflight_resumed_index_retains_dropped_source_without_destination(
+    tmp_path, mixed
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, meta = _permission_preflight_case(
+        tmp_path, everyone=(1 << 10) | (1 << 11), forum=True, mixed=mixed
+    )
+    config.resume = True
+    config.max_channels = 2
+    server_id, role_id, channel_id, index_id = (valid_stoat_id(n) for n in range(29210, 29214))
+    group, index_key = "forum-Ideas & help", "forum-index-forum-Ideas & help"
+    state = MigrationState(
+        stoat_server_id=server_id,
+        current_phase="messages",
+        role_map={"112": role_id},
+        roles_finalized={"112"},
+        channel_map={"222": channel_id, index_key: index_id},
+        channel_categories={"222": group},
+        forum_channel_members={group: ["222"]},
+        forum_category_names={group: "Ideas & help"},
+    )
+    server = {
+        "_id": server_id,
+        "channels": [channel_id, index_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        for target in (channel_id, index_id):
+            remote.get(
+                f"{config.stoat_url}/channels/{target}",
+                payload={"_id": target, "channel_type": "TextChannel", "server": server_id},
+                repeat=True,
+            )
+        async with aiohttp.ClientSession() as session:
+            if mixed:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await _permission_preflight_operation()(
+                        config, state, exports, session, mode="migration"
+                    )
+                assert caught.value.outcome.reason == "unsupported"
+                assert caught.value.outcome.effects == "none_confirmed"
+            else:
+                runtime = await _permission_preflight_operation()(
+                    config, state, exports, session, mode="migration"
+                )
+                assert {channel.source_key for channel in runtime.plan.channels} == {
+                    "222",
+                    index_key,
+                }
+                index = next(c for c in runtime.plan.channels if c.source_key == index_key)
+                assert index.source_ids == frozenset({"222", "333"})
+                assert set(dict(runtime.plan.target_layout.planned_channels)) == {"222", index_key}
+                assert not runtime.ready
+    assert set(state.channel_map) == {"222", index_key}
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_budget_projection_matches_existing_channel_owner(
+    tmp_path, monkeypatch
+):
+    from discord_ferry.migrator import structure
+
+    config, exports, meta = _permission_preflight_case(tmp_path, source_ids=("222", "333"))
+    config.max_channels = 1
+    config.upload_delay = 0
+    server_id, role_id, created_id = (valid_stoat_id(n) for n in (29090, 29091, 29092))
+    state = MigrationState(
+        stoat_server_id=server_id, role_map={"112": role_id}, roles_finalized={"112"}
+    )
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": 0,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    create = AsyncMock(return_value={"_id": created_id})
+    permission_writer = AsyncMock()
+    monkeypatch.setattr(structure, "api_create_channel", create)
+    # This comparison tests the unchanged selection owner, not permission
+    # application. Actual writer/readback integration has its own controls.
+    monkeypatch.setattr(structure, "apply_channel_permissions", permission_writer)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+            state.permission_runtime = runtime
+            config.session = session
+            try:
+                await structure.run_channels(config, state, exports, lambda event: None)
+            finally:
+                config.session = None
+    assert create.await_count == permission_writer.await_count == 1
+    assert set(state.channel_map) == {"222"}
+    assert set(dict(runtime.plan.target_layout.planned_channels)) == set(state.channel_map)
+    assert not runtime.ready
+
+
+@pytest.mark.parametrize("strategy", ["merge", "archive"])
+async def test_permission_preflight_does_not_bind_private_thread_info_to_public_parent(
+    tmp_path, strategy
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(
+        tmp_path, source_ids=("222", "333"), everyone=(1 << 10) | (1 << 11), mixed=True
+    )
+    config.thread_strategy = strategy
+    exports[1].is_thread = True
+    exports[1].parent_channel_name = exports[0].channel.name
+    # An ambiguous legacy thread label cannot redirect an independently proved
+    # private source into a public parent without a combined-source binding.
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.stage == "preflight"
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_requires_missing_carried_index_to_have_a_creation_owner(
+    tmp_path,
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, meta = _permission_preflight_case(
+        tmp_path, source_ids=("222", "333"), everyone=(1 << 10) | (1 << 11)
+    )
+    exports = [exports[1]]  # A partial export does not recreate the carried forum.
+    server_id, role_id, channel_id = (valid_stoat_id(n) for n in (29100, 29101, 29102))
+    group = "forum-Ideas & help"
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": role_id},
+        roles_finalized={"112"},
+        channel_map={"222": channel_id},
+        channel_categories={"222": group},
+        forum_channel_members={group: ["222"]},
+        forum_category_names={group: "Ideas & help"},
+    )
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(f"{config.stoat_url}/servers/{server_id}", payload=server, repeat=True)
+        remote.get(
+            f"{config.stoat_url}/channels/{channel_id}",
+            payload={"_id": channel_id, "channel_type": "TextChannel", "server": server_id},
+            repeat=True,
+        )
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, state, exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert not any(key.startswith("forum-index-") for key in state.channel_map)
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_root_timeout_is_unverified_without_fallback_authority(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    with patch(
+        "discord_ferry.core.engine.api_fetch_root", new=AsyncMock(side_effect=TimeoutError())
+    ):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.stage == "preflight"
+    assert caught.value.outcome.effects == "none_confirmed"
+
+
+async def test_permission_preflight_task_cancel_clears_session_before_any_lock(tmp_path):
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    cancellation = asyncio.CancelledError()
+    lock = AsyncMock(return_value=False)
+    connect = AsyncMock()
+    with (
+        patch("discord_ferry.core.engine.parse_export_directory", return_value=exports),
+        patch("discord_ferry.core.engine.api_fetch_root", new=AsyncMock(side_effect=cancellation)),
+        patch("discord_ferry.core.engine._acquire_migration_lock", new=lock),
+        pytest.raises(asyncio.CancelledError) as caught,
+    ):
+        await run_migration(
+            config, lambda event: None, phase_overrides={**_NOOP_OVERRIDES, "connect": connect}
+        )
+    assert caught.value is cancellation
+    assert config.session is None
+    lock.assert_not_awaited()
+    connect.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_delivery_namespace_exists_before_first_engine_phase(tmp_path: Path) -> None:
     async def check_namespace(
         config: FerryConfig, state: MigrationState, exports: list, emit: EventCallback
@@ -203,6 +1239,7 @@ async def test_delivery_namespace_exists_before_first_engine_phase(tmp_path: Pat
         await run_migration(_make_config(tmp_path), lambda event: None, phase_overrides=overrides)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_delivery_incremental_carries_identity_and_pending_followups(tmp_path: Path) -> None:
     from discord_ferry import state as state_module
     from tests.stoat_ids import stoat_id
@@ -236,6 +1273,7 @@ async def test_delivery_incremental_carries_identity_and_pending_followups(tmp_p
         )
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_validates_exports(tmp_path: Path, proxy_env: Any) -> None:
     """Engine parses exports and emits validate events.
 
@@ -259,6 +1297,7 @@ async def test_run_migration_validates_exports(tmp_path: Path, proxy_env: Any) -
     assert len(state.author_names) > 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_rendered_markdown_warning_does_not_gate_the_migration(tmp_path: Path) -> None:
     """The GUI blocked on this warning and the engine never did, which is the
     real defect in #143. Pin the engine side so nobody closes the gap from the
@@ -289,6 +1328,7 @@ async def test_rendered_markdown_warning_does_not_gate_the_migration(tmp_path: P
     assert any(e.phase == "connect" and e.status == "started" for e in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_emits_phase_events(tmp_path: Path) -> None:
     """Engine emits started/completed for each injected phase."""
     events: list[MigrationEvent] = []
@@ -311,6 +1351,7 @@ async def test_run_migration_emits_phase_events(tmp_path: Path) -> None:
     assert any(e.status == "completed" for e in connect_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_phases_called_in_order(tmp_path: Path) -> None:
     """Mock phases are called in the correct order."""
     call_order: list[str] = []
@@ -334,6 +1375,7 @@ async def test_run_migration_phases_called_in_order(tmp_path: Path) -> None:
     assert call_order == phase_names
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_skip_messages(tmp_path: Path) -> None:
     """skip_messages config flag skips the messages phase."""
     events: list[MigrationEvent] = []
@@ -343,6 +1385,7 @@ async def test_run_migration_skip_messages(tmp_path: Path) -> None:
     assert any(e.status == "skipped" for e in msg_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_skip_emoji(tmp_path: Path) -> None:
     """skip_emoji config flag skips the emoji phase."""
     events: list[MigrationEvent] = []
@@ -352,6 +1395,7 @@ async def test_run_migration_skip_emoji(tmp_path: Path) -> None:
     assert any(e.status == "skipped" for e in emoji_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_skip_reactions(tmp_path: Path) -> None:
     """skip_reactions config flag skips the reactions phase."""
     events: list[MigrationEvent] = []
@@ -361,6 +1405,7 @@ async def test_run_migration_skip_reactions(tmp_path: Path) -> None:
     assert any(e.status == "skipped" for e in reaction_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_saves_state(tmp_path: Path) -> None:
     """State file exists after migration completes."""
     config = _make_config(tmp_path)
@@ -368,6 +1413,7 @@ async def test_run_migration_saves_state(tmp_path: Path) -> None:
     assert (tmp_path / "state.json").exists()
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_resume_skips_completed(tmp_path: Path) -> None:
     """On resume, phases before current_phase are skipped."""
     from discord_ferry.state import save_state
@@ -386,6 +1432,7 @@ async def test_run_migration_resume_skips_completed(tmp_path: Path) -> None:
         assert any(e.status == "skipped" for e in phase_events), f"{phase} should be skipped"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_resume_after_validate_does_not_crash(tmp_path: Path) -> None:
     """Resume must not crash when current_phase is a terminal value outside PHASE_ORDER.
 
@@ -413,6 +1460,7 @@ async def test_run_migration_resume_after_validate_does_not_crash(tmp_path: Path
         assert any(e.status == "skipped" for e in phase_events), f"{phase} should be skipped"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_phase_error(tmp_path: Path) -> None:
     """Engine catches phase exceptions and raises MigrationError."""
     from discord_ferry.errors import MigrationError
@@ -431,6 +1479,7 @@ async def test_run_migration_phase_error(tmp_path: Path) -> None:
         await run_migration(config, lambda e: None, phase_overrides=overrides)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_phase_error_recorded_in_state(tmp_path: Path) -> None:
     """Phase errors are recorded in state.errors before raising."""
     from discord_ferry.errors import MigrationError
@@ -456,6 +1505,7 @@ async def test_run_migration_phase_error_recorded_in_state(tmp_path: Path) -> No
     assert any(e["phase"] == "connect" for e in state.errors)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_builds_author_names(tmp_path: Path) -> None:
     """Author names are populated from export data, preferring nickname."""
     events: list[MigrationEvent] = []
@@ -466,6 +1516,7 @@ async def test_run_migration_builds_author_names(tmp_path: Path) -> None:
     assert state.author_names["400000000000000001"] == "Alice"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_report_generated(tmp_path: Path) -> None:
     """Report file exists after migration."""
     config = _make_config(tmp_path)
@@ -473,6 +1524,7 @@ async def test_run_migration_report_generated(tmp_path: Path) -> None:
     assert (tmp_path / "migration_report.json").exists()
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_report_events_emitted(tmp_path: Path) -> None:
     """Engine emits started and completed events for the report phase."""
     events: list[MigrationEvent] = []
@@ -483,6 +1535,7 @@ async def test_run_migration_report_events_emitted(tmp_path: Path) -> None:
     assert any(e.status == "completed" for e in report_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_returns_migration_state(tmp_path: Path) -> None:
     """run_migration returns a MigrationState instance."""
     config = _make_config(tmp_path)
@@ -490,6 +1543,7 @@ async def test_run_migration_returns_migration_state(tmp_path: Path) -> None:
     assert isinstance(result, MigrationState)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_creates_output_dir(tmp_path: Path) -> None:
     """Engine creates the output directory if it doesn't exist."""
     nested_output = tmp_path / "deep" / "nested" / "output"
@@ -498,6 +1552,7 @@ async def test_run_migration_creates_output_dir(tmp_path: Path) -> None:
     assert nested_output.exists()
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_state_has_timestamps(tmp_path: Path) -> None:
     """Completed state has non-empty started_at and completed_at."""
     config = _make_config(tmp_path)
@@ -506,6 +1561,7 @@ async def test_run_migration_state_has_timestamps(tmp_path: Path) -> None:
     assert state.completed_at != ""
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_unimplemented_phases_skipped(tmp_path: Path) -> None:
     """Phases without implementations emit a 'Not yet implemented' skipped event."""
     events: list[MigrationEvent] = []
@@ -524,6 +1580,7 @@ async def test_run_migration_unimplemented_phases_skipped(tmp_path: Path) -> Non
         assert phase in skipped_phases, f"{phase} should be skipped when unimplemented"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_validate_total_in_event(tmp_path: Path) -> None:
     """The validate completed event carries the total message count."""
     events: list[MigrationEvent] = []
@@ -534,6 +1591,7 @@ async def test_run_migration_validate_total_in_event(tmp_path: Path) -> None:
     assert completed.total > 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_sets_source_messages_total(tmp_path: Path) -> None:
     """source_messages_total is set from the parsed exports on a fresh run."""
     from discord_ferry.parser.dce_parser import parse_export_directory
@@ -547,6 +1605,7 @@ async def test_run_migration_sets_source_messages_total(tmp_path: Path) -> None:
     assert state.source_messages_total == expected
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_resume_repopulates_source_messages_total(tmp_path: Path) -> None:
     """A resume run re-derives source_messages_total even though MESSAGES is skipped."""
     from discord_ferry.state import load_state, save_state
@@ -562,6 +1621,7 @@ async def test_run_migration_resume_repopulates_source_messages_total(tmp_path: 
     _ = load_state  # silence unused import if not needed
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_source_messages_total_post_filter(tmp_path: Path) -> None:
     """source_messages_total reflects only exports that survive the thread filter (R1 guard).
 
@@ -584,6 +1644,7 @@ async def test_run_migration_source_messages_total_post_filter(tmp_path: Path) -
     assert state.source_messages_total == post_filter_total
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_default_connect_phase(tmp_path: Path) -> None:
     """Connect phase runs by default when no override is provided (uses _DEFAULT_PHASES)."""
     from aioresponses import aioresponses
@@ -625,6 +1686,7 @@ async def test_export_phase_in_phase_order() -> None:
     assert PHASE_ORDER[0] == "export"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_export_skipped_in_offline_mode(tmp_path: Path) -> None:
     """When skip_export is True, the export phase is skipped."""
     events: list[MigrationEvent] = []
@@ -634,6 +1696,7 @@ async def test_export_skipped_in_offline_mode(tmp_path: Path) -> None:
     assert any(e.status == "skipped" for e in export_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_export_does_not_probe_for_external_dotnet(tmp_path: Path) -> None:
     """The self-contained DCE archive runs without an external runtime gate."""
     events: list[MigrationEvent] = []
@@ -654,6 +1717,7 @@ async def test_export_does_not_probe_for_external_dotnet(tmp_path: Path) -> None
     assert any(event.phase == "export" and event.status == "completed" for event in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_partial_dce_failure_is_recorded_in_migration_report(
     tmp_path: Path, proxy_env: Any
 ) -> None:
@@ -745,6 +1809,7 @@ _MOCK_CHANNELS = [
 _GUILD_ID = "111111111111111111"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_discord_metadata_fetched_when_token_provided(tmp_path: Path) -> None:
     """When discord_token and discord_server_id are set, metadata is fetched and saved."""
     from aioresponses import aioresponses
@@ -776,6 +1841,7 @@ async def test_discord_metadata_fetched_when_token_provided(tmp_path: Path) -> N
     assert any("metadata" in e.message.lower() for e in export_events if e.status == "progress")
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_discord_metadata_skipped_when_no_token(tmp_path: Path) -> None:
     """When discord_token is not set, no Discord API calls are made."""
     from aioresponses import aioresponses
@@ -795,6 +1861,7 @@ async def test_discord_metadata_skipped_when_no_token(tmp_path: Path) -> None:
     assert any("No Discord token" in e.message for e in export_events if e.status == "warning")
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
     """On resume with existing metadata, no Discord API calls are made."""
     from aioresponses import aioresponses
@@ -866,6 +1933,7 @@ def _cached_events(events: list[MigrationEvent]) -> list[MigrationEvent]:
     return [e for e in events if e.message == "Using cached Discord metadata (resume)"]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_resume_uses_cached_metadata_for_this_export(tmp_path: Path) -> None:
     """The cache is announced and no Discord metadata is fetched."""
     from aioresponses import aioresponses
@@ -881,6 +1949,7 @@ async def test_resume_uses_cached_metadata_for_this_export(tmp_path: Path) -> No
     assert len(_cached_events(events)) == 1
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_resume_without_a_token_still_accepts_a_matching_cache(tmp_path: Path) -> None:
     _write_resume_cache(tmp_path, _GUILD_ID)
     config = _make_config(tmp_path, discord_token=None, discord_server_id=None, resume=True)
@@ -945,6 +2014,7 @@ async def test_resume_rejects_malformed_cached_metadata(
     assert _cached_events(events) == []
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_fresh_run_replaces_an_invalid_cache_instead_of_rejecting_it(
     tmp_path: Path,
 ) -> None:
@@ -969,6 +2039,7 @@ def _warnings_of(state: MigrationState, kind: str) -> list[dict[str, str]]:
     return [w for w in state.warnings if w.get("type") == kind]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_fresh_run_without_a_token_ignores_another_guilds_cache(tmp_path: Path) -> None:
     """The stale file is never applied, and one warning names it."""
     _write_resume_cache(tmp_path, _OTHER_GUILD_ID)
@@ -984,6 +2055,7 @@ async def test_a_fresh_run_without_a_token_ignores_another_guilds_cache(tmp_path
     assert sum(1 for e in events if e.status == "warning" and "Ignoring cached" in e.message) == 1
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_fresh_run_survives_a_corrupt_cache_in_the_review_step(tmp_path: Path) -> None:
     """The review step used to read the file raw and crash on bad JSON."""
     (tmp_path / "discord_metadata.json").write_text("{not json")
@@ -992,6 +2064,7 @@ async def test_a_fresh_run_survives_a_corrupt_cache_in_the_review_step(tmp_path:
     assert len(_warnings_of(state, "discord_metadata_ignored")) == 1
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_fresh_run_still_fetches_and_overwrites_the_file_with_a_token(
     tmp_path: Path,
 ) -> None:
@@ -1012,6 +2085,7 @@ async def test_a_fresh_run_still_fetches_and_overwrites_the_file_with_a_token(
     assert _warnings_of(state, "discord_metadata_ignored") == []
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_unknown_permission_bits_are_reported_once_per_run(tmp_path: Path) -> None:
     from discord_ferry.discord.metadata import PermissionPair
 
@@ -1027,6 +2101,7 @@ async def test_unknown_permission_bits_are_reported_once_per_run(tmp_path: Path)
     assert _warnings_of(state, "discord_metadata_ignored") == []
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_valid_cache_with_only_defined_bits_raises_no_metadata_warning(
     tmp_path: Path,
 ) -> None:
@@ -1036,6 +2111,7 @@ async def test_a_valid_cache_with_only_defined_bits_raises_no_metadata_warning(
     assert [w for w in state.warnings if w.get("type", "").startswith("discord_metadata")] == []
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_no_discord_token_emits_warning(tmp_path: Path) -> None:
     """When discord_token is absent, engine emits status='warning' about permissions."""
     config = _make_config(tmp_path, discord_token=None, discord_server_id=None)
@@ -1056,6 +2132,7 @@ async def test_no_discord_token_emits_warning(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_discord_token_present_no_permission_warning(tmp_path: Path) -> None:
     """When discord_token IS set, no permission warning emitted."""
     from aioresponses import aioresponses
@@ -1100,6 +2177,7 @@ def test_avatars_phase_in_phase_order() -> None:
     assert PHASE_ORDER.index("avatars") < PHASE_ORDER.index("messages")
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_skip_avatars(tmp_path: Path) -> None:
     """skip_avatars config flag skips the avatars phase."""
     events: list[MigrationEvent] = []
@@ -1109,6 +2187,7 @@ async def test_skip_avatars(tmp_path: Path) -> None:
     assert any(e.status == "skipped" for e in avatar_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_avatars_phase_runs_when_not_skipped(tmp_path: Path) -> None:
     """Avatars phase runs and emits started/completed events."""
     events: list[MigrationEvent] = []
@@ -1139,6 +2218,7 @@ def test_phase_order_contains_expected_phases() -> None:
     assert expected.issubset(set(PHASE_ORDER))
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_discord_metadata_fetch_runs_with_skip_export(tmp_path: Path) -> None:
     """Discord metadata fetch runs even when skip_export=True."""
     from aioresponses import aioresponses
@@ -1177,6 +2257,7 @@ async def test_discord_metadata_fetch_runs_with_skip_export(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_review_shows_reaction_mode(tmp_path: Path) -> None:
     """Pre-creation review event detail includes reaction_mode from config."""
     events: list[MigrationEvent] = []
@@ -1674,6 +2755,7 @@ STOAT_URL = "https://api.test"
 STOAT_SERVER_ID = "01J5T000000000000000009000"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_validation_calls_run_check(tmp_path: Path) -> None:
     """validate_after=True calls run_check and stores results."""
     events: list[MigrationEvent] = []
@@ -1731,6 +2813,7 @@ async def test_validation_calls_run_check(tmp_path: Path) -> None:
     assert written_report["validation"] == state.validation_results
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_validation_cancellation_skips_report_publication(tmp_path: Path) -> None:
     """Cancel during validation returns without publishing a completed report."""
     cancel = asyncio.Event()
@@ -1767,6 +2850,7 @@ async def test_validation_cancellation_skips_report_publication(tmp_path: Path) 
     assert not (tmp_path / "migration_report.json").exists()
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_validation_reports_failures(tmp_path: Path) -> None:
     """run_check failures produce a warning event and has_failures=True."""
     events: list[MigrationEvent] = []
@@ -1804,6 +2888,7 @@ async def test_validation_reports_failures(tmp_path: Path) -> None:
     assert state.validation_results["has_failures"] is True
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_validation_skipped_when_disabled(tmp_path: Path) -> None:
     """No validation events when validate_after is False."""
     events: list[MigrationEvent] = []
@@ -1825,6 +2910,7 @@ async def test_validation_skipped_when_disabled(tmp_path: Path) -> None:
     assert len(val_events) == 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_validation_skips_dry_run(tmp_path: Path) -> None:
     """Dry-run state skips validation with a warning."""
     events: list[MigrationEvent] = []
@@ -1854,6 +2940,7 @@ async def test_validation_skips_dry_run(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_validation_handles_api_failure(tmp_path: Path) -> None:
     """API failure during run_check emits a warning, doesn't crash."""
     events: list[MigrationEvent] = []
@@ -1948,6 +3035,7 @@ def _write_channel_json(
     return path
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_thread_below_threshold_excluded(tmp_path: Path) -> None:
     """Thread with fewer messages than threshold is excluded from exports."""
     export_dir = tmp_path / "exports"
@@ -1990,6 +3078,7 @@ async def test_thread_below_threshold_excluded(tmp_path: Path) -> None:
     assert "small-thread" in filter_warnings[0].message
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_regular_channel_never_filtered(tmp_path: Path) -> None:
     """Regular channels are never filtered regardless of message count or threshold."""
     export_dir = tmp_path / "exports"
@@ -2024,6 +3113,7 @@ async def test_regular_channel_never_filtered(tmp_path: Path) -> None:
     assert review_events[0].detail["threads_filtered"] == 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_min_thread_messages_zero_includes_all(tmp_path: Path) -> None:
     """Default min_thread_messages=0 includes all threads regardless of message count."""
     export_dir = tmp_path / "exports"
@@ -2065,6 +3155,7 @@ async def test_min_thread_messages_zero_includes_all(tmp_path: Path) -> None:
     assert review_events[0].detail["threads_filtered"] == 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_filtered_threads_logged_to_warnings(tmp_path: Path) -> None:
     """Filtered threads are recorded in state.warnings with the correct structure."""
     export_dir = tmp_path / "exports"
@@ -2105,6 +3196,7 @@ async def test_filtered_threads_logged_to_warnings(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_semaphore_initialized_during_migration(tmp_path: Path) -> None:
     """run_migration calls init_request_semaphore with max_concurrent_requests."""
     events: list[MigrationEvent] = []
@@ -2214,6 +3306,7 @@ async def test_report_index_delivery_recovery_and_later_edit(tmp_path: Path, fai
     assert "8 messages migrated" in edits[-1]
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path) -> None:
     """_rebuild_forum_indexes is invoked during REPORT when forum_channel_members is non-empty."""
     events: list[MigrationEvent] = []
@@ -2685,6 +3778,7 @@ async def test_repair_delivery_outcome_counts_real_tail_and_retry_drain(
     assert sorted(posts) == sorted(expected_parts)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_engine_delivery_outcome_preserves_visited_progress(tmp_path: Path) -> None:
     export_dir = tmp_path / "exports"
     export_dir.mkdir()
@@ -2742,6 +3836,7 @@ async def test_engine_delivery_outcome_preserves_visited_progress(tmp_path: Path
     assert visited[-1].current == visited[-1].total == 3
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_path: Path) -> None:
     """Real engine initialization carries a rejection, then unchanged incremental posts nothing."""
     export_dir = tmp_path / "exports"
@@ -3196,6 +4291,7 @@ async def test_rebuild_success_never_leaves_forum_in_both(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_cleanup_orphans_logs_unreferenced_uploads(tmp_path: Path) -> None:
     """When cleanup_orphans=True, unreferenced uploads are added to state.warnings."""
     events: list[MigrationEvent] = []
@@ -3220,6 +4316,7 @@ async def test_cleanup_orphans_logs_unreferenced_uploads(tmp_path: Path) -> None
     assert orphan_ids == {"aut2", "aut3"}
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_cleanup_orphans_skipped_when_flag_false(tmp_path: Path) -> None:
     """When cleanup_orphans=False (default), no orphan warnings are emitted."""
     events: list[MigrationEvent] = []
@@ -3242,6 +4339,7 @@ async def test_cleanup_orphans_skipped_when_flag_false(tmp_path: Path) -> None:
     assert len(orphan_warnings) == 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_cleanup_orphans_emits_cleanup_event(tmp_path: Path) -> None:
     """cleanup_orphans emits a 'cleanup' phase event with orphan count."""
     events: list[MigrationEvent] = []
@@ -3270,6 +4368,7 @@ async def test_cleanup_orphans_emits_cleanup_event(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_migration_lock_acquired_on_existing_server(tmp_path: Path) -> None:
     """Lock is acquired (api_edit_server called) when server_id is provided."""
     events: list[MigrationEvent] = []
@@ -3286,6 +4385,7 @@ async def test_migration_lock_acquired_on_existing_server(tmp_path: Path) -> Non
     assert mock_edit.call_count >= 1
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_migration_lock_not_acquired_without_server_id(tmp_path: Path) -> None:
     """Lock is NOT acquired when no server_id is configured."""
     events: list[MigrationEvent] = []
@@ -3494,6 +4594,7 @@ async def test_acquire_sets_and_release_clears_lock_marker(tmp_path: Path) -> No
             assert state.migration_lock_marker == ""
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_messages_cancel_clean_path(tmp_path: Path) -> None:
     """SC-10: a CancelledError from the messages phase takes the engine's clean-cancel path
     (skipped event 'Cancelled during messages'), NOT phase_failed, and run_migration returns."""
@@ -3514,6 +4615,7 @@ async def test_run_migration_messages_cancel_clean_path(tmp_path: Path) -> None:
     assert not any(e.status == "error" for e in msg_events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_run_migration_messages_crash_keeps_phase_for_resume(tmp_path: Path) -> None:
     """SC-11 (engine): a non-cancel messages-phase crash → MigrationError, with current_phase
     persisted as 'messages' so --resume re-runs it."""
@@ -3801,6 +4903,7 @@ async def test_unresolved_index_conflict_writes_no_false_state_entry(tmp_path: P
 # covers the fresh path and passes every test of it.
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_fresh_run_records_the_thread_strategy(tmp_path: Path) -> None:
     """SC-1.3. Neither --resume nor --incremental."""
     config = _make_config(tmp_path, thread_strategy="merge")
@@ -3808,6 +4911,7 @@ async def test_a_fresh_run_records_the_thread_strategy(tmp_path: Path) -> None:
     assert state.thread_strategy == "merge"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_resume_records_the_thread_strategy(tmp_path: Path) -> None:
     """SC-1.4. The mutant this kills is the natural implementation.
 
@@ -3826,6 +4930,7 @@ async def test_a_resume_records_the_thread_strategy(tmp_path: Path) -> None:
     assert state.thread_strategy == "archive"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_an_incremental_with_a_prior_records_the_thread_strategy(tmp_path: Path) -> None:
     """SC-1.5. The carry-over branch constructs, then copies fields forward.
 
@@ -3844,6 +4949,7 @@ async def test_an_incremental_with_a_prior_records_the_thread_strategy(tmp_path:
     assert state.thread_strategy == "merge"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_an_incremental_with_no_prior_records_the_thread_strategy(tmp_path: Path) -> None:
     """SC-1.6. The fallback branch, which constructs fresh and warns."""
     config = _make_config(tmp_path, incremental=True, thread_strategy="archive")
@@ -3853,6 +4959,7 @@ async def test_an_incremental_with_no_prior_records_the_thread_strategy(tmp_path
     assert any("no prior state" in e.message for e in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_resume_records_the_resuming_runs_strategy(tmp_path: Path) -> None:
     """SC-1.7. The field describes the MOST RECENT run, deliberately.
 
@@ -3875,6 +4982,7 @@ async def test_a_resume_records_the_resuming_runs_strategy(tmp_path: Path) -> No
     assert state.thread_strategy == "merge"
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_carries_the_recorded_names(tmp_path: Path) -> None:
     """SC-5.7. Omitting these two carries degrades rename detection to silence.
 
@@ -3958,6 +5066,7 @@ async def _incremental_from(tmp_path: Path, prior: MigrationState) -> MigrationS
     return await run_migration(config, lambda _e: None, phase_overrides=_NOOP_OVERRIDES)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_2_17_prior_is_carried_intact(tmp_path: Path) -> None:
     """SC-5.6. The ordinary case: names recorded, names carried."""
     prior = MigrationState(
@@ -3969,6 +5078,7 @@ async def test_a_2_17_prior_is_carried_intact(tmp_path: Path) -> None:
     assert state.created_channel_names == {"100": "general"}
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_an_incremental_from_a_pre_2_17_state_is_not_flagged(tmp_path: Path) -> None:
     """SC-5.8. THE mandatory discriminator, and the reason there are two predicates.
 
@@ -3992,6 +5102,7 @@ async def test_an_incremental_from_a_pre_2_17_state_is_not_flagged(tmp_path: Pat
     assert state.created_channel_names == {}
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_a_mixed_carried_and_nameless_prior_is_not_flagged(tmp_path: Path) -> None:
     """SC-5.9. Half a pre-2.17.0 prior, half recorded under 2.17.0.
 
@@ -4049,6 +5160,7 @@ def test_completeness_is_deliberately_not_applied_to_an_incremental_state() -> N
     )
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_an_invalid_thread_strategy_is_recorded_as_the_effective_one(
     tmp_path: Path,
 ) -> None:
@@ -8161,6 +9273,7 @@ async def test_permission_stop_escapes_phase_without_success(
     assert not any(event.status == "completed" for event in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_permission_stop_in_migration_skips_report_and_clears_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8190,6 +9303,7 @@ async def test_permission_stop_in_migration_skips_report_and_clears_session(
     assert not any(event.phase == "report" for event in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_permission_stop_in_report_saves_ids_without_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8297,6 +9411,7 @@ async def test_permission_stop_in_repair_is_saved_and_not_completed(
 
 
 @pytest.mark.parametrize("acquired", [False, True])
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_permission_stop_preserves_error_when_owned_lock_cleanup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, acquired: bool
 ) -> None:
@@ -8373,6 +9488,7 @@ async def test_permission_stop_escapes_repair_message_catches(
     assert not any(event.status == "completed" for event in events)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_permission_stop_escapes_final_validation_warning_catch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

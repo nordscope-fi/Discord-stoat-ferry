@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Check existing target roles plus planned creations against the backend's total-role limit before migration writes, preserving reuse and skipped-creation behavior (#1172).
+- Compile complete migration permission scope before advisory lock writes or phases, keeping proposed owner changes separate from observations and refusing unproved carried-channel or generated-index access (#1172).
 - Share the pure access comparison between strict readback and non-authorizing carried-channel preflight, checking current and proposed-final access without inventing created identities or readiness (#1172).
 - Model the pinned new-server creation default when the existing role writer skips zero, while keeping proposed values separate from observations and requiring exact channel readback (#1172).
 - Define complete common-source permission proof for generated indexes, preserving existing keys and unrelated cells while refusing mixed access or inconsistent source membership (#1172).
