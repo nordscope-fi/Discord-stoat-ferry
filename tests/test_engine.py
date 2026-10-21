@@ -58,6 +58,103 @@ def _keep_existing_send_mock_boundary(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(delivery_module, "api_send_message", send)
 
 
+def _index_export(source_id, *, parent="Ideas & help", count=0):
+    return DCEExport(
+        DCEGuild("111", "source"),
+        DCEChannel(source_id, 15, "post"),
+        message_count=count,
+        is_thread=True,
+        parent_channel_name=parent,
+    )
+
+
+def test_permission_index_sources_cover_current_carried_zero_and_truncated_members():
+    state = MigrationState(
+        channel_map={"444": "target-carried", "forum-index-forum-Ideas & help": "target-index"},
+        channel_categories={"444": "forum-Ideas & help"},
+        forum_channel_members={"forum-Ideas & help": ["444"]},
+    )
+    before = dataclasses.asdict(state)
+    # Neither zero messages nor a later rendering/channel budget removes an obligation.
+    exports = [_index_export("333", count=10000), _index_export("222", count=0)]
+    result = engine_module._permission_index_sources(exports, state)
+    assert result == {"forum-index-forum-Ideas & help": ("222", "333", "444")}
+    assert dataclasses.asdict(state) == before
+
+
+def test_permission_index_sources_keep_distinct_real_ids_under_same_display_name():
+    result = engine_module._permission_index_sources(
+        [_index_export("222"), _index_export("333")], MigrationState()
+    )
+    assert result == {"forum-index-forum-Ideas & help": ("222", "333")}
+    assert engine_module._permission_index_sources([], MigrationState()) == {}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_category",
+        "missing_member",
+        "missing_target",
+        "wrong_category",
+        "empty",
+        "ambiguous_export",
+        "digest",
+    ],
+)
+def test_permission_index_sources_refuse_incomplete_or_inconsistent_membership(change):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state = MigrationState(
+        channel_map={"444": "target-carried", "forum-index-forum-Ideas & help": "target-index"},
+        channel_categories={"444": "forum-Ideas & help"},
+        forum_channel_members={"forum-Ideas & help": ["444"]},
+    )
+    exports = [_index_export("222")]
+    if change == "missing_category":
+        state.channel_categories.clear()
+    elif change == "missing_member":
+        state.forum_channel_members.clear()
+    elif change == "missing_target":
+        state.channel_map.pop("444")
+    elif change == "wrong_category":
+        state.channel_categories["444"] = "forum-other"
+    elif change == "empty":
+        exports = []
+        state.channel_map.pop("444")
+        state.channel_categories.clear()
+        state.forum_channel_members.clear()
+    elif change == "ambiguous_export":
+        exports.append(_index_export("222", parent="other"))
+    else:
+        state.forum_channel_members["forum-Ideas & help"] = ["receipt-digest"]
+    with pytest.raises(PermissionSafetyError) as caught:
+        engine_module._permission_index_sources(exports, state)
+    assert caught.value.outcome.stage == "preflight"
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.effects == "none_confirmed"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("forum_channel_members", {"forum-name": None}),
+        ("forum_channel_members", {"forum-name": [["222"]]}),
+        ("channel_categories", {"222": None}),
+        ("forum_category_names", {None: "name"}),
+    ],
+)
+def test_permission_index_sources_refuse_malformed_saved_membership(field, value):
+    from discord_ferry.errors import PermissionSafetyError
+
+    state = MigrationState()
+    setattr(state, field, value)
+    with pytest.raises(PermissionSafetyError) as caught:
+        engine_module._permission_index_sources([], state)
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.stage == "preflight"
+
+
 async def _noop_phase(
     config: FerryConfig,
     state: MigrationState,
