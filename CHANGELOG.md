@@ -40,6 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Rebind recreated roles to existing permission plans, prove dependent channels before content, and preserve unrelated cells and emoji-only rendering without changing role ranks or saved-state formats (#1172).
+
 - Preflight explicit channel repair before target writes, preserve actual target facts while planning corrections or recreation, and require fresh permission proof before resend. Retain completed actions and actual dead-letter totals when repair stops (#1172).
 
 - Capture the approved permission safety decision as separate snapshot evidence and verify its exact scoped backup, while retaining rejection of other paths (#1172).

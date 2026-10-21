@@ -32,6 +32,7 @@ from discord_ferry.core.permissions import (
     common_index_plan,
     compile_permission_plan,
     prove_carried_channel_access,
+    require_permission_runtime,
 )
 from discord_ferry.core.security import (
     SecureTokenStore,
@@ -1413,20 +1414,24 @@ def _permission_role_layout(
     ):
         _permission_preflight_unverified("Bind the complete role list used by existing creation")
     actual = {role.id: role for role in observed.roles}
-    if any(target not in actual for target in state.role_map.values()) or len(
-        set(state.role_map.values())
-    ) != len(state.role_map):
+    recreating = {role.source_id for role in observed.planned_role_facts}
+    mapped = {sid: tid for sid, tid in state.role_map.items() if sid not in recreating}
+    if (
+        not recreating <= state.role_map.keys()
+        or any(state.role_map[sid] in actual for sid in recreating)
+        or any(target not in actual for target in mapped.values())
+    ) or len(set(state.role_map.values())) != len(state.role_map):
         _permission_preflight_unverified("Repair missing mapped roles before migration")
     processed = (
         sorted(roles, key=lambda role: (role.position, role.id), reverse=True)[:role_limit]
         if change_roles
-        else []
+        else sorted((role for role in roles if role.id in recreating), key=lambda role: role.id)
     )
     processed_ids = {role.id for role in processed}
-    future = [role for role in processed if role.id not in state.role_map]
+    future = [role for role in processed if role.id not in mapped]
     if future and len(actual) + len(future) > role_limit:
         _permission_preflight_unverified("Resolve sufficient existing-owner role capacity")
-    if raw.keys() - state.role_map.keys() != {role.id for role in future}:
+    if raw.keys() - mapped.keys() != {role.id for role in future}:
         _permission_preflight_unverified(
             "Resolve every required role within existing creation scope"
         )
@@ -1435,10 +1440,7 @@ def _permission_role_layout(
     ranks.update((("source", role.id), len(actual) + i) for i, role in enumerate(future))
     if any(rank is None for rank in ranks.values()) or len(set(ranks.values())) != len(ranks):
         _permission_preflight_unverified("Resolve unambiguous existing-owner role priority")
-    tokens = {
-        sid: ("target", state.role_map[sid]) if sid in state.role_map else ("source", sid)
-        for sid in raw
-    }
+    tokens = {sid: ("target", mapped[sid]) if sid in mapped else ("source", sid) for sid in raw}
     if change_roles and len(tokens) >= 2:
         current = sorted(ranks, key=lambda token: (ranks[token], token))
         desired = [tokens[role.id] for role in sorted(processed, key=lambda r: (-r.position, r.id))]
@@ -1457,7 +1459,7 @@ def _permission_role_layout(
     proposed = []
     updates = []
     for role in sorted(roles, key=lambda role: role.id):
-        target = state.role_map.get(role.id)
+        target = mapped.get(role.id)
         old = actual.get(target) if target is not None else None
         pair = meta.role_permissions[role.id]
         permissions = (
@@ -1482,7 +1484,7 @@ def _permission_role_layout(
     )
     return dataclasses.replace(
         observed,
-        planned_roles=tuple((sid, state.role_map.get(sid)) for sid in sorted(raw)),
+        planned_roles=tuple((sid, mapped.get(sid)) for sid in sorted(raw)),
         planned_role_facts=tuple(proposed),
         planned_role_updates=tuple(updates),
         planned_server_default=default,
@@ -1630,6 +1632,29 @@ async def _prepare_permission_operation(
     change_roles = mode == "migration" and not (
         config.resume and phase_index > PHASE_ORDER.index("roles")
     )
+    if mode == "repair":
+        actual_roles = {role.id for role in layout.roles}
+        missing_roles = sorted(
+            sid for sid, tid in state.role_map.items() if tid not in actual_roles
+        )
+        if any(
+            not state.created_role_names.get(sid) or sid not in meta.role_permissions
+            for sid in missing_roles
+        ):
+            _permission_preflight_unverified("Bind missing roles to recorded recreation owners")
+        layout = dataclasses.replace(
+            layout,
+            planned_role_facts=tuple(
+                PlannedRole(
+                    sid,
+                    PermissionCell(
+                        meta.role_permissions[sid].allow, meta.role_permissions[sid].deny
+                    ),
+                    len(actual_roles) + index,
+                )
+                for index, sid in enumerate(missing_roles)
+            ),
+        )
     if (
         mode == "migration"
         and config.resume
@@ -3101,9 +3126,19 @@ async def _recreate_role(
     # api_create_role answers with `id`; api_create_channel answers with `_id`.
     # The five create routes disagree by design and a pass that "makes these
     # consistent" breaks two of the three.
-    created = await api_create_role(
-        session, config.stoat_url, config.token, state.stoat_server_id, recorded
-    )
+    runtime = state.permission_runtime
+    if runtime is not None:
+        runtime.note_write()
+    try:
+        created = await api_create_role(
+            session, config.stoat_url, config.token, state.stoat_server_id, recorded
+        )
+    except MigrationError as exc:
+        if runtime is not None:
+            raise runtime.stop("write_uncertain", stage="application") from exc
+        raise
+    if runtime is not None:
+        runtime.note_write_confirmed()
     new_id: str = created["id"]
     state.role_map[discord_id] = new_id
     # From the RESPONSE, which is what the server actually stored, not from the
@@ -3474,6 +3509,8 @@ async def _rewrite_emoji_references(
     new_id: str,
     exports: list[DCEExport],
     on_event: EventCallback,
+    *,
+    render_state: MigrationState | None = None,
 ) -> tuple[int, int, int]:
     """Edit every Ferry-sent message that used the emoji so it points at ``new_id``.
 
@@ -3492,7 +3529,7 @@ async def _rewrite_emoji_references(
             # Not a message Ferry sent, or its channel is unmapped. Never edited.
             continue
 
-        parts = _split_message(_build_content(msg, state))
+        parts = _split_message(_build_content(msg, render_state or state))
         part_index = next((i for i, part in enumerate(parts) if token in part), None)
         if part_index is None:
             # The emoji did not survive rendering (should not happen); skip safely.
@@ -3512,6 +3549,12 @@ async def _rewrite_emoji_references(
         try:
             runtime = state.permission_runtime
             if runtime is not None:
+                bindings = dict(runtime._active_plan("application").target_layout.planned_channels)
+                # A proved-missing channel has no old messages to edit. Its
+                # later resend renders through the updated emoji map.
+                if channel_discord_id in bindings and bindings[channel_discord_id] is None:
+                    continue
+                runtime.require(stoat_channel)
                 runtime.note_write()
             await api_edit_message(
                 session,
@@ -3572,6 +3615,8 @@ async def _run_emoji_repair_pass(
     exports: list[DCEExport],
     outcome: RepairOutcome,
     on_event: EventCallback,
+    *,
+    render_state: MigrationState | None = None,
 ) -> None:
     """Recreate each missing emoji, then rewrite the messages that referenced it.
 
@@ -3595,6 +3640,7 @@ async def _run_emoji_repair_pass(
     # emoji_work loop recreates a fresh id and rewrites again. Extra edits, correct
     # final state. So this loop must not assume disjointness.
     owned_rewrites, declined_rewrites = _owned_pending_rewrites(state)
+    render_args = {"render_state": render_state} if render_state is not None else {}
     for notice in declined_rewrites:
         state.warnings.append(
             {"phase": "repair", "type": "emoji_rewrite_not_owned", "message": notice}
@@ -3602,7 +3648,7 @@ async def _run_emoji_repair_pass(
         on_event(MigrationEvent(phase="repair", status="warning", message=notice))
     for pending_id, pending in list(owned_rewrites.items()):
         rewritten, declined, failed = await _rewrite_emoji_references(
-            session, config, state, pending_id, pending["new"], exports, on_event
+            session, config, state, pending_id, pending["new"], exports, on_event, **render_args
         )
         # Record the resume work in the outcome too, so a run that only finishes a
         # leftover record still reports what it edited (RepairOutcome is "everything
@@ -3698,7 +3744,7 @@ async def _run_emoji_repair_pass(
         )
 
         rewritten, declined, failed = await _rewrite_emoji_references(
-            session, config, state, discord_id, new_id, exports, on_event
+            session, config, state, discord_id, new_id, exports, on_event, **render_args
         )
         row["messages_rewritten"] = rewritten
         row["messages_declined"] = declined
@@ -3718,6 +3764,35 @@ async def _run_emoji_repair_pass(
                     f"({declined} declined, {failed} failed)."
                 ),
             )
+        )
+
+
+async def _repair_dependent_channel_permissions(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    discord_role_id: str,
+) -> None:
+    """Reapply existing bound channel plans after the selected role is rebound."""
+    runtime = require_permission_runtime(state, service=config.stoat_url)
+    plan = runtime._active_plan("application")
+    if not any(role.source_id == discord_role_id for role in plan.target_layout.planned_role_facts):
+        raise runtime.stop("unverified", stage="application")
+    bindings = dict(plan.target_layout.planned_channels)
+    for channel in plan.channels:
+        target = bindings[channel.source_key]
+        if target is None or discord_role_id not in dict(channel.roles):
+            continue
+        if state.channel_map.get(channel.source_key) != target:
+            raise runtime.stop("unverified", stage="application")
+        await apply_channel_permissions(
+            session,
+            config,
+            state,
+            target,
+            None,
+            state.created_channel_names.get(channel.source_key, channel.source_key),
+            phase="repair",
         )
 
 
@@ -3946,6 +4021,29 @@ async def _run_repair(
         state.permission_runtime = await _prepare_permission_operation(
             config, state, exports, limits_session, mode="repair"
         )
+        assert state.permission_runtime is not None
+        assert state.permission_runtime.plan is not None
+        plan = state.permission_runtime.plan
+        selected_roles = {
+            result.discord_id
+            for result in structure_work
+            if result.kind == "role_missing"
+            and state.role_map.get(result.discord_id or "") == result.stoat_id
+        }
+        selected_channels = {
+            result.discord_id
+            for result in structure_work
+            if result.kind == "channel_missing"
+            and state.channel_map.get(result.discord_id or "") == result.stoat_id
+        }
+        if any(
+            role.source_id not in selected_roles for role in plan.target_layout.planned_role_facts
+        ) or any(
+            source not in selected_channels
+            for source, target in plan.target_layout.planned_channels
+            if target is None
+        ):
+            raise state.permission_runtime.stop("unverified", stage="preflight")
         await _initialize_upload_limits(limits_session, config)
         _permission_preflight_cancel(config, state.permission_runtime)
         metadata = load_bound_discord_metadata(config, exports)
@@ -4047,37 +4145,54 @@ async def _run_repair(
                 if own_conv_session:
                     await conv_sess.close()
 
-        for source, target in state.permission_runtime.plan.target_layout.planned_channels:
-            if target is not None:
-                await apply_channel_permissions(
-                    limits_session,
-                    config,
-                    state,
-                    target,
-                    metadata.channel_metadata.get(source) if metadata else None,
-                    state.created_channel_names.get(source, source),
-                    phase="repair",
-                )
+        if not plan.target_layout.planned_role_facts:
+            for source, target in plan.target_layout.planned_channels:
+                if target is not None:
+                    await apply_channel_permissions(
+                        limits_session,
+                        config,
+                        state,
+                        target,
+                        metadata.channel_metadata.get(source) if metadata else None,
+                        state.created_channel_names.get(source, source),
+                        phase="repair",
+                    )
     finally:
         if own_limits_session:
             await limits_session.close()
 
-    # Emoji pass, ordered BEFORE structure and tail so channel_map, role_map and
-    # author_names still hold their migration-time values when a referencing
-    # message is re-rendered. That ordering is what keeps the rewrite scoped to
-    # the emoji rather than sweeping in a reference a structure repair just
-    # changed in the same run. See
-    # docs/plans/designs/2026-08-20-repair-emoji-missing.md.
-    if emoji_work or state.pending_emoji_rewrites:
+    # Role recreation must precede content proof. A render-only snapshot keeps
+    # emoji edits scoped to emoji changes even when those roles must run first.
+    # It never supplies observed permission facts or reaches a state writer.
+    emoji_render_state = (
+        dataclasses.replace(
+            state,
+            role_map=dict(state.role_map),
+            channel_map=dict(state.channel_map),
+            author_names=dict(state.author_names),
+        )
+        if plan.target_layout.planned_role_facts
+        else None
+    )
+
+    async def repair_emoji() -> None:
+        if not (emoji_work or state.pending_emoji_rewrites):
+            return
         own_emoji_session = session is None
         emoji_sess = session or new_session()
         try:
+            render_args = (
+                {"render_state": emoji_render_state} if emoji_render_state is not None else {}
+            )
             await _run_emoji_repair_pass(
-                emoji_sess, config, state, emoji_work, exports, outcome, on_event
+                emoji_sess, config, state, emoji_work, exports, outcome, on_event, **render_args
             )
         finally:
             if own_emoji_session:
                 await emoji_sess.close()
+
+    if not plan.target_layout.planned_role_facts:
+        await repair_emoji()
 
     if structure_work:
         # Only when something is actually being recreated. A repair with nothing
@@ -4117,77 +4232,94 @@ async def _run_repair(
                 )
                 on_event(MigrationEvent(phase="repair", status="warning", message=message))
 
-            for result in structure_work:
+            role_work = sorted(
+                (result for result in structure_work if result.kind == "role_missing"),
+                key=lambda result: result.discord_id or "",
+            )
+            for result in role_work:
                 discord_id = result.discord_id or ""
-                # Persist after EACH recreation, not once at the end. run_roles
-                # already does this mid-loop and says why: a hard kill between a
-                # create and the save leaves the id map naming the entity that is
-                # gone, so the next run's check reports it missing again and
-                # repair creates a SECOND one. One extra atomic write per
-                # recreated entity is cheap against a duplicate nobody asked for.
-                #
-                # Unreachable under --dry-run: that path returns above.
-                if result.kind == "role_missing":
-                    role_created = await _recreate_role(sess, config, state, result, on_event)
-                    if role_created:
-                        role_label = state.created_role_names.get(discord_id, discord_id)
-                        outcome.recreated_roles.append(
-                            {
-                                "discord_id": discord_id,
-                                "stoat_id": state.role_map.get(discord_id),
-                                "name": role_label,
-                            }
-                        )
-                        # Colour, hoist and icon live in Discord metadata. With a
-                        # RoleMeta for this role we restore them the same way the
-                        # migration does (apply_role_attributes); the icon is
-                        # re-fetched from Discord's CDN and re-uploaded to Autumn.
-                        # With none (no metadata file, or the role absent from it)
-                        # there is no source, so we decline and say so. Rank is NOT
-                        # restored here: the per-role PATCH discards it and ordering
-                        # goes through _apply_role_ordering, so an --incremental
-                        # re-run restores position. See #344.
-                        role_meta = metadata.role_metadata.get(discord_id) if metadata else None
-                        if role_meta is not None:
-                            await apply_role_attributes(
-                                sess,
-                                config,
-                                state,
-                                state.role_map[discord_id],
-                                _role_from_metadata(discord_id, role_meta),
-                                role_meta,
-                                phase="repair",
-                            )
-                        else:
-                            state.warnings.append(
-                                {
-                                    "phase": "repair",
-                                    "type": "role_attributes_not_restored",
-                                    "message": (
-                                        f"Role '{role_label}' was recreated with its name and "
-                                        "permissions. Its colour, hoist setting and icon are not "
-                                        "restored (no Discord metadata for it): set them by hand, "
-                                        "or re-run the migration with --incremental (see issue "
-                                        "#344)."
-                                    ),
-                                }
-                            )
-                    if role_created and metadata:
-                        # ONE role. The server-default call that follows the loop
-                        # this helper was extracted from is deliberately not here:
-                        # it writes a mask onto the server's DEFAULT ROLE, which
-                        # every member holds, and re-firing it during a one-role
-                        # repair is the defect batch 5 of #107 existed to fix.
-                        await apply_role_permissions(
+                role_created = await _recreate_role(sess, config, state, result, on_event)
+                if role_created:
+                    role_label = state.created_role_names.get(discord_id, discord_id)
+                    outcome.recreated_roles.append(
+                        {
+                            "discord_id": discord_id,
+                            "stoat_id": state.role_map.get(discord_id),
+                            "name": role_label,
+                        }
+                    )
+                    runtime = state.permission_runtime
+                    assert runtime is not None
+                    runtime.bind_role(discord_id, state.role_map[discord_id])
+                    save_state(state, config.output_dir)
+                    # Colour, hoist and icon live in Discord metadata. With a
+                    # RoleMeta for this role we restore them the same way the
+                    # migration does (apply_role_attributes); the icon is
+                    # re-fetched from Discord's CDN and re-uploaded to Autumn.
+                    # With none (no metadata file, or the role absent from it)
+                    # there is no source, so we decline and say so. Rank is NOT
+                    # restored here: the per-role PATCH discards it and ordering
+                    # goes through _apply_role_ordering, so an --incremental
+                    # re-run restores position. See #344.
+                    role_meta = metadata.role_metadata.get(discord_id) if metadata else None
+                    if role_meta is not None:
+                        await apply_role_attributes(
                             sess,
                             config,
                             state,
                             state.role_map[discord_id],
-                            metadata.role_permissions.get(discord_id),
-                            state.created_role_names.get(discord_id, discord_id),
+                            _role_from_metadata(discord_id, role_meta),
+                            role_meta,
                             phase="repair",
                         )
-                elif result.kind == "category_missing":
+                    else:
+                        state.warnings.append(
+                            {
+                                "phase": "repair",
+                                "type": "role_attributes_not_restored",
+                                "message": (
+                                    f"Role '{role_label}' was recreated with its name and "
+                                    "permissions. Its colour, hoist setting and icon are not "
+                                    "restored (no Discord metadata for it): set them by hand, "
+                                    "or re-run the migration with --incremental (see issue "
+                                    "#344)."
+                                ),
+                            }
+                        )
+                save_state(state, config.output_dir)
+
+            # Bind every actual role identity before the existing role writer
+            # validates the final complete layout. Never manufacture ranks.
+            created_roles = {action["discord_id"] for action in outcome.recreated_roles}
+            if any(
+                role.source_id not in created_roles
+                for role in plan.target_layout.planned_role_facts
+            ):
+                raise state.permission_runtime.stop("readback_mismatch", stage="application")
+            for action in outcome.recreated_roles:
+                discord_id = action["discord_id"]
+                if metadata is not None:
+                    await apply_role_permissions(
+                        sess,
+                        config,
+                        state,
+                        state.role_map[discord_id],
+                        metadata.role_permissions.get(discord_id),
+                        action["name"],
+                        phase="repair",
+                    )
+            if outcome.recreated_roles:
+                await _repair_dependent_channel_permissions(
+                    sess, config, state, outcome.recreated_roles[-1]["discord_id"]
+                )
+            if plan.target_layout.planned_role_facts:
+                await repair_emoji()
+
+            for result in structure_work:
+                if result.kind == "role_missing":
+                    continue
+                discord_id = result.discord_id or ""
+                if result.kind == "category_missing":
                     cat_created = await _recreate_category(
                         sess, config, state, result, live_categories, on_event
                     )
@@ -4412,6 +4544,8 @@ async def _run_repair(
     # with a migration that can never be checked again.
     outcome.declined = _repair_declined(state, warnings_start)
     if state.permission_runtime is not None:
+        if not state.permission_runtime.outcome.verified:
+            raise state.permission_runtime.stop("unverified", stage="recheck")
         outcome.permissions = state.permission_runtime.outcome
     outcome.failed_messages = [
         {"discord_msg_id": fm.discord_msg_id, "stoat_channel_id": fm.stoat_channel_id}
