@@ -20,12 +20,50 @@ from discord_ferry.discord.client import (
     fetch_guild_roles,
 )
 from discord_ferry.discord.models import DiscordChannel, DiscordRole
-from discord_ferry.errors import DiscordAuthError
+from discord_ferry.errors import DiscordAuthError, MigrationError
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 
 DISCORD_API = "https://discord.com/api/v10"
 TOKEN = "test-discord-token"
 GUILD_ID = "111222333"
+
+
+@pytest.mark.parametrize(
+    "value", [True, False, 0.5, 0.0, -1, "-1", "", "1.0", " 1 ", "١", None, [], {}]
+)
+def test_permission_parsing_rejects_non_integer_facts(value: object) -> None:
+    with pytest.raises(MigrationError, match="Discord returned an invalid permission value"):
+        _parse_role({"id": "111", "name": "ordinary", "permissions": value})
+    for key in ("allow", "deny"):
+        overwrite = {"id": "111", "type": 0, "allow": "0", "deny": "0", key: value}
+        with pytest.raises(MigrationError, match="Discord returned an invalid permission value"):
+            _parse_channel(
+                {"id": "222", "name": "general", "type": 0, "permission_overwrites": [overwrite]}
+            )
+
+
+def test_permission_parsing_keeps_valid_integer_and_decimal_string_inputs() -> None:
+    for value in (0, 1, 1 << 100):
+        for raw in (value, str(value)):
+            role = _parse_role({"id": "111", "name": "ordinary", "permissions": raw})
+            channel = _parse_channel(
+                {
+                    "id": "222",
+                    "name": "general",
+                    "type": 0,
+                    "permission_overwrites": [{"id": "111", "type": 0, "allow": raw, "deny": raw}],
+                }
+            )
+            assert role.permissions == value
+            assert channel.permission_overwrites[0].allow == value
+            assert channel.permission_overwrites[0].deny == value
+
+
+def test_invalid_permission_error_does_not_echo_received_value() -> None:
+    marker = "unexpected-sensitive-input"
+    with pytest.raises(MigrationError) as caught:
+        _parse_role({"id": "111", "name": "ordinary", "permissions": marker})
+    assert marker not in str(caught.value)
 
 
 def test_omitted_overwrites_are_not_verified_empty() -> None:
@@ -336,6 +374,13 @@ async def test_fetch_and_translate_metadata(mock_discord: aioresponses) -> None:
 
     # Bot role excluded
     assert "role2" not in meta.role_permissions
+    assert hasattr(meta, "permission_source"), "Fetch did not capture raw source evidence"
+    assert meta.permission_source is not None
+    source_roles = {role.id: role for role in meta.permission_source.roles}
+    assert source_roles["role2"].managed is True
+    assert guild_id in source_roles
+    source_channels = {channel.id: channel for channel in meta.permission_source.channels}
+    assert source_channels["ch1"].member_overwrite_count == 1
 
     # @everyone role excluded from role_permissions
     assert guild_id not in meta.role_permissions

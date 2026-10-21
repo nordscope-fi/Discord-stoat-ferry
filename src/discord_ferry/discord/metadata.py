@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import atomic_write_text
+from discord_ferry.core.permissions import (
+    PermissionSourceEvidence,
+    SourceChannel,
+    SourceOverwrite,
+    SourceRole,
+)
 from discord_ferry.discord.models import normalize_channel_position
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS
 from discord_ferry.errors import MigrationError
@@ -17,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from discord_ferry.config import FerryConfig
+    from discord_ferry.discord.models import DiscordChannel, DiscordRole
     from discord_ferry.parser.models import DCEExport
 
 
@@ -76,6 +84,166 @@ class DiscordMetadata:
     category_positions: dict[str, int] = field(default_factory=dict)
     guild_description: str = ""
     guild_nsfw: bool = False
+    permission_source: PermissionSourceEvidence | None = None
+
+
+_PERMISSION_TRANSLATION_VERSION = "discord-to-stoat-v1"
+
+
+def _source_integer(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _capture_source_channel(channel: DiscordChannel) -> SourceChannel:
+    overwrites = None
+    member_count = None
+    if "permission_overwrites" in channel.capture_fields and all(
+        type(ow.type) is int and ow.type in (0, 1) for ow in channel.permission_overwrites
+    ):
+        overwrites = tuple(
+            SourceOverwrite(ow.id, ow.allow, ow.deny)
+            for ow in sorted(channel.permission_overwrites, key=lambda ow: ow.id)
+            if ow.type == 0
+        )
+        member_count = sum(ow.type == 1 for ow in channel.permission_overwrites)
+    return SourceChannel(
+        channel.id,
+        _source_integer(channel.type) if "type" in channel.capture_fields else None,
+        overwrites,
+        member_count,
+        channel.capture_fields,
+    )
+
+
+def capture_permission_source(
+    guild_id: str, roles: Collection[DiscordRole], channels: Collection[DiscordChannel]
+) -> PermissionSourceEvidence:
+    """Snapshot structural facts before translation, without inventing absent values."""
+    source = PermissionSourceEvidence(
+        guild_id,
+        _PERMISSION_TRANSLATION_VERSION,
+        roles=tuple(
+            SourceRole(
+                role.id,
+                _source_integer(role.permissions) if "permissions" in role.capture_fields else None,
+                _source_integer(role.position) if "position" in role.capture_fields else None,
+                role.managed
+                if "managed" in role.capture_fields and type(role.managed) is bool
+                else None,
+                role.capture_fields,
+            )
+            for role in sorted(roles, key=lambda role: role.id)
+        ),
+        channels=tuple(_capture_source_channel(c) for c in sorted(channels, key=lambda c: c.id)),
+        covered_channel_ids=frozenset(channel.id for channel in channels),
+    )
+    return replace(source, fingerprint=_permission_source_fingerprint(source))
+
+
+def _permission_source_payload(source: PermissionSourceEvidence) -> dict[str, Any]:
+    return {
+        "schema_version": source.schema_version,
+        "guild_id": source.guild_id,
+        "translation_version": source.translation_version,
+        "roles": [
+            {
+                "id": r.id,
+                "permissions": r.permissions,
+                "position": r.position,
+                "managed": r.managed,
+                "capture_fields": sorted(r.capture_fields),
+            }
+            for r in source.roles
+        ],
+        "channels": [
+            {
+                "id": c.id,
+                "type": c.type,
+                "overwrites": None
+                if c.overwrites is None
+                else [
+                    {"role_id": ow.role_id, "allow": ow.allow, "deny": ow.deny}
+                    for ow in c.overwrites
+                ],
+                "member_overwrite_count": c.member_overwrite_count,
+                "capture_fields": sorted(c.capture_fields),
+            }
+            for c in source.channels
+        ],
+        "covered_channel_ids": sorted(source.covered_channel_ids),
+    }
+
+
+def _permission_source_fingerprint(source: PermissionSourceEvidence) -> str:
+    data = _permission_source_payload(source)
+    data["roles"].sort(key=lambda role: role["id"])
+    data["channels"].sort(key=lambda channel: channel["id"])
+    for channel in data["channels"]:
+        if channel["overwrites"] is not None:
+            channel["overwrites"].sort(key=lambda ow: (ow["role_id"], ow["allow"], ow["deny"]))
+    return hashlib.sha256(
+        json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _permission_source_to_dict(source: PermissionSourceEvidence) -> dict[str, Any]:
+    return {**_permission_source_payload(source), "fingerprint": source.fingerprint}
+
+
+def _source_list(value: object) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError("Source evidence collection must be a list")
+    return value
+
+
+def _source_fields(value: object) -> frozenset[str]:
+    values = _source_list(value)
+    if any(type(item) is not str for item in values):
+        raise ValueError("Source evidence fields must be strings")
+    return frozenset(values)
+
+
+def _dict_to_permission_source(value: object) -> PermissionSourceEvidence | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        if not isinstance(value["fingerprint"], str):
+            return None
+        return PermissionSourceEvidence(
+            guild_id=value["guild_id"],
+            translation_version=value["translation_version"],
+            schema_version=value["schema_version"],
+            fingerprint=value["fingerprint"],
+            roles=tuple(
+                SourceRole(
+                    r["id"],
+                    r.get("permissions"),
+                    r.get("position"),
+                    r.get("managed"),
+                    _source_fields(r["capture_fields"]),
+                )
+                for r in _source_list(value["roles"])
+            ),
+            channels=tuple(
+                SourceChannel(
+                    c["id"],
+                    c.get("type"),
+                    None
+                    if c["overwrites"] is None
+                    else tuple(
+                        SourceOverwrite(ow["role_id"], ow["allow"], ow["deny"])
+                        for ow in _source_list(c["overwrites"])
+                    ),
+                    c.get("member_overwrite_count"),
+                    _source_fields(c["capture_fields"]),
+                )
+                for c in _source_list(value["channels"])
+            ),
+            covered_channel_ids=_source_fields(value["covered_channel_ids"]),
+        )
+    except (KeyError, TypeError, ValueError, AttributeError):
+        # Invalid optional evidence does not erase otherwise readable legacy metadata.
+        return None
 
 
 def save_discord_metadata(meta: DiscordMetadata, output_dir: Path) -> None:
@@ -95,7 +263,7 @@ def load_discord_metadata(output_dir: Path) -> DiscordMetadata | None:
 
 
 def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
-    return {
+    data = {
         "guild_id": meta.guild_id,
         "fetched_at": meta.fetched_at,
         "server_default_permissions": meta.server_default_permissions,
@@ -120,6 +288,9 @@ def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
         "guild_description": meta.guild_description,
         "guild_nsfw": meta.guild_nsfw,
     }
+    if meta.permission_source is not None:
+        data["permission_source"] = _permission_source_to_dict(meta.permission_source)
+    return data
 
 
 def _channel_meta_to_dict(cm: ChannelMeta) -> dict[str, Any]:
@@ -187,6 +358,7 @@ def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
         category_positions=data.get("category_positions", {}),
         guild_description=data.get("guild_description", ""),
         guild_nsfw=data.get("guild_nsfw", False),
+        permission_source=_dict_to_permission_source(data.get("permission_source")),
     )
 
 

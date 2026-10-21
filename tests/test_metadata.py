@@ -1,13 +1,17 @@
 """Tests for Discord metadata persistence."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import aiohttp
 import pytest
 
 from discord_ferry.discord import fetch_and_translate_guild_metadata
+from discord_ferry.discord import metadata as metadata_module
+from discord_ferry.discord.client import _parse_channel, _parse_role
 from discord_ferry.discord.metadata import (
     ChannelMeta,
     DiscordMetadata,
@@ -24,6 +28,173 @@ from discord_ferry.discord.metadata import (
 )
 from discord_ferry.discord.permissions import ALL_STOAT_PERMISSIONS, translate_permissions
 from discord_ferry.errors import MigrationError
+
+
+def _permission_capture() -> Any:
+    assert hasattr(metadata_module, "capture_permission_source"), "Raw source capture is missing"
+    roles = [
+        _parse_role(
+            {
+                "id": "111",
+                "name": "private-name",
+                "permissions": "8",
+                "position": 0,
+                "managed": False,
+                "token": "private-token-value",
+            }
+        ),
+        _parse_role(
+            {
+                "id": "222",
+                "name": "managed-name",
+                "permissions": str(1 << 100),
+                "position": 2,
+                "managed": True,
+            }
+        ),
+    ]
+    channels = [
+        _parse_channel(
+            {
+                "id": "333",
+                "name": "private-channel-name",
+                "type": 0,
+                "permission_overwrites": [
+                    {"id": "111", "type": 0, "allow": "0", "deny": str(1 << 10)},
+                    {"id": "222", "type": 0, "allow": str(1 << 100), "deny": "0"},
+                    {"id": "987654321098765432", "type": 1, "allow": "0", "deny": "0"},
+                ],
+            }
+        )
+    ]
+    return metadata_module.capture_permission_source("111", roles, channels)
+
+
+def test_legacy_and_absent_source_evidence_round_trip() -> None:
+    meta = DiscordMetadata("111", "old", 0, {}, {})
+    assert hasattr(meta, "permission_source"), "Optional source evidence is missing"
+    assert meta.permission_source is None
+    assert _dict_to_meta(_meta_to_dict(meta)).permission_source is None
+
+
+def test_permission_source_preserves_raw_inventory_and_excludes_private_values(
+    tmp_path: Path,
+) -> None:
+    source = _permission_capture()
+    assert source.schema_version == 1 and source.guild_id == "111"
+    assert source.roles[0].permissions == 8
+    assert source.roles[1].managed is True and source.roles[1].permissions == 1 << 100
+    assert source.channels[0].member_overwrite_count == 1
+    assert len(source.channels[0].overwrites) == 2
+    assert source.covered_channel_ids == frozenset({"333"})
+    meta = DiscordMetadata("111", "now", 0, {}, {}, permission_source=source)
+    save_discord_metadata(meta, tmp_path)
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None and loaded.permission_source == source
+    text = (tmp_path / "discord_metadata.json").read_text()
+    for excluded in (
+        "private-name",
+        "managed-name",
+        "private-channel-name",
+        "private-token-value",
+        "987654321098765432",
+        "ready",
+    ):
+        assert excluded not in text
+
+
+def test_source_fingerprint_is_structural_canonical_and_input_independent() -> None:
+    original = _permission_capture()
+    roles = [
+        _parse_role(
+            {
+                "id": r.id,
+                "name": "renamed",
+                "permissions": str(r.permissions),
+                "position": r.position,
+                "managed": r.managed,
+                **({"token": "another-private-value"} if r.id == "111" else {}),
+            }
+        )
+        for r in reversed(original.roles)
+    ]
+    channel = _parse_channel(
+        {
+            "id": "333",
+            "name": "renamed",
+            "type": 0,
+            "permission_overwrites": [
+                {"id": "222", "type": 0, "allow": str(1 << 100), "deny": "0"},
+                {"id": "111", "type": 0, "allow": "0", "deny": str(1 << 10)},
+                {"id": "888888888888888888", "type": 1, "allow": "0", "deny": "0"},
+            ],
+        }
+    )
+    reordered = metadata_module.capture_permission_source("111", roles, [channel])
+    assert original.fingerprint == reordered.fingerprint
+    roles[0].permissions = 0
+    channel.permission_overwrites[0].allow = 0
+    assert reordered.roles[1].permissions == 1 << 100
+    assert reordered.channels[0].overwrites[1].allow == 1 << 100
+    changed = metadata_module.capture_permission_source("111", roles, [channel])
+    assert changed.fingerprint != original.fingerprint
+
+
+def test_capture_never_upgrades_absent_fields_from_parser_defaults() -> None:
+    assert hasattr(metadata_module, "capture_permission_source"), "Raw source capture is missing"
+    role = _parse_role({"id": "111", "name": "ordinary", "permissions": "0"})
+    omitted = _parse_channel({"id": "333", "name": "general", "type": 0})
+    explicit = _parse_channel(
+        {"id": "444", "name": "general", "type": 0, "permission_overwrites": []}
+    )
+    source = metadata_module.capture_permission_source("111", [role], [omitted, explicit])
+    assert source.roles[0].position is None and source.roles[0].managed is None
+    assert source.channels[0].overwrites is None
+    assert source.channels[0].member_overwrite_count is None
+    assert source.channels[1].overwrites == ()
+    assert source.channels[1].member_overwrite_count == 0
+
+
+def test_source_codec_keeps_versions_and_fingerprints_without_inventing_authority() -> None:
+    source = replace(
+        _permission_capture(),
+        schema_version=99,
+        translation_version="unknown",
+        fingerprint="not-validated",
+    )
+    meta = DiscordMetadata("111", "now", 0, {}, {}, permission_source=source)
+    loaded = _dict_to_meta(_meta_to_dict(meta))
+    assert loaded.permission_source == source
+
+
+def test_malformed_source_payload_does_not_make_legacy_metadata_unreadable() -> None:
+    source = _permission_capture()
+    meta = DiscordMetadata("111", "now", 0, {}, {}, permission_source=source)
+    for bad in (True, [], "invalid", {"schema_version": 1}):
+        data = _meta_to_dict(meta)
+        data["permission_source"] = bad
+        loaded = _dict_to_meta(data)
+        assert loaded.guild_id == "111" and loaded.permission_source is None
+    data = _meta_to_dict(meta)
+    data["permission_source"]["roles"][0]["permissions"] = True
+    assert _dict_to_meta(data).permission_source is None
+
+
+def test_source_save_uses_existing_atomic_owner_and_preserves_previous_bytes(
+    tmp_path: Path,
+) -> None:
+    source = _permission_capture()
+    meta = DiscordMetadata("111", "old", 0, {}, {})
+    save_discord_metadata(meta, tmp_path)
+    path = tmp_path / "discord_metadata.json"
+    before = path.read_bytes()
+    meta.permission_source = source
+    with (
+        patch("discord_ferry.discord.metadata.atomic_write_text", side_effect=OSError("synthetic")),
+        pytest.raises(OSError, match="synthetic"),
+    ):
+        save_discord_metadata(meta, tmp_path)
+    assert path.read_bytes() == before
 
 
 def test_metadata_roundtrip_preserves_new_fields(tmp_path: Path) -> None:
