@@ -20,6 +20,7 @@ from discord_ferry.core.atomicio import (
 )
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, read_bounded, tls_hint
+from discord_ferry.core.permissions import require_permission_runtime
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import (
     ChannelMeta,
@@ -29,8 +30,7 @@ from discord_ferry.discord.metadata import (
     load_bound_discord_metadata,
 )
 from discord_ferry.discord.models import normalize_channel_position
-from discord_ferry.discord.permissions import ADMINISTRATOR_ONLY_BITS
-from discord_ferry.errors import AutumnUploadError, MigrationError
+from discord_ferry.errors import AutumnUploadError, MigrationError, PermissionSafetyError
 from discord_ferry.migrator.api import (
     api_create_channel,
     api_create_role,
@@ -51,6 +51,7 @@ from discord_ferry.migrator.api import (
 )
 from discord_ferry.migrator.delivery import deliver_part
 from discord_ferry.migrator.sanitize import truncate_name
+from discord_ferry.migrator.verify import read_permission_context, verify_permission_channel
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCERole
@@ -60,6 +61,7 @@ from discord_ferry.uploader.autumn import TAG_SIZE_LIMITS, upload_to_autumn, upl
 if TYPE_CHECKING:
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
+    from discord_ferry.core.permissions import PermissionStage
     from discord_ferry.parser.models import DCEChannel, DCEExport
     from discord_ferry.state import MigrationState
 
@@ -1245,94 +1247,67 @@ async def apply_channel_permissions(
     *,
     phase: str,
 ) -> None:
-    """Apply a channel's Discord permission overrides to its Stoat channel.
+    """Apply the bound calculated plan, then establish authority from fresh readback.
 
-    Extracted from ``run_channels`` so ``run_repair`` can apply the same
-    overrides to a channel it recreates. A recreated channel without them is
-    silently wrong in exactly the way batch 5 of #107 existed to fix.
-
-    ``phase`` is a parameter rather than the hardcoded ``"channels"`` it was
-    inline, so a repair-time failure is not recorded in ``state.warnings`` as a
-    migration-time one. ADR-014 relies on that document being an honest record.
-
-    The raw ``str(exc)`` below needs no ``safe_sanitize`` at this append site.
-    Redaction happens at the WRITER: ``scrub_document`` masks
-    ``warnings[].message`` on the way into ``state.json`` and ``report.json``
-    (``_TEXT_MEMBERS`` in ``core/security.py``). That is ADR-014's whole point,
-    a call site cannot forget a scrub it never has to make.
-
-    The early return replaces an ``if ch_meta and not config.dry_run:`` block
-    that wrapped the whole body. Same behaviour, one level less nesting.
+    The public arguments remain compatible with existing structure/repair callers.
+    Translated legacy metadata never supplies target payloads here. The compiler
+    consumes validated raw source facts, where administrator overwrite bits grant
+    nothing. Calculated target cells and preserved native grants are not source
+    overwrites and must never pass through inflated-source cleanup.
     """
-    if not ch_meta or config.dry_run:
+    if config.dry_run:
         return
-    # A saved allow holding a bit only the ADMINISTRATOR expansion sets was written
-    # by a version that expanded ADMINISTRATOR inside overwrites (#986). Discord
-    # grants nothing by that bit there, so send an allow of 0 and keep the deny.
-    # The expansion returned before reading any other bit, so the saved value
-    # holds no real grant to keep.
-    replaced = False
-    if ch_meta.default_override:
-        default_allow = ch_meta.default_override.allow
-        if default_allow & ADMINISTRATOR_ONLY_BITS:
-            default_allow = 0
-            replaced = True
-        try:
-            await api_set_channel_default_permissions(
-                session,
-                config.stoat_url,
-                config.token,
-                stoat_channel_id,
-                allow=default_allow,
-                deny=ch_meta.default_override.deny,
-            )
-            await asyncio.sleep(config.upload_delay)
-        except Exception as exc:  # noqa: BLE001
-            state.warnings.append(
-                {
-                    "phase": phase,
-                    "type": "channel_default_perm_failed",
-                    "message": f"Default override for '{label}': {exc}",
-                }
-            )
-    for ow in ch_meta.role_overrides:
-        stoat_role_id = state.role_map.get(ow.discord_role_id)
-        if stoat_role_id:
-            role_allow = ow.allow
-            if role_allow & ADMINISTRATOR_ONLY_BITS:
-                role_allow = 0
-                replaced = True
-            try:
+    runtime = require_permission_runtime(state)
+    runtime.channel_plan(stoat_channel_id)
+    runtime.invalidate_channel(stoat_channel_id)
+    stage: PermissionStage = "application"
+    try:
+        observed = await read_permission_context(session, config, state, (stoat_channel_id,))
+        proposal = runtime.application_plan(stoat_channel_id, observed)
+        if proposal is None:
+            runtime.verify(stoat_channel_id, observed, stage="application")
+            return
+        assert proposal.default is not None
+        cells = ((None, proposal.default), *proposal.roles)
+        if any(mask >= 1 << 64 for _, cell in cells for mask in (cell.allow, cell.deny)):
+            raise runtime.stop("unsupported", stage="application")
+        # PUT uses Override's u64 fields; GET uses OverrideField's signed i64 cells.
+        for role_id, cell in cells:
+            runtime.note_write()
+            if role_id is None:
+                await api_set_channel_default_permissions(
+                    session,
+                    config.stoat_url,
+                    config.token,
+                    stoat_channel_id,
+                    allow=cell.allow,
+                    deny=cell.deny,
+                )
+            else:
                 await api_set_channel_role_permissions(
                     session,
                     config.stoat_url,
                     config.token,
                     stoat_channel_id,
-                    stoat_role_id,
-                    allow=role_allow,
-                    deny=ow.deny,
+                    role_id,
+                    allow=cell.allow,
+                    deny=cell.deny,
                 )
-                await asyncio.sleep(config.upload_delay)
-            except Exception as exc:  # noqa: BLE001
-                state.warnings.append(
-                    {
-                        "phase": phase,
-                        "type": "channel_role_perm_failed",
-                        "message": f"Role override for '{label}': {exc}",
-                    }
-                )
-    if replaced:
-        state.warnings.append(
-            {
-                "phase": phase,
-                "type": "channel_override_admin_inflated",
-                "message": (
-                    f"Saved permission overwrite for '{label}' granted every permission, "
-                    "which Discord never grants inside an overwrite. Ferry removed its "
-                    "allowed permissions and kept its denied ones."
-                ),
-            }
-        )
+            runtime.note_write_confirmed()
+            await asyncio.sleep(config.upload_delay)
+        stage = "recheck"
+        await verify_permission_channel(session, config, state, stoat_channel_id)
+    except asyncio.CancelledError:
+        runtime.stop("interrupted", stage=stage)
+        raise
+    except PermissionSafetyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # The existing transport does not expose a typed rejection receipt. A
+        # dispatched request can have taken effect even if its reply was lost.
+        raise runtime.stop(
+            "unverified" if stage == "recheck" else "write_uncertain", stage=stage
+        ) from exc
 
 
 async def run_channels(

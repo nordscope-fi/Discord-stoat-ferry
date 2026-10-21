@@ -1222,7 +1222,7 @@ async def test_generated_delivery_empty_thread_receipt_survives_restart(
 
 @pytest.mark.parametrize("forum_name", ["my-forum", "Ideas & help 🌱"])
 async def test_structure_index_delivery_recovery_reuses_saved_channel(
-    tmp_path: Path, forum_name: str
+    tmp_path: Path, forum_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Restart structure after index creation without making another channel or post."""
     import json
@@ -1231,6 +1231,15 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
 
     from aioresponses import CallbackResult
 
+    from discord_ferry.core import permissions as permission_module
+    from discord_ferry.discord import client
+    from discord_ferry.discord.metadata import (
+        ChannelMeta,
+        DiscordMetadata,
+        capture_permission_source,
+        validate_permission_source,
+    )
+    from discord_ferry.migrator import structure as structure_module
     from discord_ferry.state import DeliveryRef, load_state
 
     server_id = valid_stoat_id(900)
@@ -1248,6 +1257,63 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
     records: list[dict[str, str]] = []
     pins: list[str] = []
     first = True
+    proofs = []
+    source = capture_permission_source(
+        post.guild.id,
+        [
+            client._parse_role(
+                {
+                    "id": post.guild.id,
+                    "name": "everyone",
+                    "permissions": "0",
+                    "position": 0,
+                    "managed": False,
+                }
+            )
+        ],
+        [
+            client._parse_channel(
+                {
+                    "id": post.channel.id,
+                    "name": "post",
+                    "type": 15,
+                    "permission_overwrites": [],
+                }
+            )
+        ],
+    )
+    metadata = DiscordMetadata(
+        post.guild.id,
+        "2026-10-20T00:00:00+00:00",
+        0,
+        {},
+        {post.channel.id: ChannelMeta(False)},
+        permission_source=source,
+    )
+    assert not validate_permission_source(metadata, frozenset({post.channel.id}))
+    layout = permission_module.TargetLayout(
+        service=STOAT_URL,
+        server_id=server_id,
+        server_default=0,
+        planned_channels=((post.channel.id, None),),
+        fingerprint="mock-server-before-post-creation",
+    )
+    plan = permission_module.compile_permission_plan(source, layout)
+    assert not plan.problems
+    state.permission_runtime = permission_module.PermissionRuntime(plan)
+    real_writer = structure_module.apply_channel_permissions
+
+    async def bind_created_post(session, config, state, target, metadata, label, *, phase):
+        # This phase fixture binds the actual create receipt. Whole-operation
+        # preflight and generated-index authority have separate approved tasks.
+        runtime = state.permission_runtime
+        assert runtime is not None
+        assert not runtime.ready
+        runtime.bind_channel(post.channel.id, target)
+        await real_writer(session, config, state, target, metadata, label, phase=phase)
+        proofs.append(runtime.require(target))
+
+    monkeypatch.setattr(structure_module, "apply_channel_permissions", bind_created_post)
 
     def create_channel(url, **kwargs):
         channel_id = valid_stoat_id(1800 + len(channels))
@@ -1273,6 +1339,31 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
         return CallbackResult(payload={})
 
     def register(http):
+        http.get(
+            f"{STOAT_URL}/servers/{server_id}",
+            callback=lambda *args, **kwargs: CallbackResult(
+                payload={
+                    "_id": server_id,
+                    "channels": list(channels),
+                    "roles": {},
+                    "default_permissions": 0,
+                }
+            ),
+            repeat=True,
+        )
+        http.get(
+            re.compile(r"https://api\.test/channels/[^/?]+$"),
+            callback=lambda url, **kwargs: CallbackResult(
+                payload={
+                    "_id": url.path.split("/")[-1],
+                    "server": server_id,
+                    "channel_type": "TextChannel",
+                    "default_permissions": {"a": 0, "d": 0},
+                    "role_permissions": {},
+                }
+            ),
+            repeat=True,
+        )
         http.post(f"{STOAT_URL}/servers/{server_id}/channels", callback=create_channel, repeat=True)
         http.post(
             re.compile(r"https://api\.test/channels/[^/]+/messages$"),
@@ -1297,6 +1388,8 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
             await run_channels(config, state, [post], lambda event: None)
     assert len(channels) == 2
     assert len(records) == 1
+    assert len(proofs) == 1
+    assert proofs[0].layout.channels[0].id == channels[0]
     state = load_state(tmp_path)
     saved_index_channel = state.channel_map.get(f"forum-index-forum-{forum_name}")
     source_id = hashlib.sha256(f"forum-{forum_name}".encode()).hexdigest()

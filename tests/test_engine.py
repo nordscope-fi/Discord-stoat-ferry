@@ -5642,10 +5642,12 @@ async def _repair_with_metadata(
         )
         m.post(f"{BASE_URL}/servers/{R_SERVER}/roles", payload={"id": S_ROLE_NEW})
         m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
-        await run_repair(config, state, [repair_export], events.append)
-        urls = _permission_calls(m)
-        if bodies_out is not None:
-            bodies_out.update(_permission_bodies(m))
+        try:
+            await run_repair(config, state, [repair_export], events.append)
+        finally:
+            urls = _permission_calls(m)
+            if bodies_out is not None:
+                bodies_out.update(_permission_bodies(m))
     return state, urls, events
 
 
@@ -5659,37 +5661,36 @@ async def test_repair_ignores_another_servers_metadata_file(tmp_path: Path) -> N
     assert any(w.get("type") == "no_discord_metadata" for w in state.warnings), state.warnings
 
 
-async def test_a_recreated_channel_gets_its_recorded_overrides(tmp_path: Path) -> None:
-    """SC-4.3. Both override kinds, through the chunk 1 helper."""
-    _, urls, _ = await _repair_with_metadata(tmp_path, _report_with("channel_missing", "fail"))
-    assert any(
-        u.endswith("/channels/01J5T000000000000000009500/permissions/default") for u in urls
-    ), f"the default override was not applied: {urls}"
-    assert any(
-        u.endswith(f"/channels/01J5T000000000000000009500/permissions/{S_ROLE_OLD}") for u in urls
-    ), f"the role override was not applied: {urls}"
+async def test_a_recreated_channel_refuses_unbound_recorded_overrides(tmp_path: Path) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    bodies: dict[str, Any] = {}
+    with pytest.raises(PermissionSafetyError) as caught:
+        await _repair_with_metadata(
+            tmp_path, _report_with("channel_missing", "fail"), bodies_out=bodies
+        )
+    assert caught.value.outcome.reason == "unverified"
+    assert bodies == {}, "Legacy translated cells must not authorize a channel permission PUT"
 
 
-async def test_repair_sends_no_allow_for_an_inflated_saved_overwrite(tmp_path: Path) -> None:
-    """SC-2.10 (#986). v2.6.15 to v2.9.x saved 0x3ff00cdf for an ADMINISTRATOR overwrite."""
+async def test_repair_refuses_inflated_legacy_cells_without_a_bound_plan(tmp_path: Path) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
     output_dir = tmp_path / "output"
     output_dir.mkdir(parents=True)
     _write_discord_metadata(output_dir, default_allow=0x3FF00CDF, role_allow=0x3FF00CDF)
+    before = (output_dir / "discord_metadata.json").read_bytes()
     bodies: dict[str, Any] = {}
-    state, _, _ = await _repair_with_metadata(
-        tmp_path,
-        _report_with("channel_missing", "fail"),
-        write_metadata=False,
-        bodies_out=bodies,
-    )
-    new_channel = "/channels/01J5T000000000000000009500/permissions/"
-    default_bodies = [b for u, b in bodies.items() if u.endswith(new_channel + "default")]
-    role_bodies = [b for u, b in bodies.items() if u.endswith(new_channel + S_ROLE_OLD)]
-    assert default_bodies == [{"permissions": {"allow": 0, "deny": 0}}]
-    assert role_bodies == [{"permissions": {"allow": 0, "deny": 8}}]
-    inflated = [w for w in state.warnings if w.get("type") == "channel_override_admin_inflated"]
-    assert len(inflated) == 1
-    assert inflated[0]["phase"] == "repair"
+    with pytest.raises(PermissionSafetyError) as caught:
+        await _repair_with_metadata(
+            tmp_path,
+            _report_with("channel_missing", "fail"),
+            write_metadata=False,
+            bodies_out=bodies,
+        )
+    assert caught.value.outcome.reason == "unverified"
+    assert bodies == {}
+    assert (output_dir / "discord_metadata.json").read_bytes() == before
 
 
 async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) -> None:
@@ -5728,13 +5729,9 @@ async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) ->
     )
 
 
-async def test_a_repair_permission_failure_is_recorded_as_a_repair(tmp_path: Path) -> None:
-    """SC-4.5. phase="repair", not "channels".
+async def test_repair_preserves_shared_writer_refusal_as_a_repair_error(tmp_path: Path) -> None:
+    from discord_ferry.errors import PermissionSafetyError
 
-    ADR-014 relies on state.warnings and report.json being an honest record of
-    where a failure came from. The inline blocks hardcoded their phase, which is
-    why chunk 1 made it a parameter.
-    """
     config = _make_repair_config(tmp_path)
     _write_discord_metadata(config.output_dir)
     state = MigrationState(
@@ -5742,28 +5739,33 @@ async def test_a_repair_permission_failure_is_recorded_as_a_repair(tmp_path: Pat
         channel_map={R_D_CHANNEL: R_S_CHANNEL},
         created_channel_names={R_D_CHANNEL: "general"},
     )
+    events: list[MigrationEvent] = []
 
-    async def _fake_check(*_a: Any, **_k: Any) -> CheckReport:
+    async def check(*_args: Any, **_kwargs: Any) -> CheckReport:
         return _report_with("channel_missing", "fail")
 
     with (
-        patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
+        patch("discord_ferry.migrator.verify.run_check", new=check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
-        aioresponses() as m,
+        aioresponses() as mocked,
     ):
-        _register_repair_server_reads(m, _server_with_channels(), repeat=True)
-        m.post(
+        _register_repair_server_reads(mocked, _server_with_channels(), repeat=True)
+        mocked.post(
             f"{BASE_URL}/servers/{R_SERVER}/channels",
             payload={"_id": "01J5T000000000000000009500", "name": "general"},
         )
-        m.put(re.compile(r".*/permissions/.*"), status=403, repeat=True)
-        await run_repair(config, state, [_export_for(R_D_CHANNEL)], lambda _e: None)
-
-    perm_warnings = [w for w in state.warnings if "perm" in w.get("type", "")]
-    assert perm_warnings, f"a 403 on every permission call recorded nothing: {state.warnings}"
-    assert all(w["phase"] == "repair" for w in perm_warnings), (
-        f"a repair-time failure was filed as a migration-time one: {perm_warnings}"
+        mocked.put(re.compile(r".*/permissions/.*"), status=403, repeat=True)
+        with pytest.raises(PermissionSafetyError) as caught:
+            await run_repair(config, state, [_export_for(R_D_CHANNEL)], events.append)
+        assert _permission_calls(mocked) == []
+    assert caught.value.outcome.reason == "unverified"
+    assert any(
+        event.phase == "repair" and event.detail == {"permissions": caught.value.outcome}
+        for event in events
     )
+    assert not any(event.status == "completed" for event in events)
+    assert state.channel_map[R_D_CHANNEL] == "01J5T000000000000000009500"
+    assert not state.failed_messages
 
 
 async def test_repair_warns_by_name_when_the_metadata_file_is_absent(tmp_path: Path) -> None:
@@ -7450,6 +7452,9 @@ async def _repair_with_live_categories(
         patch("discord_ferry.migrator.verify.run_check", new=_fake_check),
         patch.object(engine_module, "save_state", lambda *a, **k: None),
         patch.object(engine_module, "_process_message", _noop_process),
+        patch.object(
+            engine_module, "apply_channel_permissions", new_callable=AsyncMock
+        ) as permission_writer,
         aioresponses() as m,
     ):
         _register_repair_server_reads(m, payload, repeat=True)
@@ -7461,6 +7466,9 @@ async def _repair_with_live_categories(
         m.patch(re.compile(r".*/channels/.*"), payload={}, repeat=True)
         m.put(re.compile(r".*/permissions/.*"), payload={}, repeat=True)
         await run_repair(config, state, [_export_for(R_D_CHANNEL)], lambda _e: None)
+        # This helper's subjects are category membership and channel attributes.
+        permission_writer.assert_awaited_once()
+        assert permission_writer.await_args.kwargs["phase"] == "repair"
         for (method, url), calls in m.requests.items():
             if method == "PATCH" and str(url).endswith(f"/servers/{R_SERVER}"):
                 body = calls[0].kwargs.get("json")

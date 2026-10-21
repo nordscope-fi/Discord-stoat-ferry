@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Keep permission authority in unsaved operation state, bind created identities explicitly, and require fresh matching target evidence before channel readiness (#1172).
 - Record the approved exact-access-or-stop policy and its recovery, evidence and reporting boundaries in Ferry's local architecture decision record (#1172).
 - Refresh bound source permission evidence through the existing Discord and atomic metadata owners, preserving prior files on failure or cancellation without target work (#1172).
+- Apply calculated channel permissions through the shared writer, preserving unrelated cells and requiring fresh matching readback, with typed stops instead of warning-only failures (#1172).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
