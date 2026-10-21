@@ -235,7 +235,7 @@ class TargetLayout:
 
 @dataclass(frozen=True)
 class BitPredicate:
-    """Immutable source predicate masks; formation and evaluation belong to T05."""
+    """Source result P OR (NOT N AND (c OR G)) over assigned role indices."""
 
     P: int
     N: int
@@ -247,6 +247,151 @@ class BitPredicate:
             _integer(value, name)
         if type(self.c) is not bool:
             raise ValueError("Predicate constant must be Boolean")
+
+
+def evaluate_source_bit(predicate: BitPredicate, members: int) -> bool:
+    """Evaluate explicit allows/admin before aggregated denies and base grants."""
+    _integer(members, "members")
+    return bool(
+        (predicate.P & members)
+        or (not (predicate.N & members) and (predicate.c or predicate.G & members))
+    )
+
+
+def _source_role_changes_bit(predicate: BitPredicate, role: int) -> bool:
+    """Whether toggling one role can change the result for any other assignment."""
+    if predicate.P & role:
+        # Without this allow, all-zero membership requires c; a non-allow deny
+        # supplies a counterexample even when c is true.
+        return not predicate.c or bool(predicate.N & ~predicate.P)
+    if predicate.N & role:
+        # Only other grants not defeated by their own deny can survive.
+        return predicate.c or bool(predicate.G & ~(predicate.P | predicate.N))
+    return bool(predicate.G & role) and not predicate.c
+
+
+def _form_source_bit(
+    everyone: SourceRole,
+    roles: tuple[SourceRole, ...],
+    overwrites: dict[str, SourceOverwrite],
+    bit: int,
+) -> BitPredicate:
+    """Form one raw bit after structural validation, before implicit dependencies."""
+    assert everyone.permissions is not None
+    if everyone.permissions & 8:  # Discord ADMINISTRATOR bypasses all overwrites.
+        return BitPredicate(0, 0, 0, True)
+    mask = 1 << bit
+    default = overwrites.get(everyone.id, SourceOverwrite(everyone.id, 0, 0))
+    c = bool(((everyone.permissions & ~default.deny) | default.allow) & mask)
+    guild_survives = not bool((default.allow | default.deny) & mask)
+    allows = denies = grants = 0
+    for index, role in enumerate(roles):
+        assert role.permissions is not None
+        assigned = 1 << index
+        overwrite = overwrites.get(role.id)
+        if role.permissions & 8 or (overwrite is not None and overwrite.allow & mask):
+            allows |= assigned
+        if overwrite is not None and overwrite.deny & mask:
+            denies |= assigned
+        if guild_survives and role.permissions & mask:
+            grants |= assigned
+    return BitPredicate(allows, denies, grants, c)
+
+
+def build_source_predicates(
+    source: PermissionSourceEvidence,
+    channel_id: str,
+    role_ids: tuple[str, ...],
+    bits: tuple[int, ...],
+) -> tuple[tuple[tuple[int, BitPredicate], ...], tuple[PermissionProblem, ...]]:
+    """Form raw source bits or refuse, without target encoding or readiness.
+
+    The metadata owner validates snapshot binding before calculation. This
+    boundary additionally requires complete structural inputs and an exact
+    ordered universe of ordinary roles, excluding everyone and managed roles.
+    Implicit dependencies and target compatibility belong to plan compilation.
+    """
+    entities: tuple[str, ...] = ()
+
+    def refuse(
+        reason: ProblemReason, guidance: str
+    ) -> tuple[tuple[tuple[int, BitPredicate], ...], tuple[PermissionProblem, ...]]:
+        return (), (PermissionProblem(reason, entities, None, guidance),)
+
+    try:
+        _identity(channel_id)
+        entities = (channel_id,)
+        _immutable(role_ids)
+        _ids(role_ids)
+        _immutable(bits)
+        for bit in bits:
+            _integer(bit, "bit")
+    except ValueError:
+        return refuse("unverified", "Supply valid channel, role and permission selections")
+    if len(set(bits)) != len(bits) or len(set(role_ids)) != len(role_ids):
+        return refuse("unverified", "Supply unique role and permission selections")
+    roles_by_id = {role.id: role for role in source.roles}
+    if len(roles_by_id) != len(source.roles) or source.guild_id not in roles_by_id:
+        return refuse("unverified", "Refresh a unique role inventory including everyone")
+    if any(
+        role.permissions is None
+        or role.position is None
+        or role.managed is None
+        or not {"permissions", "position", "managed"} <= role.capture_fields
+        for role in source.roles
+    ):
+        return refuse("unverified", "Refresh complete raw role facts before calculation")
+    ordinary = {role.id for role in source.roles if role.id != source.guild_id and not role.managed}
+    if set(role_ids) != ordinary:
+        return refuse("unverified", "Bind every ordinary source role exactly once")
+    channels = tuple(channel for channel in source.channels if channel.id == channel_id)
+    if len(channels) != 1 or channel_id not in source.covered_channel_ids:
+        return refuse("unverified", "Refresh unique evidence covering the selected channel")
+    channel = channels[0]
+    if (
+        channel.type is None
+        or channel.overwrites is None
+        or channel.member_overwrite_count is None
+        or not {"type", "permission_overwrites"} <= channel.capture_fields
+    ):
+        return refuse("unverified", "Refresh complete raw channel permission facts")
+    overwrites = {overwrite.role_id: overwrite for overwrite in channel.overwrites}
+    if len(overwrites) != len(channel.overwrites) or not overwrites.keys() <= roles_by_id.keys():
+        return refuse("unverified", "Refresh unique overwrites bound to known source roles")
+    # Discord channel resource: ordinary guild overwrite scopes, not threads,
+    # direct messages or directory channels. Never infer parent/member access.
+    if channel.type not in {0, 2, 4, 5, 13, 15, 16}:
+        return refuse("unsupported", "This source channel scope has no exact supported model")
+    if channel.member_overwrite_count:
+        return refuse("unsupported", "Member-specific source overwrites cannot be reproduced")
+    managed = tuple(role for role in source.roles if role.id != source.guild_id and role.managed)
+    roles = tuple(roles_by_id[role_id] for role_id in role_ids) + managed
+    retained = (1 << len(role_ids)) - 1
+    pairs = []
+    for bit in bits:
+        predicate = _form_source_bit(roles_by_id[source.guild_id], roles, overwrites, bit)
+        for index, role in enumerate(managed, start=len(role_ids)):
+            if _source_role_changes_bit(predicate, 1 << index):
+                return (), (
+                    PermissionProblem(
+                        "unsupported",
+                        (channel_id, role.id),
+                        bit,
+                        "A managed source role changes access without an exact target mapping",
+                    ),
+                )
+        pairs.append(
+            (
+                bit,
+                BitPredicate(
+                    predicate.P & retained,
+                    predicate.N & retained,
+                    predicate.G & retained,
+                    predicate.c,
+                ),
+            )
+        )
+    return tuple(pairs), ()
 
 
 @dataclass(frozen=True)
