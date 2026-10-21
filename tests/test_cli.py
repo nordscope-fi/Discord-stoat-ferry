@@ -82,6 +82,160 @@ def test_validate_help(runner: CliRunner) -> None:
     assert "EXPORT_DIR" in result.output
 
 
+def test_refresh_help_does_not_require_target_credentials(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["refresh-permissions", "--help"])
+    assert result.exit_code == 0
+    assert "--discord-server-id" in result.output
+    assert "--export-dir" in result.output
+    assert "DISCORD_TOKEN" in result.output
+    assert "--stoat-url" not in result.output
+    assert "--token" not in result.output
+
+
+@pytest.mark.parametrize(
+    "missing", ["output", "exports", "guild", "output-is-file", "prompt-abort"]
+)
+def test_cli_permission_refresh_requires_explicit_context_before_backend(
+    tmp_path, monkeypatch, runner, missing
+):
+    from discord_ferry import cli
+
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    backend = AsyncMock(side_effect=AssertionError("Incomplete selection reached refresh"))
+    monkeypatch.setattr(cli, "refresh_permission_metadata", backend)
+    output = tmp_path / "selected-output"
+    if missing == "output-is-file":
+        output.write_text("not a directory")
+    else:
+        output.mkdir()
+    selected = tmp_path / "selected-exports"
+    selected.mkdir()
+    shutil.copy(Path(FIXTURES_DIR) / "simple_channel.json", selected)
+    before = output.read_bytes() if output.is_file() else list(output.iterdir())
+    args = ["refresh-permissions"]
+    if missing != "output":
+        args.append(str(output))
+    if missing != "exports":
+        args.extend(["--export-dir", str(selected)])
+    if missing != "guild":
+        args.extend(["--discord-server-id", "111"])
+    result = runner.invoke(main, args, input="")
+    assert result.exit_code == (1 if missing == "prompt-abort" else 2)
+    backend.assert_not_called()
+    assert (output.read_bytes() if output.is_file() else list(output.iterdir())) == before
+    if missing == "prompt-abort":
+        assert "Discord token" in result.output and "Aborted" in result.output
+
+
+@pytest.mark.parametrize("result_kind", ["success", "prompt", "error", "cancel", "wrong-guild"])
+def test_cli_permission_refresh_uses_only_selected_source_context(
+    tmp_path, monkeypatch, runner, result_kind
+):
+    import asyncio
+
+    from aioresponses import aioresponses
+
+    from discord_ferry import cli, discord
+    from discord_ferry.core.http import new_session
+    from discord_ferry.core.security import sanitize_secrets
+    from discord_ferry.discord.metadata import (
+        DiscordMetadata,
+        load_discord_metadata,
+        save_discord_metadata,
+    )
+    from discord_ferry.exporter import runner as exporter
+    from discord_ferry.migrator import api
+    from tests.test_metadata_refresh import BASE, GUILD, channel_payload, role_payload
+
+    token = "synthetic-cli-source-refresh-token"
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    monkeypatch.delenv("STOAT_TOKEN", raising=False)
+    monkeypatch.delenv("STOAT_URL", raising=False)
+    if result_kind != "prompt":
+        monkeypatch.setenv("DISCORD_TOKEN", token)
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    payload = json.loads((Path(FIXTURES_DIR) / "simple_channel.json").read_text())
+    payload["guild"]["id"] = GUILD
+    payload["channel"]["id"] = "333"
+    (selected / "selected.json").write_text(json.dumps(payload))
+    output = tmp_path / "output"
+    save_discord_metadata(DiscordMetadata(GUILD, "old", 0, {}, {}), output)
+    (output / "state.json").write_bytes(b'{"keep":"confirmed-id"}')
+    before = {p.name: p.read_bytes() for p in output.iterdir()}
+    forbidden = []
+    for owner, name in (
+        (cli, "run_migration"),
+        (cli, "run_repair"),
+        (cli, "run_retry_failed"),
+        (exporter, "run_dce_export"),
+        (api, "_api_request"),
+    ):
+        guard = AsyncMock(side_effect=AssertionError("Unexpected target/export work"))
+        monkeypatch.setattr(owner, name, guard)
+        forbidden.append(guard)
+    sessions = []
+    seen_tokens = []
+    actual_refresh = discord.refresh_permission_metadata
+
+    async def observed_refresh(session, credential, guild, exports, destination):
+        assert not session.closed
+        assert credential == token
+        assert token not in sanitize_secrets(token)
+        assert {export.guild.id for export in exports} == {GUILD}
+        assert destination == output
+        sessions.append(session)
+        seen_tokens.append(credential)
+        if result_kind == "cancel":
+            raise asyncio.CancelledError
+        return await actual_refresh(session, credential, guild, exports, destination)
+
+    monkeypatch.setattr(cli, "refresh_permission_metadata", observed_refresh, raising=False)
+    monkeypatch.setattr(cli, "new_session", new_session, raising=False)
+    with aioresponses() as remote:
+        if result_kind == "error":
+            remote.get(BASE, exception=MigrationError(f"Source refused {token}"))
+        elif result_kind in {"success", "prompt"}:
+            remote.get(BASE, payload={"id": GUILD, "name": "source"})
+            remote.get(BASE + "/roles", payload=role_payload())
+            remote.get(BASE + "/channels", payload=channel_payload())
+        result = runner.invoke(
+            main,
+            [
+                "refresh-permissions",
+                str(output),
+                "--export-dir",
+                str(selected),
+                "--discord-server-id",
+                "999" if result_kind == "wrong-guild" else GUILD,
+            ],
+            input=token + "\n" if result_kind == "prompt" else None,
+        )
+        expected_requests = (
+            3 if result_kind in {"success", "prompt"} else int(result_kind == "error")
+        )
+        assert len(remote.requests) == expected_requests
+        assert all(method == "GET" and str(url).startswith(BASE) for method, url in remote.requests)
+    assert result.exit_code == (0 if result_kind in {"success", "prompt"} else 1), result.output
+    assert sessions and all(session.closed for session in sessions)
+    assert seen_tokens == [token]
+    assert token not in result.output
+    assert "only" in result.output.lower() and "discord_metadata.json" in result.output
+    after = {p.name: p.read_bytes() for p in output.iterdir()}
+    if result_kind in {"success", "prompt"}:
+        assert load_discord_metadata(output).permission_source is not None
+        assert after.pop("discord_metadata.json") != before["discord_metadata.json"]
+        assert after == {
+            name: value for name, value in before.items() if name != "discord_metadata.json"
+        }
+    else:
+        assert after == before
+    for guard in forbidden:
+        guard.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Validate
 # ---------------------------------------------------------------------------

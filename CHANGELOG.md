@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Add an explicit source-only CLI permission refresh using selected exports and the existing metadata backend, with hidden source-token prompting and no Stoat changes (#1172).
+
 - Account for confirmed or possible duplicate-index cleanup effects through the existing permission runtime, preserving terminal safety stops without changing which messages are removed (#1172).
 
 - Verify forum-index access before rebuild, recovered edits and pins; bind and prove recreated indexes before content, retain confirmed recreation actions on stops, and recheck the final repair scope before success (#1172).
