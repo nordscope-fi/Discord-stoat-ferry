@@ -124,6 +124,9 @@ from discord_ferry.migrator.structure import (
     run_roles,
     run_server,
 )
+from discord_ferry.migrator.structure import (
+    run_role_backfill as _run_role_backfill_structure,
+)
 from discord_ferry.parser.dce_parser import parse_export_directory, stream_messages, validate_export
 from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCEExport, DCEMessage
@@ -1392,6 +1395,7 @@ def _permission_role_layout(
     creation_default: int,
     role_limit: int,
     source_fingerprint: str,
+    order_roles: bool = False,
 ) -> TargetLayout:
     """Describe existing creation/finalization/ordering owners without executing them."""
     roles, _, meta = _collect_roles_to_order(config, exports)
@@ -1422,9 +1426,15 @@ def _permission_role_layout(
         or any(target not in actual for target in mapped.values())
     ) or len(set(state.role_map.values())) != len(state.role_map):
         _permission_preflight_unverified("Repair missing mapped roles before migration")
+    if order_roles and raw.keys() != mapped.keys():
+        _permission_preflight_unverified(
+            "Resolve every source role through its creation or repair owner before ordering"
+        )
     processed = (
         sorted(roles, key=lambda role: (role.position, role.id), reverse=True)[:role_limit]
         if change_roles
+        else sorted(roles, key=lambda role: (role.position, role.id), reverse=True)
+        if order_roles
         else sorted((role for role in roles if role.id in recreating), key=lambda role: role.id)
     )
     processed_ids = {role.id for role in processed}
@@ -1441,7 +1451,7 @@ def _permission_role_layout(
     if any(rank is None for rank in ranks.values()) or len(set(ranks.values())) != len(ranks):
         _permission_preflight_unverified("Resolve unambiguous existing-owner role priority")
     tokens = {sid: ("target", mapped[sid]) if sid in mapped else ("source", sid) for sid in raw}
-    if change_roles and len(tokens) >= 2:
+    if (change_roles or order_roles) and len(tokens) >= 2:
         current = sorted(ranks, key=lambda token: (ranks[token], token))
         desired = [tokens[role.id] for role in sorted(processed, key=lambda r: (-r.position, r.id))]
         known = set(desired)
@@ -1465,7 +1475,9 @@ def _permission_role_layout(
         permissions = (
             old.permissions
             if old is not None
-            and (role.id not in processed_ids or role.id in state.roles_finalized)
+            and (
+                not change_roles or role.id not in processed_ids or role.id in state.roles_finalized
+            )
             else PermissionCell(pair.allow, pair.deny)
         )
         rank = ranks[tokens[role.id]]
@@ -1671,6 +1683,7 @@ async def _prepare_permission_operation(
         creation_default=creation,
         role_limit=role_limit,
         source_fingerprint=meta.permission_source.fingerprint,
+        order_roles=mode == "backfill",
     )
     if (
         mode == "repair"
@@ -2273,6 +2286,9 @@ async def run_retry_failed(
     scans exports once to find matching DCEMessage objects. A permission
     safety stop remains an operation failure, not a failed message send.
     """
+    previous_session = config.session
+    if _delivery_outcomes is None:
+        state.permission_runtime = None
     try:
         await _run_retry_failed(
             config,
@@ -2283,9 +2299,10 @@ async def run_retry_failed(
             _delivery_outcomes=_delivery_outcomes,
         )
     except PermissionSafetyError as exc:
-        config.session = None
         _record_permission_stop(config, state, on_event, "retry", exc)
         raise
+    finally:
+        config.session = previous_session
 
 
 async def _run_retry_failed(
@@ -2306,6 +2323,17 @@ async def _run_retry_failed(
     _ensure_token_store(config)
     _refuse_dry_run_state(state, "retry")
     delivery_outcomes = _delivery_outcomes if _delivery_outcomes is not None else DeliveryOutcomes()
+
+    if config.dry_run:
+        on_event(
+            MigrationEvent(
+                phase="retry",
+                status="progress",
+                message=f"[DRY RUN] Would retry {len(state.failed_messages)} failed messages.",
+                detail=delivery_outcomes.detail(),
+            )
+        )
+        return
 
     if not state.failed_messages:
         on_event(
@@ -2371,9 +2399,15 @@ async def _run_retry_failed(
 
     async with get_session(config) as session:
         config.session = session
+        if _delivery_outcomes is None:
+            state.permission_runtime = await _prepare_permission_operation(
+                config, state, exports, session, mode="retry"
+            )
+        require_permission_runtime(state, service=config.stoat_url)
         if not _upload_limits_ready:
             await _initialize_upload_limits(session, config)
         retried = 0
+        checked_channels: set[str] = set()
         still_failed: list[FailedMessage] = []
         resolved_sources: set[DeliveryRef] = set()
         # Batch 3 (S1): iterate a snapshot — _process_message (channel_result=None) appends
@@ -2441,6 +2475,11 @@ async def _run_retry_failed(
             failure_start = len(state.failed_messages)
             before_outcomes = delivery_outcomes.revision
             try:
+                if stoat_channel_id not in checked_channels:
+                    from discord_ferry.migrator.verify import verify_permission_channel
+
+                    await verify_permission_channel(session, config, state, stoat_channel_id)
+                    checked_channels.add(stoat_channel_id)
                 if ref.family == "ordinary":
                     resolved = await _process_message(
                         msg=found_msg,
@@ -2515,8 +2554,6 @@ async def _run_retry_failed(
                 continue
             remaining_failures.append(failure)
         state.failed_messages = remaining_failures
-    config.session = None
-
     save_state(state, config.output_dir)
     remaining = len(state.failed_messages)
     on_event(
@@ -2527,6 +2564,41 @@ async def _run_retry_failed(
             detail=delivery_outcomes.detail(),
         )
     )
+
+
+async def run_permission_role_backfill(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    on_event: EventCallback,
+) -> None:
+    """Preflight the existing ordering owner without correcting channel access."""
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    _ensure_token_store(config)
+    previous_session = config.session
+    state.permission_runtime = None
+    try:
+        if config.dry_run:
+            await _run_role_backfill_structure(config, state, exports, on_event)
+            return
+        _refuse_dry_run_state(state, "backfill")
+        async with get_session(config) as session:
+            config.session = session
+            state.permission_runtime = await _prepare_permission_operation(
+                config, state, exports, session, mode="backfill"
+            )
+            runtime = require_permission_runtime(state, service=config.stoat_url)
+            await _run_role_backfill_structure(config, state, exports, on_event)
+            for _, target in runtime._active_plan("recheck").target_layout.planned_channels:
+                if target is None:
+                    raise runtime.stop("unverified", stage="recheck")
+                await verify_permission_channel(session, config, state, target)
+    except PermissionSafetyError as exc:
+        _record_permission_stop(config, state, on_event, "roles", exc)
+        raise
+    finally:
+        config.session = previous_session
 
 
 # ---------------------------------------------------------------------------

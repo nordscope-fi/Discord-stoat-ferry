@@ -37,6 +37,7 @@ from tests.test_delivery import (
 )
 from tests.test_delivery import seed_rejected_messages
 from tests.test_engine import repair_permission_unit_boundary as repair_permission_unit_boundary
+from tests.test_engine import retry_permission_unit_boundary as retry_permission_unit_boundary
 from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
 
 if TYPE_CHECKING:
@@ -210,6 +211,7 @@ async def test_engine_malformed_root_shape_falls_back(tmp_path: Path, body: str)
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_initializes_advertised_attachment_limit(tmp_path: Path) -> None:
     attachment_path = tmp_path / "attachment.bin"
     attachment_path.write_bytes(b"four")

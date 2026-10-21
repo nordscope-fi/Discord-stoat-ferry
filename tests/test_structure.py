@@ -7695,6 +7695,18 @@ def _backfill_meta(role_metadata: dict[str, RoleMeta]) -> DiscordMetadata:
     )
 
 
+async def test_recovery_direct_backfill_requires_authority_even_for_one_role(
+    tmp_path: Path,
+) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    state = MigrationState(stoat_server_id="srv1", role_map={"r1": "s-r1"})
+    with aioresponses() as remote:
+        with pytest.raises(PermissionSafetyError):
+            await run_role_backfill(_make_config(tmp_path), state, [], lambda event: None)
+        assert not remote.requests
+
+
 async def test_run_role_backfill_orders_live_only_roles(tmp_path: Path) -> None:
     """SC-2.1. A role present only in discord_metadata is placed, not dropped."""
     config = _make_config(tmp_path)
@@ -7864,6 +7876,7 @@ async def test_run_role_backfill_single_known_role_makes_no_write(tmp_path: Path
     state = MigrationState(stoat_server_id="srv1")
     state.role_map = {"a": "s-a"}
     export = _make_export(messages=[_make_message("m1", roles=[DCERole(id="a", name="A")])])
+    _bind_rank_operation(state, {"s-a": 0}, ("s-a",))
 
     with aioresponses() as m:
         # No PATCH route registered: aioresponses raises if a write is attempted.

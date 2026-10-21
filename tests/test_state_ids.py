@@ -35,6 +35,7 @@ from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.verify import RepairOutcome
 from discord_ferry.state import FailedMessage, MigrationState, load_state, save_state
 from tests.stoat_ids import SERVER_ID, stoat_id
+from tests.test_engine import retry_permission_unit_boundary as retry_permission_unit_boundary
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import MigrationEvent
@@ -337,6 +338,7 @@ def _one_message_export(config: FerryConfig, msg_id: str) -> list[Any]:
     return parse_export_directory(config.export_dir, metadata_only=True)
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_does_not_send_to_a_channel_this_state_did_not_create(tmp_path: Path) -> None:
     config = _retry_config(tmp_path)
     exports = _one_message_export(config, "555")
@@ -357,6 +359,7 @@ async def test_retry_does_not_send_to_a_channel_this_state_did_not_create(tmp_pa
     assert any(w["type"] == "retry_unmapped_channel" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_still_sends_to_a_mapped_channel(tmp_path: Path) -> None:
     config = _retry_config(tmp_path)
     exports = _one_message_export(config, "555")
