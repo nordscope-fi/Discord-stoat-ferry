@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Preflight standalone retry and role backfill through the shared permission boundary, share repair authority for nested retries, preserve borrowed sessions and dry-run queues, and verify existing role-order changes without changing grants (#1172).
+
 - Include versioned permission outcomes and retained repair actions in reports, base permission review on verified operation evidence, and redact classified guidance without changing identifiers (#1172).
 
 - Check mapped channel and generated-index access against source evidence without changing permissions or installing operation authority; distinguish verified, mismatched, unsupported and unverified results in check schema version 2 (#1172).

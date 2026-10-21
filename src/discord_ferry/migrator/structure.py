@@ -941,6 +941,7 @@ async def run_role_backfill(
             )
         )
         return
+    require_permission_runtime(state, service=config.stoat_url)
     async with get_session(config) as session:
         await _apply_role_ordering(session, config, state, roles, on_event)
 

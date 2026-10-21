@@ -274,7 +274,27 @@ def repair_permission_unit_boundary(monkeypatch, request):
     monkeypatch.setattr(engine_module, "apply_channel_permissions", AsyncMock())
     monkeypatch.setattr(engine_module, "apply_role_permissions", AsyncMock())
     monkeypatch.setattr(engine_module, "_repair_dependent_channel_permissions", AsyncMock())
+    monkeypatch.setattr(engine_module, "require_permission_runtime", Mock(return_value=runtime))
+    monkeypatch.setattr("discord_ferry.migrator.verify.verify_permission_channel", AsyncMock())
     return runtime
+
+
+@pytest.fixture
+def retry_permission_unit_boundary(monkeypatch):
+    """Select only for unrelated receipt, upload and ID-binding retry units.
+
+    No operation or readiness is installed in state. Actual permission tests
+    keep their real preflight, runtime, transport readers and writer guards.
+    """
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    prepare = AsyncMock(return_value=None)
+    monkeypatch.setattr(engine_module, "_prepare_permission_operation", prepare)
+    monkeypatch.setattr(
+        engine_module, "require_permission_runtime", Mock(return_value=Mock(spec=PermissionRuntime))
+    )
+    monkeypatch.setattr("discord_ferry.migrator.verify.verify_permission_channel", AsyncMock())
+    return prepare
 
 
 def _permission_preflight_case(
@@ -2846,6 +2866,7 @@ async def test_retry_failed_missing_export_dir(tmp_path: Path) -> None:
     assert len(state.failed_messages) == 1  # Unchanged
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_populates_the_token_store(tmp_path: Path) -> None:
     """run_retry_failed must build the token store, as both its siblings do.
 
@@ -2908,6 +2929,7 @@ async def test_retry_failed_populates_the_token_store(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
     """Successfully retried message is removed from failed_messages."""
     config = _make_retry_config(tmp_path)
@@ -2945,6 +2967,7 @@ async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
     assert any("1 succeeded" in e.message for e in events)
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_still_failing_increments_count(tmp_path: Path) -> None:
     """A message that fails again increments retry_count and stays in the list."""
     config = _make_retry_config(tmp_path)
@@ -2974,6 +2997,7 @@ async def test_retry_failed_still_failing_increments_count(tmp_path: Path) -> No
     assert any("0 succeeded" in e.message and "1 still failed" in e.message for e in events)
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_message_not_found_in_exports(tmp_path: Path) -> None:
     """A message ID not found in any export emits a warning and is not removed."""
     config = _make_retry_config(tmp_path)
@@ -3001,6 +3025,7 @@ async def test_retry_failed_message_not_found_in_exports(tmp_path: Path) -> None
     assert any("not found in exports" in e.message for e in events)
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_saves_state(tmp_path: Path) -> None:
     """State is saved after retry completes."""
     config = _make_retry_config(tmp_path)
@@ -3029,6 +3054,7 @@ async def test_retry_failed_saves_state(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     """Retry with one success and one not-found gives correct counts."""
     config = _make_retry_config(tmp_path)
@@ -3068,6 +3094,7 @@ async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> None:
     """SC-1: a deterministically-failing retry TERMINATES (no mutate-during-iteration hang)
     via the REAL _process_message append path; the message stays failed with retry_count+1.
@@ -3120,6 +3147,7 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -> None:
     """SC-4: success + real re-failure + not-found, all under a timeout (no hang).
 
@@ -3764,6 +3792,7 @@ async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path)
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
 @pytest.mark.parametrize("refail", [False, True])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_delivery_uses_recorded_source_and_family(
     tmp_path: Path, family: str, refail: bool
 ) -> None:
@@ -3871,6 +3900,7 @@ async def test_retry_delivery_uses_recorded_source_and_family(
 
 
 @pytest.mark.parametrize("case", ["positive", "missing", "ambiguous_source", "missing_receipt"])
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_legacy_delivery_requires_existing_evidence(tmp_path: Path, case: str) -> None:
     """Old failure text and missing receipts never authorize a fresh message."""
     from discord_ferry.state import DeliveryRef, ensure_delivery_namespace
@@ -4009,6 +4039,7 @@ async def test_incremental_legacy_delivery_requires_history(
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_merged_delivery_preserves_skipped_source_types(tmp_path: Path) -> None:
     """Explicit retry cannot bypass the merge loop's source-type exclusion."""
     config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
@@ -4051,6 +4082,7 @@ async def test_retry_merged_delivery_preserves_skipped_source_types(tmp_path: Pa
     assert state.failed_messages[0].retry_count == 1
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_delivery_duplicate_source_scan_keeps_bounded_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4089,6 +4121,7 @@ async def test_retry_delivery_duplicate_source_scan_keeps_bounded_candidates(
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
 @pytest.mark.parametrize("outcome", ["verified", "partial", "unresolved"])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_delivery_outcome_counts_selected_source(
     tmp_path: Path, family: str, outcome: str
 ) -> None:
@@ -4353,6 +4386,7 @@ async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_p
 
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_delivery_checkpoint_removes_resolved_failure_before_retirement(
     tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5246,6 +5280,7 @@ async def test_preflight_emits_and_persists_a_proxy_notice(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_retry_path_preserves_unresolved_duplicate(tmp_path: Path) -> None:
     """A cached key without a matching message remains a failure and terminates."""
     config = _make_retry_config(tmp_path)
@@ -9893,6 +9928,7 @@ async def test_permission_stop_in_report_saves_ids_without_completion(
     invite.assert_not_awaited()
 
 
+@pytest.mark.usefixtures("retry_permission_unit_boundary")
 async def test_permission_stop_in_retry_does_not_become_a_failed_send(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10160,6 +10196,391 @@ async def test_explicit_channel_repair_keeps_non_permission_effects_on_later_sto
     assert outcome.permissions.reason == "readback_mismatch"
     assert outcome.permissions.effects == "changes_confirmed"
     assert outcome.recreated_categories if kind == "category" else outcome.recreated_emoji
+
+
+@pytest.mark.parametrize("nested", [False, True])
+async def test_recovery_retry_requires_operation_before_limits_or_content(
+    tmp_path, monkeypatch, nested
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config = _make_retry_config(tmp_path)
+    export = _export_for(R_D_CHANNEL)
+    export.messages = [_dce_msg("101")]
+    state = MigrationState(
+        channel_map={R_D_CHANNEL: R_S_CHANNEL},
+        failed_messages=[
+            FailedMessage(discord_msg_id="101", stoat_channel_id=R_S_CHANNEL, error="old")
+        ],
+    )
+    limits = AsyncMock()
+    processor = AsyncMock(return_value=True)
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", limits)
+    monkeypatch.setattr(engine_module, "_process_message", processor)
+    events = []
+    with pytest.raises(PermissionSafetyError):
+        await run_retry_failed(
+            config,
+            state,
+            [export],
+            events.append,
+            _delivery_outcomes=messages_module.DeliveryOutcomes() if nested else None,
+        )
+    limits.assert_not_awaited()
+    processor.assert_not_awaited()
+    assert len(state.failed_messages) == 1
+    assert not any(event.status == "completed" for event in events)
+
+
+async def test_recovery_empty_retry_drops_stale_authority_without_preflight(tmp_path, monkeypatch):
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    config = _make_retry_config(tmp_path)
+    state = MigrationState(permission_runtime=PermissionRuntime())
+    prepare = AsyncMock()
+    monkeypatch.setattr(engine_module, "_prepare_permission_operation", prepare)
+    await run_retry_failed(config, state, [], lambda event: None)
+    assert state.permission_runtime is None
+    prepare.assert_not_awaited()
+
+
+async def test_recovery_retry_dry_run_preserves_queue_without_requests(tmp_path, monkeypatch):
+    config = _make_retry_config(tmp_path, dry_run=True)
+    state = MigrationState(
+        failed_messages=[
+            FailedMessage(discord_msg_id="101", stoat_channel_id=R_S_CHANNEL, error="old")
+        ]
+    )
+    prepare, process = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(engine_module, "_prepare_permission_operation", prepare)
+    monkeypatch.setattr(engine_module, "_process_message", process)
+    events = []
+    with aioresponses() as remote:
+        await run_retry_failed(config, state, [], events.append)
+        assert not remote.requests
+    prepare.assert_not_awaited()
+    process.assert_not_awaited()
+    assert len(state.failed_messages) == 1 and state.permission_runtime is None
+    assert any("[DRY RUN]" in event.message for event in events)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("changed", [False, True])
+async def test_recovery_retry_actual_preflight_and_batch_proof_before_each_send(
+    tmp_path, monkeypatch, nested, changed
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, state, server, channel = _explicit_channel_repair_case(tmp_path)
+    role = state.role_map["112"]
+    server["roles"][role]["permissions"] = {"a": server["default_permissions"], "d": 0}
+    channel["role_permissions"] = {}
+    exports[0].messages = [
+        DCEMessage(
+            id=mid,
+            type="Default",
+            timestamp="2026-10-20T00:00:00Z",
+            content="synthetic",
+            author=DCEAuthor(id="114", name="Synthetic"),
+        )
+        for mid in ("101", "102")
+    ]
+    state.failed_messages = [
+        FailedMessage(discord_msg_id=mid, stoat_channel_id=channel["_id"], error="old")
+        for mid in ("101", "102")
+    ]
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    # Arrange an earlier real rejection only after actual preflight/readback.
+    # This creates retry receipts, never permission readiness by assignment.
+    with aioresponses() as setup_remote:
+        _register_explicit_repair_reads(setup_remote, config, server, channel)
+        async with aiohttp.ClientSession() as setup_session:
+            state.permission_runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, setup_session, mode="repair"
+            )
+            await verify_permission_channel(setup_session, config, state, channel["_id"])
+    await seed_rejected_messages(config, state, exports)
+    state.permission_runtime = None
+    limits = AsyncMock()
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", limits)
+    reads, sends = [], []
+
+    def read_channel(url, **kwargs):
+        reads.append("read")
+        value = channel
+        if changed and len(reads) > 1:
+            value = {**channel, "default_permissions": {"a": 0, "d": 1 << 20}}
+        return CallbackResult(status=200, payload=value)
+
+    def send(url, **kwargs):
+        state.permission_runtime.require(channel["_id"])
+        sends.append(kwargs["json"])
+        return CallbackResult(status=200, payload={"_id": valid_stoat_id(29310 + len(sends))})
+
+    events = []
+    async with aiohttp.ClientSession() as session:
+        config.session = session
+        with aioresponses() as remote:
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            remote.get(f"{config.stoat_url}/servers/{server['_id']}", payload=server, repeat=True)
+            remote.get(
+                f"{config.stoat_url}/channels/{channel['_id']}", callback=read_channel, repeat=True
+            )
+            remote.get(
+                f"{config.stoat_url}/servers/{server['_id']}?include_channels=true",
+                payload={**server, "channels": [channel]},
+                repeat=True,
+            )
+            remote.post(
+                f"{config.stoat_url}/channels/{channel['_id']}/messages", callback=send, repeat=True
+            )
+            operation = None
+            if nested:
+                operation = await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode="repair"
+                )
+                state.permission_runtime = operation
+                prepare = AsyncMock(side_effect=AssertionError("Nested retry must share repair"))
+                monkeypatch.setattr(engine_module, "_prepare_permission_operation", prepare)
+            kwargs = {"_delivery_outcomes": messages_module.DeliveryOutcomes()} if nested else {}
+            if changed:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await run_retry_failed(config, state, exports, events.append, **kwargs)
+                assert caught.value.outcome.reason == "readback_mismatch"
+                assert len(state.failed_messages) == 2 and not sends
+                assert not any(event.status == "completed" for event in events)
+            else:
+                await run_retry_failed(config, state, exports, events.append, **kwargs)
+                assert len(sends) == 2 and not state.failed_messages
+                assert state.permission_runtime.outcome.verified
+            assert config.session is session and not session.closed
+            if nested:
+                assert state.permission_runtime is operation
+                prepare.assert_not_awaited()
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("failure", ["transport", "permission", "cancel"])
+async def test_recovery_retry_restores_borrowed_session_on_every_exit(
+    tmp_path, monkeypatch, failure
+):
+    original, borrowed = AsyncMock(), AsyncMock()
+    config = _make_retry_config(tmp_path, session=original)
+    error = (
+        _permission_stop("preflight", "unverified", "none_confirmed")
+        if failure == "permission"
+        else asyncio.CancelledError()
+        if failure == "cancel"
+        else RuntimeError("transport")
+    )
+
+    async def interrupted(*args, **kwargs):
+        config.session = borrowed
+        raise error
+
+    monkeypatch.setattr(engine_module, "_run_retry_failed", interrupted)
+    with pytest.raises(type(error)):
+        await run_retry_failed(config, MigrationState(), [], lambda event: None)
+    assert config.session is original
+    original.close.assert_not_awaited()
+    borrowed.close.assert_not_awaited()
+
+
+async def test_recovery_backfill_wrapper_refuses_without_source_before_writer(
+    tmp_path, monkeypatch
+):
+    from discord_ferry.errors import PermissionSafetyError
+
+    write = AsyncMock()
+    monkeypatch.setattr(engine_module, "_run_role_backfill_structure", write, raising=False)
+    operation = getattr(engine_module, "run_permission_role_backfill", None)
+    assert callable(operation), "Standalone backfill needs the shared engine preflight boundary"
+    with pytest.raises(PermissionSafetyError):
+        await operation(_make_retry_config(tmp_path), MigrationState(), [], lambda event: None)
+    write.assert_not_awaited()
+
+
+def _recovery_backfill_case(tmp_path):
+    config, exports, meta = _permission_preflight_case(
+        tmp_path,
+        everyone=(1 << 10) | (1 << 11),
+        ordinary=(("112", 0, 1), ("113", 0, 2)),
+    )
+    server_id, native, first, second, channel_id = (valid_stoat_id(n) for n in range(29300, 29305))
+    state = MigrationState(
+        stoat_server_id=server_id,
+        role_map={"112": first, "113": second},
+        channel_map={"222": channel_id},
+    )
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": meta.server_default_permissions,
+        "roles": {
+            role: {"_id": role, "rank": rank, "permissions": {"a": 1 << 12, "d": 0}}
+            for rank, role in enumerate((native, first, second))
+        },
+    }
+    channel = {
+        "_id": channel_id,
+        "server": server_id,
+        "channel_type": "TextChannel",
+        "default_permissions": {"a": 0, "d": 0},
+        "role_permissions": {},
+    }
+    return config, exports, state, server, channel
+
+
+async def test_recovery_backfill_preflight_projects_existing_order_without_grant_changes(tmp_path):
+    from discord_ferry.core.permissions import PermissionCell
+
+    config, exports, state, server, channel = _recovery_backfill_case(tmp_path)
+    first, second = state.role_map["112"], state.role_map["113"]
+    native = next(role for role in server["roles"] if role not in state.role_map.values())
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        async with aiohttp.ClientSession() as session:
+            runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="backfill"
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    layout = runtime.plan.target_layout
+    assert {role.source_id: role.rank for role in layout.planned_role_updates} == {
+        "112": 2,
+        "113": 1,
+    }
+    assert all(
+        role.permissions == PermissionCell(1 << 12, 0) for role in layout.planned_role_updates
+    )
+    assert layout.planned_role_facts == () and layout.planned_server_default is None
+    assert {role.id: role.rank for role in layout.roles} == {native: 0, first: 1, second: 2}
+    assert state.role_map == {"112": first, "113": second}
+
+
+async def test_recovery_backfill_never_proposes_unowned_role_creation(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, state, server, channel = _recovery_backfill_case(tmp_path)
+    state.role_map.pop("113")
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode="backfill"
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.effects == "none_confirmed"
+
+
+@pytest.mark.parametrize("failure", [None, "rejected", "stale"])
+async def test_recovery_backfill_actual_order_writer_and_fresh_readback(tmp_path, failure):
+    from copy import deepcopy
+
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, state, server, channel = _recovery_backfill_case(tmp_path)
+    native = next(role for role in server["roles"] if role not in state.role_map.values())
+    expected = [native, state.role_map["113"], state.role_map["112"]]
+    writes = []
+
+    def order(url, **kwargs):
+        writes.append(kwargs["json"])
+        assert kwargs["json"] == {"ranks": expected}
+        assert not state.permission_runtime.ready
+        if failure == "rejected":
+            return CallbackResult(status=403, payload={"type": "MissingPermission"})
+        if failure != "stale":
+            for rank, role in enumerate(expected):
+                server["roles"][role]["rank"] = rank
+        return CallbackResult(status=200, payload={})
+
+    events = []
+    async with aiohttp.ClientSession() as session:
+        config.session = session
+        with aioresponses() as remote:
+            remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+            remote.get(
+                f"{config.stoat_url}/servers/{server['_id']}",
+                callback=lambda url, **kwargs: CallbackResult(payload=deepcopy(server)),
+                repeat=True,
+            )
+            remote.get(
+                f"{config.stoat_url}/channels/{channel['_id']}", payload=channel, repeat=True
+            )
+            remote.patch(f"{config.stoat_url}/servers/{server['_id']}/roles/ranks", callback=order)
+            if failure:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await engine_module.run_permission_role_backfill(
+                        config, state, exports, events.append
+                    )
+                assert caught.value.outcome.reason == (
+                    "write_uncertain" if failure == "rejected" else "readback_mismatch"
+                )
+                assert not state.permission_runtime.ready
+            else:
+                await engine_module.run_permission_role_backfill(
+                    config, state, exports, events.append
+                )
+                assert state.permission_runtime.outcome.verified
+            assert config.session is session and not session.closed
+            assert all(
+                method == "GET" or url.path.endswith("/roles/ranks")
+                for method, url in remote.requests
+            )
+    assert writes == [{"ranks": expected}]
+    assert server["roles"][native]["rank"] == 0
+    assert all(role["permissions"] == {"a": 1 << 12, "d": 0} for role in server["roles"].values())
+
+
+async def test_recovery_backfill_unsupported_scope_makes_zero_writes(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, meta = _permission_preflight_case(tmp_path, unsupported_source="222")
+    server_id, role_id, channel_id = (valid_stoat_id(n) for n in range(29340, 29343))
+    state = MigrationState(
+        stoat_server_id=server_id, role_map={"112": role_id}, channel_map={"222": channel_id}
+    )
+    server = {
+        "_id": server_id,
+        "channels": [channel_id],
+        "default_permissions": 0,
+        "roles": {
+            role_id: {
+                "_id": role_id,
+                "rank": 0,
+                "permissions": {"a": meta.role_permissions["112"].allow, "d": 0},
+            }
+        },
+    }
+    channel = {
+        "_id": channel_id,
+        "server": server_id,
+        "channel_type": "TextChannel",
+        "default_permissions": {"a": 0, "d": 0},
+        "role_permissions": {},
+    }
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel)
+        with pytest.raises(PermissionSafetyError) as caught:
+            await engine_module.run_permission_role_backfill(
+                config, state, exports, lambda event: None
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.reason == "unsupported"
+
+
+async def test_recovery_backfill_dry_run_needs_no_target_authority(tmp_path):
+    config = _make_retry_config(tmp_path, dry_run=True)
+    state = MigrationState()
+    events = []
+    with aioresponses() as remote:
+        await engine_module.run_permission_role_backfill(config, state, [], events.append)
+        assert not remote.requests
+    assert state.permission_runtime is None
+    assert any("[DRY RUN]" in event.message for event in events)
 
 
 def _dependent_role_repair_case(tmp_path, *, role_count=1):
