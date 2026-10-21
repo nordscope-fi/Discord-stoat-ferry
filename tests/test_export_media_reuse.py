@@ -16,6 +16,7 @@ from discord_ferry.discord.metadata import DiscordMetadata, save_discord_metadat
 from discord_ferry.errors import ExportError
 from discord_ferry.state import MigrationState, load_state, save_state
 from tests.stoat_ids import stoat_id
+from tests.test_engine import migration_preflight_unit_boundary as migration_preflight_unit_boundary
 
 if TYPE_CHECKING:
     from discord_ferry.core.events import EventCallback
@@ -104,6 +105,7 @@ async def _run_with_mock_export(
         return await run_migration(config, lambda _event: None, phase_overrides=_NOOP_OVERRIDES)
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_completed_resume_reuses_media_from_the_same_export_folder(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     config = _orchestrated_config(output_dir, resume=True)
@@ -115,6 +117,7 @@ async def test_completed_resume_reuses_media_from_the_same_export_folder(tmp_pat
     assert run_dce.await_args.kwargs["reuse_media"] is True
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_fresh_second_run_reuses_completed_export_without_carrying_migration_state(
     tmp_path: Path,
 ) -> None:
@@ -155,6 +158,7 @@ async def test_fresh_second_run_reuses_completed_export_without_carrying_migrati
     assert state.attachments_uploaded == 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_incremental_run_carries_completed_export_media_authorization(
     tmp_path: Path,
 ) -> None:
@@ -179,6 +183,7 @@ async def test_incremental_run_carries_completed_export_media_authorization(
     assert run_dce.await_args.kwargs["reuse_media"] is True
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_completed_flag_does_not_authorize_a_different_export_folder(
     tmp_path: Path,
 ) -> None:
@@ -238,6 +243,7 @@ async def test_completed_export_for_another_server_does_not_authorize_this_cache
     )
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_partial_channel_failure_does_not_mark_export_complete(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     config = _orchestrated_config(output_dir)

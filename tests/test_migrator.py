@@ -10,6 +10,7 @@ from discord_ferry.core.engine import PhaseFunction, run_migration
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.errors import MigrationError
 from discord_ferry.state import MigrationState, save_state
+from tests.test_engine import migration_preflight_unit_boundary as migration_preflight_unit_boundary
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -159,6 +160,7 @@ async def test_incremental_still_accepts_a_real_prior_state(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_server_phase_never_sends_default_permissions(tmp_path: Path) -> None:
     """#957: the migration floor must not reach the server default role."""
     from aioresponses import aioresponses

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
+import json
 import re
 import socket
 import uuid
@@ -19,7 +20,19 @@ import aiohttp  # noqa: TCH002
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.events import EventCallback, MigrationEvent
 from discord_ferry.core.http import format_proxy_notices, new_session
-from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+from discord_ferry.core.permissions import (
+    PermissionCell,
+    PermissionOutcome,
+    PermissionPlan,
+    PermissionProblem,
+    PermissionRuntime,
+    PlannedRole,
+    TargetLayout,
+    backend_creation_default,
+    common_index_plan,
+    compile_permission_plan,
+    prove_carried_channel_access,
+)
 from discord_ferry.core.security import (
     SecureTokenStore,
     register_secret,
@@ -34,7 +47,7 @@ from discord_ferry.discord import (
     resume_refusal,
     save_discord_metadata,
 )
-from discord_ferry.discord.metadata import _bad_id
+from discord_ferry.discord.metadata import _bad_id, validate_permission_source
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
     MigrationError,
@@ -97,6 +110,7 @@ from discord_ferry.migrator.reactions import run_reactions
 from discord_ferry.migrator.sanitize import truncate_name
 from discord_ferry.migrator.structure import (
     FERRY_MIN_PERMISSIONS,
+    _collect_roles_to_order,
     _generate_category_id,
     _role_from_metadata,
     _stoat_channel_type,
@@ -542,6 +556,7 @@ async def run_migration(
     state.thread_strategy = (
         config.thread_strategy if config.thread_strategy in _THREAD_STRATEGIES else "flatten"
     )
+    state.permission_runtime = None
 
     # Preflight: surface any proxy configuration Ferry found but cannot use.
     # core/http.py returns data and never emits; the engine decides. Emitted at
@@ -842,21 +857,26 @@ async def run_migration(
 
     async with new_session() as session:
         config.session = session
-        await _initialize_upload_limits(session, config)
-
-        # S17: Acquire advisory migration lock on the target server (existing server only).
         lock_acquired = False
-        if config.server_id and not config.dry_run:
-            lock_acquired = await _acquire_migration_lock(config, state, session, on_event)
-
         try:
+            if not config.dry_run:
+                state.permission_runtime = await _prepare_permission_operation(
+                    config, state, exports, session, mode="migration"
+                )
+            await _initialize_upload_limits(session, config)
+            if not config.dry_run:
+                _permission_preflight_cancel(config, state.permission_runtime)
+
+            # Permission preflight precedes the existing description-based lock write.
+            if config.server_id and not config.dry_run:
+                lock_acquired = await _acquire_migration_lock(config, state, session, on_event)
             await _run_phases(config, state, exports, on_event, runnable_phases, phase_overrides)
-        except PermissionSafetyError:
-            config.session = None
-            raise
         finally:
-            if lock_acquired and config.server_id and not config.dry_run:
-                await _release_migration_lock(config, state, session, on_event)
+            try:
+                if lock_acquired and config.server_id and not config.dry_run:
+                    await _release_migration_lock(config, state, session, on_event)
+            finally:
+                config.session = None
 
     config.session = None
 
@@ -1341,6 +1361,317 @@ async def _recover_forum_index_id(
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def _permission_preflight_stop(problems: tuple[PermissionProblem, ...]) -> NoReturn:
+    raise PermissionSafetyError(
+        PermissionOutcome("preflight", problems[0].reason, "none_confirmed", problems)
+    )
+
+
+def _permission_preflight_unverified(guidance: str) -> NoReturn:
+    _permission_preflight_stop((PermissionProblem("unverified", (), None, guidance),))
+
+
+def _permission_preflight_cancel(
+    config: FerryConfig, runtime: PermissionRuntime | None = None
+) -> None:
+    if config.cancel_event is not None and config.cancel_event.is_set():
+        pending = runtime if runtime is not None else PermissionRuntime()
+        raise pending.stop("interrupted", stage="preflight")
+
+
+def _permission_role_layout(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    observed: TargetLayout,
+    *,
+    change_roles: bool,
+    creation_default: int,
+    role_limit: int,
+    source_fingerprint: str,
+) -> TargetLayout:
+    """Describe existing creation/finalization/ordering owners without executing them."""
+    roles, _, meta = _collect_roles_to_order(config, exports)
+    if (
+        meta is None
+        or meta.permission_source is None
+        or meta.permission_source.fingerprint != source_fingerprint
+    ):
+        _permission_preflight_unverified("Refresh complete bound source role evidence")
+    raw = {
+        role.id: role
+        for role in meta.permission_source.roles
+        if role.id != meta.guild_id and role.managed is False
+    }
+    if (
+        len(roles) != len(raw)
+        or {role.id for role in roles} != raw.keys()
+        or any(role.position != raw[role.id].position for role in roles)
+        or not state.role_map.keys() <= raw.keys()
+    ):
+        _permission_preflight_unverified("Bind the complete role list used by existing creation")
+    actual = {role.id: role for role in observed.roles}
+    if any(target not in actual for target in state.role_map.values()) or len(
+        set(state.role_map.values())
+    ) != len(state.role_map):
+        _permission_preflight_unverified("Repair missing mapped roles before migration")
+    processed = (
+        sorted(roles, key=lambda role: (role.position, role.id), reverse=True)[:role_limit]
+        if change_roles
+        else []
+    )
+    processed_ids = {role.id for role in processed}
+    future = [role for role in processed if role.id not in state.role_map]
+    if future and len(actual) + len(future) > role_limit:
+        _permission_preflight_unverified("Resolve sufficient existing-owner role capacity")
+    if raw.keys() - state.role_map.keys() != {role.id for role in future}:
+        _permission_preflight_unverified(
+            "Resolve every required role within existing creation scope"
+        )
+    # Abstract source tokens describe proposed roles, never actual target identities.
+    ranks = {("target", role.id): role.rank for role in observed.roles}
+    ranks.update((("source", role.id), len(actual) + i) for i, role in enumerate(future))
+    if any(rank is None for rank in ranks.values()) or len(set(ranks.values())) != len(ranks):
+        _permission_preflight_unverified("Resolve unambiguous existing-owner role priority")
+    tokens = {
+        sid: ("target", state.role_map[sid]) if sid in state.role_map else ("source", sid)
+        for sid in raw
+    }
+    if change_roles and len(tokens) >= 2:
+        current = sorted(ranks, key=lambda token: (ranks[token], token))
+        desired = [tokens[role.id] for role in sorted(processed, key=lambda r: (-r.position, r.id))]
+        known = set(desired)
+        slots = [i for i, token in enumerate(current) if token in known]
+        final = list(current)
+        for slot, token in zip(slots, desired, strict=True):
+            final[slot] = token
+        if final != current:
+            for i, token in enumerate(final):
+                if token not in tokens.values() and ranks[token] != i:
+                    _permission_preflight_unverified(
+                        "Preserve native ranks under existing ordering"
+                    )
+            ranks = {token: i for i, token in enumerate(final)}
+    proposed = []
+    updates = []
+    for role in sorted(roles, key=lambda role: role.id):
+        target = state.role_map.get(role.id)
+        old = actual.get(target) if target is not None else None
+        pair = meta.role_permissions[role.id]
+        permissions = (
+            old.permissions
+            if old is not None
+            and (role.id not in processed_ids or role.id in state.roles_finalized)
+            else PermissionCell(pair.allow, pair.deny)
+        )
+        rank = ranks[tokens[role.id]]
+        assert permissions is not None and rank is not None
+        expected = PlannedRole(role.id, permissions, rank)
+        if old is None:
+            proposed.append(expected)
+        elif (old.permissions, old.rank) != (permissions, rank):
+            updates.append(expected)
+    default = (
+        meta.server_default_permissions or creation_default
+        if not observed.server_id
+        else meta.server_default_permissions
+        if change_roles and meta.server_default_permissions
+        else None
+    )
+    return dataclasses.replace(
+        observed,
+        planned_roles=tuple((sid, state.role_map.get(sid)) for sid in sorted(raw)),
+        planned_role_facts=tuple(proposed),
+        planned_role_updates=tuple(updates),
+        planned_server_default=default,
+    )
+
+
+async def _prepare_permission_operation(
+    config: FerryConfig,
+    state: MigrationState,
+    exports: list[DCEExport],
+    session: aiohttp.ClientSession,
+    *,
+    mode: str,
+) -> PermissionRuntime:
+    """Read and compile complete operation scope before any destination mutation."""
+    from discord_ferry.migrator.verify import _permission_service, read_permission_context
+
+    _permission_preflight_cancel(config)
+    if mode not in {"migration", "repair", "retry", "backfill"}:
+        _permission_preflight_unverified("Select an existing permission operation")
+    meta = load_bound_discord_metadata(config, exports)
+    if meta is None or meta.permission_source is None:
+        _permission_preflight_unverified("Refresh complete bound source permission evidence")
+    selected = [
+        export
+        for export in exports
+        if export.channel.type != 4 and not (config.skip_threads and export.is_thread)
+    ]
+    indexes = _permission_index_sources(selected, state)
+    destinations = set(state.channel_map)
+    if mode == "migration":
+        if config.thread_strategy in {"merge", "archive"} and any(e.is_thread for e in selected):
+            _permission_preflight_unverified(
+                "Bind combined source access before merging or archiving thread content"
+            )
+        candidates: dict[str, DCEExport] = {}
+        new_indexes = set()
+        for export in selected:
+            if export.channel.id in candidates:
+                continue
+            candidates[export.channel.id] = export
+            if export.is_thread and export.channel.type in {15, 16} and export.parent_channel_name:
+                new_indexes.add(f"forum-index-forum-{export.parent_channel_name}")
+        carried = [e for sid, e in candidates.items() if sid in state.channel_map]
+        future_channels = [e for sid, e in candidates.items() if sid not in state.channel_map]
+        budget = max(0, config.max_channels - len(new_indexes) - len(carried))
+        if len(future_channels) > budget:
+            counts = {e.channel.id: e.message_count for e in exports}
+            future_channels.sort(key=lambda e: (e.is_thread, -counts[e.channel.id]))
+            future_channels = future_channels[:budget]
+        destinations.update(e.channel.id for e in carried + future_channels)
+        destinations.update(new_indexes)
+        if any(key not in destinations for key in indexes):
+            _permission_preflight_unverified(
+                "Bind missing carried indexes to an existing creation or explicit repair owner"
+            )
+    else:
+        destinations.update(e.channel.id for e in selected)
+        destinations.update(indexes)
+    source_ids = {sid for sid in destinations if not sid.startswith("forum-index-")}
+    for members in indexes.values():
+        source_ids.update(members)
+    problems = validate_permission_source(meta, frozenset(source_ids))
+    if problems:
+        _permission_preflight_stop(problems)
+    try:
+        service = _permission_service(config.stoat_url)
+    except ValueError:
+        _permission_preflight_unverified("Bind a safe target service")
+    try:
+        root = await api_fetch_root(session, service)
+    except TimeoutError:
+        root = {}
+    _permission_preflight_cancel(config)
+    version = root.get("revolt") if isinstance(root, dict) else None
+    creation = backend_creation_default(version) if isinstance(version, str) else None
+    if creation is None:
+        _permission_preflight_unverified("Read the supported pinned backend creation contract")
+    role_limits: object = root
+    for key in ("features", "limits", "global"):
+        if not isinstance(role_limits, dict):
+            _permission_preflight_unverified("Read structured existing-owner role limits")
+        role_limits = role_limits.get(key, {})
+    if not isinstance(role_limits, dict):
+        _permission_preflight_unverified("Read structured existing-owner role limits")
+    # Match the existing creation owner's fallback, never coerce a malformed value.
+    role_limit = role_limits.get("server_roles", 200)
+    if type(role_limit) is not int or not 0 <= role_limit < (1 << 63):
+        _permission_preflight_unverified("Read a valid existing-owner role limit")
+    target = state.stoat_server_id or config.server_id or ""
+    if state.stoat_server_id and config.server_id and target != config.server_id:
+        _permission_preflight_unverified("Reconcile configured and recorded target identities")
+    bindings = tuple(
+        (sid, state.channel_map.get(sid)) for sid in sorted(source_ids | indexes.keys())
+    )
+    if not target and (state.channel_map or state.role_map):
+        _permission_preflight_unverified("Bind carried mappings to an actual target server")
+    requested = tuple(sorted({tid for _, tid in bindings if tid is not None}))
+    observed = None
+    if target:
+        # Bind an explicit existing-server choice without persisting an unobserved identity.
+        observed = await read_permission_context(
+            session, config, dataclasses.replace(state, stoat_server_id=target), requested
+        )
+        if observed.problems:
+            _permission_preflight_stop(observed.problems)
+        layout = observed.layout
+    else:
+        layout = TargetLayout(
+            service=service,
+            fingerprint=hashlib.sha256(
+                json.dumps(
+                    {"service": service, "version": version, "creation": creation}, sort_keys=True
+                ).encode()
+            ).hexdigest(),
+        )
+    phase_index = (
+        PHASE_ORDER.index(state.current_phase)
+        if state.current_phase in PHASE_ORDER
+        else len(PHASE_ORDER)
+        if state.current_phase
+        else 0
+    )
+    change_roles = mode == "migration" and not (
+        config.resume and phase_index > PHASE_ORDER.index("roles")
+    )
+    if (
+        mode == "migration"
+        and config.resume
+        and phase_index > PHASE_ORDER.index("channels")
+        and any(target is None for source, target in bindings if source in destinations)
+    ):
+        _permission_preflight_unverified("Resume requires actual channels from completed creation")
+    layout = _permission_role_layout(
+        config,
+        state,
+        exports,
+        layout,
+        change_roles=change_roles,
+        creation_default=creation,
+        role_limit=role_limit,
+        source_fingerprint=meta.permission_source.fingerprint,
+    )
+    base = dataclasses.replace(
+        layout, planned_channels=tuple((sid, tid) for sid, tid in bindings if sid in source_ids)
+    )
+    plan = compile_permission_plan(meta.permission_source, base)
+    if plan.problems:
+        _permission_preflight_stop(plan.problems)
+    layout = dataclasses.replace(layout, planned_channels=bindings)
+    channels = tuple(
+        dataclasses.replace(channel, target_layout=layout) for channel in plan.channels
+    )
+    by_source = {channel.source_key: channel for channel in channels}
+    for key, members in indexes.items():
+        index = common_index_plan(key, members, tuple(by_source[sid] for sid in members))
+        if index.problems:
+            _permission_preflight_stop(index.problems)
+        channels += (index,)
+    # Proof-only members retain complete index intent, but do not promise a
+    # destination that the existing channel-budget owner will not create.
+    layout = dataclasses.replace(
+        layout, planned_channels=tuple(pair for pair in bindings if pair[0] in destinations)
+    )
+    channels = tuple(
+        dataclasses.replace(channel, target_layout=layout)
+        for channel in channels
+        if channel.source_key in destinations
+    )
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "calculation": plan.calculation_fingerprint,
+                "layout": dataclasses.asdict(layout),
+                "indexes": indexes,
+            },
+            sort_keys=True,
+            default=lambda value: sorted(value) if isinstance(value, frozenset) else value,
+        ).encode()
+    ).hexdigest()
+    complete = PermissionPlan(meta.permission_source.fingerprint, digest, layout, channels)
+    runtime = PermissionRuntime()
+    runtime.bind(complete)
+    if observed is not None:
+        problems = prove_carried_channel_access(complete, observed)
+        if problems:
+            _permission_preflight_stop(problems)
+    _permission_preflight_cancel(config, runtime)
+    return runtime
 
 
 def _permission_index_sources(

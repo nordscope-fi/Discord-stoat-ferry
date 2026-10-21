@@ -17,6 +17,7 @@ from discord_ferry.gui import (
     _msgs_per_hour,
 )
 from discord_ferry.parser.dce_parser import parse_export_directory
+from tests.test_engine import migration_preflight_unit_boundary as migration_preflight_unit_boundary
 
 if TYPE_CHECKING:
     from nicegui.testing import User
@@ -170,9 +171,10 @@ def test_detect_cached_exports_empty_dir(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_event_stops_migration() -> None:
-    """When cancel_event is set, the engine should return early (not raise)."""
+async def test_cancel_event_stops_migration(tmp_path: Path) -> None:
+    """Preflight cancellation retains its typed stop before destination work."""
     from discord_ferry.core.engine import run_migration
+    from discord_ferry.errors import PermissionSafetyError
 
     cancel = asyncio.Event()
     cancel.set()  # pre-cancelled
@@ -182,6 +184,7 @@ async def test_cancel_event_stops_migration() -> None:
         stoat_url="http://localhost",
         token="test",
         cancel_event=cancel,
+        output_dir=tmp_path,
         skip_export=True,
     )
 
@@ -199,16 +202,18 @@ async def test_cancel_event_stops_migration() -> None:
         "pins": noop,
     }
 
-    state = await run_migration(config, on_event=events.append, phase_overrides=overrides)
+    with pytest.raises(PermissionSafetyError) as caught:
+        await run_migration(config, on_event=events.append, phase_overrides=overrides)
 
-    # Should return without error (cancelled gracefully)
-    assert state is not None
-    # At least one phase should have been skipped due to cancel
-    cancelled_events = [e for e in events if "cancelled" in e.message.lower()]
-    assert len(cancelled_events) > 0
+    assert caught.value.outcome.reason == "interrupted"
+    assert caught.value.outcome.stage == "preflight"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert config.session is None
+    assert not any(event.phase == "connect" for event in events)
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_cancel_saves_state(tmp_path: Path) -> None:
     """Cancel during a phase should save state before returning."""
     from discord_ferry.core.engine import run_migration
@@ -778,6 +783,7 @@ async def _real_delivery_events_for_shells(tmp_path: Path, skipped: bool):
 
 
 @pytest.mark.parametrize("skipped", [False, True])
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 @pytest.mark.nicegui_main_file("tests/nicegui_app.py")
 async def test_gui_cli_delivery_summary_parity_from_real_engine_events(
     user: User,
