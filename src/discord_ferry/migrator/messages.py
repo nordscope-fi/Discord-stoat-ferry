@@ -12,12 +12,14 @@ from typing import TYPE_CHECKING, Any
 
 from discord_ferry.core.atomicio import ensure_output_subdir, write_text_no_follow
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.permissions import require_permission_runtime
 from discord_ferry.core.security import safe_sanitize
-from discord_ferry.errors import DeliveryUnresolvedError, StateError
+from discord_ferry.errors import DeliveryUnresolvedError, PermissionSafetyError, StateError
 from discord_ferry.migrator.api import api_send_message as api_send_message
 from discord_ferry.migrator.api import get_rate_multiplier, get_session
 from discord_ferry.migrator.delivery import deliver_part, retry_delivery_context
 from discord_ferry.migrator.sanitize import sanitize_filename, truncate_name
+from discord_ferry.migrator.verify import verify_permission_channel
 from discord_ferry.parser.dce_parser import check_cdn_url_expiry, stream_messages
 from discord_ferry.parser.media_paths import contained_media_path, is_media_escape
 from discord_ferry.parser.transforms import (
@@ -552,9 +554,12 @@ async def run_messages(
 
     async with get_session(config) as session:
         tasks: list[asyncio.Task[ChannelResult]] = []
-        for export in eligible_exports:
-            task = asyncio.create_task(
-                _process_single_channel(
+        permission_error: PermissionSafetyError | None = None
+
+        async def channel_worker(export: DCEExport) -> ChannelResult:
+            nonlocal permission_error
+            try:
+                return await _process_single_channel(
                     export=export,
                     config=config,
                     state=state,
@@ -564,7 +569,32 @@ async def run_messages(
                     save_lock=save_lock,
                     source_channel_names=source_channel_names,
                     delivery_outcomes=delivery_outcomes,
-                ),
+                )
+            except PermissionSafetyError as exc:
+                if permission_error is None:
+                    runtime = state.permission_runtime
+                    permission_error = (
+                        runtime.stop(
+                            exc.outcome.reason
+                            if exc.outcome.reason != "verified"
+                            else "unverified",
+                            stage=exc.outcome.stage,
+                            problems=exc.outcome.problems,
+                        )
+                        if runtime is not None
+                        else exc
+                    )
+                # No await separates the terminal stop from peer cancellation.
+                # The existing delivery owner retains in-flight receipts.
+                current = asyncio.current_task()
+                for peer in tasks:
+                    if peer is not current and not peer.done():
+                        peer.cancel()
+                raise permission_error from None
+
+        for export in eligible_exports:
+            task = asyncio.create_task(
+                channel_worker(export),
                 name=f"channel-{export.channel.id}",
             )
             tasks.append(task)
@@ -579,6 +609,10 @@ async def run_messages(
         cancelled = False
         first_exc: BaseException | None = None
         for export, result in zip(eligible_exports, results, strict=True):
+            if isinstance(result, PermissionSafetyError):
+                if permission_error is None:
+                    permission_error = result
+                continue
             # CancelledError is a BaseException (NOT Exception) — check it FIRST so a user
             # cancel never lands in the generic-exception branch (cancel wins — see below).
             if isinstance(result, asyncio.CancelledError):
@@ -611,6 +645,8 @@ async def run_messages(
             _merge_channel_result(state, result, delivery_outcomes)
             state.completed_channel_ids.add(export.channel.id)
 
+        if permission_error is not None:
+            raise permission_error
         # Cancel takes precedence over a concurrent crash: a user cancel must reach the
         # engine's clean-cancel handler, not phase_failed.
         if cancelled or (config.cancel_event and config.cancel_event.is_set()):
@@ -740,6 +776,8 @@ async def _process_merged_message(
             acknowledged_parts += 1
             if part_index == 0:
                 first_id = result.message_id
+        except PermissionSafetyError:
+            raise
         except Exception as exc:  # noqa: BLE001
             safe_exc = safe_sanitize(config.token_store, str(exc))
             state.warnings.append(
@@ -831,6 +869,9 @@ async def _merge_threads(
                     }
                 )
                 continue
+
+            require_permission_runtime(state, service=config.stoat_url)
+            await verify_permission_channel(session, config, state, parent_stoat_id)
 
             # These markers select continuation work. Receipts recover selected
             # sends, but do not reopen work below a resume marker. The merge path
@@ -938,6 +979,8 @@ async def _merge_threads(
                         masquerade={"name": "Discord Ferry"},
                         allow_rejected_retry=config.incremental or reconcile_failed,
                     )
+                except PermissionSafetyError:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     safe_exc = safe_sanitize(config.token_store, str(exc))
                     state.warnings.append(
@@ -1269,6 +1312,8 @@ async def _process_single_channel(
     """
     async with channel_sem:
         stoat_channel_id = state.channel_map[export.channel.id]
+        require_permission_runtime(state, service=config.stoat_url)
+        await verify_permission_channel(session, config, state, stoat_channel_id)
         result = ChannelResult(channel_id=export.channel.id)
 
         on_event(
@@ -1308,6 +1353,8 @@ async def _process_single_channel(
                     masquerade={"name": "Discord Ferry"},
                     allow_rejected_retry=config.incremental,
                 )
+            except PermissionSafetyError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(
                     {
@@ -2045,6 +2092,8 @@ async def _process_message(
                 allow_rejected_retry=allow_rejected_retry or config.incremental,
                 legacy_keys=legacy_keys,
             )
+        except PermissionSafetyError:
+            raise
         except Exception as exc:  # noqa: BLE001
             _parts_failed += 1
             if not _send_failed:

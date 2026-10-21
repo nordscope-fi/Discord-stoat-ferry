@@ -17,6 +17,9 @@ from discord_ferry.gui import (
     _msgs_per_hour,
 )
 from discord_ferry.parser.dce_parser import parse_export_directory
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 from tests.test_engine import migration_preflight_unit_boundary as migration_preflight_unit_boundary
 
 if TYPE_CHECKING:
@@ -786,6 +789,7 @@ async def _real_delivery_events_for_shells(tmp_path: Path, skipped: bool):
 @pytest.mark.usefixtures("migration_preflight_unit_boundary")
 @pytest.mark.nicegui_main_file("tests/nicegui_app.py")
 async def test_gui_cli_delivery_summary_parity_from_real_engine_events(
+    request: pytest.FixtureRequest,
     user: User,
     user_store: dict[str, object],
     tab_store: dict[str, object],
@@ -799,6 +803,8 @@ async def test_gui_cli_delivery_summary_parity_from_real_engine_events(
 
     from discord_ferry import cli
 
+    if not skipped:
+        request.getfixturevalue("publication_permission_collaborator")
     events, state = await _real_delivery_events_for_shells(tmp_path, skipped)
     report = next(
         event for event in events if event.phase == "report" and event.status == "completed"

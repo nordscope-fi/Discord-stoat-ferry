@@ -41,6 +41,9 @@ from discord_ferry.parser.models import (
 )
 from discord_ferry.state import FailedMessage, MigrationState, load_state
 from tests.stoat_ids import stoat_id as valid_stoat_id
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 from tests.test_delivery import seed_rejected_messages
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -192,14 +195,24 @@ def _make_config(tmp_path: Path, **overrides: object) -> FerryConfig:
 
 
 @pytest.fixture
-def migration_preflight_unit_boundary(monkeypatch: pytest.MonkeyPatch):
+def migration_preflight_unit_boundary(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+):
     """Isolate unrelated pipeline units, never permission integration or readiness."""
     from discord_ferry.core.permissions import PermissionRuntime
 
     # Legacy pipeline fixtures include mixed guilds and unsupported thread exports.
     # They test other collaborators, not whether those exports may be migrated.
     # Explicit opt-in keeps every real preflight regression on the actual owner.
-    operation = AsyncMock(side_effect=lambda *args, **kwargs: PermissionRuntime())
+    # Publication units explicitly isolate both boundaries. Keep their state
+    # without an operation rather than passing a placeholder to a real guard.
+    operation = AsyncMock(
+        side_effect=lambda *args, **kwargs: (
+            None
+            if "publication_permission_collaborator" in request.fixturenames
+            else PermissionRuntime()
+        )
+    )
     monkeypatch.setattr(engine_module, "_prepare_permission_operation", operation)
     return operation
 
@@ -2483,6 +2496,7 @@ async def test_retry_failed_populates_the_token_store(tmp_path: Path) -> None:
     assert config.token_store is not None, "the call left token_store unset"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_failed_success_removes_from_list(tmp_path: Path) -> None:
     """Successfully retried message is removed from failed_messages."""
     config = _make_retry_config(tmp_path)
@@ -2603,6 +2617,7 @@ async def test_retry_failed_saves_state(tmp_path: Path) -> None:
     assert (config.output_dir / "state.json").exists()
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     """Retry with one success and one not-found gives correct counts."""
     config = _make_retry_config(tmp_path)
@@ -2641,6 +2656,7 @@ async def test_retry_failed_mixed_results(tmp_path: Path) -> None:
     assert any("1 succeeded" in e.message and "1 still failed" in e.message for e in events)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> None:
     """SC-1: a deterministically-failing retry TERMINATES (no mutate-during-iteration hang)
     via the REAL _process_message append path; the message stays failed with retry_count+1.
@@ -2692,6 +2708,7 @@ async def test_retry_failed_deterministic_failure_terminates(tmp_path: Path) -> 
     assert any("0 succeeded" in e.message and "1 still failed" in e.message for e in events)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_failed_mixed_with_real_failure_terminates(tmp_path: Path) -> None:
     """SC-4: success + real re-failure + not-found, all under a timeout (no hang).
 
@@ -3214,6 +3231,7 @@ async def test_semaphore_initialized_during_migration(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("failure", ["response", "pin"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_report_index_delivery_recovery_and_later_edit(tmp_path: Path, failure: str) -> None:
     """Reload a lost create or failed pin, recover its identifier, then edit it."""
     from discord_ferry.state import save_state
@@ -3334,6 +3352,7 @@ async def test_forum_index_rebuild_called_when_forum_members_set(tmp_path: Path)
 
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
 @pytest.mark.parametrize("refail", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_delivery_uses_recorded_source_and_family(
     tmp_path: Path, family: str, refail: bool
 ) -> None:
@@ -3507,6 +3526,7 @@ async def test_retry_legacy_delivery_requires_existing_evidence(tmp_path: Path, 
 
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
 @pytest.mark.parametrize("found", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_legacy_delivery_requires_history(
     tmp_path: Path, family: str, found: bool
 ) -> None:
@@ -3577,6 +3597,7 @@ async def test_incremental_legacy_delivery_requires_history(
         assert "50" not in state.message_map
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_merged_delivery_preserves_skipped_source_types(tmp_path: Path) -> None:
     """Explicit retry cannot bypass the merge loop's source-type exclusion."""
     config = _make_config(tmp_path, export_dir=tmp_path, message_rate_limit=0.0)
@@ -3656,6 +3677,7 @@ async def test_retry_delivery_duplicate_source_scan_keeps_bounded_candidates(
 
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
 @pytest.mark.parametrize("outcome", ["verified", "partial", "unresolved"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_delivery_outcome_counts_selected_source(
     tmp_path: Path, family: str, outcome: str
 ) -> None:
@@ -3702,6 +3724,7 @@ async def test_retry_delivery_outcome_counts_selected_source(
 
 
 @pytest.mark.parametrize("partial_then_drained", [False, True])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_repair_delivery_outcome_counts_real_tail_and_retry_drain(
     tmp_path: Path, partial_then_drained: bool
 ) -> None:
@@ -3779,6 +3802,7 @@ async def test_repair_delivery_outcome_counts_real_tail_and_retry_drain(
 
 
 @pytest.mark.usefixtures("migration_preflight_unit_boundary")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_engine_delivery_outcome_preserves_visited_progress(tmp_path: Path) -> None:
     export_dir = tmp_path / "exports"
     export_dir.mkdir()
@@ -3837,6 +3861,7 @@ async def test_engine_delivery_outcome_preserves_visited_progress(tmp_path: Path
 
 
 @pytest.mark.usefixtures("migration_preflight_unit_boundary")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_path: Path) -> None:
     """Real engine initialization carries a rejection, then unchanged incremental posts nothing."""
     export_dir = tmp_path / "exports"
@@ -3915,6 +3940,7 @@ async def test_incremental_engine_delivery_carries_rejection_and_namespace(tmp_p
 
 
 @pytest.mark.parametrize("family", ["ordinary", "merged"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_retry_delivery_checkpoint_removes_resolved_failure_before_retirement(
     tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4039,6 +4065,7 @@ async def test_forum_index_rebuild_skipped_when_dry_run(tmp_path: Path) -> None:
     mock_rebuild.assert_not_called()
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) -> None:
     """_rebuild_forum_indexes uses state.channel_message_counts for per-post counts."""
     from discord_ferry.core.engine import _rebuild_forum_indexes
@@ -4079,6 +4106,7 @@ async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) ->
     assert "News" in sent_content[0]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
     """SC-3 helper parity: the per-forum helper sends and pins the index and records its id."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4123,6 +4151,7 @@ async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) ->
             await _rebuild_one_forum_index(session, config, state, "forum-empty", lambda e: None)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_rebuild_conflict_without_history_stays_unresolved(tmp_path: Path) -> None:
     """A bare conflict cannot establish index presence or authorize a replacement."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4157,6 +4186,7 @@ async def test_rebuild_conflict_without_history_stays_unresolved(tmp_path: Path)
     assert receipt.parts[0].status == "uncertain"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_rebuild_recovers_id_from_unique_nonce_history(tmp_path: Path) -> None:
     """A new-format conflict resolves through exact nonce history, then edits and pins."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4260,6 +4290,7 @@ async def test_rebuild_recovers_id_from_marked_forum(tmp_path: Path) -> None:
     assert "f" not in state.forum_index_present_unknown_id
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_rebuild_success_never_leaves_forum_in_both(tmp_path: Path) -> None:
     """SC-1.5: after a successful send, the id map and the marker set stay disjoint."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -5859,6 +5890,7 @@ async def test_invalid_server_read_stops_repair_writes(tmp_path: Path, stage: st
     assert all(method == "GET" for method, url in mock.requests)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_raw_healthy_repair_makes_zero_server_writes(tmp_path: Path) -> None:
     from discord_ferry.migrator.verify import run_check
 
@@ -7223,6 +7255,7 @@ async def test_a_recreated_channels_new_id_lands_under_the_unchanged_key(
     assert state.channel_map == {R_D_CHANNEL: "01J5T000000000000000009500"}
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
     tmp_path: Path,
 ) -> None:
@@ -7245,6 +7278,7 @@ async def test_the_recreated_channels_stale_per_channel_state_is_cleared(
     assert R_D_CHANNEL not in state.completed_channel_ids
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_only_this_channels_message_map_entries_are_dropped(tmp_path: Path) -> None:
     """The scan is channel-scoped, so another channel's entries survive.
 
@@ -7406,6 +7440,7 @@ def _thread_export(channel_id: str, *, parent: str, ch_type: int = 0) -> Any:
     return export
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_recreated_thread_channel_gets_its_origin_header_back(
     tmp_path: Path,
 ) -> None:
@@ -7426,6 +7461,7 @@ async def test_a_recreated_thread_channel_gets_its_origin_header_back(
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_recreated_forum_post_gets_the_forum_wording(tmp_path: Path) -> None:
     """Discord channel types 15 and 16 are forums, and say so."""
     export = _thread_export(R_D_CHANNEL, parent="ideas", ch_type=15)
@@ -7616,6 +7652,7 @@ def _merge_fixture() -> list[Any]:
     return [parent, thread_a, thread_b]
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
     tmp_path: Path,
 ) -> None:
@@ -7648,6 +7685,7 @@ async def test_a_recreated_merge_parent_gets_its_thread_content_back_in_order(
     ], f"a restored thread was still warned about: {state.warnings}"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
     tmp_path: Path,
 ) -> None:
@@ -7678,6 +7716,7 @@ async def test_repair_salts_the_merge_idempotency_keys_with_the_new_channel(
     assert delivery_module.delivery_key(state.delivery_namespace, base_separator, 0, 0) not in keys
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) -> None:
     """The parent is resent FIRST, so the thread's duplicate of it is suppressed.
 
@@ -7699,6 +7738,7 @@ async def test_the_origin_message_in_a_thread_is_not_sent_twice(tmp_path: Path) 
     )
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_merge_repair_records_thread_messages_the_way_a_merge_does(
     tmp_path: Path,
 ) -> None:
@@ -7721,6 +7761,7 @@ async def test_merge_repair_records_thread_messages_the_way_a_merge_does(
     assert state.channel_high_water[R_THREAD_A] == "900000000000000012"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_thread_message_repair_delivers_leaves_the_failed_queue(
     tmp_path: Path,
 ) -> None:
@@ -7739,6 +7780,7 @@ async def test_a_thread_message_repair_delivers_leaves_the_failed_queue(
     assert leftover == [], f"a delivered message is still queued for retry: {leftover}"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_failed_thread_message_is_queued_against_the_new_channel(
     tmp_path: Path,
 ) -> None:
@@ -7766,6 +7808,7 @@ async def test_a_dry_run_repair_sends_no_thread_content(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("strategy", ["flatten", "archive"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_flatten_and_archive_repair_send_no_merged_thread_content(
     tmp_path: Path, strategy: str
 ) -> None:
@@ -7779,6 +7822,7 @@ async def test_flatten_and_archive_repair_send_no_merged_thread_content(
     assert [s["content"] for s in sends] == ["parent-one", "parent-two"], sends
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_thread_under_another_parent_is_left_alone(tmp_path: Path) -> None:
     """Only threads whose parent is the recreated channel are merged, by name."""
     other_id = "800000000000000002"
@@ -7801,6 +7845,7 @@ async def test_a_thread_under_another_parent_is_left_alone(tmp_path: Path) -> No
     ], "a thread of a channel that was not recreated was warned about"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_a_thread_with_no_record_of_a_merge_is_not_sent_and_is_named(
     tmp_path: Path,
 ) -> None:
@@ -7827,6 +7872,7 @@ async def test_a_thread_with_no_record_of_a_merge_is_not_sent_and_is_named(
     assert any("thread-b" in e.message for e in events if e.status == "warning")
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_an_error_escaping_the_merge_is_recorded_and_repair_carries_on(
     tmp_path: Path,
 ) -> None:
@@ -7895,6 +7941,7 @@ async def test_a_resend_sends_in_timestamp_order_not_list_order(tmp_path: Path) 
     ], f"the resend followed list order rather than timestamp order: {sent}"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unsalted_migration_reuses_base_delivery_without_reposting(tmp_path: Path) -> None:
     """An ordinary send with no repair salt keeps its base identity on recovery."""
     config = _make_config(tmp_path, message_rate_limit=0.0)
@@ -7973,6 +8020,7 @@ async def test_a_resend_passes_persisted_replacement_identity(
     assert ref.generation != "base"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_origin_header_uses_persisted_replacement_identity(tmp_path: Path) -> None:
     """The header uses its own saved generation and current destination."""
     export = _thread_export(R_D_CHANNEL, parent="general")
@@ -8034,6 +8082,7 @@ def test_repair_generation_is_saved_and_reused(tmp_path: Path) -> None:
     assert first == second
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_repair_tail_generation_recovers_interruption_and_repeated_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8126,6 +8175,7 @@ def test_repair_generation_save_failure_cannot_authorize_later_dispatch(
 
 
 @pytest.mark.parametrize("family", ["header", "forum_index"])
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_repair_generated_receipt_replacement_recovery(
     tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8190,6 +8240,7 @@ async def test_repair_generated_receipt_replacement_recovery(
         assert restarted.forum_index_message_ids["news"] == valid_stoat_id(3401)
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_repair_merged_receipt_replacement_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8237,6 +8288,7 @@ async def test_repair_merged_receipt_replacement_recovery(
     assert restarted.channel_high_water["200"] == "20"
 
 
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_repair_merged_generation_checkpoint_keeps_completed_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

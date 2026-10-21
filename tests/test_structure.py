@@ -55,6 +55,9 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import DeliveryRef, MigrationState, load_state, read_delivery_receipt
 from discord_ferry.state import save_state as save_state_real
 from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
+from tests.test_delivery import (
+    publication_permission_collaborator as publication_permission_collaborator,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -4587,6 +4590,7 @@ async def test_no_banner_skipped(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_channel_created(channel_attributes_only, tmp_path: Path) -> None:
     """Forum category with 2 posts creates an index channel with a pinned message
     that includes channel references and message counts."""
@@ -4695,6 +4699,7 @@ async def test_forum_index_channel_created(channel_attributes_only, tmp_path: Pa
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_empty_forum(channel_attributes_only, tmp_path: Path) -> None:
     """Forum category with 0 posts sends 'No posts migrated.' message."""
     events: list[MigrationEvent] = []
@@ -5934,6 +5939,7 @@ async def test_a_refused_proxy_names_the_proxy(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_duplicate_skips_the_pin(channel_attributes_only, tmp_path: Path) -> None:
     """SC-2.6: a duplicate index send leaves no id, so there is nothing to pin.
 
@@ -6042,6 +6048,7 @@ def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> N
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_create_conflict_remains_unresolved(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6066,6 +6073,7 @@ async def test_forum_index_create_conflict_remains_unresolved(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_create_success_does_not_mark_the_forum(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6082,6 +6090,7 @@ async def test_forum_index_create_success_does_not_mark_the_forum(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_create_success_records_the_message_id(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6102,6 +6111,7 @@ async def test_forum_index_create_success_records_the_message_id(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_report_rebuild_after_a_create_edits_the_created_message(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6147,6 +6157,7 @@ async def test_report_rebuild_after_a_create_edits_the_created_message(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_forum_index_create_success_clears_a_stale_mark(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6202,6 +6213,7 @@ async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
     channel_attributes_only,
     tmp_path: Path,
@@ -6236,6 +6248,7 @@ async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_report_index_delivery_recovery_does_not_dispatch_prepared_render(
     channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

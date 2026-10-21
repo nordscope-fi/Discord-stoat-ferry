@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
+from discord_ferry.core.permissions import require_permission_runtime
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
     MessageSendFailure,
@@ -382,6 +383,8 @@ async def deliver_part(
             )
             return _result(state, config, receipt, part_index, recovered=True)
 
+        runtime = require_permission_runtime(state, service=config.stoat_url)
+        runtime.require(ref.destination_channel_id)
         part.status = "uncertain"
         part.autumn_ids = list(attachments or [])
         for embed in embeds or []:
@@ -397,6 +400,7 @@ async def deliver_part(
             recovered = True
             return await recover(failure)
 
+        runtime.note_write()
         try:
             result = await api_send_message(
                 session,
@@ -413,9 +417,13 @@ async def deliver_part(
             )
         except MessageSendFailure as failure:
             if failure.disposition == "confirmed_rejected":
+                runtime.note_write_rejected()
                 part.status = "confirmed_rejected"
                 write_delivery_receipt(state, config.output_dir, receipt)
             raise
         part.message_id = result["_id"]
         part.status = "acknowledged"
-        return _result(state, config, receipt, part_index, recovered=recovered)
+        delivered = _result(state, config, receipt, part_index, recovered=recovered)
+        if not recovered:
+            runtime.note_write_confirmed()
+        return delivered
