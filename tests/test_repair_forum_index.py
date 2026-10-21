@@ -22,6 +22,7 @@ from discord_ferry.state import MigrationState
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
 )
+from tests.test_engine import forum_permission_unit_boundary as forum_permission_unit_boundary
 from tests.test_engine import repair_permission_unit_boundary as repair_permission_unit_boundary
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ def _result() -> CheckResult:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_recreate_forum_index_creates_and_rebuilds(tmp_path: Path) -> None:
     """SC-3.1/SC-4.1: the channel is recreated at position 0 and its index message rebuilt."""
     config = _config(tmp_path)
@@ -98,6 +100,7 @@ async def test_recreate_forum_index_creates_and_rebuilds(tmp_path: Path) -> None
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_path: Path) -> None:
     """Whole-branch review: a migrated forum already has a forum_index_message_ids entry.
 
@@ -146,6 +149,7 @@ async def test_recreate_forum_index_sends_fresh_when_a_stale_id_is_recorded(tmp_
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_recreate_forum_index_clears_a_stale_present_unknown_mark(tmp_path: Path) -> None:
     """Whole-branch/second-opinion: a carried present-id-unknown mark must not suppress the send.
 
@@ -283,6 +287,7 @@ async def test_repair_skips_a_reappearing_hidden_forum_index(tmp_path: Path) -> 
 
 
 @pytest.mark.usefixtures("repair_permission_unit_boundary")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_repair_recreates_lone_forum_index(tmp_path: Path) -> None:
     """SC-I2/SC-3.2/SC-3.3: the forum index as the ONLY broken entity is still repaired.
 

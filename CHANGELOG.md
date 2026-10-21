@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Account for confirmed or possible duplicate-index cleanup effects through the existing permission runtime, preserving terminal safety stops without changing which messages are removed (#1172).
+
+- Verify forum-index access before rebuild, recovered edits and pins; bind and prove recreated indexes before content, retain confirmed recreation actions on stops, and recheck the final repair scope before success (#1172).
+
 - Preflight standalone retry and role backfill through the shared permission boundary, share repair authority for nested retries, preserve borrowed sessions and dry-run queues, and verify existing role-order changes without changing grants (#1172).
 
 - Include versioned permission outcomes and retained repair actions in reports, base permission review on verified operation evidence, and redact classified guidance without changing identifiers (#1172).

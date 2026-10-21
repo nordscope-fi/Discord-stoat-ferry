@@ -297,6 +297,29 @@ def retry_permission_unit_boundary(monkeypatch):
     return prepare
 
 
+@pytest.fixture
+def forum_permission_unit_boundary(monkeypatch):
+    """Isolate selected index rendering, receipt and layout units, not access proof."""
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    runtime = Mock(spec=PermissionRuntime)
+    plan = Mock()
+    runtime._active_plan.return_value = plan
+
+    def require(state, **kwargs):
+        plan.target_layout.planned_channels = tuple(
+            (source, None)
+            for source in state.created_channel_names
+            if source.startswith("forum-index-")
+        )
+        return runtime
+
+    monkeypatch.setattr(engine_module, "require_permission_runtime", Mock(side_effect=require))
+    monkeypatch.setattr("discord_ferry.migrator.verify.verify_permission_channel", AsyncMock())
+    monkeypatch.setattr(engine_module, "apply_channel_permissions", AsyncMock())
+    return runtime
+
+
 def _permission_preflight_case(
     tmp_path,
     *,
@@ -3671,6 +3694,7 @@ async def test_semaphore_initialized_during_migration(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("failure", ["response", "pin"])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_report_index_delivery_recovery_and_later_edit(tmp_path: Path, failure: str) -> None:
     """Reload a lost create or failed pin, recover its identifier, then edit it."""
     from discord_ferry.state import save_state
@@ -4512,6 +4536,7 @@ async def test_forum_index_rebuild_skipped_when_dry_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) -> None:
     """_rebuild_forum_indexes uses state.channel_message_counts for per-post counts."""
     from discord_ferry.core.engine import _rebuild_forum_indexes
@@ -4553,6 +4578,7 @@ async def test_forum_index_rebuild_uses_actual_message_counts(tmp_path: Path) ->
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
     """SC-3 helper parity: the per-forum helper sends and pins the index and records its id."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4579,6 +4605,7 @@ async def test_rebuild_one_forum_index_matches_loop(tmp_path: Path) -> None:
     assert state.forum_index_message_ids["forum-news"] == "01J5T000000000000000002302"
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) -> None:
     """SC-I3: a forum with no forum_channel_members entry rebuilds to the no-posts body."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4598,6 +4625,7 @@ async def test_rebuild_one_forum_index_zero_posts_no_keyerror(tmp_path: Path) ->
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_conflict_without_history_stays_unresolved(tmp_path: Path) -> None:
     """A bare conflict cannot establish index presence or authorize a replacement."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4633,6 +4661,7 @@ async def test_rebuild_conflict_without_history_stays_unresolved(tmp_path: Path)
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_recovers_id_from_unique_nonce_history(tmp_path: Path) -> None:
     """A new-format conflict resolves through exact nonce history, then edits and pins."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4684,6 +4713,7 @@ async def test_rebuild_recovers_id_from_unique_nonce_history(tmp_path: Path) -> 
     assert "f" not in state.forum_index_present_unknown_id
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_skips_marked_forum(tmp_path: Path) -> None:
     """A marked forum with no recoverable pinned message skips and warns."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4712,6 +4742,7 @@ async def test_rebuild_skips_marked_forum(tmp_path: Path) -> None:
     assert state.forum_index_present_unknown_id == {"f"}
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_recovers_id_from_marked_forum(tmp_path: Path) -> None:
     """A marked forum recovers the id from pinned messages on a subsequent run (#561)."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -4737,6 +4768,7 @@ async def test_rebuild_recovers_id_from_marked_forum(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_success_never_leaves_forum_in_both(tmp_path: Path) -> None:
     """SC-1.5: after a successful send, the id map and the marker set stay disjoint."""
     from discord_ferry.core.engine import _rebuild_one_forum_index
@@ -5318,6 +5350,8 @@ async def test_retry_path_preserves_unresolved_duplicate(tmp_path: Path) -> None
     )
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
+@pytest.mark.usefixtures("publication_permission_collaborator")
 async def test_unresolved_index_conflict_writes_no_false_state_entry(tmp_path: Path) -> None:
     """No history match means no saved index identifier, pin, or success event."""
     from discord_ferry.core.engine import _rebuild_forum_indexes
@@ -5358,6 +5392,13 @@ async def test_unresolved_index_conflict_writes_no_false_state_entry(tmp_path: P
         async with aiohttp.ClientSession() as session:
             config.session = session
             await _rebuild_forum_indexes(config, state, events.append)
+
+        assert any(
+            method == "POST" and url.path.endswith("/messages") for method, url in mock.requests
+        )
+        assert any(
+            method == "GET" and url.query.get("limit") == "100" for method, url in mock.requests
+        )
 
     assert pins == [], "a pin was attempted against an id that was never returned"
     assert not state.forum_index_message_ids, (
@@ -8685,6 +8726,7 @@ def test_repair_generation_save_failure_cannot_authorize_later_dispatch(
 
 @pytest.mark.parametrize("family", ["header", "forum_index"])
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_repair_generated_receipt_replacement_recovery(
     tmp_path: Path, family: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10581,6 +10623,471 @@ async def test_recovery_backfill_dry_run_needs_no_target_authority(tmp_path):
         assert not remote.requests
     assert state.permission_runtime is None
     assert any("[DRY RUN]" in event.message for event in events)
+
+
+def _forum_lifecycle_recreation_case(tmp_path, *, needs_overwrite=False):
+    from tests.test_delivery import permission_dispatch_context
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, forum=True, source_ids=("333",) if needs_overwrite else ("222", "333")
+    )
+    if needs_overwrite:
+        _, exports, meta = _permission_preflight_case(
+            tmp_path, everyone=(1 << 10) | (1 << 11), forum=True, mixed=True, source_ids=("333",)
+        )
+        server["default_permissions"] = meta.server_default_permissions
+        channels[state.channel_map["333"]]["role_permissions"] = {
+            state.role_map["112"]: {"a": 0, "d": 1 << 20}
+        }
+    group = "forum-Ideas & help"
+    source = "forum-index-" + group
+    old = state.channel_map[source]
+    category = valid_stoat_id(29420)
+    state.created_channel_names[source] = "forum-index"
+    state.category_map[group] = category
+    server["channels"].remove(old)
+    channels.pop(old)
+    server["categories"] = [
+        {"id": category, "title": "Ideas & help", "channels": list(server["channels"])}
+    ]
+    return config, state, exports, server, channels, source, old
+
+
+def _register_forum_lifecycle_recreation_reads(remote, config, state, server, channels):
+    from copy import deepcopy
+
+    from tests.test_delivery import register_permission_dispatch_reads
+
+    register_permission_dispatch_reads(remote, config, state, server, channels)
+    remote.get(
+        f"{config.stoat_url}/servers/{state.stoat_server_id}?include_channels=true",
+        callback=lambda url, **kwargs: CallbackResult(
+            payload={
+                **deepcopy(server),
+                "channels": [deepcopy(channels[target]) for target in server["channels"]],
+            }
+        ),
+        repeat=True,
+    )
+
+
+async def test_forum_lifecycle_recreation_preflight_keeps_confirmed_absence_separate(tmp_path):
+    config, state, exports, server, channels, source, old = _forum_lifecycle_recreation_case(
+        tmp_path
+    )
+    with aioresponses() as remote:
+        _register_forum_lifecycle_recreation_reads(remote, config, state, server, channels)
+        async with aiohttp.ClientSession() as session:
+            runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="repair"
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert dict(runtime.plan.target_layout.planned_channels)[source] is None
+    assert old not in {channel.id for channel in runtime.plan.target_layout.channels}
+    assert next(
+        channel for channel in runtime.plan.channels if channel.source_key == source
+    ).source_ids == frozenset({"222", "333"})
+    assert state.channel_map[source] == old and not runtime.ready
+
+
+@pytest.mark.parametrize("failure", [None, "reject", "readback"])
+@pytest.mark.parametrize("public", [False, True])
+async def test_forum_lifecycle_recreation_saves_binds_and_proves_before_content(
+    tmp_path, monkeypatch, failure, public
+):
+    from copy import deepcopy
+
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, state, exports, server, channels, source, old = _forum_lifecycle_recreation_case(
+        tmp_path, needs_overwrite=True
+    )
+    group = source.removeprefix("forum-index-")
+    new, message = valid_stoat_id(29410), valid_stoat_id(29411)
+    state.forum_index_message_ids[group] = valid_stoat_id(29412)
+    result = CheckResult(
+        name="channel:" + source,
+        status="fail",
+        detail="missing",
+        kind="channel_missing",
+        discord_id=source,
+        stoat_id=old,
+    )
+    if public:
+        report = CheckReport()
+        report.results.append(result)
+        monkeypatch.setattr(
+            "discord_ferry.migrator.verify.run_check", AsyncMock(return_value=report)
+        )
+        monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+        monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    permissions, content, attachments = [], [], []
+
+    def create(url, **kwargs):
+        server["channels"].append(new)
+        channels[new] = {
+            "_id": new,
+            "server": server["_id"],
+            "name": "forum-index",
+            "channel_type": "TextChannel",
+            "default_permissions": {"a": 0, "d": 0},
+            "role_permissions": {},
+        }
+        return CallbackResult(status=200, payload={"_id": new, "name": "forum-index"})
+
+    def permission(url, **kwargs):
+        assert load_state(config.output_dir).channel_map[source] == new
+        assert state.permission_runtime.channel_plan(new).source_key == source
+        permissions.append(str(url))
+        if failure == "reject":
+            return CallbackResult(status=403, payload={"type": "MissingPermission"})
+        if failure != "readback":
+            value = kwargs["json"]["permissions"]
+            cell = {"a": value["allow"], "d": value["deny"]}
+            target = url.path.rsplit("/", 1)[-1]
+            if target == "default":
+                channels[new]["default_permissions"] = cell
+            else:
+                channels[new]["role_permissions"][target] = cell
+        return CallbackResult(status=200, payload={})
+
+    def attach(url, **kwargs):
+        attachments.append(new in state.permission_runtime.ready)
+        server["categories"] = deepcopy(kwargs["json"]["categories"])
+        return CallbackResult(status=200, payload={})
+
+    def send(url, **kwargs):
+        content.append(new in state.permission_runtime.ready)
+        return CallbackResult(status=200, payload={"_id": message})
+
+    with aioresponses() as remote:
+        _register_forum_lifecycle_recreation_reads(remote, config, state, server, channels)
+        remote.post(f"{config.stoat_url}/servers/{server['_id']}/channels", callback=create)
+        remote.get(
+            f"{config.stoat_url}/channels/{new}",
+            callback=lambda url, **kw: CallbackResult(payload=deepcopy(channels[new])),
+            repeat=True,
+        )
+        remote.put(f"{config.stoat_url}/channels/{new}/permissions/default", callback=permission)
+        remote.put(
+            f"{config.stoat_url}/channels/{new}/permissions/{state.role_map['112']}",
+            callback=permission,
+        )
+        remote.patch(f"{config.stoat_url}/servers/{server['_id']}", callback=attach)
+        remote.post(f"{config.stoat_url}/channels/{new}/messages", callback=send)
+        remote.post(f"{config.stoat_url}/channels/{new}/messages/{message}/pin", payload={})
+        async with aiohttp.ClientSession() as session:
+            categories = deepcopy(server["categories"])
+            if public:
+                events = []
+                outcome = await run_repair(config, state, exports, events.append, session=session)
+                assert len(outcome.recreated_channels) == 1
+                assert outcome.recreated_channels[0]["stoat_id"] == new
+                if failure:
+                    assert outcome.permissions.reason == (
+                        "write_uncertain" if failure == "reject" else "readback_mismatch"
+                    )
+                    assert not content and not attachments
+                    assert not any(event.status == "completed" for event in events)
+                else:
+                    assert outcome.permissions.verified
+                    assert content == attachments == [True]
+                    assert state.forum_index_message_ids[group] == message
+            else:
+                state.permission_runtime = await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode="repair"
+                )
+            if failure and not public:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await engine_module._recreate_forum_index(
+                        session, config, state, result, set(), categories, lambda event: None
+                    )
+                assert caught.value.outcome.reason == (
+                    "write_uncertain" if failure == "reject" else "readback_mismatch"
+                )
+                assert not content and not attachments
+            elif not public:
+                assert await engine_module._recreate_forum_index(
+                    session, config, state, result, set(), categories, lambda event: None
+                )
+                assert content == attachments == [True]
+                assert state.forum_index_message_ids[group] == message
+                assert categories[0]["channels"][0] == new
+    assert permissions and state.channel_map[source] == new
+    assert load_state(config.output_dir).channel_map[source] == new
+
+
+async def test_forum_lifecycle_mixed_recreated_index_scope_stops_before_writes(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, state, _, server, channels, source, old = _forum_lifecycle_recreation_case(tmp_path)
+    _, exports, meta = _permission_preflight_case(
+        tmp_path,
+        everyone=(1 << 10) | (1 << 11),
+        forum=True,
+        mixed=True,
+    )
+    server["default_permissions"] = meta.server_default_permissions
+    channels[state.channel_map["333"]]["role_permissions"] = {
+        state.role_map["112"]: {"a": 0, "d": 1 << 20}
+    }
+    with aioresponses() as remote:
+        _register_forum_lifecycle_recreation_reads(remote, config, state, server, channels)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._prepare_permission_operation(
+                    config, state, exports, session, mode="repair"
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.reason == "unsupported"
+    assert state.channel_map[source] == old
+
+
+async def test_forum_lifecycle_read_only_recovery_does_not_install_authority(tmp_path, monkeypatch):
+    state = MigrationState()
+    edit = AsyncMock()
+    monkeypatch.setattr(engine_module, "api_search_pinned_messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(engine_module, "api_edit_message", edit)
+    async with aiohttp.ClientSession() as session:
+        result = await engine_module._recover_forum_index_id(
+            session,
+            _make_repair_config(tmp_path),
+            valid_stoat_id(29430),
+            "empty",
+            "synthetic",
+            state=state,
+        )
+    assert result == "" and state.permission_runtime is None
+    edit.assert_not_awaited()
+
+
+async def test_forum_lifecycle_recreation_refuses_a_carried_index_before_create(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+    from tests.test_delivery import permission_dispatch_context, register_permission_dispatch_reads
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, forum=True, source_ids=("222",)
+    )
+    group = "forum-Ideas & help"
+    source = "forum-index-" + group
+    target, category = state.channel_map[source], valid_stoat_id(29431)
+    state.category_map[group] = category
+    state.created_channel_names[source] = "index"
+    categories = [{"id": category, "title": "Ideas & help", "channels": [target]}]
+    server["categories"] = categories
+    result = CheckResult(
+        name="index",
+        status="fail",
+        kind="channel_missing",
+        detail="stale classification",
+        discord_id=source,
+        stoat_id=target,
+    )
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._recreate_forum_index(
+                    session, config, state, result, set(), categories, lambda event: None
+                )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert state.channel_map[source] == target
+
+
+@pytest.mark.parametrize("result", ["ack", "rejected", "stopped", "dry_run"])
+async def test_forum_lifecycle_cleanup_retains_actual_destination_effects(tmp_path, result):
+    from discord_ferry.errors import PermissionSafetyError
+    from tests.test_delivery import permission_dispatch_context, register_permission_dispatch_reads
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, forum=True, source_ids=("222",)
+    )
+    config = dataclasses.replace(config, dry_run=result == "dry_run")
+    group = "forum-Ideas & help"
+    target = state.channel_map["forum-index-" + group]
+    kept, duplicate, author = (valid_stoat_id(number) for number in (29440, 29441, 29442))
+    state.forum_index_message_ids[group] = kept
+    pinned = [
+        {
+            "_id": identity,
+            "author": author,
+            "masquerade": {"name": "Discord Ferry"},
+            "content": "**Forum: Ideas & help** synthetic",
+        }
+        for identity in (kept, duplicate)
+    ]
+    outcome = RepairOutcome()
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        remote.get(f"{config.stoat_url}/users/@me", payload={"_id": author})
+        remote.post(f"{config.stoat_url}/channels/{target}/search", payload=pinned)
+        remote.delete(
+            f"{config.stoat_url}/channels/{target}/messages/{duplicate}",
+            status=403 if result == "rejected" else 204,
+        )
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+            if result == "stopped":
+                original = state.permission_runtime.stop("readback_mismatch", stage="recheck")
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await engine_module._remove_duplicate_forum_indexes(
+                        session, config, state, outcome, lambda event: None
+                    )
+                assert caught.value is original
+            else:
+                await engine_module._remove_duplicate_forum_indexes(
+                    session, config, state, outcome, lambda event: None
+                )
+        assert sum(method == "DELETE" for method, _ in remote.requests) == int(
+            result in {"ack", "rejected"}
+        )
+    if result == "ack":
+        assert outcome.removed_duplicate_indexes[0]["removed"] is True
+    elif result == "dry_run":
+        assert outcome.removed_duplicate_indexes[0]["removed"] is False
+    else:
+        assert not outcome.removed_duplicate_indexes
+    stopped = state.permission_runtime.stop("readback_mismatch", stage="recheck")
+    assert (
+        stopped.outcome.effects
+        == {
+            "ack": "changes_confirmed",
+            "rejected": "changes_possible",
+            "stopped": "none_confirmed",
+            "dry_run": "none_confirmed",
+        }[result]
+    )
+
+
+@pytest.mark.parametrize("operation", ["rebuild", "recover"])
+async def test_forum_lifecycle_missing_authority_never_edits(tmp_path, monkeypatch, operation):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config = _make_repair_config(tmp_path)
+    index, message = valid_stoat_id(29400), valid_stoat_id(29401)
+    state = MigrationState(
+        channel_map={"forum-index-forum-example": index},
+        forum_channel_members={"forum-example": ["222"]},
+        forum_index_message_ids={"forum-example": message},
+    )
+    edit = AsyncMock(return_value={})
+    monkeypatch.setattr(engine_module, "api_edit_message", edit)
+    monkeypatch.setattr(
+        engine_module,
+        "api_search_pinned_messages",
+        AsyncMock(return_value=[{"_id": message, "content": "**Forum: example** old"}]),
+    )
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(PermissionSafetyError):
+            if operation == "rebuild":
+                await engine_module._rebuild_one_forum_index(
+                    session, config, state, "forum-example", lambda event: None
+                )
+            else:
+                await engine_module._recover_forum_index_id(
+                    session, config, index, "example", "synthetic", state=state
+                )
+    edit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("operation", ["existing", "recovered"])
+@pytest.mark.parametrize("changed", [False, True])
+async def test_forum_lifecycle_batch_readback_precedes_direct_edits(tmp_path, operation, changed):
+    from discord_ferry.errors import PermissionSafetyError
+    from tests.test_delivery import permission_dispatch_context, register_permission_dispatch_reads
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, forum=True, source_ids=("222", "333")
+    )
+    group = "forum-Ideas & help"
+    index = state.channel_map["forum-index-" + group]
+    message = valid_stoat_id(29402)
+    if operation == "existing":
+        state.forum_index_message_ids[group] = message
+    else:
+        state.forum_index_present_unknown_id.add(group)
+    edits = []
+
+    def edit(url, **kwargs):
+        edits.append(index in state.permission_runtime.ready)
+        return CallbackResult(status=200, payload={})
+
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        remote.patch(f"{config.stoat_url}/channels/{index}/messages/{message}", callback=edit)
+        remote.post(
+            f"{config.stoat_url}/channels/{index}/search",
+            payload=[{"_id": message, "content": "**Forum: Ideas & help** old"}],
+        )
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+            assert not state.permission_runtime.ready
+            if changed:
+                channels[index]["role_permissions"] = {
+                    state.role_map["112"]: {"a": 0, "d": 1 << 20}
+                }
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await engine_module._rebuild_one_forum_index(
+                        session, config, state, group, lambda event: None
+                    )
+                assert caught.value.outcome.reason == "readback_mismatch"
+                assert not edits
+            else:
+                await engine_module._rebuild_one_forum_index(
+                    session, config, state, group, lambda event: None
+                )
+                assert edits == [True]
+                assert state.forum_index_message_ids[group] == message
+                assert group not in state.forum_index_present_unknown_id
+            assert not any(method == "PUT" for method, _ in remote.requests)
+
+
+async def test_forum_lifecycle_invalidated_proof_stops_pin_after_acknowledgement(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator.verify import verify_permission_channel
+    from tests.test_delivery import permission_dispatch_context, register_permission_dispatch_reads
+
+    config, state, exports, server, channels = permission_dispatch_context(
+        tmp_path, forum=True, source_ids=("222",)
+    )
+    group = "forum-Ideas & help"
+    index = state.channel_map["forum-index-" + group]
+    message = valid_stoat_id(29403)
+    posts, pins = [], []
+
+    def send(url, **kwargs):
+        posts.append(index in state.permission_runtime.ready)
+        state.permission_runtime.invalidate_channel(index)
+        return CallbackResult(status=200, payload={"_id": message})
+
+    def pin(url, **kwargs):
+        pins.append("pin")
+        return CallbackResult(status=200, payload={})
+
+    with aioresponses() as remote:
+        register_permission_dispatch_reads(remote, config, state, server, channels)
+        remote.post(f"{config.stoat_url}/channels/{index}/messages", callback=send)
+        remote.post(f"{config.stoat_url}/channels/{index}/messages/{message}/pin", callback=pin)
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="migration"
+            )
+            await verify_permission_channel(session, config, state, index)
+            with pytest.raises(PermissionSafetyError) as caught:
+                await engine_module._rebuild_one_forum_index(
+                    session, config, state, group, lambda event: None
+                )
+    assert posts == [True] and not pins
+    assert caught.value.outcome.effects == "changes_confirmed"
+    assert state.forum_index_message_ids[group] == message
 
 
 def _dependent_role_repair_case(tmp_path, *, role_count=1):

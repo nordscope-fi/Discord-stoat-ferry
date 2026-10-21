@@ -40,6 +40,7 @@ from discord_ferry.state import MigrationState
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
 )
+from tests.test_engine import forum_permission_unit_boundary as forum_permission_unit_boundary
 from tests.test_structure import channel_attributes_only as channel_attributes_only
 from tests.test_structure import role_ordering_only as role_ordering_only
 from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
@@ -863,6 +864,7 @@ async def test_rerun_two_carried_only_categories_keep_own_channels(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_forum_indexes_patches_on_rerun(tmp_path: Path) -> None:
     """SC-9: with a carried forum_index_message_ids, the rebuild edits (PATCHes).
 
@@ -911,6 +913,7 @@ async def test_rebuild_forum_indexes_patches_on_rerun(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_rebuild_forum_indexes_reports_cumulative_counts(tmp_path: Path) -> None:
     """SC-10: carried count (800) + this-run delta (47) → index shows 847.
 

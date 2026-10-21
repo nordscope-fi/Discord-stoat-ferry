@@ -58,6 +58,7 @@ from tests.local_cdn import ENDLESS_LIMIT, RewritingSession, local_cdn
 from tests.test_delivery import (
     publication_permission_collaborator as publication_permission_collaborator,
 )
+from tests.test_engine import forum_permission_unit_boundary as forum_permission_unit_boundary
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -6112,6 +6113,7 @@ async def test_forum_index_create_success_records_the_message_id(
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_report_rebuild_after_a_create_edits_the_created_message(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6174,6 +6176,7 @@ async def test_forum_index_create_success_clears_a_stale_mark(
     assert state.forum_index_present_unknown_id == set()
 
 
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
     tmp_path: Path,
 ) -> None:
@@ -6214,6 +6217,7 @@ async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
     channel_attributes_only,
     tmp_path: Path,
@@ -6249,6 +6253,7 @@ async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
 @pytest.mark.usefixtures("publication_permission_collaborator")
+@pytest.mark.usefixtures("forum_permission_unit_boundary")
 async def test_report_index_delivery_recovery_does_not_dispatch_prepared_render(
     channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
