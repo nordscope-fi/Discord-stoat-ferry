@@ -1244,3 +1244,472 @@ def test_planned_role_rejects_invalid_rank_with_valid_permission_facts(rank: obj
     p = planned_contracts()
     with pytest.raises(ValueError):
         p.PlannedRole("112", p.PermissionCell(0, 0), rank)
+
+
+def runtime_case(*, grants=((1 << 10) | (1 << 11), (1 << 10) | (1 << 11))):
+    p = compiler_functions()
+    source = source_evidence(grants, ((0, 1 << 11),))
+    layout = compiler_layout(source)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    channel = plan.channels[0]
+    bindings = dict(layout.planned_roles)
+    actual = p.PermissionReadback(
+        replace(
+            layout,
+            planned_roles=(),
+            planned_channels=(),
+            fingerprint="observed-context",
+            channels=(
+                p.TargetChannel(
+                    "c-222",
+                    channel.default,
+                    tuple((bindings[sid], cell) for sid, cell in channel.roles),
+                ),
+            ),
+        )
+    )
+    runtime = p.PermissionRuntime(plan=plan)
+    for method in (
+        "bind",
+        "bind_server",
+        "bind_role",
+        "bind_channel",
+        "channel_plan",
+        "verify",
+        "require",
+        "invalidate_channel",
+        "invalidate_layout",
+        "stop",
+        "note_write",
+        "note_write_confirmed",
+        "note_write_rejected",
+    ):
+        assert callable(getattr(runtime, method, None)), f"Runtime boundary {method} is missing"
+    return p, runtime, plan, actual
+
+
+def test_permission_plan_is_not_runtime_authority() -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    _, runtime, _, _ = runtime_case()
+    assert runtime.ready == {}
+    assert not runtime.outcome.verified
+    with pytest.raises(PermissionSafetyError) as caught:
+        runtime.require("c-222")
+    assert caught.value.outcome.reason == "unverified"
+    assert runtime.stopped and not runtime.ready
+
+
+def test_actual_verified_readback_is_required_for_authority() -> None:
+    p, runtime, _, actual = runtime_case()
+    assert runtime.verify("c-222", actual) is actual
+    assert runtime.require("c-222") is actual
+    assert runtime.outcome.verified
+    other = p.PermissionRuntime(plan=runtime.plan)
+    assert not other.ready and not other.outcome.verified
+
+
+def test_injected_ready_record_is_not_a_runtime_proof() -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    _, runtime, _, actual = runtime_case()
+    runtime.ready["c-222"] = actual
+    with pytest.raises(PermissionSafetyError):
+        runtime.require("c-222")
+
+
+def test_equivalent_carried_cells_do_not_need_canonical_rewrites() -> None:
+    p, runtime, plan, actual = runtime_case(grants=(0, 0))
+    neutral = p.TargetChannel("c-222", p.PermissionCell(0, 0), ())
+    assert neutral.default != plan.channels[0].default
+    actual = replace(actual, layout=replace(actual.layout, channels=(neutral,)))
+    runtime.verify("c-222", actual)
+    assert runtime.require("c-222") is actual
+
+
+@pytest.mark.parametrize("conditional_visibility", [False, True])
+def test_runtime_ignores_mapped_bit_differences_only_for_hidden_members(
+    conditional_visibility: bool,
+) -> None:
+    p = compiler_functions()
+    grants = (0, 1 << 10, 0) if conditional_visibility else (0, 0)
+    source = source_evidence(grants, ())
+    layout = compiler_layout(source)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    proposed = plan.channels[0]
+    cells = dict(proposed.roles)
+    hidden_role = "113" if conditional_visibility else "112"
+    cells[hidden_role] = p.PermissionCell(
+        cells[hidden_role].allow | (1 << 22), cells[hidden_role].deny & ~(1 << 22)
+    )
+    if conditional_visibility:
+        cells["112"] = p.PermissionCell(
+            cells["112"].allow & ~(1 << 22), cells["112"].deny | (1 << 22)
+        )
+    carried = replace(proposed, roles=tuple(cells.items()))
+    ids = tuple(cells)
+    for assignment in range(1 << len(ids)):
+        members = frozenset(sid for index, sid in enumerate(ids) if assignment & (1 << index))
+        value = compiled_target_value(carried, layout, members)
+        visible = source_oracle(source, members, 10)
+        assert bool(value & (1 << 20)) == visible
+        assert bool(value & (1 << 22)) == (visible and source_oracle(source, members, 11))
+    actual = p.PermissionReadback(
+        replace(
+            layout,
+            planned_roles=(),
+            planned_channels=(),
+            channels=(
+                p.TargetChannel(
+                    "c-222",
+                    carried.default,
+                    tuple((f"r-{sid}", cell) for sid, cell in carried.roles),
+                ),
+            ),
+        )
+    )
+    runtime = p.PermissionRuntime(plan)
+    runtime.verify("c-222", actual)
+    assert runtime.require("c-222") is actual
+
+
+@pytest.mark.parametrize(
+    "change", ["default", "role_cell", "grant", "rank", "inventory", "unrelated"]
+)
+def test_runtime_refuses_changed_permission_facts(change: str) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, runtime, _, actual = runtime_case()
+    layout = actual.layout
+    channel = layout.channels[0]
+    if change == "default":
+        layout = replace(layout, server_default=layout.server_default ^ (1 << 22))
+    elif change == "role_cell":
+        rid, cell = channel.roles[0]
+        layout = replace(
+            layout,
+            channels=(
+                replace(
+                    channel,
+                    roles=(
+                        (rid, p.PermissionCell(cell.allow | (1 << 22), cell.deny & ~(1 << 22))),
+                    ),
+                ),
+            ),
+        )
+    elif change in {"grant", "rank"}:
+        role = layout.roles[0]
+        changed = (
+            replace(role, rank=role.rank + 1)
+            if change == "rank"
+            else replace(role, permissions=p.PermissionCell(role.permissions.allow ^ (1 << 20), 0))
+        )
+        layout = replace(layout, roles=(changed,))
+    elif change == "inventory":
+        layout = replace(
+            layout, roles=(*layout.roles, p.TargetRole("native", p.PermissionCell(0, 0), 8))
+        )
+    else:
+        layout = replace(
+            layout,
+            channels=(
+                replace(
+                    channel,
+                    default=p.PermissionCell(
+                        channel.default.allow | (1 << 12), channel.default.deny
+                    ),
+                ),
+            ),
+        )
+    with pytest.raises(PermissionSafetyError) as caught:
+        runtime.verify("c-222", replace(actual, layout=layout))
+    assert caught.value.outcome.reason == "readback_mismatch"
+    assert runtime.stopped and not runtime.ready
+
+
+@pytest.mark.parametrize("change", ["service", "server", "channel", "missing", "problem"])
+def test_runtime_never_uses_expected_values_for_missing_or_misbound_reads(change: str) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, runtime, _, actual = runtime_case()
+    if change == "service":
+        actual = replace(actual, layout=replace(actual.layout, service="https://other.test"))
+    elif change == "server":
+        actual = replace(actual, layout=replace(actual.layout, server_id="other"))
+    elif change == "channel":
+        actual = replace(
+            actual,
+            layout=replace(
+                actual.layout, channels=(replace(actual.layout.channels[0], id="other"),)
+            ),
+        )
+    elif change == "missing":
+        actual = replace(actual, layout=replace(actual.layout, server_default=None))
+    else:
+        actual = replace(
+            actual,
+            problems=(p.PermissionProblem("unverified", (), None, "Refresh actual evidence"),),
+        )
+    with pytest.raises(PermissionSafetyError) as caught:
+        runtime.verify("c-222", actual)
+    assert caught.value.outcome.reason == "unverified"
+    assert not runtime.ready
+
+
+def test_runtime_invalidated_proof_needs_a_new_readback() -> None:
+    _, runtime, _, actual = runtime_case()
+    runtime.verify("c-222", actual)
+    runtime.invalidate_channel("c-222")
+    assert not runtime.ready and not runtime.outcome.verified
+    runtime.verify("c-222", actual)
+    assert runtime.require("c-222") is actual
+    runtime.invalidate_layout()
+    assert not runtime.ready and not runtime.outcome.verified
+
+
+def test_runtime_plan_change_invalidates_existing_authority() -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    _, runtime, plan, actual = runtime_case()
+    runtime.verify("c-222", actual)
+    runtime.plan = replace(plan, source_fingerprint="changed-source")
+    with pytest.raises(PermissionSafetyError):
+        runtime.require("c-222")
+    assert not runtime.ready
+
+
+def test_runtime_stop_is_terminal_and_preserves_primary_error() -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    _, runtime, _, actual = runtime_case()
+    runtime.verify("c-222", actual)
+    runtime.note_write()
+    first = runtime.stop("write_uncertain", stage="application")
+    assert first.outcome.effects == "changes_possible"
+    assert runtime.stop("unverified", stage="recheck") is first
+    with pytest.raises(PermissionSafetyError) as caught:
+        runtime.verify("c-222", actual)
+    assert caught.value is first
+    assert runtime.stopped and not runtime.ready
+
+
+def test_runtime_effects_accounting_does_not_confirm_pending_writes() -> None:
+    _, runtime, _, _ = runtime_case()
+    runtime.note_write()
+    runtime.note_write()
+    assert runtime.effects == "changes_possible"
+    runtime.note_write_confirmed()
+    assert runtime.effects == "changes_possible"
+    runtime.note_write_confirmed()
+    assert runtime.effects == "changes_confirmed"
+    runtime.note_write()
+    assert runtime.effects == "changes_possible"
+    runtime.note_write_rejected()
+    assert runtime.effects == "changes_confirmed"
+
+
+def test_observed_encoding_matches_the_existing_symbolic_query() -> None:
+    p = synthesis_functions()
+    matches = getattr(p, "_encoding_matches", None)
+    assert callable(matches), "Readback needs the existing symbolic encoding verification"
+    for size in range(3):
+        for grants, base in product(range(1 << size), (False, True)):
+            for ops in product((None, False, True), repeat=size):
+                expected = target_truth(ops, grants, base)
+                for table in product((False, True), repeat=1 << size):
+
+                    def agrees(zeros, ones, wanted, *, table=table):
+                        return table_query(table, zeros, ones) is wanted
+
+                    assert matches(ops, agrees, grants, base) == (table == expected)
+
+
+def test_observed_encoding_matches_independent_visibility_restricted_tables() -> None:
+    p = synthesis_functions()
+    for grants, base in product(range(4), (False, True)):
+        for operations in product((None, False, True), repeat=2):
+            actual = target_truth(operations, grants, base)
+            for table in product((False, True), repeat=4):
+                for visible in range(16):
+
+                    def agrees(zeros, ones, wanted, *, table=table, visible=visible):
+                        return all(
+                            value is wanted
+                            for assignment, value in enumerate(table)
+                            if visible & (1 << assignment)
+                            and not assignment & zeros
+                            and assignment & ones == ones
+                        )
+
+                    expected = all(
+                        not visible & (1 << assignment) or result == table[assignment]
+                        for assignment, result in enumerate(actual)
+                    )
+                    assert p._encoding_matches(operations, agrees, grants, base) == expected
+
+
+def test_runtime_binds_created_identities_without_fabricating_observations() -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    p = compiler_functions()
+    source = source_evidence((0, (1 << 10) | (1 << 11)), ())
+    layout = compiler_layout(source, new_server=True)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    runtime = p.PermissionRuntime(plan=plan)
+    assert callable(getattr(runtime, "bind_server", None)), "Created bindings need a runtime owner"
+    runtime.bind_server("created-server")
+    runtime.bind_role("112", "created-role")
+    runtime.bind_channel("222", "created-channel")
+    channel = runtime.channel_plan("created-channel")
+    assert {rid for rid, _ in channel.roles} == {"created-role"}
+    assert plan.target_layout.roles == () and plan.target_layout.server_id == ""
+    assert channel.target_layout is plan.target_layout
+    assert not runtime.ready
+    planned = layout.planned_role_facts[0]
+    actual = p.PermissionReadback(
+        p.TargetLayout(
+            service=layout.service,
+            server_id="created-server",
+            roles=(p.TargetRole("created-role", planned.permissions, planned.rank),),
+            server_default=layout.planned_server_default,
+            channels=(p.TargetChannel("created-channel", channel.default, channel.roles),),
+            fingerprint="fresh-created-context",
+        )
+    )
+    runtime.verify("created-channel", actual)
+    assert runtime.require("created-channel") is actual
+    wrong = replace(
+        actual, layout=replace(actual.layout, roles=(replace(actual.layout.roles[0], rank=7),))
+    )
+    with pytest.raises(PermissionSafetyError):
+        runtime.verify("created-channel", wrong)
+    assert not runtime.ready
+
+
+def test_runtime_does_not_report_all_channels_verified_after_one_read() -> None:
+    p = compiler_functions()
+    source = source_evidence((0,), ())
+    source = replace(
+        source,
+        channels=(*source.channels, replace(source.channels[0], id="223")),
+        covered_channel_ids=frozenset({"222", "223"}),
+    )
+    layout = compiler_layout(source)
+    plan = p.compile_permission_plan(source, layout)
+    runtime = p.PermissionRuntime(plan=plan)
+    assert callable(getattr(runtime, "verify", None)), "Channel readiness needs observed proof"
+    observations = []
+    for proposal in plan.channels:
+        cid = "c-" + proposal.source_key
+        actual = p.PermissionReadback(
+            replace(
+                layout,
+                planned_roles=(),
+                planned_channels=(),
+                fingerprint=cid,
+                channels=(p.TargetChannel(cid, proposal.default, ()),),
+            )
+        )
+        runtime.verify(cid, actual)
+        observations.append(actual)
+        assert runtime.require(cid) is actual
+        if len(observations) == 1:
+            assert not runtime.outcome.verified
+    assert runtime.outcome.verified
+    runtime.invalidate_channel("c-222")
+    assert not runtime.outcome.verified
+    assert runtime.require("c-223") is observations[1]
+
+
+@pytest.mark.parametrize("binding", ["server", "role", "channel"])
+def test_runtime_rebinding_cannot_reuse_an_existing_proof(binding: str) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    _, runtime, _, actual = runtime_case()
+    runtime.verify("c-222", actual)
+    with pytest.raises(PermissionSafetyError):
+        if binding == "server":
+            runtime.bind_server("different-server")
+        elif binding == "role":
+            runtime.bind_role("112", "different-role")
+        else:
+            runtime.bind_channel("222", "different-channel")
+    assert runtime.stopped and not runtime.ready
+
+
+@pytest.mark.parametrize("cell", [(0, 0), (1 << 20, 1 << 12)])
+def test_runtime_preserves_inactive_cells_in_observed_context(cell) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, _, _, old_actual = runtime_case()
+    source = source_evidence(((1 << 10) | (1 << 11), (1 << 10) | (1 << 11)), ((0, 1 << 11),))
+    layout = compiler_layout(source)
+    inactive = ("deleted-role", p.PermissionCell(*cell))
+    layout = replace(layout, channels=(replace(layout.channels[0], roles=(inactive,)),))
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    runtime = p.PermissionRuntime(plan=plan)
+    channel = old_actual.layout.channels[0]
+    actual = replace(
+        old_actual,
+        layout=replace(
+            old_actual.layout, channels=(replace(channel, roles=(*channel.roles, inactive)),)
+        ),
+    )
+    runtime.verify("c-222", actual)
+    assert runtime.require("c-222") is actual
+    with pytest.raises(PermissionSafetyError):
+        runtime.verify("c-222", old_actual)
+    assert not runtime.ready
+
+
+def test_readback_encoding_query_remains_linear_for_large_role_sets() -> None:
+    p = synthesis_functions()
+    matches = getattr(p, "_encoding_matches", None)
+    assert callable(matches)
+    size, calls = 100, []
+    grants = (1 << size) - 1
+    predicate = p.BitPredicate(0, 0, grants, False)
+
+    def query(zeros, ones, wanted):
+        calls.append((zeros, ones))
+        return p.constant_result(predicate, grants, zeros, ones) is wanted
+
+    assert matches((None,) * size, query, grants, False)
+    assert len(calls) <= size + 1
+
+
+@pytest.mark.parametrize(
+    "change", ["missing-cells", "duplicate-cells", "native-grant", "role-deny"]
+)
+def test_runtime_does_not_trust_unsupported_or_incomplete_plan_assumptions(change) -> None:
+    from discord_ferry.errors import PermissionSafetyError
+
+    p, _, plan, observed = runtime_case()
+    layout = plan.target_layout
+    if change == "missing-cells":
+        layout = replace(layout, channels=(replace(layout.channels[0], roles=None),))
+    elif change == "duplicate-cells":
+        pair = ("r-112", p.PermissionCell(0, 0))
+        layout = replace(layout, channels=(replace(layout.channels[0], roles=(pair, pair)),))
+    elif change == "native-grant":
+        native = p.TargetRole("native-role", p.PermissionCell(1 << 20, 0), 500)
+        layout = replace(layout, roles=(*layout.roles, native))
+        observed = replace(observed, layout=replace(observed.layout, roles=layout.roles))
+    else:
+        role = layout.roles[0]
+        role = replace(role, permissions=p.PermissionCell(role.permissions.allow, 1 << 20))
+        layout = replace(layout, roles=(role,))
+        observed = replace(observed, layout=replace(observed.layout, roles=layout.roles))
+    plan = replace(
+        plan,
+        target_layout=layout,
+        channels=tuple(replace(channel, target_layout=layout) for channel in plan.channels),
+    )
+    runtime = p.PermissionRuntime(plan=plan)
+    with pytest.raises(PermissionSafetyError):
+        runtime.verify("c-222", observed)
+    assert runtime.stopped and not runtime.ready

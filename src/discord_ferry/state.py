@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from discord_ferry.core.atomicio import atomic_write_text, ensure_output_subdir
+from discord_ferry.core.permissions import PermissionRuntime
 from discord_ferry.core.security import scrub_document
 from discord_ferry.errors import StateError
 
@@ -115,6 +116,7 @@ class MigrationState:
     pending_delivery_replacements: dict[str, str] = field(default_factory=dict)
     # Caller-issued cleanup capabilities. Never restored from JSON.
     delivery_ready: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    permission_runtime: PermissionRuntime | None = field(default=None, repr=False, compare=False)
 
     # Discord ID -> Stoat ID mappings
     role_map: dict[str, str] = field(default_factory=dict)

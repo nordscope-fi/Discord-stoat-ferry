@@ -1900,3 +1900,41 @@ def test_role_ordering_warnings_are_classified_for_redaction() -> None:
     assert all(w["phase"] == "roles" for w in doc["warnings"])
     # The positive control: free text was actually scrubbed.
     assert all("hunter2horse" not in w["message"] for w in doc["warnings"])
+
+
+def test_permission_runtime_starts_absent_and_is_not_persisted() -> None:
+    from discord_ferry.core.permissions import PermissionRuntime
+    from discord_ferry.state import _dict_to_state, _state_to_dict
+
+    state = MigrationState()
+    assert getattr(state, "permission_runtime", "missing") is None
+    state.permission_runtime = PermissionRuntime()
+    saved = _state_to_dict(state)
+    assert "permission_runtime" not in saved
+    assert _dict_to_state(saved).permission_runtime is None
+
+
+def test_saved_permission_runtime_cannot_restore_authority(tmp_path: Path) -> None:
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    state = MigrationState(current_phase="messages")
+    assert getattr(state, "permission_runtime", "missing") is None
+    state.permission_runtime = PermissionRuntime()
+    save_state(state, tmp_path)
+    path = tmp_path / "state.json"
+    saved = json.loads(path.read_text())
+    saved["permission_runtime"] = {"ready": {"synthetic": True}, "outcome": "verified"}
+    path.write_text(json.dumps(saved))
+    restored = load_state(tmp_path)
+    assert restored.permission_runtime is None
+    assert restored.current_phase == "messages"
+
+
+def test_permission_runtime_is_not_state_equality_or_repr() -> None:
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    first, second = MigrationState(), MigrationState()
+    assert getattr(first, "permission_runtime", "missing") is None
+    first.permission_runtime = PermissionRuntime()
+    assert first == second
+    assert "permission_runtime" not in repr(first)
