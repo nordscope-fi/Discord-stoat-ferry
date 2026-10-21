@@ -160,12 +160,17 @@ async def test_incremental_still_accepts_a_real_prior_state(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("migration_preflight_unit_boundary")
 async def test_server_phase_never_sends_default_permissions(tmp_path: Path) -> None:
     """#957: the migration floor must not reach the server default role."""
+    from unittest.mock import patch
+
     from aioresponses import aioresponses
 
-    config = _make_config(tmp_path)
+    from tests.stoat_ids import stoat_id
+    from tests.test_engine import _permission_preflight_case
+
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    server_id = stoat_id(29350)
 
     structure_noops: dict[str, PhaseFunction] = {
         "connect": _noop_phase,
@@ -180,13 +185,17 @@ async def test_server_phase_never_sends_default_permissions(tmp_path: Path) -> N
 
     events: list[MigrationEvent] = []
 
-    with aioresponses() as m:
+    with (
+        aioresponses() as m,
+        patch("discord_ferry.core.engine.parse_export_directory", return_value=exports),
+    ):
+        m.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
         m.post(
             f"{config.stoat_url}/servers/create",
-            payload={"server": {"_id": "stoat-server-001"}, "channels": []},
+            payload={"server": {"_id": server_id}, "channels": []},
         )
         m.patch(
-            f"{config.stoat_url}/servers/stoat-server-001",
+            f"{config.stoat_url}/servers/{server_id}",
             payload={},
             repeat=True,
         )
@@ -197,12 +206,16 @@ async def test_server_phase_never_sends_default_permissions(tmp_path: Path) -> N
         call.kwargs.get("json") or {}
         for key, calls in m.requests.items()
         for call in calls
-        if key[0] in ("PATCH", "PUT")
+        if key[0] in ("POST", "PATCH", "PUT")
     ]
+    assert sent_bodies
     assert all("default_permissions" not in body for body in sent_bodies), (
         f"server phase wrote the shared default: {sent_bodies}"
     )
     assert not [w for w in state.warnings if w.get("type") == "permission_bootstrap"]
+    assert state.permission_runtime.plan is not None
+    assert not state.permission_runtime.ready
+    assert state.stoat_server_id == server_id
     assert state.completed_at != ""
 
 

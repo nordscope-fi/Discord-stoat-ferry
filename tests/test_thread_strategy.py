@@ -1222,24 +1222,25 @@ async def test_generated_delivery_empty_thread_receipt_survives_restart(
 
 @pytest.mark.parametrize("forum_name", ["my-forum", "Ideas & help 🌱"])
 async def test_structure_index_delivery_recovery_reuses_saved_channel(
-    tmp_path: Path, forum_name: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, forum_name: str
 ) -> None:
     """Restart structure after index creation without making another channel or post."""
     import json
     import re
     from dataclasses import asdict
 
+    import aiohttp
     from aioresponses import CallbackResult
 
-    from discord_ferry.core import permissions as permission_module
+    from discord_ferry.core.engine import _prepare_permission_operation
     from discord_ferry.discord import client
     from discord_ferry.discord.metadata import (
         ChannelMeta,
         DiscordMetadata,
         capture_permission_source,
+        save_discord_metadata,
         validate_permission_source,
     )
-    from discord_ferry.migrator import structure as structure_module
     from discord_ferry.state import DeliveryRef, load_state
 
     server_id = valid_stoat_id(900)
@@ -1291,31 +1292,11 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
         permission_source=source,
     )
     assert not validate_permission_source(metadata, frozenset({post.channel.id}))
-    layout = permission_module.TargetLayout(
-        service=STOAT_URL,
-        server_id=server_id,
-        server_default=0,
-        planned_channels=((post.channel.id, None),),
-        fingerprint="mock-server-before-post-creation",
-    )
-    plan = permission_module.compile_permission_plan(source, layout)
-    assert not plan.problems
-    state.permission_runtime = permission_module.PermissionRuntime(plan)
-    real_writer = structure_module.apply_channel_permissions
-
-    async def bind_created_post(session, config, state, target, metadata, label, *, phase):
-        # This phase fixture binds the actual create receipt. Whole-operation
-        # preflight and generated-index authority have separate approved tasks.
-        runtime = state.permission_runtime
-        assert runtime is not None
-        assert not runtime.ready
-        runtime.bind_channel(post.channel.id, target)
-        await real_writer(session, config, state, target, metadata, label, phase=phase)
-        proofs.append(runtime.require(target))
-
-    monkeypatch.setattr(structure_module, "apply_channel_permissions", bind_created_post)
+    save_discord_metadata(metadata, tmp_path)
 
     def create_channel(url, **kwargs):
+        if channels:
+            proofs.append(state.permission_runtime.ready.get(channels[0]))
         channel_id = valid_stoat_id(1800 + len(channels))
         channels.append(channel_id)
         return CallbackResult(payload={"_id": channel_id, "name": kwargs["json"]["name"]})
@@ -1339,6 +1320,7 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
         return CallbackResult(payload={})
 
     def register(http):
+        http.get(f"{STOAT_URL}/", payload={"revolt": "0.15.7"}, repeat=True)
         http.get(
             f"{STOAT_URL}/servers/{server_id}",
             callback=lambda *args, **kwargs: CallbackResult(
@@ -1384,12 +1366,19 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
 
     with aioresponses() as http:
         register(http)
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await _prepare_permission_operation(
+                config, state, [post], session, mode="migration"
+            )
+        assert not state.permission_runtime.ready
         with pytest.raises(_Crash):
             await run_channels(config, state, [post], lambda event: None)
     assert len(channels) == 2
     assert len(records) == 1
-    assert len(proofs) == 1
+    assert len(proofs) == 1 and proofs[0] is not None
     assert proofs[0].layout.channels[0].id == channels[0]
+    assert channels[0] not in state.permission_runtime.ready
+    state.permission_runtime.require(channels[1])
     state = load_state(tmp_path)
     saved_index_channel = state.channel_map.get(f"forum-index-forum-{forum_name}")
     source_id = hashlib.sha256(f"forum-{forum_name}".encode()).hexdigest()
@@ -1400,8 +1389,14 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
     assert forum_name not in json.dumps(asdict(pending), ensure_ascii=False)
     with aioresponses() as http:
         register(http)
+        resumed_config = _make_config(tmp_path, upload_delay=0, resume=True)
+        async with aiohttp.ClientSession() as session:
+            state.permission_runtime = await _prepare_permission_operation(
+                resumed_config, state, [post], session, mode="migration"
+            )
+        assert not state.permission_runtime.ready
         await run_channels(
-            _make_config(tmp_path, upload_delay=0, resume=True),
+            resumed_config,
             state,
             [post],
             lambda event: None,
@@ -1413,6 +1408,8 @@ async def test_structure_index_delivery_recovery_reuses_saved_channel(
     assert pins == [records[0]["_id"]]
     assert not state.forum_index_present_unknown_id
     assert not [warning for warning in state.warnings if warning["type"] == "forum_index_failed"]
+    state.permission_runtime.require(channels[0])
+    state.permission_runtime.require(channels[1])
     reloaded = load_state(tmp_path)
     assert reloaded.forum_index_message_ids == state.forum_index_message_ids
 

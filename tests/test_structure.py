@@ -10,7 +10,7 @@ import os
 import ssl
 import sys
 from typing import IO, TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
@@ -73,6 +73,48 @@ _VALID_PNG = bytes.fromhex(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def structure_binding_collaborator(monkeypatch):
+    """Isolate selected phase units from operation binding and access proof.
+
+    These units retain their layout, transport, checkpoint and attribute checks.
+    They do not test creation binding or claim permission authority. Real
+    lifecycle and writer tests do not select this fixture. A supplied real
+    runtime always uses the real collaborators, including rank-unit setup.
+    """
+    from discord_ferry.core.permissions import PermissionRuntime
+
+    runtime = MagicMock(spec=PermissionRuntime)
+    original_require = structure_module.require_permission_runtime
+    original_server = structure_module._server_permission_runtime
+    original_verify = structure_module.verify_permission_channel
+
+    def require(state, **kwargs):
+        if state.permission_runtime is not None:
+            return original_require(state, **kwargs)
+        return runtime
+
+    def server(config, state):
+        if state.permission_runtime is not None:
+            return original_server(config, state)
+        return runtime
+
+    async def verify(session, config, state, target):
+        if state.permission_runtime is not None:
+            return await original_verify(session, config, state, target)
+        return None
+
+    require_call = MagicMock(side_effect=require)
+    server_call = MagicMock(side_effect=server)
+    monkeypatch.setattr(structure_module, "require_permission_runtime", require_call)
+    monkeypatch.setattr(structure_module, "_server_permission_runtime", server_call)
+    monkeypatch.setattr(
+        structure_module, "verify_permission_channel", AsyncMock(side_effect=verify)
+    )
+    yield runtime
+    assert require_call.call_count + server_call.call_count > 0
 
 
 @pytest.fixture
@@ -242,6 +284,228 @@ def _bound_role_phase_setup(tmp_path, *, everyone_raw=0, role_raw=0, hoist=False
         )
     ]
     return _make_config(tmp_path, upload_delay=0), state, exports, meta
+
+
+@pytest.mark.parametrize(
+    ("bad_index_readback", "invalidate_after_send", "interrupt_index_creation"),
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+)
+async def test_created_identities_are_read_back_before_initial_index_content(
+    tmp_path, bad_index_readback, invalidate_after_send, interrupt_index_creation
+):
+    from copy import deepcopy
+
+    from discord_ferry.core.permissions import backend_creation_default
+    from discord_ferry.errors import PermissionSafetyError
+    from tests.stoat_ids import stoat_id
+    from tests.test_engine import _permission_preflight_case, _permission_preflight_operation
+
+    config, exports, _ = _permission_preflight_case(tmp_path, forum=True)
+    config.upload_delay = 0
+    server_id, role_id, first_id, second_id, index_id, message_id = (
+        stoat_id(n) for n in range(29300, 29306)
+    )
+    index_key = "forum-index-forum-Ideas & help"
+    state = MigrationState()
+    server = {
+        "_id": server_id,
+        "channels": [],
+        "default_permissions": backend_creation_default("0.15.7"),
+        "roles": {},
+    }
+    channels = {}
+    created, permission_writes, sent, pinned = [], [], [], []
+    content_authority = []
+    original_sleep = asyncio.sleep
+
+    async def interrupt_after_index_receipt(delay):
+        if len(created) == 3:
+            raise asyncio.CancelledError
+        await original_sleep(delay)
+
+    def create_role(url, **kwargs):
+        server["roles"][role_id] = {
+            "_id": role_id,
+            "rank": 0,
+            "permissions": {"a": 0, "d": 0},
+        }
+        return CallbackResult(payload={"id": role_id, "name": kwargs["json"]["name"]})
+
+    def write_role(url, **kwargs):
+        pair = kwargs["json"]["permissions"]
+        server["roles"][role_id]["permissions"] = {"a": pair["allow"], "d": pair["deny"]}
+        return CallbackResult(payload={})
+
+    def create_channel(url, **kwargs):
+        target = (first_id, second_id, index_id)[len(created)]
+        created.append(target)
+        server["channels"].append(target)
+        channels[target] = {
+            "_id": target,
+            "server": server_id,
+            "channel_type": "TextChannel",
+            "name": kwargs["json"]["name"],
+            "default_permissions": {"a": 0, "d": 0},
+            "role_permissions": {},
+        }
+        return CallbackResult(payload=deepcopy(channels[target]))
+
+    def write_channel(url, **kwargs):
+        _, target, _, key = url.path.strip("/").split("/")
+        pair = kwargs["json"]["permissions"]
+        permission_writes.append((target, key))
+        if not (bad_index_readback and target == index_id):
+            wire = {"a": pair["allow"], "d": pair["deny"]}
+            if key == "default":
+                channels[target]["default_permissions"] = wire
+            else:
+                channels[target]["role_permissions"][key] = wire
+        return CallbackResult(payload={})
+
+    def send_index(url, **kwargs):
+        content_authority.append(index_id in runtime.ready and not runtime.stopped)
+        sent.append(kwargs["json"]["content"])
+        if invalidate_after_send:
+            runtime.invalidate_channel(index_id)
+        return CallbackResult(payload={"_id": message_id})
+
+    def pin_index(url, **kwargs):
+        content_authority.append(index_id in runtime.ready and not runtime.stopped)
+        pinned.append(message_id)
+        return CallbackResult(payload={})
+
+    with aioresponses() as remote:
+        remote.get(f"{STOAT_URL}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.post(
+            f"{STOAT_URL}/servers/create", payload={"server": {"_id": server_id}, "channels": []}
+        )
+        remote.get(
+            f"{STOAT_URL}/servers/{server_id}",
+            callback=lambda url, **kwargs: CallbackResult(payload=deepcopy(server)),
+            repeat=True,
+        )
+        remote.post(f"{STOAT_URL}/servers/{server_id}/roles", callback=create_role)
+        remote.patch(f"{STOAT_URL}/servers/{server_id}/roles/{role_id}", payload={}, repeat=True)
+        remote.put(f"{STOAT_URL}/servers/{server_id}/permissions/{role_id}", callback=write_role)
+        remote.post(
+            f"{STOAT_URL}/servers/{server_id}/channels", callback=create_channel, repeat=True
+        )
+        remote.patch(f"{STOAT_URL}/servers/{server_id}", payload={}, repeat=True)
+        for target in (first_id, second_id, index_id):
+            remote.get(
+                f"{STOAT_URL}/channels/{target}",
+                callback=lambda url, target=target, **kwargs: CallbackResult(
+                    payload=deepcopy(channels[target])
+                ),
+                repeat=True,
+            )
+            for key in ("default", role_id):
+                remote.put(
+                    f"{STOAT_URL}/channels/{target}/permissions/{key}",
+                    callback=write_channel,
+                    repeat=True,
+                )
+        remote.post(f"{STOAT_URL}/channels/{index_id}/messages", callback=send_index, repeat=True)
+        remote.post(
+            f"{STOAT_URL}/channels/{index_id}/messages/{message_id}/pin",
+            callback=pin_index,
+            repeat=True,
+        )
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+            assert not runtime.ready
+            assert all(method == "GET" for method, _ in remote.requests)
+            state.permission_runtime = runtime
+            config.session = session
+            try:
+                await run_server(config, state, exports, lambda event: None)
+                await run_roles(config, state, exports, lambda event: None)
+                assert not runtime.ready
+                if interrupt_index_creation:
+                    with (
+                        patch(
+                            "discord_ferry.migrator.structure.asyncio.sleep",
+                            new=interrupt_after_index_receipt,
+                        ),
+                        pytest.raises(asyncio.CancelledError),
+                    ):
+                        await run_channels(config, state, exports, lambda event: None)
+                    assert state.channel_map.get(index_key) == index_id
+                    assert load_state(config.output_dir).channel_map.get(index_key) == index_id
+                    assert not sent and not pinned
+                    assert index_id not in runtime.ready
+                elif bad_index_readback or invalidate_after_send:
+                    with pytest.raises(PermissionSafetyError) as caught:
+                        await run_channels(config, state, exports, lambda event: None)
+                    assert caught.value.outcome.reason == (
+                        "readback_mismatch" if bad_index_readback else "unverified"
+                    )
+                    assert caught.value.outcome.effects == "changes_confirmed"
+                    assert bool(sent) is invalidate_after_send
+                    assert not pinned
+                    assert not [url for method, url in remote.requests if str(url).endswith("/pin")]
+                    assert index_id not in runtime.ready
+                else:
+                    await run_channels(config, state, exports, lambda event: None)
+                    assert len(sent) == 1 and pinned == [message_id]
+                    assert index_id in runtime.ready
+                    # Reuse must prove carried cells without a corrective PUT.
+                    writes_before, creates_before = list(permission_writes), list(created)
+                    state.current_phase = "messages"
+                    config.resume = True
+                    runtime = await _permission_preflight_operation()(
+                        config, state, exports, session, mode="migration"
+                    )
+                    state.permission_runtime = runtime
+                    assert not runtime.ready
+                    await run_channels(config, state, exports, lambda event: None)
+                    assert {first_id, second_id, index_id} <= runtime.ready.keys()
+                    assert permission_writes == writes_before and created == creates_before
+                    assert len(sent) == 1 and pinned == [message_id]
+            finally:
+                config.session = None
+    assert all(content_authority)
+    assert state.channel_map[index_key] == index_id
+    assert load_state(config.output_dir).channel_map[index_key] == index_id
+    assert state.role_map == {"112": role_id}
+    assert state.stoat_server_id == server_id
+
+
+@pytest.mark.parametrize("invalid", ["missing", "different_service", "changed_plan"])
+async def test_server_binding_refuses_invalid_operation_before_any_write(tmp_path, invalid):
+    from dataclasses import replace
+
+    from discord_ferry.errors import PermissionSafetyError
+    from tests.test_engine import _permission_preflight_case, _permission_preflight_operation
+
+    config, exports, _ = _permission_preflight_case(tmp_path)
+    state = MigrationState()
+    with aioresponses() as remote:
+        remote.get(f"{STOAT_URL}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, state, exports, session, mode="migration"
+            )
+            state.permission_runtime = runtime
+            if invalid == "missing":
+                state.permission_runtime = None
+            elif invalid == "different_service":
+                config.stoat_url += "/another-service"
+            else:
+                runtime.plan = replace(runtime.plan, source_fingerprint="changed-after-preflight")
+            before = list(remote.requests)
+            config.session = session
+            try:
+                with pytest.raises(PermissionSafetyError) as caught:
+                    await run_server(config, state, exports, lambda event: None)
+            finally:
+                config.session = None
+            assert caught.value.outcome.reason == "unverified"
+            assert caught.value.outcome.effects == "none_confirmed"
+            assert list(remote.requests) == before
+    assert state.stoat_server_id == "" and not state.role_map and not state.channel_map
 
 
 @pytest.mark.parametrize("metadata", [None, ChannelMeta(False)])
@@ -1155,6 +1419,7 @@ def _collect_events(events: list[MigrationEvent]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_creates_server(tmp_path: Path) -> None:
     """SERVER phase creates a new server and stores the ID in state."""
     events: list[MigrationEvent] = []
@@ -1176,6 +1441,7 @@ async def test_run_server_creates_server(tmp_path: Path) -> None:
     assert any("srv1" in msg for msg in messages)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_creates_with_description_and_nsfw(tmp_path: Path) -> None:
     """SERVER sends metadata Stoat accepts in the initial create request."""
     events: list[MigrationEvent] = []
@@ -1221,6 +1487,7 @@ async def test_run_server_creates_with_description_and_nsfw(tmp_path: Path) -> N
     assert all("nsfw" not in body for body in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_omits_empty_description(tmp_path: Path) -> None:
     """SERVER does not send an empty description."""
     events: list[MigrationEvent] = []
@@ -1260,6 +1527,7 @@ async def test_run_server_omits_empty_description(tmp_path: Path) -> None:
     assert all("description" not in b for b in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_meta_skipped_without_metadata(tmp_path: Path) -> None:
     """SERVER warns when no Discord metadata is available for description/NSFW."""
     events: list[MigrationEvent] = []
@@ -1279,6 +1547,7 @@ async def test_run_server_meta_skipped_without_metadata(tmp_path: Path) -> None:
     assert any(w.get("type") == "server_meta_skipped" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
     """SERVER phase uses config.server_id when set, no POST to create."""
     events: list[MigrationEvent] = []
@@ -1297,6 +1566,7 @@ async def test_run_server_uses_existing_server(tmp_path: Path) -> None:
     assert any("existing-srv" in msg for msg in messages)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_warns_nsfw_cannot_apply_to_existing_server(tmp_path: Path) -> None:
     """SERVER warns when Stoat cannot apply NSFW to a reused server (#1168)."""
     events: list[MigrationEvent] = []
@@ -1331,6 +1601,7 @@ async def test_run_server_warns_nsfw_cannot_apply_to_existing_server(tmp_path: P
     assert all("nsfw" not in body for body in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_truncates_long_guild_name(tmp_path: Path) -> None:
     """SERVER keeps an overlong guild name within Stoat's 32-character limit (#1182)."""
     config = _make_config(tmp_path)
@@ -1351,6 +1622,7 @@ async def test_run_server_truncates_long_guild_name(tmp_path: Path) -> None:
     assert bodies[0]["name"] == long_name[:32]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_uploads_icon(tmp_path: Path) -> None:
     """SERVER phase uploads the guild icon and applies it to the server.
 
@@ -1384,6 +1656,7 @@ async def test_run_server_uploads_icon(tmp_path: Path) -> None:
     assert any(e.message == "Applied server icon" for e in events)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_upload_failure_is_non_fatal(tmp_path: Path) -> None:
     """SERVER phase logs a warning and continues if the icon upload fails."""
     events: list[MigrationEvent] = []
@@ -1452,6 +1725,7 @@ def _icon_warnings(state: MigrationState) -> list[dict[str, str]]:
     return [w for w in state.warnings if w["type"] in _ICON_WARNING_TYPES]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_absolute_icon_path_is_rejected(tmp_path: Path) -> None:
     """An absolute iconUrl is refused even when the file exists (#1041, SC-1.2)."""
     events: list[MigrationEvent] = []
@@ -1469,6 +1743,7 @@ async def test_run_server_absolute_icon_path_is_rejected(tmp_path: Path) -> None
     assert not any(e.message == "Applied server icon" for e in events)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_traversal_icon_path_is_rejected(tmp_path: Path) -> None:
     """A ../ iconUrl is refused even when it resolves to a real file (#1041, SC-1.3)."""
     events: list[MigrationEvent] = []
@@ -1486,6 +1761,7 @@ async def test_run_server_traversal_icon_path_is_rejected(tmp_path: Path) -> Non
     assert not any(e.message == "Applied server icon" for e in events)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_symlinked_icon_escaping_root_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -1507,6 +1783,7 @@ async def test_run_server_symlinked_icon_escaping_root_is_rejected(
     assert "icon_upload_failed" not in types, "an upload was attempted"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_missing_icon_file_warns_icon_file_missing(
     tmp_path: Path,
 ) -> None:
@@ -1526,6 +1803,7 @@ async def test_run_server_missing_icon_file_warns_icon_file_missing(
     assert "icon_upload_failed" not in [w["type"] for w in state.warnings]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_directory_warns_and_does_not_upload(
     tmp_path: Path,
 ) -> None:
@@ -1543,6 +1821,7 @@ async def test_run_server_icon_directory_warns_and_does_not_upload(
     assert "icon_upload_failed" not in types, "a directory reached the uploader"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_remote_icon_url_is_skipped_without_a_missing_warning(
     tmp_path: Path,
 ) -> None:
@@ -1566,6 +1845,7 @@ async def test_run_server_remote_icon_url_is_skipped_without_a_missing_warning(
     assert not any(e.message == "Applied server icon" for e in events)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_empty_icon_url_warns_nothing(tmp_path: Path) -> None:
     """An export with no icon is not reported as defective (#1041, SC-3.1)."""
     events: list[MigrationEvent] = []
@@ -1578,6 +1858,7 @@ async def test_run_server_empty_icon_url_warns_nothing(tmp_path: Path) -> None:
     assert _icon_warnings(state) == []
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_warning_bounds_a_hostile_spelling(
     tmp_path: Path,
 ) -> None:
@@ -1615,6 +1896,7 @@ _HOSTILE_GUILD_NAMES = {
 
 @pytest.mark.parametrize("label", sorted(_HOSTILE_GUILD_NAMES))
 @pytest.mark.parametrize("case", ["unsafe_media_path", "icon_file_missing"])
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_warning_escapes_a_hostile_guild_name(
     tmp_path: Path, case: str, label: str
 ) -> None:
@@ -1648,6 +1930,7 @@ async def test_run_server_icon_warning_escapes_a_hostile_guild_name(
 
 
 @pytest.mark.parametrize("case", ["unsafe_media_path", "icon_file_missing"])
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_warning_bounds_a_long_guild_name(tmp_path: Path, case: str) -> None:
     """An unbounded guild name does not inflate the icon warning (#1080)."""
     icon_url = "../outside-icon.png" if case == "unsafe_media_path" else "media/icon.png"
@@ -1667,6 +1950,7 @@ async def test_run_server_icon_warning_bounds_a_long_guild_name(tmp_path: Path, 
 
 
 @pytest.mark.parametrize("case", ["unsafe_media_path", "icon_file_missing"])
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_warning_keeps_an_ordinary_guild_name(
     tmp_path: Path, case: str
 ) -> None:
@@ -1687,6 +1971,7 @@ async def test_run_server_icon_warning_keeps_an_ordinary_guild_name(
     assert any("Cafe Nordscope" in e.message for e in events if e.status == "warning")
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_icon_uploads_from_a_foreign_working_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1718,6 +2003,7 @@ async def test_run_server_icon_uploads_from_a_foreign_working_directory(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_creates_roles(role_ordering_only, tmp_path: Path) -> None:
     """ROLES phase creates roles found in message authors."""
     events: list[MigrationEvent] = []
@@ -1740,6 +2026,7 @@ async def test_run_roles_creates_roles(role_ordering_only, tmp_path: Path) -> No
     assert state.role_map == {"r1": "stoat-r1", "r2": "stoat-r2"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_deduplicates(tmp_path: Path) -> None:
     """ROLES phase creates each unique role only once even if it appears in multiple messages."""
     events: list[MigrationEvent] = []
@@ -1760,6 +2047,7 @@ async def test_run_roles_deduplicates(tmp_path: Path) -> None:
     assert state.role_map["r1"] == "stoat-r1"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_colour_conversion(tmp_path: Path) -> None:
     """ROLES phase sends a CSS string for role colour (British spelling)."""
     events: list[MigrationEvent] = []
@@ -1786,6 +2074,7 @@ async def test_run_roles_colour_conversion(tmp_path: Path) -> None:
     assert patch_body.get("colour") == "#FF5733"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_skips_everyone(tmp_path: Path) -> None:
     """ROLES phase skips the @everyone role (role ID equals guild ID)."""
     events: list[MigrationEvent] = []
@@ -1803,6 +2092,7 @@ async def test_run_roles_skips_everyone(tmp_path: Path) -> None:
     assert state.role_map == {}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_applies_hoist_when_metadata_present(tmp_path: Path) -> None:
     """ROLES sends hoist even for a role with no colour and position 0."""
     events: list[MigrationEvent] = []
@@ -1841,6 +2131,7 @@ async def test_run_roles_applies_hoist_when_metadata_present(tmp_path: Path) -> 
     assert any(body.get("hoist") is True for body in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
     """ROLES emits a hoist-skipped warning when no Discord metadata is present."""
     events: list[MigrationEvent] = []
@@ -1858,6 +2149,7 @@ async def test_run_roles_hoist_skipped_without_metadata(tmp_path: Path) -> None:
     assert any(w.get("type") == "hoist_skipped" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_batch2_fields_skip_without_metadata(channel_attributes_only, tmp_path: Path) -> None:
     """S5 graceful-degrade: channels + roles emit batch-2 skip warnings without metadata.
 
@@ -1905,6 +2197,7 @@ async def test_batch2_fields_skip_without_metadata(channel_attributes_only, tmp_
     assert warning_types.count("role_icon_skipped") == 1
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_image_icon_uploaded_and_folded(tmp_path: Path) -> None:
     """ROLES downloads an image role icon, uploads to Autumn, folds icon into edit."""
     events: list[MigrationEvent] = []
@@ -1954,6 +2247,7 @@ async def test_run_roles_image_icon_uploaded_and_folded(tmp_path: Path) -> None:
     assert state.native_fidelity_counts.get("role_icons") == 1
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_emoji_icon_skipped_with_warning(tmp_path: Path) -> None:
     """ROLES skips an emoji-only role icon with a warning and no icon kwarg."""
     events: list[MigrationEvent] = []
@@ -2000,6 +2294,7 @@ async def test_run_roles_emoji_icon_skipped_with_warning(tmp_path: Path) -> None
     mock_download.assert_not_called()
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_icon_upload_error_is_token_safe(tmp_path: Path) -> None:
     """A failed icon upload never leaks the HTTP body and preserves hoist/rank."""
     events: list[MigrationEvent] = []
@@ -2055,6 +2350,7 @@ async def test_run_roles_icon_upload_error_is_token_safe(tmp_path: Path) -> None
     assert all("icon" not in body for body in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_a_server_disconnect_degrades_rather_than_aborting(tmp_path: Path) -> None:
     """SC-135-35. Killing: forgetting to widen structure.py:403.
 
@@ -2098,6 +2394,7 @@ async def test_a_server_disconnect_degrades_rather_than_aborting(tmp_path: Path)
     assert any(w.get("type") == "role_icon_upload_failed" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_truncates_long_name(tmp_path: Path) -> None:
     """ROLES phase truncates role names exceeding 32 characters."""
     events: list[MigrationEvent] = []
@@ -2125,6 +2422,7 @@ async def test_run_roles_truncates_long_name(tmp_path: Path) -> None:
     assert len(created_names[0]) == 32
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_colour_without_hash(tmp_path: Path) -> None:
     """ROLES phase handles colour strings without a leading '#'."""
     events: list[MigrationEvent] = []
@@ -2156,6 +2454,7 @@ async def test_run_roles_colour_without_hash(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_live_only_role_is_created(role_ordering_only, tmp_path: Path) -> None:
     """A live role absent from every export author is still created via the union."""
     events: list[MigrationEvent] = []
@@ -2210,6 +2509,7 @@ async def test_live_only_role_is_created(role_ordering_only, tmp_path: Path) -> 
     assert set(state.role_map) == {"r1", "r2"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_overlap_role_uses_live_name_color(tmp_path: Path) -> None:
     """A role in both export and live metadata uses the LIVE name/colour."""
     events: list[MigrationEvent] = []
@@ -2256,6 +2556,7 @@ async def test_overlap_role_uses_live_name_color(tmp_path: Path) -> None:
     assert any(body.get("colour") == "#00ff00" for body in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_managed_role_not_created(tmp_path: Path) -> None:
     """A managed role (excluded at capture, absent from role_metadata) is not created."""
     events: list[MigrationEvent] = []
@@ -2296,6 +2597,7 @@ async def test_managed_role_not_created(tmp_path: Path) -> None:
     assert state.role_map == {"r1": "stoat-r1"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_structural_roles_counted_for_live_only(role_ordering_only, tmp_path: Path) -> None:
     """A live-only role (in role_metadata, absent from the export) increments
     native_fidelity_counts['structural_roles']; an overlap role does not."""
@@ -2340,6 +2642,7 @@ async def test_structural_roles_counted_for_live_only(role_ordering_only, tmp_pa
     assert state.native_fidelity_counts.get("structural_roles") == 1
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_structural_roles_zero_when_all_overlap(tmp_path: Path) -> None:
     """When every created role also appears in the export, no structural-role
     credit is recorded."""
@@ -2373,6 +2676,7 @@ async def test_structural_roles_zero_when_all_overlap(tmp_path: Path) -> None:
     assert state.native_fidelity_counts.get("structural_roles") is None
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_no_token_fallback_unchanged(role_ordering_only, tmp_path: Path) -> None:
     """With no discord_metadata.json, the created set equals the export-derived set."""
     events: list[MigrationEvent] = []
@@ -2518,6 +2822,7 @@ async def test_run_categories_skips_a_thread_parent_as_a_category(tmp_path: Path
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_creates_channels(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase creates channels and populates channel_map."""
     events: list[MigrationEvent] = []
@@ -2539,6 +2844,7 @@ async def test_run_channels_creates_channels(channel_attributes_only, tmp_path: 
     assert any("general" in msg for msg in messages)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_assigns_to_categories(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase PATCHes the server with categories containing the stoat channel IDs."""
     events: list[MigrationEvent] = []
@@ -2579,6 +2885,7 @@ async def test_run_channels_assigns_to_categories(channel_attributes_only, tmp_p
     assert cat["channels"] == ["stoat-ch1"]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_thread_flattening(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase adds ├─ prefix to thread channel names in flatten mode."""
     events: list[MigrationEvent] = []
@@ -2622,6 +2929,7 @@ async def test_run_channels_thread_flattening(channel_attributes_only, tmp_path:
     assert created_names[0] == "\u251c\u2500 my-thread"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_skips_category_type(tmp_path: Path) -> None:
     """CHANNELS phase skips exports whose channel type is 4 (category)."""
     events: list[MigrationEvent] = []
@@ -2696,6 +3004,7 @@ def test_malformed_saved_position_preserves_category_order(tmp_path: Path, value
 
 
 @pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_final_layout_uses_carried_positions(tmp_path: Path, missing: bool) -> None:
     state = MigrationState(
         stoat_server_id="srv1",
@@ -2734,6 +3043,7 @@ async def test_final_layout_uses_carried_positions(tmp_path: Path, missing: bool
     assert state.channel_map == {"10": "s10", "2": "s2", "30": "s30", "50": "s50"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_final_layout_retry_reuses_saved_channels(tmp_path: Path) -> None:
     state = MigrationState(
         stoat_server_id="01J5T000000000000000009000",
@@ -2785,6 +3095,7 @@ async def test_final_layout_retry_reuses_saved_channels(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_final_layout_orders_one_new_channel_with_carried_members(
     channel_attributes_only, tmp_path: Path, missing: bool
 ) -> None:
@@ -2830,6 +3141,7 @@ async def test_final_layout_orders_one_new_channel_with_carried_members(
 
 
 @pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_channel_selection_stays_in_export_order(
     channel_attributes_only, tmp_path: Path, with_metadata: bool
 ) -> None:
@@ -2871,6 +3183,7 @@ async def test_channel_selection_stays_in_export_order(
     )
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_orders_categories_by_discord_position(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -2917,6 +3230,7 @@ async def test_run_channels_orders_categories_by_discord_position(
     assert titles == ["Bravo", "Alpha"]  # position 0 before position 2
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_category_without_position_sorts_last(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -2972,6 +3286,7 @@ async def test_run_channels_category_without_position_sorts_last(
         ({"2": 1_000_000}, ["Zulu", "Alpha"]),
     ],
 )
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_category_position_ties(
     tmp_path: Path, positions: dict[str, int], expected: list[str]
 ) -> None:
@@ -3007,6 +3322,7 @@ async def test_category_position_ties(
     assert len(bodies) == 1
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_deduplicates_channel_ids(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -3032,6 +3348,7 @@ async def test_run_channels_deduplicates_channel_ids(
     assert len(state.channel_map) == 1
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_channel_kill_and_resume_no_duplicates(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -3044,13 +3361,9 @@ async def test_channel_kill_and_resume_no_duplicates(
         _make_export(channel_id="813", channel_name="three", category_id=""),
     ]
 
-    call_count = 0
-
     def kill_after_two(s: MigrationState, d: Path) -> None:
-        nonlocal call_count
         save_state_real(s, d)
-        call_count += 1
-        if call_count == 2:
+        if len(s.channel_map) == 2:
             raise KeyboardInterrupt
 
     with (
@@ -3096,7 +3409,10 @@ async def test_channel_kill_and_resume_no_duplicates(
     assert resumed_state.channel_map["813"] == "01J5T000000000000000000503"
 
 
-async def test_run_channels_voice_fallback_to_text(channel_attributes_only, tmp_path: Path) -> None:
+@pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_run_channels_voice_fallback_to_text(
+    channel_attributes_only, structure_binding_collaborator, tmp_path: Path
+) -> None:
     """CHANNELS phase retries a failed voice channel creation as text and warns."""
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
@@ -3123,6 +3439,8 @@ async def test_run_channels_voice_fallback_to_text(channel_attributes_only, tmp_
         await run_channels(config, state, exports, events.append)
 
     assert state.channel_map["vc1"] == "stoat-vc1"
+    assert structure_binding_collaborator.note_write.call_count == 2
+    assert structure_binding_collaborator.note_write_confirmed.call_count == 1
     fallback_warnings = [
         event
         for event in events
@@ -3133,6 +3451,7 @@ async def test_run_channels_voice_fallback_to_text(channel_attributes_only, tmp_
     assert len(fallback_warnings) == 1
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_passes_nsfw_flag(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase passes nsfw=True from Discord metadata."""
     events: list[MigrationEvent] = []
@@ -3168,6 +3487,7 @@ async def test_run_channels_passes_nsfw_flag(channel_attributes_only, tmp_path: 
     assert created_bodies[0].get("nsfw") is True
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_truncates_long_topic(channel_attributes_only, tmp_path: Path) -> None:
     """A channel topic longer than 1024 chars is truncated before reaching Stoat."""
     events: list[MigrationEvent] = []
@@ -3195,6 +3515,7 @@ async def test_run_channels_truncates_long_topic(channel_attributes_only, tmp_pa
     assert len(desc) == 1024  # type: ignore[arg-type]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_channel_slowmode_and_user_limit_applied(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -3258,6 +3579,7 @@ async def test_channel_slowmode_and_user_limit_applied(
     assert state.native_fidelity_counts == {"slowmode": 1, "user_limit": 1}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_channel_slowmode_clamped_above_max(channel_attributes_only, tmp_path: Path) -> None:
     """Slowmode > 21600 is clamped to 21600 and a slowmode_clamped warning is logged."""
     events: list[MigrationEvent] = []
@@ -3298,6 +3620,7 @@ async def test_channel_slowmode_clamped_above_max(channel_attributes_only, tmp_p
     assert any(w.get("type") == "slowmode_clamped" for w in state.warnings)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_voice_cap_resume_does_not_recount_carried_channels(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -3349,6 +3672,7 @@ async def test_voice_cap_resume_does_not_recount_carried_channels(
     edit.assert_not_awaited()
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_voice_fallback_skips_voice_patch(channel_attributes_only, tmp_path: Path) -> None:
     """A voice channel that falls back to text skips the voice PATCH.
 
@@ -3608,7 +3932,9 @@ async def test_fetched_administrator_overwrite_is_normalized_before_calculation(
 
 
 async def test_a_carried_channel_is_not_sent_its_saved_overwrite_again(tmp_path: Path) -> None:
-    """SC-I2: pins the non-goal. A server already migrated keeps what it has."""
+    """A carried channel without bound evidence stops without corrective writes."""
+    from discord_ferry.errors import PermissionSafetyError
+
     events: list[MigrationEvent] = []
     state = MigrationState(stoat_server_id="srv1", channel_map={"ch1": "stoat-ch1"})
     _save_overrides(
@@ -3616,12 +3942,13 @@ async def test_a_carried_channel_is_not_sent_its_saved_overwrite_again(tmp_path:
         {"ch1": ChannelMeta(nsfw=False, default_override=PermissionPair(0x3FF00CDF, 0))},
     )
     with aioresponses() as m:
-        await run_channels(
-            _make_config(tmp_path, upload_delay=0.0),
-            state,
-            [_make_export(channel_id="ch1", category_id="")],
-            events.append,
-        )
+        with pytest.raises(PermissionSafetyError):
+            await run_channels(
+                _make_config(tmp_path, upload_delay=0.0),
+                state,
+                [_make_export(channel_id="ch1", category_id="")],
+                events.append,
+            )
         assert list(m.requests) == []
     assert _inflated_warnings(state) == []
 
@@ -3678,6 +4005,7 @@ def test_make_unique_channel_name_truncated_collision() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_never_sends_rank(tmp_path: Path) -> None:
     """SC-2.1. No per-role PATCH body carries ``rank``; the Stoat backend discards it.
 
@@ -3713,6 +4041,7 @@ async def test_run_roles_never_sends_rank(tmp_path: Path) -> None:
     assert all("rank" not in b for b in bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_position_only_role_sends_no_patch(tmp_path: Path) -> None:
     """SC-2.3. A role whose only attribute was rank now triggers no PATCH at all.
 
@@ -3768,6 +4097,8 @@ async def test_run_roles_applies_permissions(tmp_path: Path) -> None:
 
 async def test_run_roles_does_not_apply_another_guilds_permissions(tmp_path: Path) -> None:
     """A stale discord_metadata.json from a different server grants nothing here (#971)."""
+    from discord_ferry.errors import PermissionSafetyError
+
     events: list[MigrationEvent] = []
     config = _make_config(tmp_path)
     state = MigrationState(stoat_server_id="srv1")
@@ -3790,10 +4121,11 @@ async def test_run_roles_does_not_apply_another_guilds_permissions(tmp_path: Pat
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
         m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
         m.put(f"{STOAT_URL}/servers/srv1/permissions/default", payload={}, repeat=True)
-        await run_roles(config, state, exports, events.append)
+        with pytest.raises(PermissionSafetyError):
+            await run_roles(config, state, exports, events.append)
         sent = [(method, str(url)) for (method, url) in m.requests]
 
-    assert not [r for r in sent if r[0] == "PUT" and "/permissions" in r[1]]
+    assert not sent
     patched = [kw for (method, _), calls in m.requests.items() if method == "PATCH" for kw in calls]
     assert not [c for c in patched if c.kwargs.get("json", {}).get("hoist")]
 
@@ -3830,8 +4162,8 @@ async def test_run_channels_does_not_apply_another_guilds_overrides(tmp_path: Pa
             for c in calls
         ]
 
-    assert bodies
-    assert not [b for b in bodies if b.get("nsfw")]
+    assert not bodies
+    assert not m.requests
 
 
 def test_ferry_min_permissions_value_pinned() -> None:
@@ -3888,6 +4220,7 @@ async def test_run_roles_administrator_mask_passes_through_unmerged(tmp_path: Pa
     assert bodies == [{"permissions": ALL_STOAT_PERMISSIONS}]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_no_metadata_no_permissions(tmp_path: Path) -> None:
     """ROLES phase makes no permission PUT calls when discord_metadata.json is absent."""
     events: list[MigrationEvent] = []
@@ -3931,6 +4264,7 @@ async def test_run_roles_permission_failure_stops_before_finalization(tmp_path: 
     assert not [w for w in state.warnings if w.get("type") == "role_permissions_failed"]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_skip_threads(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase skips thread exports when config.skip_threads is True."""
     events: list[MigrationEvent] = []
@@ -3960,6 +4294,7 @@ async def test_run_channels_skip_threads(channel_attributes_only, tmp_path: Path
     assert "th1" not in state.channel_map
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_skip_threads_false(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase includes threads when skip_threads is False (default)."""
     events: list[MigrationEvent] = []
@@ -3991,6 +4326,7 @@ async def test_run_channels_skip_threads_false(channel_attributes_only, tmp_path
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_forum_threads_get_dedicated_category(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -4049,6 +4385,7 @@ async def test_run_channels_forum_threads_get_dedicated_category(
     assert categories[0]["channels"] == ["stoat-ft1"]  # type: ignore[index]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_truncates_at_200(channel_attributes_only, tmp_path: Path) -> None:
     """CHANNELS phase truncates to 200 channels, dropping threads first."""
     events: list[MigrationEvent] = []
@@ -4121,6 +4458,7 @@ async def test_run_channels_truncates_at_200(channel_attributes_only, tmp_path: 
 BANNER_CDN = "https://cdn.discordapp.com/banners"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_banner_uploaded_and_applied(tmp_path: Path) -> None:
     """SERVER phase downloads Discord banner, uploads to Autumn, and applies to Stoat server."""
     events: list[MigrationEvent] = []
@@ -4172,6 +4510,7 @@ async def test_banner_uploaded_and_applied(tmp_path: Path) -> None:
     assert any(b.get("banner") == "autumn-banner-id" for b in patch_bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_banner_download_fails_graceful(tmp_path: Path) -> None:
     """SERVER phase logs a warning when banner CDN download returns non-200."""
     events: list[MigrationEvent] = []
@@ -4209,6 +4548,7 @@ async def test_banner_download_fails_graceful(tmp_path: Path) -> None:
     assert "404" in banner_warnings[0]["message"]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_no_banner_skipped(tmp_path: Path) -> None:
     """SERVER phase skips banner download when no banner hash in metadata."""
     events: list[MigrationEvent] = []
@@ -4246,6 +4586,7 @@ async def test_no_banner_skipped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_channel_created(channel_attributes_only, tmp_path: Path) -> None:
     """Forum category with 2 posts creates an index channel with a pinned message
     that includes channel references and message counts."""
@@ -4353,6 +4694,7 @@ async def test_forum_index_channel_created(channel_attributes_only, tmp_path: Pa
     assert masq.get("name") == "Discord Ferry"  # type: ignore[union-attr]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_empty_forum(channel_attributes_only, tmp_path: Path) -> None:
     """Forum category with 0 posts sends 'No posts migrated.' message."""
     events: list[MigrationEvent] = []
@@ -4461,6 +4803,7 @@ async def test_forum_index_not_created_in_dry_run(tmp_path: Path) -> None:
     assert "forum-index-forum-my-forum" not in state.channel_map
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_failure_nonfatal(channel_attributes_only, tmp_path: Path) -> None:
     """api_create_channel failure for forum index logs a warning but does not crash."""
     events: list[MigrationEvent] = []
@@ -4508,6 +4851,7 @@ async def test_forum_index_failure_nonfatal(channel_attributes_only, tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_banner_download_sends_no_auth_header_even_with_a_token(tmp_path: Path) -> None:
     """Discord's CDN needs no token, so the SERVER phase never sends one (#975)."""
     events: list[MigrationEvent] = []
@@ -4552,6 +4896,7 @@ async def test_banner_download_sends_no_auth_header_even_with_a_token(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_role_cap_truncates_and_warns(role_ordering_only, tmp_path: Path) -> None:
     """When the union exceeds the live server_roles limit, only the top-N by
     position are created and a role_limit_exceeded warning names the dropped count."""
@@ -4608,6 +4953,7 @@ async def test_role_cap_truncates_and_warns(role_ordering_only, tmp_path: Path) 
     assert "2" in warnings[0]["message"]  # dropped count of 2 (4 union - 2 limit)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_too_many_roles_backstop_non_fatal(tmp_path: Path) -> None:
     """If api_create_role raises a TooManyRoles MigrationError mid-loop, the phase
     does not crash and a role_limit_exceeded warning is recorded."""
@@ -4661,6 +5007,7 @@ async def test_too_many_roles_backstop_non_fatal(tmp_path: Path) -> None:
     assert warnings, "expected a role_limit_exceeded backstop warning"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_resume_truncation_deterministic(role_ordering_only, tmp_path: Path) -> None:
     """Two runs over identical discord_metadata truncate to the same top-N set."""
     config = _make_config(tmp_path, upload_delay=0)
@@ -4727,6 +5074,7 @@ async def _run_and_collect(config: FerryConfig, exports: list[DCEExport]) -> set
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_icon_upload_failure_degrades(tmp_path: Path) -> None:
     """A non-JSON Autumn icon response skips the icon (token-safe warning); phase completes."""
     events: list[MigrationEvent] = []
@@ -4822,6 +5170,7 @@ async def test_resolve_role_icon_tags_failure_with_caller_phase(tmp_path: Path) 
         assert config.token not in w["message"]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
     """An OSError writing the temp icon file degrades (warning) instead of aborting."""
     events: list[MigrationEvent] = []
@@ -4971,6 +5320,7 @@ def _meta_with_description(desc: str = "Cosy") -> DiscordMetadata:
     )
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_lock_marker_preserved_in_server_description_patch(tmp_path: Path) -> None:
     """S1 SC-1: run_server folds the lock marker into the description PATCH (token-safe)."""
     config = _make_config(tmp_path, server_id="srv1", token="secret-token-xyz")
@@ -4995,6 +5345,7 @@ async def test_lock_marker_preserved_in_server_description_patch(tmp_path: Path)
     assert all("secret-token-xyz" not in w.get("message", "") for w in state.warnings)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_lock_marker_adds_no_extra_server_patch(tmp_path: Path) -> None:
     """S1 SC-2: the marker folds into the existing description PATCH — no extra PATCH."""
     config = _make_config(tmp_path, server_id="srv1")
@@ -5016,6 +5367,7 @@ async def test_lock_marker_adds_no_extra_server_patch(tmp_path: Path) -> None:
     assert not any("default_permissions" in b for b in bodies)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_create_path_description_has_no_lock_marker(tmp_path: Path) -> None:
     """S1 SC-3: the create path has no lock (empty marker) → description PATCH carries no marker."""
     config = _make_config(tmp_path)  # no server_id -> create path
@@ -5044,6 +5396,7 @@ async def test_create_path_description_has_no_lock_marker(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_server_id_persisted_right_after_create(tmp_path: Path) -> None:
     """S2 SC-6: save_state runs right after create, with stoat_server_id already set."""
     config = _make_config(tmp_path)
@@ -5065,6 +5418,7 @@ async def test_server_id_persisted_right_after_create(tmp_path: Path) -> None:
     assert recorded and recorded[0] == "new1"  # persisted immediately after create
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_resume_after_create_reuses_server(tmp_path: Path) -> None:
     """S2 SC-7: a --resume from a kill-after-create state reuses the server (no second create)."""
     config = _make_config(tmp_path)
@@ -5128,6 +5482,7 @@ async def test_resume_finalizes_unfinalized_role(tmp_path: Path) -> None:
     assert not state.permission_runtime.ready
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_resume_does_not_recreate_mapped_role(
     role_permission_collaborator, tmp_path: Path
 ) -> None:
@@ -5152,6 +5507,7 @@ async def test_resume_does_not_recreate_mapped_role(
     assert creates == []  # no create POST fired
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_incremental_finalized_role_skips_attrs_and_perms(tmp_path: Path) -> None:
     """S3 SC-11: a finalized role is skipped by both attrs and perms passes (no HTTP)."""
     config = _make_config(tmp_path)
@@ -5165,6 +5521,7 @@ async def test_incremental_finalized_role_skips_attrs_and_perms(tmp_path: Path) 
     assert state.roles_finalized == {"r1"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_resume_retries_colour_for_unfinalized_role(tmp_path: Path) -> None:
     """SC-1.2: a mapped-but-unfinalized role with colour gets its colour retried."""
     config = _make_config(tmp_path)
@@ -5193,6 +5550,7 @@ async def test_resume_retries_colour_for_unfinalized_role(tmp_path: Path) -> Non
     assert "r1" in state.roles_finalized
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_colour_failure_produces_warning(tmp_path: Path) -> None:
     """SC-1.4: a failed colour PATCH records role_colour_failed and still finalizes."""
     config = _make_config(tmp_path)
@@ -5214,6 +5572,7 @@ async def test_colour_failure_produces_warning(tmp_path: Path) -> None:
     assert "r1" in state.roles_finalized
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_colour_applied_without_discord_metadata(tmp_path: Path) -> None:
     """SC-1.6: a role with colour but no discord metadata gets colour applied."""
     config = _make_config(tmp_path)
@@ -5233,6 +5592,7 @@ async def test_colour_applied_without_discord_metadata(tmp_path: Path) -> None:
     assert "r1" in state.roles_finalized
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_invalid_colour_does_not_block_hoist(
     role_permission_collaborator, tmp_path: Path
 ) -> None:
@@ -5267,6 +5627,7 @@ async def test_invalid_colour_does_not_block_hoist(
     assert "r1" in state.roles_finalized
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_mark_at_end_finalizes_without_metadata(tmp_path: Path) -> None:
     """S3 SC-12: a completed run finalizes created roles even with no Discord metadata."""
     config = _make_config(tmp_path)
@@ -5279,6 +5640,7 @@ async def test_mark_at_end_finalizes_without_metadata(tmp_path: Path) -> None:
     assert "r1" in state.roles_finalized
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_completed_run_finalizes_all_created_roles(
     role_ordering_only, tmp_path: Path
 ) -> None:
@@ -5295,6 +5657,7 @@ async def test_completed_run_finalizes_all_created_roles(
     assert state.roles_finalized == {"r1", "r2"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_mid_phase_save(role_ordering_only, tmp_path: Path) -> None:
     """S3 SC-14: the create loop persists after every role (hard-kill durability)."""
     config = _make_config(tmp_path)
@@ -5312,6 +5675,7 @@ async def test_run_roles_mid_phase_save(role_ordering_only, tmp_path: Path) -> N
     assert spy.call_count == 3
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_role_kill_and_resume_no_duplicates(role_ordering_only, tmp_path: Path) -> None:
     """A hard kill after role 2 of 3 persists both mappings; resume creates only role 3."""
     config = _make_config(tmp_path)
@@ -5375,6 +5739,7 @@ async def test_role_kill_and_resume_no_duplicates(role_ordering_only, tmp_path: 
     assert resumed_state.role_map["823"] == "01J5T000000000000000000603"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) -> None:
     """S3 SC-15: a TooManyRoles break leaves the unmapped role out of roles_finalized."""
     config = _make_config(tmp_path)
@@ -5394,6 +5759,7 @@ async def test_too_many_roles_break_leaves_unmapped_unfinalized(tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_icon_certificate_failure_explains_itself(tmp_path: Path) -> None:
     """A certificate failure uploading a role icon names the host and the override.
 
@@ -5449,6 +5815,7 @@ async def test_run_roles_icon_certificate_failure_explains_itself(tmp_path: Path
     assert "SSL_CERT_FILE" in message
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_icon_warning_never_carries_the_response_body(tmp_path: Path) -> None:
     """The hint is the only thing added — the Autumn body still never appears.
 
@@ -5507,6 +5874,7 @@ async def test_run_roles_icon_warning_never_carries_the_response_body(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_a_refused_proxy_names_the_proxy(
     tmp_path: Path, fake_proxy, proxy_env, os_proxy
 ) -> None:
@@ -5565,6 +5933,7 @@ async def test_a_refused_proxy_names_the_proxy(
     assert "FERRY_DISABLE_PROXY" in message
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_duplicate_skips_the_pin(channel_attributes_only, tmp_path: Path) -> None:
     """SC-2.6: a duplicate index send leaves no id, so there is nothing to pin.
 
@@ -5672,6 +6041,7 @@ def _register_forum_index_channels(m: aioresponses, index_send_status: int) -> N
     m.patch(f"{STOAT_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_create_conflict_remains_unresolved(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -5695,6 +6065,7 @@ async def test_forum_index_create_conflict_remains_unresolved(
     ]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_create_success_does_not_mark_the_forum(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -5710,6 +6081,7 @@ async def test_forum_index_create_success_does_not_mark_the_forum(
     assert state.channel_map["forum-index-forum-my-forum"] == "01J5T000000000000000002000"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_create_success_records_the_message_id(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -5729,6 +6101,7 @@ async def test_forum_index_create_success_records_the_message_id(
     assert state.forum_index_present_unknown_id == set()
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_report_rebuild_after_a_create_edits_the_created_message(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -5773,6 +6146,7 @@ async def test_report_rebuild_after_a_create_edits_the_created_message(
     assert state.forum_index_message_ids == {"forum-my-forum": "01J5T000000000000000002001"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_forum_index_create_success_clears_a_stale_mark(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -5827,6 +6201,7 @@ async def test_report_rebuild_legacy_unknown_index_posts_no_second_index(
     assert [e.status for e in events] == ["warning"]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
     channel_attributes_only,
     tmp_path: Path,
@@ -5860,6 +6235,7 @@ async def test_report_index_delivery_recovery_keeps_uncertain_initial_create(
     assert any(warning["type"] == "forum_index_rebuild_failed" for warning in state.warnings)
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_report_index_delivery_recovery_does_not_dispatch_prepared_render(
     channel_attributes_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5965,6 +6341,7 @@ async def test_report_recover_only_cannot_rotate_a_rejected_render(tmp_path: Pat
 # rename test pass against a broken implementation.
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_channels_records_the_created_name(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -5984,6 +6361,7 @@ async def test_run_channels_records_the_created_name(
     assert state.created_channel_names == {"d-100": "general"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_the_recorded_name_comes_from_the_response(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6010,6 +6388,7 @@ async def test_the_recorded_name_comes_from_the_response(
     assert state.created_channel_names == {"d-100": "general-normalised"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_a_name_over_32_characters_records_the_truncated_value(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6038,6 +6417,7 @@ async def test_a_name_over_32_characters_records_the_truncated_value(
     assert state.created_channel_names == {"d-100": truncated}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_a_collision_pair_records_distinct_suffixed_names(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6072,6 +6452,7 @@ async def test_a_collision_pair_records_distinct_suffixed_names(
     assert first != second
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_a_voice_retry_records_the_retrys_response(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6105,6 +6486,7 @@ async def test_a_voice_retry_records_the_retrys_response(
     assert state.created_channel_names == {"d-100": "voice-room-as-text"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_the_forum_index_channel_records_its_name(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6166,6 +6548,7 @@ async def test_the_forum_index_channel_records_its_name(
     assert state.created_channel_names[index_key] == "my-forum-index"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_records_the_created_name(tmp_path: Path) -> None:
     """SC-2.8. The role name Ferry sent, taken from the create response.
 
@@ -6193,6 +6576,7 @@ async def test_run_roles_records_the_created_name(tmp_path: Path) -> None:
     assert state.created_role_names == {"d-role-1": "Moderators"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_the_recorded_role_name_comes_from_the_response(tmp_path: Path) -> None:
     """SC-2.8, the discriminator half.
 
@@ -6249,6 +6633,7 @@ def assert_names_complete(state: MigrationState) -> None:
             )
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_a_fresh_structure_run_records_a_name_for_every_id(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -6844,6 +7229,7 @@ async def test_run_roles_dry_run_sends_no_ordering(tmp_path: Path) -> None:
     assert state.role_map == {"a": "dry-role-a", "b": "dry-role-b"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_export_only_path_never_fetches_root(
     role_ordering_only, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6885,6 +7271,7 @@ async def test_run_roles_export_only_path_never_fetches_root(
     # Reaching here without the AssertionError means the guard held.
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_ordering_converges_on_a_second_run(
     ordering_context, tmp_path: Path
 ) -> None:
@@ -7044,6 +7431,7 @@ async def test_run_roles_retries_ordering_when_every_role_is_finalized(tmp_path:
     )
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_ordering_request_budget_is_one_read_and_one_write(
     ordering_context,
     tmp_path: Path,
@@ -7092,6 +7480,7 @@ async def test_run_roles_ordering_request_budget_is_one_read_and_one_write(
     assert writes == ["write"], f"expected exactly one ordering call, got {len(writes)}"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
     ordering_context,
     tmp_path: Path,
@@ -7140,6 +7529,9 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
     ]
     second_exports = [_make_export(messages=[_make_message("m2", roles=second_roles)])]
 
+    # This rank-unit fixture supplies the next operation at its ordering boundary.
+    # Previous transient authority cannot authorize a newly selected role.
+    state.permission_runtime = None
     ordering_context({"stoat-b": 0, "stoat-a": 1, "stoat-c": 2}, ("stoat-c", "stoat-b", "stoat-a"))
     created: list[str] = []
     bodies: list[dict[str, object]] = []
@@ -7173,6 +7565,7 @@ async def test_run_roles_incremental_adds_a_role_and_places_it_at_the_top(
     assert bodies == [{"ranks": ["stoat-c", "stoat-b", "stoat-a"]}]
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_ordering_survives_an_interrupt_and_resume(
     ordering_context, tmp_path: Path
 ) -> None:
@@ -7730,6 +8123,7 @@ async def test_banner_download_requests_without_following_redirects(tmp_path: Pa
     assert session.calls[0]["allow_redirects"] is False
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_warns_and_skips_upload_for_an_oversize_banner(tmp_path: Path) -> None:
     """Declared Content-Length over the cap, through the real run_server path."""
     events: list[MigrationEvent] = []
@@ -7772,6 +8166,7 @@ async def test_run_server_warns_and_skips_upload_for_an_oversize_banner(tmp_path
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_refuses_a_banners_folder_planted_as_a_link(tmp_path: Path) -> None:
     """#960 review: the banner folder went through a plain mkdir, so a planted
     ``banners`` link sent the download into another directory."""

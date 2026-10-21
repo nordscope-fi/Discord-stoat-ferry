@@ -20,7 +20,11 @@ from discord_ferry.core.atomicio import (
 )
 from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import proxy_hint, read_bounded, tls_hint
-from discord_ferry.core.permissions import require_permission_runtime
+from discord_ferry.core.permissions import (
+    PermissionOutcome,
+    PermissionRuntime,
+    require_permission_runtime,
+)
 from discord_ferry.discord.client import download_role_icon
 from discord_ferry.discord.metadata import (
     ChannelMeta,
@@ -191,6 +195,20 @@ async def _download_banner(
     return None
 
 
+def _server_permission_runtime(config: FerryConfig, state: MigrationState) -> PermissionRuntime:
+    """Validate the existing operation before its server identity can be bound."""
+    runtime = state.permission_runtime
+    if not isinstance(runtime, PermissionRuntime):
+        raise PermissionSafetyError(
+            PermissionOutcome("application", "unverified", "none_confirmed")
+        )
+    plan = runtime.plan
+    if plan is None or plan.target_layout.service.rstrip("/") != config.stoat_url.rstrip("/"):
+        raise runtime.stop("unverified", stage="application")
+    runtime.bind(plan)
+    return runtime
+
+
 async def run_server(
     config: FerryConfig,
     state: MigrationState,
@@ -219,6 +237,7 @@ async def run_server(
         )
         return
 
+    runtime = _server_permission_runtime(config, state)
     async with get_session(config) as session:
         discord_meta = load_bound_discord_metadata(config, exports)
 
@@ -236,6 +255,8 @@ async def run_server(
                     f"(omit --incremental)."
                 ) from exc
             state.stoat_server_id = effective_server_id
+            runtime.bind_server(effective_server_id)
+            require_permission_runtime(state, service=config.stoat_url)
             on_event(
                 MigrationEvent(
                     phase="server",
@@ -253,6 +274,7 @@ async def run_server(
             else:
                 name = "Ferry Server"
 
+            runtime.note_write()
             state.stoat_server_id = await api_create_server(
                 session,
                 config.stoat_url,
@@ -260,9 +282,12 @@ async def run_server(
                 truncate_name(name),
                 nsfw=discord_meta.guild_nsfw if discord_meta else None,
             )
+            runtime.note_write_confirmed()
             # S2: persist immediately so a kill before the post-phase save still records the
             # server id — on --resume the reuse branch fires instead of creating a duplicate.
             save_state(state, config.output_dir)
+            runtime.bind_server(state.stoat_server_id)
+            require_permission_runtime(state, service=config.stoat_url)
             on_event(
                 MigrationEvent(
                     phase="server",
@@ -987,11 +1012,13 @@ async def run_roles(
         )
         return
 
+    runtime = require_permission_runtime(state, service=config.stoat_url)
     async with get_session(config) as session:
         for idx, role in enumerate(roles_to_create, start=1):
             if role.id in pre_existing_role_ids:
                 continue
             try:
+                runtime.note_write()
                 result = await api_create_role(
                     session,
                     config.stoat_url,
@@ -1014,6 +1041,7 @@ async def run_roles(
                     break
                 raise
             stoat_role_id: str = result["id"]
+            runtime.note_write_confirmed()
             state.role_map[role.id] = stoat_role_id
             # Beside the id write, and from the RESPONSE, matching the channel
             # site. The fallback repeats truncate_name because that is the value
@@ -1021,6 +1049,7 @@ async def run_roles(
             # role whose Discord name exceeds the cap.
             state.created_role_names[role.id] = result.get("name") or truncate_name(role.name)
             save_state(state, config.output_dir)
+            runtime.bind_role(role.id, stoat_role_id)
 
             # Credit recovered structural roles: created THIS run (the
             # pre_existing_role_ids guard above already excludes prior-run roles)
@@ -1476,6 +1505,7 @@ async def run_channels(
         )
         return
 
+    runtime = require_permission_runtime(state, service=config.stoat_url)
     # stoat_category_id -> list of stoat_channel_ids (built during creation).
     category_channels: dict[str, list[str]] = {}
     # Build an export lookup so we can retrieve message_count for forum posts.
@@ -1499,10 +1529,12 @@ async def run_channels(
                 # permission overrides, no slowmode/voice attrs (all applied on
                 # the original run).
                 stoat_channel_id = state.channel_map[ch.id]
+                await verify_permission_channel(session, config, state, stoat_channel_id)
                 created_as_voice = False
             else:
                 created_as_voice = stoat_type == "Voice"
                 try:
+                    runtime.note_write()
                     result = await api_create_channel(
                         session,
                         config.stoat_url,
@@ -1539,6 +1571,7 @@ async def run_channels(
                                 message=f"Voice channel '{unique_name}' failed, retrying as text",
                             )
                         )
+                        runtime.note_write()
                         result = await api_create_channel(
                             session,
                             config.stoat_url,
@@ -1554,6 +1587,7 @@ async def run_channels(
                         raise
 
                 state.channel_map[ch.id] = stoat_channel_id
+                runtime.note_write_confirmed()
                 # Beside the id write, and OUTSIDE the try, deliberately. The
                 # voice-to-text retry above reassigns `result` inside its except
                 # block, so `result` here is whichever attempt succeeded. A name
@@ -1574,6 +1608,8 @@ async def run_channels(
                 # dict[str, str]. `or` is the safer of the two here. The same
                 # applies to the role and forum index sites below.
                 state.created_channel_names[ch.id] = result.get("name") or unique_name
+                save_state(state, config.output_dir)
+                runtime.bind_channel(ch.id, stoat_channel_id)
                 if created_as_voice and ch_meta is not None and ch_meta.user_limit > 0:
                     state.native_fidelity_counts["user_limit"] = (
                         state.native_fidelity_counts.get("user_limit", 0) + 1
@@ -1681,6 +1717,7 @@ async def run_channels(
                 source_id = hashlib.sha256(forum_key.encode()).hexdigest()
                 index_channel_id = state.channel_map.get(index_key, "")
                 if index_key in pre_existing_channel_ids:
+                    await verify_permission_channel(session, config, state, index_channel_id)
                     ref = DeliveryRef(source_id, source_id, index_channel_id, "forum_index")
                     pending = (
                         read_delivery_receipt(state, config.output_dir, ref)
@@ -1698,6 +1735,7 @@ async def run_channels(
                     )
                 else:
                     index_name = make_unique_channel_name(f"{forum_name}-index", existing_names)
+                    runtime.note_write()
                     idx_result = await api_create_channel(
                         session,
                         config.stoat_url,
@@ -1707,8 +1745,8 @@ async def run_channels(
                         channel_type="Text",
                     )
                     index_channel_id = idx_result["_id"]
+                    runtime.note_write_confirmed()
                     index_name = idx_result.get("name") or index_name
-                    await asyncio.sleep(config.upload_delay)
                     ref = DeliveryRef(source_id, source_id, index_channel_id, "forum_index")
 
                 # The existing structure owner saves destination wiring before
@@ -1717,6 +1755,14 @@ async def run_channels(
                 state.channel_map[index_key] = index_channel_id
                 state.created_channel_names[index_key] = index_name
                 save_state(state, config.output_dir)
+                if index_key not in pre_existing_channel_ids:
+                    runtime.bind_channel(index_key, index_channel_id)
+                    await asyncio.sleep(config.upload_delay)
+                    await apply_channel_permissions(
+                        session, config, state, index_channel_id, None, index_name, phase="channels"
+                    )
+                    await verify_permission_channel(session, config, state, index_channel_id)
+                runtime.require(index_channel_id)
 
                 # Build the index message content (max 2000 chars).
                 posts = forum_channel_info.get(forum_key, [])
@@ -1752,6 +1798,7 @@ async def run_channels(
                 await asyncio.sleep(config.upload_delay)
 
                 if index_msg_id:
+                    runtime.require(index_channel_id)
                     await api_pin_message(
                         session,
                         config.stoat_url,
@@ -1777,6 +1824,8 @@ async def run_channels(
                         message=f"Created forum index for '{forum_name}'",
                     )
                 )
+            except PermissionSafetyError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 state.warnings.append(
                     {

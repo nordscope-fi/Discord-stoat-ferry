@@ -39,6 +39,7 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import MigrationState
 from tests.test_structure import channel_attributes_only as channel_attributes_only
 from tests.test_structure import role_ordering_only as role_ordering_only
+from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,6 +101,7 @@ def _make_export(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_reuses_carried_stoat_server_id(tmp_path: Path) -> None:
     """SC-12: run_server uses state.stoat_server_id when config.server_id is None.
 
@@ -125,6 +127,7 @@ async def test_run_server_reuses_carried_stoat_server_id(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_server_deleted_prior_server_raises_clear_error(tmp_path: Path) -> None:
     """SC-11: run_server raises MigrationError naming the id when server is 404.
 
@@ -162,6 +165,7 @@ def _make_role_export(roles: list[DCERole], guild_id: str = "111") -> DCEExport:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_skips_all_passes_for_already_migrated_roles(
     role_ordering_only,
     tmp_path: Path,
@@ -247,6 +251,7 @@ async def test_run_roles_skips_all_passes_for_already_migrated_roles(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_creates_only_new_roles_on_incremental_rerun(
     role_ordering_only,
     tmp_path: Path,
@@ -296,6 +301,7 @@ async def test_run_roles_creates_only_new_roles_on_incremental_rerun(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
     role_ordering_only,
     tmp_path: Path,
@@ -404,6 +410,7 @@ def _make_forum_export(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_unchanged_export_creates_zero_structure(tmp_path: Path) -> None:
     """SC-1: re-running run_categories + run_channels with carried maps → 0 creates.
 
@@ -456,6 +463,7 @@ async def test_rerun_unchanged_export_creates_zero_structure(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_keeps_existing_channels_attached_to_categories(tmp_path: Path) -> None:
     """SC-2: re-run upsert still lists carried channels under their category.
 
@@ -510,6 +518,7 @@ async def test_rerun_keeps_existing_channels_attached_to_categories(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_creates_only_new_channel_and_category(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -576,6 +585,7 @@ async def test_rerun_creates_only_new_channel_and_category(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_carried_channels_not_dropped_near_max(tmp_path: Path) -> None:
     """SC-6: 5 carried channels with max_channels=5 + 1 new → carried survive, new dropped.
 
@@ -635,6 +645,7 @@ async def test_rerun_carried_channels_not_dropped_near_max(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_partial_export_keeps_carried_only_category(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -695,6 +706,7 @@ async def test_rerun_partial_export_keeps_carried_only_category(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_forum_index_channel_not_recreated(tmp_path: Path) -> None:
     """SC-9: forum-index channel is reused (no create, no pin, no index message).
 
@@ -773,6 +785,7 @@ async def test_rerun_forum_index_channel_not_recreated(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_rerun_two_carried_only_categories_keep_own_channels(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -1005,6 +1018,7 @@ async def test_fresh_run_categories_fires_early_upsert(tmp_path: Path) -> None:
     assert patch_bodies, "fresh run must fire the early upsert (non-regression)"
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_incremental_final_upsert_includes_carried_and_new(
     channel_attributes_only, tmp_path: Path
 ) -> None:
@@ -1041,6 +1055,7 @@ async def test_incremental_final_upsert_includes_carried_and_new(
     assert "stoat-chOld" in by_id["stoat-catOld"]["channels"]  # carried channel re-attached
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_incremental_multiple_carried_only_categories_survive(
     channel_attributes_only, tmp_path: Path
 ) -> None:
