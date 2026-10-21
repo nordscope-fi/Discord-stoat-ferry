@@ -1211,6 +1211,211 @@ class PermissionOutcome:
         return self.reason == "verified" and not self.problems
 
 
+def _reindex_predicate(
+    predicate: BitPredicate, before: tuple[str, ...], after: tuple[str, ...]
+) -> BitPredicate:
+    """Permute ordinary source indexes, preserving the separate managed-role bits."""
+    if len(set(before)) != len(before) or len(after) != len(before) or set(before) != set(after):
+        raise ValueError("Source role orders must be unique permutations")
+    indexes = {source: index for index, source in enumerate(before)}
+    ordinary = (1 << len(before)) - 1
+
+    def moved(mask: int) -> int:
+        return (mask & ~ordinary) | sum(
+            1 << index for index, source in enumerate(after) if mask & (1 << indexes[source])
+        )
+
+    return BitPredicate(moved(predicate.P), moved(predicate.N), moved(predicate.G), predicate.c)
+
+
+def _matches_source_access(
+    predicates: dict[int, BitPredicate],
+    default: int,
+    channel_default: PermissionCell,
+    role_grants: tuple[PermissionCell, ...],
+    role_cells: tuple[PermissionCell, ...],
+    *,
+    absent_roles: int = 0,
+) -> bool:
+    """Compare mapped access without observations, bindings or content authority."""
+    if len(role_grants) != len(role_cells):
+        raise ValueError("Grant and overwrite orders must match")
+    _integer(absent_roles, "absent roles")
+    if absent_roles >> len(role_grants):
+        raise ValueError("Absent roles must belong to the compared ordinary universe")
+    all_roles = (1 << len(role_grants)) - 1
+    for predicate in predicates.values():
+        all_roles |= predicate.P | predicate.N | predicate.G
+    for bit, targets in _permission_mapping().items():
+        required: tuple[BitPredicate, ...] = (predicates[bit],)
+        if bit in {14, 15, 17}:
+            required += (predicates[11],)
+        for target in targets:
+            mask = 1 << target
+            base = bool(((default | channel_default.allow) & ~channel_default.deny) & mask)
+            grants = sum(
+                1 << index for index, grant in enumerate(role_grants) if grant.allow & mask
+            )
+            operations = tuple(
+                False if cell.deny & mask else True if cell.allow & mask else None
+                for cell in role_cells
+            )
+
+            def agrees(
+                zeros: int,
+                ones: int,
+                wanted: bool,
+                *,
+                bit: int = bit,
+                required: tuple[BitPredicate, ...] = required,
+                grants: int = grants,
+                base: bool = base,
+            ) -> bool:
+                if ones & absent_roles:
+                    return True
+                zeros |= absent_roles
+                if bit == 10:
+                    return constant_result(predicates[10], all_roles, zeros, ones) is wanted
+                return (
+                    _visible_bit_query(
+                        predicates[10],
+                        required,
+                        all_roles,
+                        grants,
+                        base,
+                        zeros,
+                        ones,
+                        hidden_result=wanted,
+                    )
+                    is wanted
+                )
+
+            if not _encoding_matches(operations, agrees, grants, base):
+                return False
+    return True
+
+
+def prove_carried_channel_access(
+    plan: PermissionPlan, observed: PermissionReadback
+) -> tuple[PermissionProblem, ...]:
+    """Prove current and conditional final carried access without granting readiness."""
+
+    def refuse(reason: ProblemReason, guidance: str, *ids: str) -> tuple[PermissionProblem, ...]:
+        return (PermissionProblem(reason, tuple(ids), None, guidance),)
+
+    if observed.problems:
+        return observed.problems
+    try:
+        PermissionRuntime(plan)._active_plan("preflight")
+    except PermissionSafetyError as exc:
+        return exc.outcome.problems or refuse("unverified", "Bind a complete operation plan")
+    layout, actual = plan.target_layout, observed.layout
+    roles = {role.id: role for role in actual.roles}
+    channels = {channel.id: channel for channel in actual.channels}
+    before_roles = {role.id: role for role in layout.roles}
+    before_channels = {channel.id: channel for channel in layout.channels}
+    if (
+        not layout.server_id
+        or actual.server_id != layout.server_id
+        or actual.service != layout.service
+        or not actual.fingerprint
+        or actual.server_default is None
+        or actual.planned_roles
+        or actual.planned_channels
+        or len(roles) != len(actual.roles)
+        or len(channels) != len(actual.channels)
+        or channels.keys() != before_channels.keys()
+        or any(role.permissions is None or role.rank is None for role in roles.values())
+        or any(channel.default is None or channel.roles is None for channel in channels.values())
+    ):
+        return refuse("unverified", "Read complete bound actual carried-channel evidence")
+    if (
+        roles != before_roles
+        or channels != before_channels
+        or actual.server_default != layout.server_default
+    ):
+        return refuse("readback_mismatch", "Target facts changed after operation planning")
+    mapping = _permission_mapping()
+    affected = sum(1 << bit for bit in {b for values in mapping.values() for b in values})
+    problems = _target_effect_problems(replace(layout, planned_role_updates=()), affected)
+    if problems:
+        return problems
+    bindings = dict(layout.planned_roles)
+    final_order = _calculation_roles(layout)
+    current_ranks = []
+    for sid in final_order:
+        identity = bindings[sid]
+        if identity is not None:
+            rank = roles[identity].rank
+            assert rank is not None
+            current_ranks.append((rank, sid))
+    current_order = tuple(sid for _, sid in sorted(current_ranks, reverse=True)) + tuple(
+        sid for sid in final_order if bindings[sid] is None
+    )
+    absent = sum(1 << index for index, sid in enumerate(current_order) if bindings[sid] is None)
+    future = {role.source_id: role for role in layout.planned_role_facts}
+    expected = _expected_existing_roles(layout)
+    final_default = (
+        layout.planned_server_default
+        if layout.planned_server_default is not None
+        else actual.server_default
+    )
+    neutral = PermissionCell(0, 0)
+    for channel in plan.channels:
+        target = dict(layout.planned_channels)[channel.source_key]
+        if target is None:
+            continue
+        old = channels[target]
+        assert old.default is not None and old.roles is not None
+        cells = dict(old.roles)
+        current_grants = []
+        current_cells = []
+        for sid in current_order:
+            identity = bindings[sid]
+            grant = roles[identity].permissions if identity is not None else neutral
+            assert grant is not None
+            current_grants.append(grant)
+            current_cells.append(cells.get(identity, neutral) if identity is not None else neutral)
+        predicates = {
+            bit: _reindex_predicate(predicate, final_order, current_order)
+            for bit, predicate in channel.source_predicates
+        }
+        if not _matches_source_access(
+            predicates,
+            actual.server_default,
+            old.default,
+            tuple(current_grants),
+            tuple(current_cells),
+            absent_roles=absent,
+        ):
+            return refuse(
+                "readback_mismatch", "Carried current access requires explicit repair", target
+            )
+        final_grants = []
+        final_cells = []
+        for sid in final_order:
+            identity = bindings[sid]
+            grant = (
+                expected[identity].permissions if identity is not None else future[sid].permissions
+            )
+            assert grant is not None
+            final_grants.append(grant)
+            final_cells.append(cells.get(identity, neutral) if identity is not None else neutral)
+        if not _matches_source_access(
+            dict(channel.source_predicates),
+            final_default,
+            old.default,
+            tuple(final_grants),
+            tuple(final_cells),
+        ):
+            return refuse(
+                "readback_mismatch",
+                "Proposed existing-owner changes require carried-channel repair",
+                target,
+            )
+    return ()
+
+
 def require_permission_runtime(
     state: MigrationState, *, service: str | None = None
 ) -> PermissionRuntime:
@@ -1730,61 +1935,20 @@ class PermissionRuntime:
         assert (
             self._bound_plan is not None and actual.default is not None and actual.roles is not None
         )
-        ordered = _calculation_roles(self._bound_plan.target_layout)
-        predicates = dict(channel.source_predicates)
-        all_roles = (1 << len(ordered)) - 1
-        for predicate in predicates.values():
-            all_roles |= predicate.P | predicate.N | predicate.G
+        grants = []
+        overrides = []
         cells = dict(actual.roles)
-        for bit, targets in _permission_mapping().items():
-            required: tuple[BitPredicate, ...] = (predicates[bit],)
-            if bit in {14, 15, 17}:
-                required += (predicates[11],)
-            for target in targets:
-                mask = 1 << target
-                base = bool(((default | actual.default.allow) & ~actual.default.deny) & mask)
-                grants = 0
-                operations: list[bool | None] = []
-                for index, source in enumerate(ordered):
-                    role_id = self._roles[source]
-                    assert role_id is not None
-                    grant = roles[role_id].permissions
-                    assert grant is not None
-                    if grant.allow & mask:
-                        grants |= 1 << index
-                    cell = cells.get(role_id, PermissionCell(0, 0))
-                    operations.append(
-                        False if cell.deny & mask else True if cell.allow & mask else None
-                    )
-
-                def agrees(
-                    zeros: int,
-                    ones: int,
-                    wanted: bool,
-                    *,
-                    bit: int = bit,
-                    required: tuple[BitPredicate, ...] = required,
-                    grants: int = grants,
-                    base: bool = base,
-                ) -> bool:
-                    if bit == 10:
-                        return constant_result(predicates[10], all_roles, zeros, ones) is wanted
-                    # No visible source member means this observed bit is irrelevant.
-                    # Synthesis still chooses its fixed fallback in the same query.
-                    return (
-                        _visible_bit_query(
-                            predicates[10],
-                            required,
-                            all_roles,
-                            grants,
-                            base,
-                            zeros,
-                            ones,
-                            hidden_result=wanted,
-                        )
-                        is wanted
-                    )
-
-                if not _encoding_matches(tuple(operations), agrees, grants, base):
-                    return False
-        return True
+        for source in _calculation_roles(self._bound_plan.target_layout):
+            role_id = self._roles[source]
+            assert role_id is not None
+            grant = roles[role_id].permissions
+            assert grant is not None
+            grants.append(grant)
+            overrides.append(cells.get(role_id, PermissionCell(0, 0)))
+        return _matches_source_access(
+            dict(channel.source_predicates),
+            default,
+            actual.default,
+            tuple(grants),
+            tuple(overrides),
+        )

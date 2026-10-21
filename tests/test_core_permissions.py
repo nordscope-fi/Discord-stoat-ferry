@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError, replace
 from functools import partial
 from importlib import import_module
 from importlib.util import find_spec
-from itertools import product
+from itertools import permutations, product
 from pathlib import Path
 from types import ModuleType
 
@@ -939,6 +939,258 @@ def test_creation_default_requires_fresh_decoded_access_and_exact_server_default
     with pytest.raises(PermissionSafetyError):
         bound_runtime().verify(cid, changed)
     assert layout.server_default is None and layout.channels == ()
+
+
+def carried_preflight_functions():
+    p = compiler_functions()
+    assert callable(getattr(p, "prove_carried_channel_access", None)), (
+        "Carried preflight needs a pure proof without created identities or readiness"
+    )
+    return p
+
+
+def carried_preflight_case():
+    p = compiler_functions()
+    source = source_evidence(((1 << 10) | (1 << 11), (1 << 10) | (1 << 11)), ())
+    layout = replace(
+        compiler_layout(source, new_server=True),
+        server_id="server",
+        server_default=(1 << 20) | (1 << 22),
+        channels=(p.TargetChannel("c-222", p.PermissionCell(1 << 12, 0), ()),),
+        planned_channels=(("222", "c-222"),),
+    )
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    observed = p.PermissionReadback(
+        p.TargetLayout(
+            service=layout.service,
+            server_id=layout.server_id,
+            roles=layout.roles,
+            server_default=layout.server_default,
+            channels=layout.channels,
+            fingerprint="fresh-actual-context",
+        )
+    )
+    return p, source, layout, plan, observed
+
+
+def test_carried_preflight_proves_pending_redundant_role_without_authority():
+    from discord_ferry.errors import PermissionSafetyError
+
+    p = carried_preflight_functions()
+    _, _, layout, plan, observed = carried_preflight_case()
+    assert p.prove_carried_channel_access(plan, observed) == ()
+    assert layout.roles == () and layout.planned_roles == (("112", None),)
+    assert observed.layout.roles == () and observed.layout.planned_roles == ()
+    runtime = p.PermissionRuntime(plan)
+    with pytest.raises(PermissionSafetyError):
+        runtime.verify("c-222", observed)
+    assert not runtime.ready
+
+
+def test_carried_preflight_rejects_current_mismatch_even_if_final_default_is_exact():
+    p = carried_preflight_functions()
+    _, source, layout, _, observed = carried_preflight_case()
+    layout = replace(layout, server_default=0)
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems and layout.planned_server_default == (1 << 20) | (1 << 22)
+    observed = replace(observed, layout=replace(observed.layout, server_default=0))
+    problems = p.prove_carried_channel_access(plan, observed)
+    assert problems and problems[0].reason == "readback_mismatch"
+
+
+def test_carried_preflight_accepts_alternative_exact_observed_encoding():
+    p = carried_preflight_functions()
+    _, source, layout, _, observed = carried_preflight_case()
+    # Everyone already has view, so this extra actual allow changes no access.
+    layout = replace(
+        layout,
+        channels=(replace(layout.channels[0], default=p.PermissionCell((1 << 12) | (1 << 20), 0)),),
+    )
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    observed = replace(observed, layout=replace(observed.layout, channels=layout.channels))
+    assert p.prove_carried_channel_access(plan, observed) == ()
+    assert layout.channels[0].default.allow & (1 << 12)
+    assert not p.PermissionRuntime(plan).ready
+
+
+def test_carried_preflight_restricts_absent_memberships_with_visibility_and_send_dependencies():
+    p = carried_preflight_functions()
+    for grants in (1 << 10, (1 << 10) | (1 << 11), 8):
+        source = source_evidence((0, grants), ())
+        layout = replace(
+            compiler_layout(source, new_server=True),
+            server_id="server",
+            server_default=0,
+            planned_server_default=None,
+            channels=(p.TargetChannel("c-222", p.PermissionCell(1 << 22, 0), ()),),
+            planned_channels=(("222", "c-222"),),
+        )
+        plan = p.compile_permission_plan(source, layout)
+        assert not plan.problems
+        observed = p.PermissionReadback(
+            p.TargetLayout(
+                service=layout.service,
+                server_id=layout.server_id,
+                server_default=0,
+                channels=layout.channels,
+                fingerprint="actual-hidden-without-future-role",
+            )
+        )
+        result = p.prove_carried_channel_access(plan, observed)
+        if grants == 1 << 10:
+            assert result and result[0].reason == "readback_mismatch"
+        else:
+            assert result == ()
+        # Current actual access is hidden; data-only allows grant no visibility.
+        assert not layout.server_default & (1 << 20)
+        future_value = layout.planned_role_facts[0].permissions.allow | (1 << 22)
+        assert bool(future_value & (1 << 20)) == source_oracle(source, frozenset({"112"}), 10)
+        exact = True
+        for bit, targets in p._permission_mapping().items():
+            expected = source_oracle(source, frozenset({"112"}), bit)
+            if bit in {14, 15, 17}:
+                expected &= source_oracle(source, frozenset({"112"}), 11)
+            exact &= all(bool(future_value & (1 << target)) == expected for target in targets)
+        assert bool(result) is not exact
+
+
+def test_carried_preflight_rejects_final_rank_change_that_breaks_current_exact_access():
+    p = carried_preflight_functions()
+    bits = (1 << 10) | (1 << 11)
+    target_bits = (1 << 20) | (1 << 22)
+    source = source_evidence((0, bits, 0), ((0, 0), (bits, 0), (0, bits)))
+    base = compiler_layout(source)
+    cells = (
+        ("r-112", p.PermissionCell(target_bits, 0)),
+        ("r-113", p.PermissionCell(0, target_bits)),
+    )
+    layout = replace(
+        base,
+        channels=(replace(base.channels[0], roles=cells),),
+        planned_role_updates=(
+            p.PlannedRole("112", base.roles[0].permissions, 1),
+            p.PlannedRole("113", base.roles[1].permissions, 0),
+        ),
+    )
+    plan = p.compile_permission_plan(source, layout)
+    assert not plan.problems
+    observed = p.PermissionReadback(
+        p.TargetLayout(
+            service=layout.service,
+            server_id=layout.server_id,
+            roles=layout.roles,
+            server_default=0,
+            channels=layout.channels,
+            fingerprint="actual-before-ordering",
+        )
+    )
+    # The independent evaluator sees exact current access, but both roles lose
+    # view after the proposed deny role moves above the allow role.
+    before = replace(
+        plan.channels[0],
+        default=layout.channels[0].default,
+        roles=(("112", cells[0][1]), ("113", cells[1][1])),
+    )
+    for assigned in (
+        frozenset(),
+        frozenset({"112"}),
+        frozenset({"113"}),
+        frozenset({"112", "113"}),
+    ):
+        actual = compiled_target_value(before, replace(layout, planned_role_updates=()), assigned)
+        assert bool(actual & (1 << 20)) == source_oracle(source, assigned, 10)
+    problems = p.prove_carried_channel_access(plan, observed)
+    assert problems and problems[0].reason == "readback_mismatch"
+
+
+def test_carried_preflight_requires_fresh_complete_matching_observations():
+    p = carried_preflight_functions()
+    _, _, _, plan, observed = carried_preflight_case()
+    for field, value in (
+        ("fingerprint", ""),
+        ("service", "https://other.test"),
+        ("server_id", "other"),
+        ("server_default", None),
+        ("channels", ()),
+    ):
+        changed = replace(observed, layout=replace(observed.layout, **{field: value}))
+        problems = p.prove_carried_channel_access(plan, changed)
+        assert problems and problems[0].reason == "unverified"
+    assert p.prove_carried_channel_access(p.PermissionPlan(), observed)
+
+
+def test_carried_preflight_reindexes_predicates_without_changing_managed_bits():
+    p = carried_preflight_functions()
+    remap = getattr(p, "_reindex_predicate", None)
+    assert callable(remap), "Compared role orders need an explicit predicate permutation"
+    before = ("a", "b", "c")
+    for after in permutations(before):
+        for positive, negative, grants, constant in product(
+            range(8), range(8), range(8), (False, True)
+        ):
+            predicate = p.BitPredicate(positive | 8, negative, grants, constant)
+            changed = remap(predicate, before, after)
+            assert changed.P & 8
+            for members in range(16):
+                assigned = {sid for i, sid in enumerate(before) if members & (1 << i)}
+                moved = (members & 8) | sum(
+                    1 << i for i, sid in enumerate(after) if sid in assigned
+                )
+                expected = bool(members & predicate.P) or (
+                    not members & predicate.N and (predicate.c or bool(members & predicate.G))
+                )
+                actual = bool(moved & changed.P) or (
+                    not moved & changed.N and (changed.c or bool(moved & changed.G))
+                )
+                assert actual == expected
+
+
+def test_carried_preflight_shared_query_matches_independent_absent_role_truth_tables():
+    p = carried_preflight_functions()
+    compare = getattr(p, "_matches_source_access", None)
+    assert callable(compare), "Observed and proposed proof must share one pure comparison"
+    mapping = p._permission_mapping()
+    neutral = p.PermissionCell(0, 0)
+    for positive, negative, source_grants, constant in product(
+        range(4), range(4), range(4), (False, True)
+    ):
+        predicates = {bit: p.BitPredicate(0, 0, 0, False) for bit in mapping}
+        predicates[10] = p.BitPredicate(positive, negative, source_grants, constant)
+        for grants, base, operations, absent in product(
+            range(4), (False, True), product((None, False, True), repeat=2), range(4)
+        ):
+            grant_cells = tuple(
+                p.PermissionCell((1 << 20) if grants & (1 << i) else 0, 0) for i in range(2)
+            )
+            overrides = tuple(
+                p.PermissionCell((1 << 20) if op is True else 0, (1 << 20) if op is False else 0)
+                for op in operations
+            )
+            expected = True
+            for members in range(4):
+                if members & absent:
+                    continue
+                source_value = bool(members & positive) or (
+                    not members & negative and (constant or bool(members & source_grants))
+                )
+                target_value = base or bool(members & grants)
+                for i, operation in enumerate(operations):
+                    if members & (1 << i) and operation is not None:
+                        target_value = operation
+                expected &= source_value == target_value
+            assert (
+                compare(
+                    predicates,
+                    (1 << 20) if base else 0,
+                    neutral,
+                    grant_cells,
+                    overrides,
+                    absent_roles=absent,
+                )
+                == expected
+            )
 
 
 def test_incomplete_layout_cannot_produce_writable_cells() -> None:
