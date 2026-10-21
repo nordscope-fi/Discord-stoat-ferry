@@ -20,6 +20,64 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_app.py")
 
 
+@pytest.mark.parametrize("effects", ["none_confirmed", "changes_confirmed", "changes_possible"])
+async def test_migration_permission_stop_never_exposes_early_completion(
+    user, tmp_path, user_store, tab_store, monkeypatch, effects
+):
+    from discord_ferry import gui
+    from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.errors import PermissionSafetyError
+
+    user_store.update(
+        {"export_dir": str(tmp_path), "output_dir": str(tmp_path), "stoat_url": "https://api.test"}
+    )
+    tab_store.update({"token": "synthetic-target-preserved", "discord_token": "synthetic-source"})
+    emitted = asyncio.Event()
+    release = asyncio.Event()
+    returned = asyncio.Event()
+
+    async def migration(config, *, on_event):
+        on_event(
+            MigrationEvent(
+                phase="messages",
+                status="progress",
+                message="Observed actual delivery totals",
+                detail={"delivery": {"verified": 2, "partial": 1, "unresolved": 3}},
+            )
+        )
+        on_event(MigrationEvent(phase="report", status="completed", message="Report written"))
+        emitted.set()
+        try:
+            await release.wait()
+            raise PermissionSafetyError(
+                PermissionOutcome(
+                    "recheck",
+                    "readback_mismatch",
+                    effects,
+                    (PermissionProblem("readback_mismatch", (), None, "Recheck selected access"),),
+                )
+            )
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(gui, "run_migration", migration)
+    try:
+        await user.open("/migrate")
+        await asyncio.wait_for(emitted.wait(), timeout=1)
+        await user.should_not_see("Migration complete")
+        await user.should_not_see("Migration finished with unresolved messages")
+    finally:
+        release.set()
+    await asyncio.wait_for(returned.wait(), timeout=1)
+    await user.should_see("Recheck selected access")
+    await user.should_see(effects)
+    await user.should_see("Verified: 2  Partial: 1  Unresolved: 3")
+    await user.should_not_see("Migration complete")
+    await user.should_not_see("Migration finished with unresolved messages")
+    assert tab_store == {}
+
+
 async def test_running_migration_survives_disconnect_and_blocks_second_page(
     user: User,
     create_user: Callable[[], User],

@@ -22,7 +22,14 @@ from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_build, run_repair, run_retry_failed
 from discord_ferry.core.http import describe_proxy, describe_trust, format_proxy_notices
 from discord_ferry.core.security import register_secret, sanitize_secrets
-from discord_ferry.errors import BlueprintValidationError, CheckError, MigrationError, StateError
+from discord_ferry.discord import read_cached_metadata
+from discord_ferry.errors import (
+    BlueprintValidationError,
+    CheckError,
+    MigrationError,
+    PermissionSafetyError,
+    StateError,
+)
 from discord_ferry.migrator.probe import run_probe
 from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES, run_check
 from discord_ferry.parser.dce_parser import (
@@ -96,12 +103,15 @@ def _check_verdict(report: CheckReport) -> tuple[str, str]:
 def _repair_verdict(outcome: RepairOutcome, state: MigrationState) -> tuple[bool, str, str]:
     """Return (failed, label, colour), mirroring the CLI repair exit code exactly.
 
-    The CLI is ``1 if (state.failed_messages or declined) else 0`` where declined
-    is ``outcome.declined`` filtered to ``UNREPAIRED_WARNING_TYPES`` (cli.py, the
-    repair command). Sourced from the returned outcome, not the never-cleared
-    ``state.warnings``, per the #308 fix.
+    Real operations require verified permissions plus no failed messages or
+    current declined failures. Dry runs remain previews. Historical warnings do
+    not affect this run's verdict.
     """
     declined = [w for w in outcome.declined if w.get("type") in UNREPAIRED_WARNING_TYPES]
+    if outcome.dry_run:
+        return False, "Repair preview. No changes made.", "text-gray-600"
+    if not outcome.permissions.verified:
+        return True, "Permission verification or repair is incomplete.", "text-red-600"
     if state.failed_messages or declined:
         return True, "Repair left unfixable problems.", "text-red-600"
     return False, "Repair complete.", "text-green-600"
@@ -135,6 +145,13 @@ def render_repair_outcome(outcome: RepairOutcome) -> None:
     check table. The declined text is server-controlled, so it is sanitized.
     """
     dlq = outcome.dead_letter
+    permissions = outcome.permissions
+    ui.label(
+        f"Permissions: {permissions.reason} ({permissions.stage}); "
+        f"destination effects: {permissions.effects}"
+    ).classes("text-sm text-gray-600")
+    for problem in permissions.problems:
+        ui.label(sanitize_secrets(problem.guidance)).classes("text-sm text-red-600")
     ui.label(
         f"Recreated {len(outcome.recreated_channels)} channels, "
         f"{len(outcome.recreated_roles)} roles, "
@@ -243,6 +260,11 @@ def run_tool(
             try:
                 result = await coro_factory()
                 on_done(result)
+            except PermissionSafetyError as exc:
+                _safe_push(log_push, f"[ERROR] {exc}")
+                for problem in exc.outcome.problems:
+                    _safe_push(log_push, problem.guidance)
+                on_done(None)
             except Exception as exc:  # noqa: BLE001 -- one uniform error surface
                 _safe_push(log_push, f"[ERROR] {exc}")
                 on_done(None)
@@ -386,7 +408,13 @@ def check_page() -> None:
                 except StateError as exc:
                     return f"Cannot load this migration: {sanitize_secrets(str(exc))}"
                 try:
-                    return await run_check(stoat_url, token, state, on_event)
+                    return await run_check(
+                        stoat_url,
+                        token,
+                        state,
+                        on_event,
+                        permission_metadata=read_cached_metadata(output_dir, check_keys=True).meta,
+                    )
                 except (CheckError, MigrationError) as exc:
                     # MigrationError covers a rate-limit or circuit-breaker failure
                     # from the API client; the CLI catches both here too.
@@ -429,14 +457,9 @@ def repair_page() -> None:
                     ui.label("Repair failed. See the log above.").classes("text-red-600")
                     return
                 if errors:
-                    # A refusal (a rolled-back state) is not a repair failure: the
-                    # engine correctly declined, and the CLI exits 0 for it. Show a
-                    # neutral refusal, neither a green success nor a red failure, so
-                    # neither shell claims the repair failed.
-                    ui.label(
-                        f"Repair refused, nothing changed: {sanitize_secrets(errors[-1])}"
-                    ).classes("text-amber-700")
-                    return
+                    ui.label(f"Repair refused or stopped: {sanitize_secrets(errors[-1])}").classes(
+                        "text-amber-700"
+                    )
                 _, label, colour = _repair_verdict(outcome, state_ref[0])
                 ui.label(label).classes(f"text-lg font-bold {colour}")
                 render_repair_outcome(outcome)

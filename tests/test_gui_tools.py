@@ -27,6 +27,92 @@ pytestmark = pytest.mark.nicegui_main_file("tests/nicegui_app.py")
 _TOKEN = "01F8MECHZX3TBDFGH4JKLMNPQR_opaque_base64url_like_secret_value"
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_repair_verdict_requires_real_permission_evidence_but_preserves_preview(dry_run):
+    from discord_ferry import gui_tools
+    from discord_ferry.migrator.verify import RepairOutcome
+    from discord_ferry.state import MigrationState
+
+    failed, label, colour = gui_tools._repair_verdict(
+        RepairOutcome(dry_run=dry_run), MigrationState()
+    )
+    assert failed is not dry_run
+    assert colour != "text-green-600"
+    assert "Repair complete" not in label
+
+
+@pytest.mark.parametrize("effects", ["none_confirmed", "changes_confirmed", "changes_possible"])
+async def test_repair_page_keeps_actual_actions_and_permission_effects_after_stop(
+    user, tmp_path, user_store, tab_store, monkeypatch, effects
+):
+    from discord_ferry import gui_tools
+    from discord_ferry.core.events import MigrationEvent
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.migrator.verify import RepairOutcome
+    from discord_ferry.state import MigrationState
+
+    exports = tmp_path / "exports"
+    exports.mkdir()
+    user_store.update({"stoat_url": "https://api.test", "output_dir": str(tmp_path)})
+    tab_store["token"] = _TOKEN
+    outcome = RepairOutcome(
+        permissions=PermissionOutcome(
+            "recheck",
+            "readback_mismatch",
+            effects,
+            (PermissionProblem("readback_mismatch", (), None, "Review source access " + _TOKEN),),
+        ),
+        recreated_channels=[{"discord_id": "333", "stoat_id": "synthetic-confirmed-id"}],
+    )
+
+    async def stopped(config, state, selected, on_event):
+        on_event(MigrationEvent(phase="repair", status="error", message="Permission safety stop"))
+        return outcome
+
+    monkeypatch.setattr(gui_tools, "run_repair", stopped)
+    monkeypatch.setattr(gui_tools, "parse_export_directory", lambda path: [])
+    monkeypatch.setattr(gui_tools, "load_state", lambda path: MigrationState())
+    await user.open("/tools/repair")
+    await user.should_see("Run repair")
+    user.find("Export directory").elements.pop().set_value(str(exports))
+    user.find("Dry run").elements.pop().set_value(False)
+    user.find("Run repair").click()
+    await user.should_see("Recreated 1 channels")
+    await user.should_see(effects)
+    await user.should_see("readback_mismatch")
+    await user.should_not_see("nothing changed")
+    await user.should_not_see("Repair complete.")
+    await user.should_not_see("Review source access " + _TOKEN)
+
+
+async def test_check_page_passes_cached_source_evidence_without_refresh(
+    user, tmp_path, user_store, tab_store, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from discord_ferry import discord, gui_tools
+    from discord_ferry.discord.metadata import save_discord_metadata
+    from discord_ferry.migrator.verify import CheckReport
+    from discord_ferry.state import MigrationState
+    from tests.test_metadata_refresh import valid_metadata
+
+    metadata = valid_metadata()
+    save_discord_metadata(metadata, tmp_path)
+    user_store.update({"stoat_url": "https://api.test", "output_dir": str(tmp_path)})
+    tab_store["token"] = _TOKEN
+    check = AsyncMock(return_value=CheckReport())
+    refresh = AsyncMock(side_effect=AssertionError("Read-only check refreshed source evidence"))
+    monkeypatch.setattr(gui_tools, "run_check", check)
+    monkeypatch.setattr(gui_tools, "load_state", lambda path: MigrationState())
+    monkeypatch.setattr(discord, "refresh_permission_metadata", refresh)
+    await user.open("/tools/check")
+    await user.should_see("Run check")
+    user.find("Run check").click()
+    await user.should_see("Check passed.")
+    assert check.await_args.kwargs["permission_metadata"] == metadata
+    refresh.assert_not_called()
+
+
 def test_repair_failure_set_is_shared_and_exact() -> None:
     """SC-1.8: the repair pass-or-fail set is one shared constant, exact."""
     from discord_ferry.migrator.verify import UNREPAIRED_WARNING_TYPES
@@ -224,6 +310,33 @@ def test_run_tool_error_path_sanitizes_and_reports_none(monkeypatch) -> None:  #
     reset_secret_registry()
 
 
+def test_run_tool_permission_stop_preserves_masked_guidance_and_effects(monkeypatch):
+    from discord_ferry import gui_tools
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionProblem
+    from discord_ferry.core.security import register_secret
+    from discord_ferry.errors import PermissionSafetyError
+
+    register_secret("stoat", _TOKEN)
+    monkeypatch.setattr(gui_tools.background_tasks, "create", lambda coro: asyncio.run(coro))
+    pushed, done = [], []
+
+    async def stopped():
+        raise PermissionSafetyError(
+            PermissionOutcome(
+                "recheck",
+                "readback_mismatch",
+                "changes_possible",
+                (PermissionProblem("readback_mismatch", (), None, "Review access " + _TOKEN),),
+            )
+        )
+
+    gui_tools.run_tool(contextlib.nullcontext(), pushed.append, stopped, done.append)
+    assert done == [None]
+    assert any("changes_possible" in line for line in pushed)
+    assert any("Review access" in line for line in pushed)
+    assert all(_TOKEN not in line for line in pushed)
+
+
 async def test_tools_landing_lists_tools(user: User) -> None:
     """SC-1.1: /tools is reachable and lists every tool."""
     await user.open("/tools")
@@ -324,7 +437,9 @@ async def test_check_page_uses_entered_token_when_session_empty(
 
     seen: dict[str, object] = {}
 
-    async def fake_check(stoat_url, token, state, on_event, *, session=None):  # type: ignore[no-untyped-def]
+    async def fake_check(  # type: ignore[no-untyped-def]
+        stoat_url, token, state, on_event, *, session=None, permission_metadata=None
+    ):
         seen["token"] = token
         from discord_ferry.migrator.verify import CheckReport
 
@@ -358,7 +473,9 @@ async def test_check_page_streams_banners_and_renders_table(
     report = CheckReport()
     report.add(name="general", status="ok", kind="channel_present", detail="present")
 
-    async def fake_check(stoat_url, token, state, on_event, *, session=None):  # type: ignore[no-untyped-def]
+    async def fake_check(  # type: ignore[no-untyped-def]
+        stoat_url, token, state, on_event, *, session=None, permission_metadata=None
+    ):
         on_event(
             MigrationEvent(phase="check", status="started", message="Checking server structure...")
         )
@@ -864,26 +981,34 @@ class _StubState:
 def test_repair_verdict_matches_cli_failure_set() -> None:
     """SC-3.4 / SC-I2: verdict uses state.failed_messages + declined in the shared set."""
     from discord_ferry import gui_tools
+    from discord_ferry.core.permissions import PermissionOutcome
     from discord_ferry.migrator.verify import RepairOutcome
 
+    # These shell-only records do not grant operation authority.
+    verified = PermissionOutcome("recheck", "verified", "none_confirmed")
     # An unrepaired type -> fail.
     failed, _, _ = gui_tools._repair_verdict(
-        RepairOutcome(declined=[{"type": "no_recorded_name"}]), _StubState([])
+        RepairOutcome(permissions=verified, declined=[{"type": "no_recorded_name"}]), _StubState([])
     )
     assert failed is True
 
     # An excluded type (partial merge restore) -> pass, matching the CLI.
     ok, _, _ = gui_tools._repair_verdict(
-        RepairOutcome(declined=[{"type": "merge_thread_content_not_restored"}]), _StubState([])
+        RepairOutcome(
+            permissions=verified, declined=[{"type": "merge_thread_content_not_restored"}]
+        ),
+        _StubState([]),
     )
     assert ok is False
 
     # Leftover failed messages -> fail.
-    failed2, _, _ = gui_tools._repair_verdict(RepairOutcome(), _StubState([{"id": "1"}]))
+    failed2, _, _ = gui_tools._repair_verdict(
+        RepairOutcome(permissions=verified), _StubState([{"id": "1"}])
+    )
     assert failed2 is True
 
     # Nothing wrong -> pass.
-    clean, _, _ = gui_tools._repair_verdict(RepairOutcome(), _StubState([]))
+    clean, _, _ = gui_tools._repair_verdict(RepairOutcome(permissions=verified), _StubState([]))
     assert clean is False
 
 
@@ -1323,6 +1448,7 @@ async def test_check_page_uses_real_tab_token_after_connect(user: User, tmp_path
         on_event: Callable[[MigrationEvent], None],
         *,
         session: object | None = None,
+        permission_metadata: object | None = None,
     ) -> CheckReport:
         seen["token"] = token
         return CheckReport()
@@ -1360,6 +1486,7 @@ async def test_check_page_prefers_entered_token_to_real_tab_token(
         on_event: Callable[[MigrationEvent], None],
         *,
         session: object | None = None,
+        permission_metadata: object | None = None,
     ) -> CheckReport:
         seen["token"] = token
         return CheckReport()
