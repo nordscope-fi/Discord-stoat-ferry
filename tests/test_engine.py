@@ -5716,7 +5716,9 @@ async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) ->
         discord_id=D_ROLE,
         stoat_id=S_ROLE_OLD,
     )
-    state, urls, _ = await _repair_with_metadata(tmp_path, report)
+    role_writer = AsyncMock()
+    with patch.object(engine_module, "apply_role_permissions", role_writer):
+        state, urls, _ = await _repair_with_metadata(tmp_path, report)
     server_default = [u for u in urls if u.endswith(f"/servers/{R_SERVER}/permissions/default")]
     assert server_default == [], (
         f"repair re-applied the server default mask, which every member holds: {server_default}"
@@ -5724,9 +5726,13 @@ async def test_repair_never_reapplies_the_server_default_mask(tmp_path: Path) ->
     assert [w for w in state.warnings if w.get("type") == "server_default_manual"], (
         "an owner-edited default must warn for manual review, not fail silently"
     )
-    assert any(u.endswith(f"/servers/{R_SERVER}/permissions/{S_ROLE_NEW}") for u in urls), (
-        f"the recreated role's own permissions were not applied: {urls}"
-    )
+    # This unit isolates the per-role decision so the real shared-default check
+    # must run. Bound writes and typed refusals retain separate real coverage.
+    role_writer.assert_awaited_once()
+    assert role_writer.await_args.args[3] == S_ROLE_NEW
+    assert role_writer.await_args.args[4].allow == 4_194_304
+    assert role_writer.await_args.kwargs == {"phase": "repair"}
+    assert state.role_map[D_ROLE] == S_ROLE_NEW
 
 
 async def test_repair_preserves_shared_writer_refusal_as_a_repair_error(tmp_path: Path) -> None:

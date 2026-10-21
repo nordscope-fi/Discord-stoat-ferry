@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Match existing role/default/rank writes to the bound operation plan, revoke dependent proofs before dispatch, and preserve terminal stops and write uncertainty (#1172).
 - Model expected changes made by existing role finalization, ordering and default writers separately from actual observations, requiring complete matching readback before permission readiness (#1172).
 - Define shared permission facts, refused plans and operation-local outcome records without changing migration behavior (#1172).
 - Record received Discord role and channel field names separately from parser defaults for source permission evidence (#1172).
