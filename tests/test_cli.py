@@ -2830,7 +2830,7 @@ def test_check_json_mirrors_the_report(runner: CliRunner, tmp_path: Path) -> Non
     result = _invoke_check(runner, tmp_path, report, "--json")
 
     parsed = json.loads(result.output)
-    assert parsed["schema_version"] == 1
+    assert parsed["schema_version"] == 2
     assert parsed["counts"]["warn"] == 1
     (row,) = parsed["results"]
     assert row == {
@@ -3787,7 +3787,7 @@ def test_repair_json_prints_one_parseable_document(runner: CliRunner, tmp_path: 
     doc = json.loads(result.stdout)
     assert set(doc) >= {"dry_run", "actions", "declined", "failed_messages", "check"}
     assert "schema_version" not in doc
-    assert doc["check"]["schema_version"] == 1
+    assert doc["check"]["schema_version"] == 2
     assert doc["actions"]["recreated_channels"][0]["name"] == "general"
     assert doc["check"] is not None
 

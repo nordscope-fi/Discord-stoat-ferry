@@ -84,6 +84,151 @@ def test_counts_reports_every_status_even_at_zero() -> None:
     assert counts["warn"] == 0
 
 
+def test_permission_checks_version_the_report_without_redefining_unverifiable() -> None:
+    from discord_ferry.migrator.verify import CHECK_REPORT_SCHEMA_VERSION
+
+    report = CheckReport()
+    report.add(
+        name="permission:222",
+        status="unverifiable",
+        kind="permission_unverified",
+        detail="Source evidence missing",
+    )
+    assert CHECK_REPORT_SCHEMA_VERSION == 2
+    assert report.to_dict()["schema_version"] == 2
+    assert not report.has_failures
+
+
+async def test_permission_check_without_source_is_unverified_and_read_only(
+    mock_aiohttp: aioresponses,
+) -> None:
+    _register(mock_aiohttp, _server_payload([], []))
+    state = MigrationState(stoat_server_id=SRV)
+    report = await run_check(BASE_URL, TOKEN, state, _noop_event)
+    permissions = [result for result in report.results if result.kind.startswith("permission_")]
+    assert permissions and all(result.kind == "permission_unverified" for result in permissions)
+    assert all(result.status == "unverifiable" for result in permissions)
+    assert not report.has_failures and state.permission_runtime is None
+    assert all(method == "GET" for method, _ in mock_aiohttp.requests)
+
+
+@pytest.mark.parametrize(
+    "case,kind",
+    [
+        ("healthy", "permission_verified"),
+        ("mismatch", "permission_mismatch"),
+        ("legacy", "permission_unverified"),
+        ("unsupported", "permission_unsupported"),
+        ("unavailable", "permission_unverified"),
+    ],
+)
+async def test_permission_check_uses_actual_source_calculation_and_target_readback(
+    tmp_path: pathlib.Path, mock_aiohttp: aioresponses, case: str, kind: str
+) -> None:
+    from dataclasses import asdict
+
+    from discord_ferry.discord.metadata import load_discord_metadata
+    from tests.test_delivery import (
+        permission_dispatch_context,
+        register_permission_dispatch_reads,
+    )
+    from tests.test_engine import _permission_preflight_case
+
+    config, state, exports, server, channels = permission_dispatch_context(tmp_path)
+    meta = load_discord_metadata(tmp_path)
+    assert meta is not None
+    first = state.channel_map["222"]
+    if case == "mismatch":
+        channels[first]["role_permissions"] = {state.role_map["112"]: {"a": 0, "d": 1 << 20}}
+    elif case == "legacy":
+        meta.permission_source = None
+    elif case == "unsupported":
+        _, _, meta = _permission_preflight_case(
+            tmp_path, source_ids=tuple(state.channel_map), unsupported_source="222"
+        )
+    elif case == "unavailable":
+        mock_aiohttp.get(f"{config.stoat_url}/channels/{first}", status=403, repeat=True)
+    register_permission_dispatch_reads(mock_aiohttp, config, state, server, channels)
+    mock_aiohttp.get(
+        f"{config.stoat_url}/servers/{state.stoat_server_id}?include_channels=true",
+        payload={**server, "channels": list(channels.values())},
+        repeat=True,
+    )
+    mock_aiohttp.get(f"{config.stoat_url}/servers/{state.stoat_server_id}/emojis", payload=[])
+    before = asdict(state)
+    report = await run_check(
+        config.stoat_url, config.token, state, _noop_event, permission_metadata=meta
+    )
+    permissions = [result for result in report.results if result.kind.startswith("permission_")]
+    assert any(result.kind == kind for result in permissions)
+    if case == "healthy":
+        assert {result.discord_id for result in permissions} == set(state.channel_map)
+        assert all(result.status == "ok" for result in permissions)
+    else:
+        assert not any(
+            result.kind == "permission_verified" and result.discord_id == "222"
+            for result in permissions
+        )
+    if case == "mismatch":
+        assert report.has_failures
+    assert asdict(state) == before and state.permission_runtime is None
+    assert all(method == "GET" for method, _ in mock_aiohttp.requests)
+
+
+@pytest.mark.parametrize(
+    "case,kind",
+    [
+        ("common", "permission_verified"),
+        ("mixed", "permission_unsupported"),
+        ("changed-index", "permission_mismatch"),
+        ("missing-member", "permission_unverified"),
+        ("duplicate-member", "permission_unverified"),
+    ],
+)
+async def test_permission_check_proves_complete_common_index_access(
+    tmp_path: pathlib.Path, mock_aiohttp: aioresponses, case: str, kind: str
+) -> None:
+    from dataclasses import asdict
+
+    from tests.test_delivery import (
+        permission_dispatch_context,
+        register_permission_dispatch_reads,
+    )
+    from tests.test_engine import _permission_preflight_case
+
+    config, state, _, server, channels = permission_dispatch_context(tmp_path, forum=True)
+    key = next(key for key in state.channel_map if key.startswith("forum-index-"))
+    group = key.removeprefix("forum-index-")
+    _, _, metadata = _permission_preflight_case(
+        tmp_path,
+        source_ids=tuple(source for source in state.channel_map if source != key),
+        mixed=case == "mixed",
+    )
+    if case == "changed-index":
+        channels[state.channel_map[key]]["role_permissions"] = {
+            state.role_map["112"]: {"a": 0, "d": 1 << 20}
+        }
+    elif case == "missing-member":
+        state.forum_channel_members[group].pop()
+    elif case == "duplicate-member":
+        state.forum_channel_members[group].append("222")
+    register_permission_dispatch_reads(mock_aiohttp, config, state, server, channels)
+    mock_aiohttp.get(
+        f"{config.stoat_url}/servers/{state.stoat_server_id}?include_channels=true",
+        payload={**server, "channels": list(channels.values())},
+        repeat=True,
+    )
+    mock_aiohttp.get(f"{config.stoat_url}/servers/{state.stoat_server_id}/emojis", payload=[])
+    before = asdict(state)
+    report = await run_check(
+        config.stoat_url, config.token, state, _noop_event, permission_metadata=metadata
+    )
+    indexes = [result for result in report.results if result.discord_id == key]
+    assert any(result.kind == kind for result in indexes)
+    assert asdict(state) == before and state.permission_runtime is None
+    assert all(method == "GET" for method, _ in mock_aiohttp.requests)
+
+
 def test_has_failures_is_true_only_for_a_fail() -> None:
     """warn and unverifiable must NOT make the command exit non-zero.
 
@@ -294,7 +439,8 @@ async def test_a_state_predating_this_feature_degrades_rather_than_refusing(
     Scoped to the preconditions in chunk 2, where run_check made no requests
     and this could assert nothing more. Chunk 3 gave it something to degrade,
     so it now drives the real structure pass over an empty state and asserts
-    the run completes with nothing to report rather than raising.
+    the run completes without structure or tail findings rather than raising.
+    Missing permission evidence now has an explicit unverified result.
     """
     state = MigrationState()
     state.stoat_server_id = SRV
@@ -303,7 +449,8 @@ async def test_a_state_predating_this_feature_degrades_rather_than_refusing(
     _register(mock_aiohttp, _server_payload([], []))
     report = await run_check(BASE_URL, TOKEN, state, _noop_event)
     assert report.counts()["fail"] == 0
-    assert report.results == []
+    assert report.counts()["unverifiable"] == 1
+    assert all(result.kind == "permission_unverified" for result in report.results)
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +858,11 @@ async def test_the_structure_family_costs_exactly_three_requests(
     assert structure_calls == 3, (
         f"expected 3 structure requests for 91 entities, made {structure_calls}"
     )
-    structure_results = [r for r in report.results if not r.name.startswith("tail:")]
+    structure_results = [
+        r
+        for r in report.results
+        if not r.name.startswith("tail:") and not r.kind.startswith("permission_")
+    ]
     assert len(structure_results) == 91
     assert report.has_failures is False
 
@@ -1344,7 +1495,10 @@ async def test_a_flatten_migration_with_later_activity_is_all_ok(
     state.message_map[_did(9)] = _sid(9)
 
     report = await run_check(BASE_URL, TOKEN, state, _noop_event)
-    assert {r.status for r in report.results} == {"ok"}
+    assert {r.status for r in report.results if not r.kind.startswith("permission_")} == {"ok"}
+    assert [r.kind for r in report.results if r.kind.startswith("permission_")] == [
+        "permission_unverified"
+    ]
 
 
 async def test_all_seven_populations_in_one_run(mock_aiohttp: aioresponses) -> None:
@@ -1990,6 +2144,17 @@ _CHECK_REPORT_SCHEMAS = {
     }
 }
 
+_CHECK_REPORT_SCHEMAS[2] = {
+    **_CHECK_REPORT_SCHEMAS[1],
+    "kinds": {
+        *_CHECK_REPORT_SCHEMAS[1]["kinds"],
+        "permission_verified",
+        "permission_mismatch",
+        "permission_unverified",
+        "permission_unsupported",
+    },
+}
+
 
 def _literal_kind_values(node: ast.AST) -> set[str]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -2075,7 +2240,7 @@ def test_every_emitted_kind_is_documented_and_versioned() -> None:
     """Every literal kind belongs to both the durable docs and the current schema."""
     documented = set(re.findall(r"``([a-z_]+)``", CheckResult.__doc__ or ""))
     emitted = _emitted_check_kinds()
-    expected = _CHECK_REPORT_SCHEMAS[1]["kinds"]
+    expected = _CHECK_REPORT_SCHEMAS[2]["kinds"]
 
     assert emitted == expected
     assert emitted <= documented
@@ -2117,12 +2282,12 @@ class TestCheckReportToDict:
         report.add(name="general", status="ok", kind="channel_present", detail="found")
         document = report.to_dict()
         assert set(document) == {"schema_version", "results", "counts"}
-        assert document["schema_version"] == 1
+        assert document["schema_version"] == 2
         assert len(document["results"]) == 1
         assert document["counts"]["ok"] == 1
 
     def test_schema_version_covers_the_complete_contract(self) -> None:
-        """Version 1 pins fields, types, counts, statuses, and every emitted kind."""
+        """Version 2 pins fields, types, counts, statuses, and every emitted kind."""
         report = CheckReport()
         report.add(
             name="channel:d-100",
@@ -2151,14 +2316,14 @@ class TestCheckReportToDict:
         assert actual == _CHECK_REPORT_SCHEMAS[version]
 
     def test_ordinary_result_values_do_not_change_the_schema_version(self) -> None:
-        """Data changes within the same contract retain version 1."""
+        """Data changes within the same contract retain version 2."""
         first = CheckReport()
         first.add(name="first", status="ok", kind="channel_present", detail="one")
         second = CheckReport()
         second.add(name="second", status="fail", kind="channel_missing", detail="two")
 
-        assert first.to_dict()["schema_version"] == 1
-        assert second.to_dict()["schema_version"] == 1
+        assert first.to_dict()["schema_version"] == 2
+        assert second.to_dict()["schema_version"] == 2
 
     def test_to_dict_strips_control_characters(self) -> None:
         """Free-text fields have C0/C1 control characters removed."""

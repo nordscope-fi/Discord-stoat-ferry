@@ -2809,12 +2809,12 @@ async def test_validation_calls_run_check(tmp_path: Path) -> None:
     val_events = [e for e in events if e.phase == "validate_migration"]
     assert any(e.status == "started" for e in val_events)
     assert any(e.status == "completed" for e in val_events)
-    assert state.validation_results["schema_version"] == 1
+    assert state.validation_results["schema_version"] == 2
     assert state.validation_results["has_failures"] is False
     assert len(state.validation_results["results"]) == 1
     assert state.validation_results["counts"]["ok"] == 1
     saved = load_state(tmp_path)
-    assert saved.validation_results["schema_version"] == 1
+    assert saved.validation_results["schema_version"] == 2
     validation_completed = next(
         index
         for index, event in enumerate(events)
@@ -5943,7 +5943,10 @@ async def test_raw_healthy_repair_makes_zero_server_writes(tmp_path: Path) -> No
                 repeat=True,
             )
         check = await run_check(BASE_URL, TOKEN, state, lambda event: None)
-        assert check.counts() == {"ok": 7, "warn": 0, "fail": 0, "unverifiable": 0}
+        assert check.counts() == {"ok": 7, "warn": 0, "fail": 0, "unverifiable": 1}
+        assert [result.kind for result in check.results if result.status == "unverifiable"] == [
+            "permission_unverified"
+        ]
         config = _make_repair_config(tmp_path, incremental=True)
         for _ in range(2):
             outcome = await run_repair(config, state, [], lambda event: None)
