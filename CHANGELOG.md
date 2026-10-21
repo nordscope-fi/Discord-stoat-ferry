@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Add actual-owner integration checks for multi-role access, incremental delivery identities, partial-write recovery, nested retry authority, source-only refresh and refusal after access changes (#1172).
+
 - Keep GUI completion pending until the migration returns, show shared permission stops with retained delivery totals, preserve repair actions and effects after refusal, and pass cached source evidence to read-only checks (#1172).
 
 - Add an explicit source-permission refresh action to cached GUI exports, requiring selected context and clearing source credentials after success, failure or cancellation without target or exporter work (#1172).
