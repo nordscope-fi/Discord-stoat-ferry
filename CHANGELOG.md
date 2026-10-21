@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Share the pure access comparison between strict readback and non-authorizing carried-channel preflight, checking current and proposed-final access without inventing created identities or readiness (#1172).
 - Model the pinned new-server creation default when the existing role writer skips zero, while keeping proposed values separate from observations and requiring exact channel readback (#1172).
 - Define complete common-source permission proof for generated indexes, preserving existing keys and unrelated cells while refusing mixed access or inconsistent source membership (#1172).
 - Match existing role/default/rank writes to the bound operation plan, revoke dependent proofs before dispatch, and preserve terminal stops and write uncertainty (#1172).
