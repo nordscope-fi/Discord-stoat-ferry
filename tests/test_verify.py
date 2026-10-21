@@ -2684,3 +2684,147 @@ async def test_permission_context_propagates_cancellation(
                 (PERMISSION_CHANNEL,),
             )
     assert sum(len(calls) for calls in mock_aiohttp.requests.values()) == 2
+
+
+@pytest.mark.parametrize("failure", [None, "mismatch", "cancelled"])
+async def test_verify_permission_channel_requires_a_fresh_runtime_check(
+    monkeypatch, tmp_path, failure
+) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.core.permissions import PermissionOutcome, PermissionRuntime
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator import verify
+
+    check = getattr(verify, "verify_permission_channel", None)
+    assert callable(check), "Runtime permission readback integration is missing"
+    observed = decode_permissions()
+    runtime = Mock(spec=PermissionRuntime)
+    runtime.verify.return_value = observed
+    error = PermissionSafetyError(
+        PermissionOutcome("recheck", "readback_mismatch", "none_confirmed")
+    )
+    if failure == "mismatch":
+        runtime.verify.side_effect = error
+
+    async def read(session, config, state, channel_ids):
+        runtime.invalidate_channel.assert_called_once_with(PERMISSION_CHANNEL)
+        assert channel_ids == (PERMISSION_CHANNEL,)
+        if failure == "cancelled":
+            raise asyncio.CancelledError()
+        return observed
+
+    reader = AsyncMock(side_effect=read)
+    monkeypatch.setattr(verify, "read_permission_context", reader)
+    state = MigrationState(stoat_server_id=PERMISSION_SERVER, permission_runtime=runtime)
+    config = FerryConfig(tmp_path, BASE_URL, TOKEN)
+    async with aiohttp.ClientSession() as session:
+        if failure:
+            exception = asyncio.CancelledError if failure == "cancelled" else PermissionSafetyError
+            with pytest.raises(exception) as caught:
+                await check(session, config, state, PERMISSION_CHANNEL)
+            if failure == "mismatch":
+                assert caught.value is error
+        else:
+            assert await check(session, config, state, PERMISSION_CHANNEL) is observed
+        reader.assert_awaited_once_with(session, config, state, (PERMISSION_CHANNEL,))
+        assert not session.closed
+    if failure == "cancelled":
+        runtime.verify.assert_not_called()
+    else:
+        runtime.verify.assert_called_once_with(PERMISSION_CHANNEL, observed)
+
+
+@pytest.mark.parametrize("runtime_kind", ["absent", "unbound", "stopped"])
+async def test_verify_permission_channel_refuses_before_io_without_a_live_plan(
+    monkeypatch, tmp_path, runtime_kind
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.core.permissions import PermissionRuntime
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator import verify
+
+    check = getattr(verify, "verify_permission_channel", None)
+    assert callable(check), "Runtime permission readback integration is missing"
+    runtime = None if runtime_kind == "absent" else PermissionRuntime()
+    error = runtime.stop("unverified") if runtime_kind == "stopped" else None
+    reader = AsyncMock()
+    monkeypatch.setattr(verify, "read_permission_context", reader)
+    state = MigrationState(stoat_server_id=PERMISSION_SERVER, permission_runtime=runtime)
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(PermissionSafetyError) as caught:
+            await check(session, FerryConfig(tmp_path, BASE_URL, TOKEN), state, PERMISSION_CHANNEL)
+    if error is not None:
+        assert caught.value is error
+    reader.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [None, "changed-channel", "unavailable"])
+async def test_permission_channel_http_readback_controls_real_runtime_authority(
+    mock_aiohttp, tmp_path, failure
+) -> None:
+    from dataclasses import replace
+
+    from discord_ferry.config import FerryConfig
+    from discord_ferry.core.permissions import (
+        PermissionRuntime,
+        PermissionSourceEvidence,
+        SourceChannel,
+        SourceRole,
+        compile_permission_plan,
+    )
+    from discord_ferry.errors import PermissionSafetyError
+    from discord_ferry.migrator.verify import verify_permission_channel
+
+    fields = frozenset({"permissions", "position", "managed"})
+    source = PermissionSourceEvidence(
+        "111",
+        "discord-to-stoat-v1",
+        roles=(
+            SourceRole("111", 1 << 10, 0, False, fields),
+            SourceRole("112", 1 << 11, 1, False, fields),
+        ),
+        channels=(SourceChannel("222", 0, (), 0, frozenset({"type", "permission_overwrites"})),),
+        covered_channel_ids=frozenset({"222"}),
+        fingerprint="raw-source-evidence",
+    )
+    observed = decode_permissions()
+    layout = replace(
+        observed.layout,
+        planned_roles=(("112", PERMISSION_ROLE),),
+        planned_channels=(("222", PERMISSION_CHANNEL),),
+    )
+    plan = compile_permission_plan(source, layout)
+    assert not plan.problems
+    runtime = PermissionRuntime(plan)
+    # Even an earlier successful check must be replaced with this request's evidence.
+    runtime.verify(PERMISSION_CHANNEL, observed)
+    state = MigrationState(stoat_server_id=PERMISSION_SERVER, permission_runtime=runtime)
+    channel = permission_channel()
+    if failure == "changed-channel":
+        channel["default_permissions"] = {"a": 0, "d": 1 << 20}
+    mock_aiohttp.get(
+        f"{BASE_URL}/servers/{PERMISSION_SERVER}",
+        payload=permission_server(),
+        status=403 if failure == "unavailable" else 200,
+    )
+    mock_aiohttp.get(f"{BASE_URL}/channels/{PERMISSION_CHANNEL}", payload=channel)
+    mock_aiohttp.get(f"{BASE_URL}/servers/{PERMISSION_SERVER}", payload=permission_server())
+    async with aiohttp.ClientSession() as session:
+        if failure:
+            with pytest.raises(PermissionSafetyError):
+                await verify_permission_channel(
+                    session, FerryConfig(tmp_path, BASE_URL, TOKEN), state, PERMISSION_CHANNEL
+                )
+            assert runtime.stopped and not runtime.ready
+        else:
+            result = await verify_permission_channel(
+                session, FerryConfig(tmp_path, BASE_URL, TOKEN), state, PERMISSION_CHANNEL
+            )
+            assert result is not observed
+            assert runtime.require(PERMISSION_CHANNEL) is result
+    assert all(method == "GET" for method, _ in mock_aiohttp.requests)

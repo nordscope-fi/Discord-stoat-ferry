@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from hashlib import sha256
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NoReturn
+
+from discord_ferry.errors import PermissionSafetyError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -302,6 +304,41 @@ def constant_result(p: BitPredicate, all_roles: int, zeros: int, ones: int = 0) 
     return None
 
 
+def _fallback_matches(
+    role_count: int,
+    agrees: Callable[[int, int, bool], bool],
+    grants: int,
+    base: bool,
+    zeros: int,
+) -> bool:
+    if base:
+        return agrees(zeros, 0, True)
+    if not agrees(zeros | grants, 0, False):
+        return False
+    return all(
+        agrees(zeros, 1 << index, True)
+        for index in range(role_count)
+        if grants & (1 << index) and not zeros & (1 << index)
+    )
+
+
+def _encoding_matches(
+    operations: tuple[bool | None, ...],
+    agrees: Callable[[int, int, bool], bool],
+    grants: int,
+    base: bool,
+) -> bool:
+    """Check observed overrides against the same symbolic queries as synthesis."""
+    zeros = 0
+    for index in range(len(operations) - 1, -1, -1):
+        operation = operations[index]
+        if operation is not None:
+            if not agrees(zeros, 1 << index, operation):
+                return False
+            zeros |= 1 << index
+    return _fallback_matches(len(operations), agrees, grants, base, zeros)
+
+
 def synthesize_bit(
     role_count: int,
     query: Callable[[int, int], bool | None],
@@ -335,17 +372,17 @@ def synthesize_bit(
         if result is not None:
             operations[index] = result
             zeros |= role
-    if base:
-        if ask(zeros) is not True:
-            return None
-    else:
-        if ask(zeros | target_grants) is not False:
-            return None
-        for index in range(role_count):
-            role = 1 << index
-            if target_grants & role and not zeros & role and ask(zeros, role) is not True:
-                return None
-    return tuple(operations)
+    return (
+        tuple(operations)
+        if _fallback_matches(
+            role_count,
+            lambda zeros, ones, wanted: ask(zeros, ones) is wanted,
+            target_grants,
+            base,
+            zeros,
+        )
+        else None
+    )
 
 
 def _source_role_changes_bit(predicate: BitPredicate, role: int) -> bool:
@@ -565,6 +602,54 @@ def _calculation_roles(layout: TargetLayout) -> tuple[str, ...]:
     return tuple(sorted(priorities, key=priorities.__getitem__, reverse=True))
 
 
+def _target_effect_problems(layout: TargetLayout, affected: int) -> tuple[PermissionProblem, ...]:
+    """Keep compiler and runtime within the same observed target model."""
+
+    def refuse(
+        reason: ProblemReason, guidance: str, identity: str
+    ) -> tuple[PermissionProblem, ...]:
+        return (PermissionProblem(reason, (identity,), None, guidance),)
+
+    actual = {role.id for role in layout.roles}
+    targets = {target for _, target in layout.planned_roles if target is not None}
+    for role in layout.roles:
+        assert role.permissions is not None
+        if role.permissions.deny & affected:
+            return refuse(
+                "unsupported", "Server-role deny effects require an exact supported model", role.id
+            )
+        if role.id not in targets and role.permissions.allow & affected:
+            return refuse(
+                "unsupported", "Native target role access has no source intent binding", role.id
+            )
+    for proposed in layout.planned_role_facts:
+        if proposed.permissions.deny & affected:
+            return refuse(
+                "unsupported",
+                "Server-role deny effects require an exact supported model",
+                proposed.source_id,
+            )
+    channels = {channel.id: channel for channel in layout.channels}
+    for _, target in layout.planned_channels:
+        if target is None:
+            continue
+        channel = channels[target]
+        if channel.default is None or channel.roles is None:
+            return refuse("unverified", "Read complete channel defaults and role cells", target)
+        overrides = dict(channel.roles)
+        if len(overrides) != len(channel.roles):
+            return refuse("unverified", "Read unique channel role cells", target)
+        # A complete role inventory proves absent-role cells inert, not removable.
+        if any(
+            rid in actual and rid not in targets and (cell.allow | cell.deny) & affected
+            for rid, cell in overrides.items()
+        ):
+            return refuse(
+                "unsupported", "Native channel-role effects have no source intent binding", target
+            )
+    return ()
+
+
 def validate_calculation_inputs(
     source: PermissionSourceEvidence, layout: TargetLayout
 ) -> tuple[PermissionProblem, ...]:
@@ -644,17 +729,10 @@ def validate_calculation_inputs(
     ordered = _calculation_roles(layout)
     mapping = _permission_mapping()
     affected = sum(1 << target for target in {bit for values in mapping.values() for bit in values})
-    for role in layout.roles:
-        assert role.permissions is not None
-        if role.permissions.deny & affected:
-            return refuse(
-                "unsupported", "Server-role deny effects require an exact supported model", role.id
-            )
-        if role.id not in targets and role.permissions.allow & affected:
-            return refuse(
-                "unsupported", "Native target role access has no source intent binding", role.id
-            )
-    for sid, target in selected.items():
+    target_problems = _target_effect_problems(layout, affected)
+    if target_problems:
+        return target_problems
+    for sid in selected:
         _, problems = build_source_predicates(source, sid, ordered, (10,))
         if problems:
             return problems
@@ -663,23 +741,6 @@ def validate_calculation_inputs(
                 "unsupported",
                 "This source scope needs additional category or live voice evidence",
                 sid,
-            )
-        if target is None:
-            continue
-        channel = channels[target]
-        if channel.default is None or channel.roles is None:
-            return refuse("unverified", "Read complete channel defaults and role cells", target)
-        overrides = dict(channel.roles)
-        if len(overrides) != len(channel.roles):
-            return refuse("unverified", "Read unique channel role cells", target)
-        # The bound inventory is complete. The backend ignores cells for absent roles.
-        # Preserve those observed cells, including their mapped bits, in the layout.
-        if any(
-            rid in actual and rid not in targets and (cell.allow | cell.deny) & affected
-            for rid, cell in overrides.items()
-        ):
-            return refuse(
-                "unsupported", "Native channel-role effects have no source intent binding", target
             )
     from discord_ferry.discord.permissions import translate_permissions
 
@@ -746,6 +807,8 @@ def _visible_bit_query(
     base: bool,
     zeros: int,
     ones: int,
+    *,
+    hidden_result: bool | None = None,
 ) -> bool | None:
     visible = ((view, True),)
     can_allow = _conjunction_possible(
@@ -760,7 +823,7 @@ def _visible_bit_query(
         return can_allow
     # No visible source member satisfies this cube. Match the fixed fallback
     # there instead of imposing an additional restriction on hidden members.
-    return base or bool(grants & ones)
+    return hidden_result if hidden_result is not None else base or bool(grants & ones)
 
 
 def compile_supported_bits(
@@ -944,12 +1007,480 @@ class PermissionOutcome:
 
 @dataclass
 class PermissionRuntime:
-    """Run-local lifecycle data. Verification methods belong to T09."""
+    """One operation's proposed bindings, observed authority and terminal stop."""
 
     plan: PermissionPlan | None = None
-    ready: dict[str, PermissionReadback] = field(default_factory=dict)
-    stopped: bool = False
-    effects: PermissionEffects = "none_confirmed"
+    ready: dict[str, PermissionReadback] = field(default_factory=dict, init=False)
+    stopped: bool = field(default=False, init=False)
+    effects: PermissionEffects = field(default="none_confirmed", init=False)
     outcome: PermissionOutcome = field(
-        default_factory=lambda: PermissionOutcome("preflight", "unverified", "none_confirmed")
+        default_factory=lambda: PermissionOutcome("preflight", "unverified", "none_confirmed"),
+        init=False,
     )
+    _bound_plan: PermissionPlan | None = field(default=None, init=False, repr=False)
+    _roles: dict[str, str | None] = field(default_factory=dict, init=False, repr=False)
+    _channels: dict[str, str | None] = field(default_factory=dict, init=False, repr=False)
+    _sources: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _server: str = field(default="", init=False, repr=False)
+    _fingerprint: str = field(default="", init=False, repr=False)
+    _validated: bool = field(default=False, init=False, repr=False)
+    _authority: dict[str, tuple[str, PermissionReadback]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _error: PermissionSafetyError | None = field(default=None, init=False, repr=False)
+    _pending_writes: int = field(default=0, init=False, repr=False)
+    _confirmed_writes: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.plan is not None:
+            self._load_bindings(self.plan)
+
+    def _load_bindings(self, plan: PermissionPlan) -> None:
+        self._bound_plan = plan
+        self._server = plan.target_layout.server_id
+        self._roles = dict(plan.target_layout.planned_roles)
+        self._channels = dict(plan.target_layout.planned_channels)
+        self._sources = {
+            target: source for source, target in self._channels.items() if target is not None
+        }
+
+    def _refuse(
+        self,
+        reason: ProblemReason,
+        guidance: str,
+        *,
+        stage: PermissionStage = "recheck",
+        ids: tuple[str, ...] = (),
+    ) -> NoReturn:
+        raise self.stop(
+            reason, stage=stage, problems=(PermissionProblem(reason, ids, None, guidance),)
+        )
+
+    def _active_plan(self, stage: PermissionStage = "recheck") -> PermissionPlan:
+        if self._error is not None:
+            raise self._error
+        plan = self.plan
+        if self.stopped or plan is None or plan is not self._bound_plan:
+            self._refuse(
+                "unverified", "Start a fresh operation with a bound permission plan", stage=stage
+            )
+        if not self._validated:
+            problems = plan.problems + tuple(
+                problem for channel in plan.channels for problem in channel.problems
+            )
+            if problems:
+                raise self.stop(problems[0].reason, stage=stage, problems=problems)
+            layout = plan.target_layout
+            mapping = _permission_mapping()
+            affected = sum(1 << bit for bit in {b for values in mapping.values() for b in values})
+            channels = {channel.source_key: channel for channel in plan.channels}
+            roles = {role.id: role for role in layout.roles}
+            future = {role.source_id: role for role in layout.planned_role_facts}
+            observed = {channel.id: channel for channel in layout.channels}
+            if (
+                not plan.source_fingerprint
+                or not plan.calculation_fingerprint
+                or not layout.service
+                or not layout.fingerprint
+                or not channels
+                or len(channels) != len(plan.channels)
+                or set(channels) != self._channels.keys()
+                or len(self._channels) != len(layout.planned_channels)
+                or len(self._roles) != len(layout.planned_roles)
+                or len(roles) != len(layout.roles)
+                or len(future) != len(layout.planned_role_facts)
+                or len(observed) != len(layout.channels)
+                or set(future) != {sid for sid, target in self._roles.items() if target is None}
+                or len(self._sources)
+                != sum(target is not None for target in self._channels.values())
+                or len(set(target for target in self._roles.values() if target is not None))
+                != sum(target is not None for target in self._roles.values())
+                or any(target not in roles for target in self._roles.values() if target is not None)
+                or any(
+                    target not in observed
+                    for target in self._channels.values()
+                    if target is not None
+                )
+                or any(role.permissions is None or role.rank is None for role in layout.roles)
+                or (
+                    layout.server_id
+                    and (layout.server_default is None or layout.planned_server_default is not None)
+                )
+                or (
+                    not layout.server_id
+                    and (
+                        layout.planned_server_default is None
+                        or layout.server_default is not None
+                        or layout.roles
+                        or layout.channels
+                    )
+                )
+            ):
+                self._refuse(
+                    "unverified",
+                    "Bind complete source, mapping and target assumptions",
+                    stage=stage,
+                )
+            ranks = tuple(role.rank for role in layout.roles) + tuple(
+                role.rank for role in layout.planned_role_facts
+            )
+            if len(set(ranks)) != len(ranks):
+                self._refuse("unverified", "Bind unambiguous target role priority", stage=stage)
+            target_problems = _target_effect_problems(layout, affected)
+            if target_problems:
+                raise self.stop(target_problems[0].reason, stage=stage, problems=target_problems)
+            for channel in plan.channels:
+                if (
+                    channel.target_layout != layout
+                    or channel.default is None
+                    or not channel.source_ids
+                    or channel.affected_mask != affected
+                    or {sid for sid, _ in channel.roles} != self._roles.keys()
+                    or len(channel.roles) != len(self._roles)
+                    or {bit for bit, _ in channel.source_predicates} != mapping.keys()
+                    or len(channel.source_predicates) != len(mapping)
+                ):
+                    self._refuse(
+                        "unverified",
+                        "Bind complete channel proposals and source predicates",
+                        stage=stage,
+                    )
+            self._validated = True
+            self._refresh_fingerprint()
+        return plan
+
+    def _refresh_fingerprint(self) -> None:
+        assert self._bound_plan is not None
+        self._fingerprint = sha256(
+            json.dumps(
+                {
+                    "plan": asdict(self._bound_plan),
+                    "server": self._server,
+                    "roles": sorted(self._roles.items()),
+                    "channels": sorted(self._channels.items()),
+                },
+                default=lambda value: sorted(value) if isinstance(value, frozenset) else value,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+    def _identity(self, value: str) -> None:
+        try:
+            _identity(value)
+        except ValueError:
+            self._refuse("unverified", "Bind a valid structural target identity")
+
+    def bind(self, plan: PermissionPlan) -> None:
+        if self._bound_plan is not None and plan is not self._bound_plan:
+            self._refuse("unverified", "Start a fresh operation after permission inputs change")
+        if self._bound_plan is None:
+            self.plan = plan
+            self._load_bindings(plan)
+        self._active_plan("preflight")
+        self.invalidate_layout()
+
+    def bind_server(self, target: str) -> None:
+        self._active_plan()
+        self._identity(target)
+        if self._server and self._server != target:
+            self._refuse("unverified", "Start a fresh operation after the target server changes")
+        if self._server != target:
+            self._server = target
+            self._refresh_fingerprint()
+            self.invalidate_layout()
+
+    def bind_role(self, source: str, target: str) -> None:
+        plan = self._active_plan()
+        self._identity(target)
+        if source not in self._roles or (
+            self._roles[source] is not None and self._roles[source] != target
+        ):
+            self._refuse("unverified", "Bind role creation through its approved source identity")
+        if self._roles[source] == target:
+            return
+        if target in self._roles.values() or any(
+            role.id == target for role in plan.target_layout.roles
+        ):
+            self._refuse("unverified", "Bind a unique newly created target role")
+        self._roles[source] = target
+        self._refresh_fingerprint()
+        self.invalidate_layout()
+
+    def bind_channel(self, source: str, target: str) -> None:
+        plan = self._active_plan()
+        self._identity(target)
+        if source not in self._channels or (
+            self._channels[source] is not None and self._channels[source] != target
+        ):
+            self._refuse("unverified", "Bind channel creation through its approved source identity")
+        if self._channels[source] == target:
+            return
+        if target in self._channels.values() or any(
+            channel.id == target for channel in plan.target_layout.channels
+        ):
+            self._refuse("unverified", "Bind a unique newly created target channel")
+        self._channels[source] = target
+        self._sources[target] = source
+        self._refresh_fingerprint()
+        self.invalidate_layout()
+
+    def channel_plan(self, target: str) -> ChannelPermissionPlan:
+        plan = self._active_plan()
+        self._identity(target)
+        if (
+            not self._server
+            or any(value is None for value in self._roles.values())
+            or target not in self._sources
+        ):
+            self._refuse("unverified", "Bind every required created identity before application")
+        channel = next(
+            channel for channel in plan.channels if channel.source_key == self._sources[target]
+        )
+        roles = []
+        for source, cell in channel.roles:
+            role = self._roles[source]
+            assert role is not None
+            roles.append((role, cell))
+        return replace(channel, roles=tuple(roles))
+
+    def _sync_outcome(self, stage: PermissionStage) -> None:
+        if self._error is not None:
+            return
+        verified = bool(self._channels) and all(
+            target is not None
+            and target in self._authority
+            and self.ready.get(target) is self._authority[target][1]
+            for target in self._channels.values()
+        )
+        self.outcome = PermissionOutcome(
+            stage, "verified" if verified else "unverified", self.effects
+        )
+
+    def invalidate_channel(self, target: str) -> None:
+        self.ready.pop(target, None)
+        self._authority.pop(target, None)
+        self._sync_outcome("recheck")
+
+    def invalidate_layout(self) -> None:
+        self.ready.clear()
+        self._authority.clear()
+        self._sync_outcome("recheck")
+
+    def require(self, target: str) -> PermissionReadback:
+        self._active_plan()
+        proof = self._authority.get(target)
+        if proof is None or proof[0] != self._fingerprint or self.ready.get(target) is not proof[1]:
+            self._refuse("unverified", "Obtain fresh matching permission evidence before content")
+        return proof[1]
+
+    def stop(
+        self,
+        reason: ProblemReason,
+        *,
+        stage: PermissionStage = "application",
+        problems: tuple[PermissionProblem, ...] = (),
+    ) -> PermissionSafetyError:
+        if self._error is None:
+            self.stopped = True
+            self.ready.clear()
+            self._authority.clear()
+            self.outcome = PermissionOutcome(stage, reason, self.effects, problems)
+            self._error = PermissionSafetyError(self.outcome)
+        return self._error
+
+    def note_write(self) -> None:
+        self._active_plan("application")
+        self._pending_writes += 1
+        self.effects = "changes_possible"
+        self._sync_outcome("application")
+
+    def _settle_write(self, confirmed: bool) -> None:
+        if self.stopped:
+            return
+        if not self._pending_writes:
+            self._refuse(
+                "unverified", "Record destination effects before mutation", stage="application"
+            )
+        self._pending_writes -= 1
+        self._confirmed_writes |= confirmed
+        self.effects = (
+            "changes_possible"
+            if self._pending_writes
+            else "changes_confirmed"
+            if self._confirmed_writes
+            else "none_confirmed"
+        )
+        self._sync_outcome("application")
+
+    def note_write_confirmed(self) -> None:
+        self._settle_write(True)
+
+    def note_write_rejected(self) -> None:
+        self._settle_write(False)
+
+    def verify(
+        self, target: str, observed: PermissionReadback, *, stage: PermissionStage = "recheck"
+    ) -> PermissionReadback:
+        plan = self._active_plan(stage)
+        channel = self.channel_plan(target)
+        if observed.problems:
+            raise self.stop(observed.problems[0].reason, stage=stage, problems=observed.problems)
+        layout = observed.layout
+        if layout.service != plan.target_layout.service or layout.server_id != self._server:
+            self._refuse("unverified", "Read the bound target service and server", stage=stage)
+        roles = {role.id: role for role in layout.roles}
+        channels = {item.id: item for item in layout.channels}
+        if (
+            not layout.fingerprint
+            or layout.server_default is None
+            or layout.planned_roles
+            or layout.planned_channels
+            or len(roles) != len(layout.roles)
+            or len(channels) != len(layout.channels)
+            or any(role.permissions is None or role.rank is None for role in layout.roles)
+            or target not in channels
+            or channels[target].default is None
+            or channels[target].roles is None
+        ):
+            self._refuse(
+                "unverified",
+                "Read complete observed permission facts without proposed substitutes",
+                stage=stage,
+            )
+        base = plan.target_layout
+        expected_roles: dict[str, tuple[PermissionCell, int]] = {}
+        for role in base.roles:
+            assert role.permissions is not None and role.rank is not None
+            expected_roles[role.id] = (role.permissions, role.rank)
+        for planned_role in base.planned_role_facts:
+            actual_id = self._roles[planned_role.source_id]
+            assert actual_id is not None
+            expected_roles[actual_id] = (planned_role.permissions, planned_role.rank)
+        expected_default = base.server_default if base.server_id else base.planned_server_default
+        if (
+            layout.server_default != expected_default
+            or {rid: (role.permissions, role.rank) for rid, role in roles.items()} != expected_roles
+        ):
+            self._refuse(
+                "readback_mismatch",
+                "Target role inventory, grants, rank or default changed",
+                stage=stage,
+            )
+        actual = channels[target]
+        assert actual.default is not None and actual.roles is not None
+        cells = dict(actual.roles)
+        if len(cells) != len(actual.roles):
+            self._refuse("unverified", "Read unique actual channel-role cells", stage=stage)
+        old_id = dict(base.planned_channels)[channel.source_key]
+        old = next((item for item in base.channels if item.id == old_id), None)
+        old_default = old.default if old is not None else PermissionCell(0, 0)
+        old_cells = dict(old.roles) if old is not None and old.roles is not None else {}
+        if old_default is None:
+            self._refuse("unverified", "Bind the original channel context", stage=stage)
+        mask = channel.affected_mask
+        if (actual.default.allow & ~mask, actual.default.deny & ~mask) != (
+            old_default.allow & ~mask,
+            old_default.deny & ~mask,
+        ):
+            self._refuse(
+                "readback_mismatch", "Unrelated channel-default permissions changed", stage=stage
+            )
+        mapped = set(self._roles.values())
+        for rid in cells.keys() | old_cells.keys():
+            before, after = (
+                old_cells.get(rid, PermissionCell(0, 0)),
+                cells.get(rid, PermissionCell(0, 0)),
+            )
+            if rid not in mapped:
+                mismatch = (rid in cells) != (rid in old_cells) or before != after
+            else:
+                mismatch = (before.allow & ~mask, before.deny & ~mask) != (
+                    after.allow & ~mask,
+                    after.deny & ~mask,
+                )
+            if mismatch:
+                self._refuse(
+                    "readback_mismatch",
+                    "Unrelated or inactive channel-role cells changed",
+                    stage=stage,
+                )
+        if not self._matches_source(channel, layout.server_default, actual, roles):
+            self._refuse(
+                "readback_mismatch",
+                "Observed channel access differs from the proved source result",
+                stage=stage,
+            )
+        self.ready[target] = observed
+        self._authority[target] = (self._fingerprint, observed)
+        self._sync_outcome(stage)
+        return observed
+
+    def _matches_source(
+        self,
+        channel: ChannelPermissionPlan,
+        default: int,
+        actual: TargetChannel,
+        roles: dict[str, TargetRole],
+    ) -> bool:
+        assert (
+            self._bound_plan is not None and actual.default is not None and actual.roles is not None
+        )
+        ordered = _calculation_roles(self._bound_plan.target_layout)
+        predicates = dict(channel.source_predicates)
+        all_roles = (1 << len(ordered)) - 1
+        for predicate in predicates.values():
+            all_roles |= predicate.P | predicate.N | predicate.G
+        cells = dict(actual.roles)
+        for bit, targets in _permission_mapping().items():
+            required: tuple[BitPredicate, ...] = (predicates[bit],)
+            if bit in {14, 15, 17}:
+                required += (predicates[11],)
+            for target in targets:
+                mask = 1 << target
+                base = bool(((default | actual.default.allow) & ~actual.default.deny) & mask)
+                grants = 0
+                operations: list[bool | None] = []
+                for index, source in enumerate(ordered):
+                    role_id = self._roles[source]
+                    assert role_id is not None
+                    grant = roles[role_id].permissions
+                    assert grant is not None
+                    if grant.allow & mask:
+                        grants |= 1 << index
+                    cell = cells.get(role_id, PermissionCell(0, 0))
+                    operations.append(
+                        False if cell.deny & mask else True if cell.allow & mask else None
+                    )
+
+                def agrees(
+                    zeros: int,
+                    ones: int,
+                    wanted: bool,
+                    *,
+                    bit: int = bit,
+                    required: tuple[BitPredicate, ...] = required,
+                    grants: int = grants,
+                    base: bool = base,
+                ) -> bool:
+                    if bit == 10:
+                        return constant_result(predicates[10], all_roles, zeros, ones) is wanted
+                    # No visible source member means this observed bit is irrelevant.
+                    # Synthesis still chooses its fixed fallback in the same query.
+                    return (
+                        _visible_bit_query(
+                            predicates[10],
+                            required,
+                            all_roles,
+                            grants,
+                            base,
+                            zeros,
+                            ones,
+                            hidden_result=wanted,
+                        )
+                        is wanted
+                    )
+
+                if not _encoding_matches(tuple(operations), agrees, grants, base):
+                    return False
+        return True

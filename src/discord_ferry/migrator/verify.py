@@ -32,6 +32,7 @@ from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.http import new_session
 from discord_ferry.core.permissions import (
     PermissionCell,
+    PermissionOutcome,
     PermissionProblem,
     PermissionReadback,
     TargetChannel,
@@ -39,7 +40,7 @@ from discord_ferry.core.permissions import (
     TargetRole,
 )
 from discord_ferry.core.security import strip_control
-from discord_ferry.errors import CheckError, FerryError
+from discord_ferry.errors import CheckError, FerryError, PermissionSafetyError
 from discord_ferry.migrator.api import (
     api_fetch_channel,
     api_fetch_emoji_list,
@@ -229,6 +230,22 @@ async def read_permission_context(
         )
     except (FerryError, ValueError, TypeError, TimeoutError):
         return _permission_unverified("Target permission context could not be read and bound")
+
+
+async def verify_permission_channel(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    state: MigrationState,
+    target_id: str,
+) -> PermissionReadback:
+    """Replace channel authority only after a fresh read matches the bound plan."""
+    runtime = state.permission_runtime
+    if runtime is None:
+        raise PermissionSafetyError(PermissionOutcome("recheck", "unverified", "none_confirmed"))
+    runtime.channel_plan(target_id)
+    runtime.invalidate_channel(target_id)
+    observed = await read_permission_context(session, config, state, (target_id,))
+    return runtime.verify(target_id, observed)
 
 
 #: Every status the tool can report.
