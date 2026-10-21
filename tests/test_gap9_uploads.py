@@ -33,6 +33,7 @@ from discord_ferry.parser.models import (
 from discord_ferry.state import FailedMessage, MigrationState
 from discord_ferry.uploader import autumn as autumn_module
 from tests.test_delivery import seed_rejected_messages
+from tests.test_structure import structure_binding_collaborator as structure_binding_collaborator
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -415,6 +416,7 @@ async def test_recreating_emoji_does_not_reuse_consumed_cached_id(tmp_path: Path
     assert attached == {"autumn-1", "autumn-2"}
 
 
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_reentered_server_phase_refreshes_icon_and_banner_ids(tmp_path: Path) -> None:
     icon = tmp_path / "icon.png"
     icon.write_bytes(_VALID_PNG)

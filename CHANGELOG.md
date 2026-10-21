@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Bind confirmed structure identities to the operation's permission plan and verify new or carried channel access before initial forum-index send and pin (#1172).
 - Check existing target roles plus planned creations against the backend's total-role limit before migration writes, preserving reuse and skipped-creation behavior (#1172).
 - Compile complete migration permission scope before advisory lock writes or phases, keeping proposed owner changes separate from observations and refusing unproved carried-channel or generated-index access (#1172).
 - Share the pure access comparison between strict readback and non-authorizing carried-channel preflight, checking current and proposed-final access without inventing created identities or readiness (#1172).
