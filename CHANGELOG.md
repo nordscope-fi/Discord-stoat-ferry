@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.2] - 2026-10-27
+
+### Fixed
+
+- Declare `cryptography` directly in the `feedback-service` and `dev` dependency groups, since the feedback service imports it (#1298).
+
 ## [3.1.1] - 2026-10-27
 
 ### Fixed
