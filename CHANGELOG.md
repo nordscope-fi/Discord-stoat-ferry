@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.2] - 2026-10-26
+
+### Fixed
+
+- Stop the GUI feedback dialog from refilling a recent-log excerpt the user cleared, so a cleared excerpt is no longer sent (#1241).
+
 ## [3.1.0] - 2026-10-26
 
 ### Added

@@ -86,6 +86,8 @@ class _FeedbackDialogController:
         self.include_diagnostics = False
         self.last_error_value = ""
         self.log_excerpt_value = ""
+        # Auto-fill the excerpt once, so a user who clears it does not get it back.
+        self.log_excerpt_prefilled = False
         self.draft: FeedbackDraft | None = None
         self.submission_task: asyncio.Task[None] | None = None
         self.result_url: str | None = None
@@ -280,8 +282,10 @@ class _FeedbackDialogController:
         )
         if not self.last_error_value and automatic.last_error:
             self.last_error_value = automatic.last_error
-        if not self.log_excerpt_value and automatic.log_excerpt:
-            self.log_excerpt_value = automatic.log_excerpt
+        if not self.log_excerpt_prefilled:
+            self.log_excerpt_prefilled = True
+            if not self.log_excerpt_value and automatic.log_excerpt:
+                self.log_excerpt_value = automatic.log_excerpt
         return FeedbackDiagnostics.from_mapping(
             {
                 **automatic.to_mapping(),
