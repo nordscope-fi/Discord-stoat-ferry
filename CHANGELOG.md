@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- Stop the GUI feedback dialog from refilling a recent-log excerpt the user cleared, so a cleared excerpt is no longer sent (#1241).
+- Stop the GUI feedback dialog from refilling a "Last error" or recent-log excerpt the user cleared, so a cleared box is no longer sent (#1241).
 
 ## [3.1.0] - 2026-10-26
 
