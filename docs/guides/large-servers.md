@@ -201,7 +201,7 @@ Since v2.7.0 the mode is selectable: `--reaction-mode text|native|skip` on the C
 
 ## Checkpoint Tuning
 
-Ferry saves migration state every 50 messages. If a migration is interrupted, resuming replays at most that many messages; nothing else is lost. For very large servers (100,000+ messages) you can raise the interval to reduce disk I/O: `--checkpoint-interval 200` on the CLI, or **Checkpoint interval** in the GUI's Advanced Options (since v2.7.0).
+Ferry saves migration state every 50 messages. If a migration is interrupted, resuming can replay messages sent since the last save; nothing else is lost. A save happens at the first multiple of the interval reached at least 5 seconds after the previous save, so on a fast run a resume can replay more than 50 messages. For very large servers (100,000+ messages) you can raise the interval to reduce disk I/O: `--checkpoint-interval 200` on the CLI, or **Checkpoint interval** in the GUI's Advanced Options (since v2.7.0).
 
 !!! info "Trade-off"
     A higher interval means slightly faster throughput but more re-sent messages if the migration is interrupted; Ferry replays up to one interval on resume. 200 is a good balance for large migrations; the default 50 is fine for everything else.

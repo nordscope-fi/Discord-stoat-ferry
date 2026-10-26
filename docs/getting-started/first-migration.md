@@ -62,7 +62,7 @@ Before you start, confirm you have these ready:
       --stoat-url https://api.stoat.chat
     ```
 
-    Ferry also loads a `.env` file from the folder you run it in, so you can keep `DISCORD_TOKEN` and `STOAT_TOKEN` there instead. The `--discord-token` and `--token` flags still work, but a token typed on the command line is saved in your shell history. The required settings (`--stoat-url` and the Stoat token) can be passed as flags or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
+    Set `DISCORD_TOKEN` and `STOAT_TOKEN` as environment variables before you run Ferry. A `.env` file in your working folder is not reliably loaded, because Ferry searches from its own install directory. The `--discord-token` and `--token` flags still work, but a token typed on the command line is saved in your shell history. The required settings (`--stoat-url` and the Stoat token) can be passed as flags or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
 
 ---
 
@@ -98,7 +98,7 @@ Before you start, confirm you have these ready:
 
 === "CLI (Linux / advanced)"
 
-    These commands read `DISCORD_TOKEN` and `STOAT_TOKEN` from your environment (or a `.env` file), as set in Step 1. Passing `--discord-token` or `--token` also works, but the token then lands in your shell history.
+    These commands read `DISCORD_TOKEN` and `STOAT_TOKEN` from your environment, as set in Step 1. Passing `--discord-token` or `--token` also works, but the token then lands in your shell history.
 
     **Orchestrated mode (recommended):**
 
@@ -116,7 +116,7 @@ Before you start, confirm you have these ready:
       --stoat-url https://api.stoat.chat
     ```
 
-    If `DISCORD_TOKEN` is set in the environment or loaded from `.env`, Ferry ignores it in
+    If `DISCORD_TOKEN` is set in the environment, Ferry ignores it in
     offline mode and prints a note. Passing `--discord-token` with `--export-dir` remains an error.
 
     Additional flags:
@@ -141,7 +141,7 @@ Before you start, confirm you have these ready:
     | `--skip-dce-verify` | Skip DCE binary SHA-256 verification |
     | `--reaction-mode text\|native\|skip` | How reactions migrate (default `text`, appended as a summary; `native` calls the reaction API; `skip` drops them) |
     | `--min-thread-messages N` | Skip threads with fewer than N messages (default 0 = all threads) |
-    | `--checkpoint-interval N` | Save state every N messages (default 50; raise for very large runs) |
+    | `--checkpoint-interval N` | Save state at the first multiple of N messages reached 5 or more seconds after the last save (default 50; raise for very large runs) |
     | `--max-concurrent-channels N` | Channels processed in parallel (default 3; self-hosted only) |
     | `--max-concurrent-requests N` | Concurrent API calls across all channel workers (default 5) |
     | `--skip-avatars` | Skip the avatar pre-flight phase (avatars still upload on demand) |

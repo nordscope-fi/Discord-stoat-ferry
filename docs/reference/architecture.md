@@ -1186,7 +1186,7 @@ bar, status table, and warning/error output. Subscribes to the same `on_event` c
 the GUI.
 
 **Environment variables**: `STOAT_URL`, `STOAT_TOKEN`, `DISCORD_TOKEN`, `DISCORD_SERVER_ID`.
-Loaded from `.env` via python-dotenv.
+Read from the environment. `load_dotenv()` also runs with no path, which searches upward from the installed package directory, not the working directory.
 
 ### Adding a New UI
 
