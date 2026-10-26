@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "discord-ferry"
-version = "3.1.0"
+version = "3.1.1"
 description = "Migrate Discord servers to Stoat (formerly Revolt)"
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,7 @@ Issues = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues"
 
 [project.optional-dependencies]
 feedback-service = [
+    "cryptography>=3.4.0",
     "PyJWT[crypto]>=2.15.0",
 ]
 native = [
@@ -64,6 +65,7 @@ dev = [
     "ruff",
     "mypy",
     "pyinstaller>=6.0",
+    "cryptography>=3.4.0",
     "PyJWT[crypto]>=2.15.0",
 ]
 # Mutation testing, kept out of `dev` on purpose: CI installs `dev` on seven jobs

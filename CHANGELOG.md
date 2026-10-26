@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-10-26
+
+### Fixed
+
+- Declare `cryptography` directly in the `feedback-service` and `dev` dependency groups, since the feedback service imports it (#1298).
+
 ### Changed
 
 - Document the extra pinning capability inherited from Stoat's combined `ManageMessages` permission (#1228).
