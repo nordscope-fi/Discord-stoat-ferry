@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.1] - 2026-10-27
+
+### Fixed
+
+- Write the Discord @everyone permissions to Stoat even when they grant nothing. A migrated server used to keep Stoat's stock default, which let every member view and post in channels without an overwrite. `ferry repair` now resets a server still holding that stock default, or the old migration floor, to the recorded value. Any other value gets a manual-review warning (#1174).
+
 ## [3.1.0] - 2026-10-26
 
 ### Added
