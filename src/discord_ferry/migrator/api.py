@@ -48,6 +48,7 @@ _CIRCUIT_THRESHOLD = 5
 _CIRCUIT_PAUSE_SECONDS = 30
 
 _MAX_RETRY_DELAY_SECONDS = 60  # cap any server/body-advertised 429 retry delay
+_MIGRATION_AUDIT_HEADERS = {"X-Audit-Log-Reason": "Discord Ferry migration"}
 
 
 @dataclass
@@ -732,7 +733,9 @@ async def api_edit_server(
         Updated server object dict.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}"
-    return await _api_request(session, "PATCH", url, token, kwargs)
+    return await _api_request(
+        session, "PATCH", url, token, kwargs, extra_headers=_MIGRATION_AUDIT_HEADERS
+    )
 
 
 async def api_create_invite(
@@ -749,7 +752,9 @@ async def api_create_invite(
     Not idempotent — each call mints a new invite.
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/invites"
-    return await _api_request(session, "POST", url, token, {})
+    return await _api_request(
+        session, "POST", url, token, {}, extra_headers=_MIGRATION_AUDIT_HEADERS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -861,7 +866,14 @@ async def api_create_role(
         Role object dict from the API (includes ``id``).
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/roles"
-    return await _api_request(session, "POST", url, token, {"name": name})
+    return await _api_request(
+        session,
+        "POST",
+        url,
+        token,
+        {"name": name},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+    )
 
 
 async def api_edit_role(
@@ -886,7 +898,9 @@ async def api_edit_role(
         Updated role object dict.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/roles/{role_id}"
-    return await _api_request(session, "PATCH", url, token, kwargs)
+    return await _api_request(
+        session, "PATCH", url, token, kwargs, extra_headers=_MIGRATION_AUDIT_HEADERS
+    )
 
 
 async def api_edit_role_ranks(
@@ -918,7 +932,14 @@ async def api_edit_role_ranks(
         Updated server object dict.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/roles/ranks"
-    return await _api_request(session, "PATCH", url, token, {"ranks": ranks})
+    return await _api_request(
+        session,
+        "PATCH",
+        url,
+        token,
+        {"ranks": ranks},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+    )
 
 
 async def api_edit_channel(
@@ -941,7 +962,9 @@ async def api_edit_channel(
         Updated channel object dict.
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
-    return await _api_request(session, "PATCH", url, token, kwargs)
+    return await _api_request(
+        session, "PATCH", url, token, kwargs, extra_headers=_MIGRATION_AUDIT_HEADERS
+    )
 
 
 async def api_upsert_categories(
@@ -967,7 +990,14 @@ async def api_upsert_categories(
         Updated server object dict.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}"
-    return await _api_request(session, "PATCH", url, token, {"categories": categories})
+    return await _api_request(
+        session,
+        "PATCH",
+        url,
+        token,
+        {"categories": categories},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+    )
 
 
 async def api_create_channel(
@@ -1011,7 +1041,9 @@ async def api_create_channel(
         data["description"] = description
     if user_limit:
         data["voice"] = {"max_users": user_limit}
-    return await _api_request(session, "POST", url, token, data)
+    return await _api_request(
+        session, "POST", url, token, data, extra_headers=_MIGRATION_AUDIT_HEADERS
+    )
 
 
 async def api_create_emoji(
@@ -1046,6 +1078,7 @@ async def api_create_emoji(
         url,
         token,
         {"name": name, "parent": {"type": "Server", "id": server_id}},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
     )
 
 
@@ -1289,7 +1322,12 @@ async def api_set_role_permissions(
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/permissions/{role_id}"
     return await _api_request(
-        session, "PUT", url, token, {"permissions": {"allow": allow, "deny": deny}}
+        session,
+        "PUT",
+        url,
+        token,
+        {"permissions": {"allow": allow, "deny": deny}},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
     )
 
 
@@ -1306,7 +1344,14 @@ async def api_set_server_default_permissions(
     Uses PUT /servers/{server}/permissions/default.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/permissions/default"
-    return await _api_request(session, "PUT", url, token, {"permissions": permissions})
+    return await _api_request(
+        session,
+        "PUT",
+        url,
+        token,
+        {"permissions": permissions},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+    )
 
 
 async def api_set_channel_role_permissions(
@@ -1325,7 +1370,12 @@ async def api_set_channel_role_permissions(
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/permissions/{role_id}"
     return await _api_request(
-        session, "PUT", url, token, {"permissions": {"allow": allow, "deny": deny}}
+        session,
+        "PUT",
+        url,
+        token,
+        {"permissions": {"allow": allow, "deny": deny}},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
     )
 
 
@@ -1344,7 +1394,12 @@ async def api_set_channel_default_permissions(
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}/permissions/default"
     return await _api_request(
-        session, "PUT", url, token, {"permissions": {"allow": allow, "deny": deny}}
+        session,
+        "PUT",
+        url,
+        token,
+        {"permissions": {"allow": allow, "deny": deny}},
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
     )
 
 
@@ -1360,7 +1415,14 @@ async def api_delete_channel(
     (idempotent re-rolls) via ``expected_404_ok=True``.
     """
     url = f"{stoat_url.rstrip('/')}/channels/{channel_id}"
-    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+    await _api_request(
+        session,
+        "DELETE",
+        url,
+        token,
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+        expected_404_ok=True,
+    )
 
 
 async def api_delete_role(
@@ -1376,7 +1438,14 @@ async def api_delete_role(
     treated as success (idempotent re-rolls) via ``expected_404_ok=True``.
     """
     url = f"{stoat_url.rstrip('/')}/servers/{server_id}/roles/{role_id}"
-    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+    await _api_request(
+        session,
+        "DELETE",
+        url,
+        token,
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+        expected_404_ok=True,
+    )
 
 
 async def api_delete_emoji(
@@ -1392,7 +1461,14 @@ async def api_delete_emoji(
     ``ManageCustomisation`` permission at the server level.
     """
     url = f"{stoat_url.rstrip('/')}/custom/emoji/{emoji_id}"
-    await _api_request(session, "DELETE", url, token, expected_404_ok=True)
+    await _api_request(
+        session,
+        "DELETE",
+        url,
+        token,
+        extra_headers=_MIGRATION_AUDIT_HEADERS,
+        expected_404_ok=True,
+    )
 
 
 async def api_fetch_messages(

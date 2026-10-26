@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.0] - 2026-10-26
+
+### Added
+
+- Label supported server, channel, role, category, permission, emoji and invite changes with the static audit reason `Discord Ferry migration`. Server creation, reads and message requests remain outside the label's supported route set (#1248).
+
 ## [3.0.1] - 2026-10-26
 
 ### Fixed
