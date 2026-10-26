@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
+import re
 import ssl
 import sys
 from typing import IO, TYPE_CHECKING
@@ -77,6 +79,10 @@ _VALID_PNG = bytes.fromhex(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# A run with metadata writes the @everyone default even when it is 0 (#1174).
+_DEFAULT_PERMISSIONS_URL = re.compile(r".*/servers/[^/]+/permissions/default$")
 
 
 @pytest.fixture
@@ -223,7 +229,7 @@ def test_missing_runtime_does_not_authorize_a_writer() -> None:
     assert caught.value.outcome.effects == "none_confirmed"
 
 
-def _bound_role_phase_setup(tmp_path, *, everyone_raw=0, role_raw=0, hoist=False):
+def _bound_role_phase_setup(tmp_path, *, everyone_raw=0, role_raw=0, hoist=False, server_default=0):
     """Resume one observed role before channel creation, with validated source facts."""
     from discord_ferry.core import permissions as p
     from discord_ferry.discord import client
@@ -266,12 +272,12 @@ def _bound_role_phase_setup(tmp_path, *, everyone_raw=0, role_raw=0, hoist=False
     layout = p.TargetLayout(
         service=STOAT_URL,
         server_id=server,
-        server_default=0,
+        server_default=server_default,
         roles=(p.TargetRole(role, p.PermissionCell(0, 0), 0),),
         planned_roles=(("112", role),),
         planned_channels=(("222", None),),
         planned_role_updates=(p.PlannedRole("112", p.PermissionCell(grants, 0), 0),),
-        planned_server_default=default if default else None,
+        planned_server_default=default,
         fingerprint="actual-unfinished-role-before-channel-creation",
     )
     plan = p.compile_permission_plan(source, layout)
@@ -304,7 +310,9 @@ async def test_created_identities_are_read_back_before_initial_index_content(
     from tests.stoat_ids import stoat_id
     from tests.test_engine import _permission_preflight_case, _permission_preflight_operation
 
-    config, exports, _ = _permission_preflight_case(tmp_path, forum=True)
+    # A role deny on both forums gives the index a real override, so a dropped write is
+    # visible. A stock server default used to supply one by accident (#1174).
+    config, exports, _ = _permission_preflight_case(tmp_path, forum=True, role_deny=1 << 11)
     config.upload_delay = 0
     server_id, role_id, first_id, second_id, index_id, message_id = (
         stoat_id(n) for n in range(29300, 29306)
@@ -378,7 +386,12 @@ async def test_created_identities_are_read_back_before_initial_index_content(
         pinned.append(message_id)
         return CallbackResult(payload={})
 
+    def write_default(url, **kwargs):
+        server["default_permissions"] = kwargs["json"]["permissions"]
+        return CallbackResult(payload={})
+
     with aioresponses() as remote:
+        remote.put(f"{STOAT_URL}/servers/{server_id}/permissions/default", callback=write_default)
         remote.get(f"{STOAT_URL}/", payload={"revolt": "0.15.7"}, repeat=True)
         remote.post(
             f"{STOAT_URL}/servers/create", payload={"server": {"_id": server_id}, "channels": []}
@@ -2119,6 +2132,7 @@ async def test_run_roles_applies_hoist_when_metadata_present(tmp_path: Path) -> 
     patch_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         m.patch(
             f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
@@ -2234,6 +2248,7 @@ async def test_run_roles_image_icon_uploaded_and_folded(tmp_path: Path) -> None:
             new=AsyncMock(return_value="autumn-id"),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "VIP"})
         m.patch(
             f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
@@ -2280,6 +2295,7 @@ async def test_run_roles_emoji_icon_skipped_with_warning(tmp_path: Path) -> None
             new=AsyncMock(return_value=b"PNGDATA"),
         ) as mock_download,
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Fire"})
         m.patch(
             f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
@@ -2332,6 +2348,7 @@ async def test_run_roles_icon_upload_error_is_token_safe(tmp_path: Path) -> None
             new=AsyncMock(side_effect=upload_error),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "VIP"})
         m.patch(
             f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
@@ -2389,6 +2406,7 @@ async def test_a_server_disconnect_degrades_rather_than_aborting(tmp_path: Path)
             new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         m.post(f"{AUTUMN_URL}/icons", exception=aiohttp.ServerDisconnectedError(), repeat=True)
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
@@ -2485,6 +2503,7 @@ async def test_live_only_role_is_created(role_ordering_only, tmp_path: Path) -> 
     created_names: list[str] = []
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "stoat-r1", "name": "Admin"},
@@ -2538,6 +2557,7 @@ async def test_overlap_role_uses_live_name_color(tmp_path: Path) -> None:
     patch_bodies: list[dict[str, object]] = []
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "stoat-r1", "name": "NewName"},
@@ -2588,6 +2608,7 @@ async def test_managed_role_not_created(tmp_path: Path) -> None:
         created_ids.append(name)
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "stoat-r1", "name": "Admin"},
@@ -2627,6 +2648,7 @@ async def test_structural_roles_counted_for_live_only(role_ordering_only, tmp_pa
     save_discord_metadata(meta, tmp_path)
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "stoat-r1", "name": "Member"},
@@ -2668,6 +2690,7 @@ async def test_structural_roles_zero_when_all_overlap(tmp_path: Path) -> None:
     save_discord_metadata(meta, tmp_path)
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "stoat-r1", "name": "Member"},
@@ -3851,6 +3874,7 @@ async def test_run_roles_leaves_a_role_holding_every_permission_unchanged(tmp_pa
     assert meta.role_permissions["112"].allow == ALL_STOAT_PERMISSIONS
     bodies = []
     with aioresponses() as mocked:
+        mocked.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         mocked.get(f"{STOAT_URL}/", payload={})
         mocked.put(
             f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
@@ -4222,6 +4246,64 @@ async def test_run_roles_administrator_mask_passes_through_unmerged(tmp_path: Pa
         await run_roles(config, state, exports, lambda event: None)
     assert meta.server_default_permissions == ALL_STOAT_PERMISSIONS
     assert bodies == [{"permissions": ALL_STOAT_PERMISSIONS}]
+
+
+async def test_run_roles_writes_zero_server_default(tmp_path: Path) -> None:
+    """A source everyone with no mapped bit replaces Stoat's stock default with 0 (#1174)."""
+    config, state, exports, meta = _bound_role_phase_setup(
+        tmp_path, everyone_raw=0, server_default=77014766592
+    )
+    bodies = []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
+            payload={},
+        )
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        await run_roles(config, state, exports, lambda event: None)
+    assert meta.server_default_permissions == 0
+    assert bodies == [{"permissions": 0}]
+
+
+async def test_run_roles_dry_run_sends_no_zero_default(tmp_path: Path) -> None:
+    config, state, exports, _ = _bound_role_phase_setup(
+        tmp_path, everyone_raw=0, server_default=77014766592
+    )
+    config = dataclasses.replace(config, dry_run=True)
+    with aioresponses() as mocked:
+        await run_roles(config, state, exports, lambda event: None)
+        assert not any(str(url).endswith("/permissions/default") for _, url in mocked.requests)
+
+
+async def test_run_roles_refuses_default_replaced_after_preflight(tmp_path: Path) -> None:
+    """A metadata file rewritten to 0 after preflight cannot pass the bound plan."""
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, state, exports, _ = _bound_role_phase_setup(tmp_path, everyone_raw=1 << 11)
+    path = tmp_path / "discord_metadata.json"
+    data = json.loads(path.read_text())
+    data["server_default_permissions"] = 0
+    path.write_text(json.dumps(data))
+    bodies = []
+    with aioresponses() as mocked:
+        mocked.get(f"{STOAT_URL}/", payload={})
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/{state.role_map['112']}",
+            payload={},
+        )
+        mocked.put(
+            f"{STOAT_URL}/servers/{state.stoat_server_id}/permissions/default",
+            payload={},
+            callback=_recorder(bodies),
+        )
+        with pytest.raises(PermissionSafetyError):
+            await run_roles(config, state, exports, lambda event: None)
+    assert bodies == []
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
@@ -4933,6 +5015,7 @@ async def test_role_cap_truncates_and_warns(role_ordering_only, tmp_path: Path) 
     created_names: list[str] = []
 
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.get(
             f"{STOAT_URL}/",
             payload={"features": {"limits": {"global": {"server_roles": 2}}}},
@@ -4998,6 +5081,7 @@ async def test_too_many_roles_backstop_non_fatal(tmp_path: Path) -> None:
             side_effect=_fake_create_role,
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         # Live limit high enough that pre-flight truncation does NOT engage;
         # the backstop is what must fire.
         m.get(
@@ -5066,6 +5150,7 @@ async def _run_and_collect(config: FerryConfig, exports: list[DCEExport]) -> set
             payload={},
             repeat=True,
         )
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.get(
             f"{STOAT_URL}/servers/srv1",
             payload={"_id": "srv1", "roles": {"stoat-x": {"rank": 0}}},
@@ -5109,6 +5194,7 @@ async def test_run_roles_icon_upload_failure_degrades(tmp_path: Path) -> None:
             new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         # Non-JSON 200 from Autumn -> AutumnUploadError (post-S1) -> caught by the broadened guard.
         m.post(
@@ -5207,6 +5293,7 @@ async def test_run_roles_icon_oserror_degrades(tmp_path: Path) -> None:
             side_effect=OSError("disk full"),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
         m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)
@@ -5468,6 +5555,7 @@ async def test_resume_finalizes_unfinalized_role(tmp_path: Path) -> None:
     role_id = state.role_map["112"]
     attrs, grants = [], []
     with aioresponses() as mocked:
+        mocked.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         mocked.get(f"{STOAT_URL}/", payload={})
         mocked.patch(
             f"{STOAT_URL}/servers/{state.stoat_server_id}/roles/{role_id}",
@@ -5501,6 +5589,7 @@ async def test_resume_does_not_recreate_mapped_role(
     save_discord_metadata(_meta_with_role("r1"), tmp_path)
     creates: list[object] = []
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "should-not-happen"},
@@ -5522,7 +5611,8 @@ async def test_incremental_finalized_role_skips_attrs_and_perms(tmp_path: Path) 
     )
     exports = [_make_export(messages=[_make_message("m1", roles=[DCERole(id="r1", name="Mods")])])]
     save_discord_metadata(_meta_with_role("r1"), tmp_path)
-    with aioresponses():  # NO mocks — any role PATCH/PUT/POST would raise
+    with aioresponses() as m:  # Only the server default write; any role PATCH/PUT/POST raises
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         await run_roles(config, state, exports, lambda e: None)
     assert state.roles_finalized == {"r1"}
 
@@ -5618,6 +5708,7 @@ async def test_invalid_colour_does_not_block_hoist(
     save_discord_metadata(meta, tmp_path)
     hoist_body: dict[str, object] = {}
     with aioresponses() as m:
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Admin"})
         m.patch(
             f"{STOAT_URL}/servers/srv1/roles/stoat-r1",
@@ -5806,6 +5897,7 @@ async def test_run_roles_icon_certificate_failure_explains_itself(tmp_path: Path
             new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         m.post(f"{AUTUMN_URL}/icons", exception=cert_error, repeat=True)
         m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
@@ -5856,6 +5948,7 @@ async def test_run_roles_icon_warning_never_carries_the_response_body(tmp_path: 
             new=AsyncMock(return_value=_VALID_PNG),
         ),
     ):
+        m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
         m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
         m.post(
             f"{AUTUMN_URL}/icons",
@@ -5925,6 +6018,7 @@ async def test_a_refused_proxy_names_the_proxy(
                 new=AsyncMock(return_value=_VALID_PNG),
             ),
         ):
+            m.put(_DEFAULT_PERMISSIONS_URL, payload={}, repeat=True)
             m.post(f"{STOAT_URL}/servers/srv1/roles", payload={"id": "stoat-r1", "name": "Mods"})
             m.patch(f"{STOAT_URL}/servers/srv1/roles/stoat-r1", payload={}, repeat=True)
             m.put(f"{STOAT_URL}/servers/srv1/permissions/stoat-r1", payload={}, repeat=True)

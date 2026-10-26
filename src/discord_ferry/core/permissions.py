@@ -816,18 +816,6 @@ def validate_calculation_inputs(
             )
     everyone = raw_roles[source.guild_id].permissions
     expected_default = translate_permissions(everyone) if everyone is not None else None
-    if not layout.server_id and expected_default == 0:
-        # Existing role creation skips zero. Preflight binds the exact backend
-        # version; the pure compiler permits only these pinned creation contracts.
-        creation_defaults = {
-            backend_creation_default("0.15.7"),
-            backend_creation_default("0.16.2"),
-        }
-        expected_default = (
-            layout.planned_server_default
-            if layout.planned_server_default in creation_defaults
-            else None
-        )
     if layout.planned_server_default is not None and (
         everyone is None or layout.planned_server_default != expected_default
     ):
