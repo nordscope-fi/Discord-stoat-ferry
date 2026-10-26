@@ -919,7 +919,10 @@ the equivalent Stoat bitfield.
   and translates the overwrite's other bits
 - **CONNECT** maps to **two** bits: Stoat gates joining a voice channel on `Connect` but gates
   hearing anyone on `Listen`, and Discord's single permission covers both
-- **PIN_MESSAGES** (51) is deliberately unmapped, Stoat has no pin-only bit, and its nearest
+- **MANAGE_MESSAGES** maps to `ManageMessages`, which also permits pinning. Discord now requires
+  its separate `PIN_MESSAGES` permission for pinning, so a role with only `MANAGE_MESSAGES` gains
+  pinning after migration
+- **PIN_MESSAGES** (51) is deliberately unmapped. Stoat has no pin-only bit, and its nearest
   equivalent (`ManageMessages`) also permits deletion
 - **Unmapped Discord bits**: Dropped and recorded as having no Stoat equivalent
 - **Managed/bot roles**: Permissions skipped (role still created for mention remapping)

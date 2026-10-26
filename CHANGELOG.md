@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Document the extra pinning capability inherited from Stoat's combined `ManageMessages` permission (#1228).
+- Correct the documented Autumn `FileTooLarge` field to `max` in ADR-014 (#1358).
+- Verify shipped HTML-conflict recovery and nonce-based message bookkeeping, including recovered-parent merge suppression after restart (#1243, #1250).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
