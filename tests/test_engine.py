@@ -263,6 +263,8 @@ def repair_permission_unit_boundary(monkeypatch, request):
     runtime.plan = Mock()
     runtime.plan.target_layout.planned_channels = ()
     runtime.plan.target_layout.planned_role_facts = ()
+    runtime.plan.target_layout.planned_server_default = None
+    runtime.plan.target_layout.server_default = None
     runtime._active_plan.return_value = runtime.plan
     # A successful collaborator response lets these unrelated units reach their
     # own completion paths. It is not access evidence; real integration tests
@@ -416,10 +418,12 @@ def _permission_preflight_operation():
     return operation
 
 
-def _explicit_channel_repair_case(tmp_path, *, missing=False, unsupported=False):
+def _explicit_channel_repair_case(
+    tmp_path, *, missing=False, unsupported=False, everyone=(1 << 10) | (1 << 11)
+):
     config, exports, meta = _permission_preflight_case(
         tmp_path,
-        everyone=(1 << 10) | (1 << 11),
+        everyone=everyone,
         source_ids=("222", "333") if unsupported else None,
         unsupported_source="333" if unsupported else None,
     )
@@ -459,8 +463,10 @@ def _explicit_channel_repair_case(tmp_path, *, missing=False, unsupported=False)
     return config, exports, state, server, channel
 
 
-def _register_explicit_repair_reads(remote, config, server, channel, *, missing=False):
-    remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+def _register_explicit_repair_reads(
+    remote, config, server, channel, *, missing=False, version="0.15.7"
+):
+    remote.get(f"{config.stoat_url}/", payload={"revolt": version}, repeat=True)
     remote.get(f"{config.stoat_url}/servers/{server['_id']}", payload=server, repeat=True)
     remote.get(
         f"{config.stoat_url}/servers/{server['_id']}?include_channels=true",
@@ -9732,7 +9738,13 @@ async def _repair_with_server_default(
     server_status: int = 200,
     put_status: int = 200,
     dry_run: bool = False,
+    runtime: Any = None,
+    planned: int | None = None,
+    observed: int | None = None,
 ) -> tuple[MigrationState, list[str], list[dict], list[MigrationEvent]]:
+    if runtime is not None:
+        runtime.plan.target_layout.planned_server_default = planned
+        runtime.plan.target_layout.server_default = observed
     config = _make_repair_config(tmp_path, dry_run=dry_run)
     if write_metadata:
         _write_discord_metadata(config.output_dir, server_default=mask or 0)
@@ -9770,11 +9782,17 @@ def _warnings_of(state: MigrationState, *types: str) -> list[dict]:
     return [w for w in state.warnings if w.get("type") in types]
 
 
-@pytest.mark.usefixtures("repair_permission_unit_boundary")
-async def test_repair_convergence_resets_exact_prefix_default(tmp_path: Path) -> None:
+async def test_repair_convergence_resets_exact_prefix_default(
+    tmp_path: Path, repair_permission_unit_boundary
+) -> None:
     mask = 4_194_304
     state, gets, puts, _ = await _repair_with_server_default(
-        tmp_path, stored=mask | FERRY_MIN_PERMISSIONS, mask=mask
+        tmp_path,
+        stored=mask | FERRY_MIN_PERMISSIONS,
+        mask=mask,
+        runtime=repair_permission_unit_boundary,
+        planned=mask,
+        observed=mask | FERRY_MIN_PERMISSIONS,
     )
     assert puts == [{"permissions": mask}]
     assert len(_warnings_of(state, "server_default_reset")) == 1
@@ -9842,11 +9860,18 @@ async def test_repair_convergence_fetch_failure_nonfatal(tmp_path: Path) -> None
     assert len(_warnings_of(state, "server_default_check_failed")) == 1
 
 
-@pytest.mark.usefixtures("repair_permission_unit_boundary")
-async def test_repair_convergence_put_failure_nonfatal(tmp_path: Path) -> None:
+async def test_repair_convergence_put_failure_nonfatal(
+    tmp_path: Path, repair_permission_unit_boundary
+) -> None:
     mask = 4_194_304
     state, _, puts, _ = await _repair_with_server_default(
-        tmp_path, stored=mask | FERRY_MIN_PERMISSIONS, mask=mask, put_status=500
+        tmp_path,
+        stored=mask | FERRY_MIN_PERMISSIONS,
+        mask=mask,
+        put_status=500,
+        runtime=repair_permission_unit_boundary,
+        planned=mask,
+        observed=mask | FERRY_MIN_PERMISSIONS,
     )
     assert len(_warnings_of(state, "server_default_check_failed")) == 1
 
