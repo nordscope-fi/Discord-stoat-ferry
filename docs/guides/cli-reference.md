@@ -98,7 +98,7 @@ ferry migrate [OPTIONS]
 | `--verify-uploads` | | false | Post-upload file size verification for Autumn uploads |
 | `--reaction-mode [text\|native\|skip]` | | `text` | How reactions migrate: `text` appends a summary to the message (fast); `native` adds per-emoji reactions via API (slow, Stoat caps 20 per message); `skip` drops them |
 | `--min-thread-messages INT` | | 0 | Exclude threads with fewer messages (0 = include all). Applies to every thread strategy. |
-| `--checkpoint-interval INT` | | 50 | Save state every N messages. Lower = safer but more disk I/O; on resume Ferry replays at most this many messages. |
+| `--checkpoint-interval INT` | | 50 | Save state at the first multiple of N messages reached at least 5 seconds after the last save. Lower = safer but more disk I/O. On a fast run a resume can replay more than N messages. |
 | `--max-concurrent-channels INT` | | 3 | Channels migrated in parallel. Raise only on self-hosted instances. |
 | `--max-concurrent-requests INT` | | 5 | Concurrent API calls across all channel workers. Raise only on self-hosted instances. |
 | `--skip-avatars` | | false | Skip the avatar pre-flight phase; avatars still upload on demand during messages |
@@ -110,24 +110,23 @@ ferry migrate [OPTIONS]
 | `--yes` / `-y` | | false | Skip the terms-of-service confirmation prompt (for scripted runs) |
 
 !!! warning "Token security"
-    Set `STOAT_TOKEN` and `DISCORD_TOKEN` as environment variables or in a `.env` file, and leave `--token` and `--discord-token` off the command line. A token typed as an argument is saved in your shell history and can show up in process listings. Writing `--token "$STOAT_TOKEN"` does not help, because the shell expands it before Ferry starts. The literal options still work, for one-off use. The environment route keeps the token out of your shell history, but it does not hide it from every other process on the machine.
+    Set `STOAT_TOKEN` and `DISCORD_TOKEN` as environment variables, and leave `--token` and `--discord-token` off the command line. A token typed as an argument is saved in your shell history and can show up in process listings. Writing `--token "$STOAT_TOKEN"` does not help, because the shell expands it before Ferry starts. The literal options still work, for one-off use. The environment route keeps the token out of your shell history, but it does not hide it from every other process on the machine.
 
 ### Environment Variables
 
-You can set credentials in a `.env` file in your working directory. Ferry loads this file automatically.
+Ferry reads these settings from environment variables. Set them in your shell before you run it:
 
 ```dotenv
-# .env
 DISCORD_TOKEN=your_discord_token_here
 DISCORD_SERVER_ID=123456789012345678
 STOAT_URL=https://api.stoat.chat
 STOAT_TOKEN=your_stoat_token_here
 ```
 
-!!! tip
-    Add `.env` to your `.gitignore` if you keep your project under version control.
+!!! note "`.env` files"
+    Ferry calls `load_dotenv()` with no path, which searches upward from Ferry's own install directory, not from the folder you run it in. A `.env` file in your working folder is not reliably picked up, so set real environment variables or pass the token flags. If you do keep a `.env` file somewhere, add it to your `.gitignore`.
 
-Ferry also reads a handful of environment variables outside the `.env` file:
+Ferry also reads a handful of environment variables beyond the credentials above:
 
 | Variable | Effect |
 |----------|--------|
@@ -164,7 +163,7 @@ ferry migrate --export-dir ~/exports/my-server/ && echo "Migration complete!"
 
 ## Examples
 
-The examples below leave the tokens out of the command. Set `STOAT_TOKEN` (and `DISCORD_TOKEN` for orchestrated mode) in your environment or in a `.env` file first, as described under [Environment Variables](#environment-variables).
+The examples below leave the tokens out of the command. Set `STOAT_TOKEN` (and `DISCORD_TOKEN` for orchestrated mode) in your environment first, as described under [Environment Variables](#environment-variables).
 
 **1-Click migration (orchestrated):**
 

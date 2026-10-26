@@ -145,7 +145,7 @@ Ferry 2.0 adds several options. Decide which apply to your migration before you 
 | `--reaction-mode text\|native\|skip` | How reactions are migrated | Use `native` if per-emoji reactions matter (slow); `skip` for the fastest migration |
 | `--min-thread-messages N` | Exclude threads below a message count | Use when your server has hundreds of low-activity threads |
 | `--max-concurrent-channels N` / `--max-concurrent-requests N` | Parallelism during message migration | Raise only on self-hosted instances with relaxed rate limits |
-| `--checkpoint-interval N` | How often state is saved | Raise to ~200 for very large migrations to reduce disk I/O |
+| `--checkpoint-interval N` | How often state is saved (every N messages, but at most once per 5 seconds) | Raise to ~200 for very large migrations to reduce disk I/O |
 | `--skip-avatars` | Skip the avatar pre-flight phase | Avatars still upload on demand during messages |
 | `--validate-after` | Post-migration count comparison | Use when you want an automatic sanity check of the result |
 
