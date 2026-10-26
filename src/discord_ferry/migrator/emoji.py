@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 _CONTENT_EMOJI_RE = re.compile(r"<(a?):([^:]+):(\d+)>")
 
-# Delay between emoji creations — shares the /servers 5/10s rate bucket.
-_CREATION_DELAY = 2.0
+# Stoat routes custom emoji creation through the 20-request catch-all bucket.
+_CREATION_DELAY = 0.5
 
 
 def _extract_emoji_from_content(content: str) -> list[tuple[str, str, bool]]:
@@ -498,7 +498,7 @@ async def run_emoji(
                     )
                 )
 
-            # Rate-limit courtesy: /servers bucket is 5/10s and shared with channels/roles.
+            # Rate-limit courtesy for the 20-request catch-all bucket.
             await asyncio.sleep(_CREATION_DELAY)
 
     migrated = len(state.emoji_map)

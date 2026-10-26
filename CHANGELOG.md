@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.0.1] - 2026-10-26
+
+### Fixed
+
+- Space custom emoji creation attempts by 0.5 seconds for Stoat's 20-per-10-second catch-all bucket, replacing the 2-second delay intended for server operations (#1265).
+
 ## [3.0.0] - 2026-10-21
 
 ### Breaking
