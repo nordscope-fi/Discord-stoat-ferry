@@ -3677,6 +3677,37 @@ async def test_voice_cap_resume_does_not_recount_carried_channels(
 
 
 @pytest.mark.usefixtures("structure_binding_collaborator")
+async def test_stage_channel_is_created_as_voice(channel_attributes_only, tmp_path: Path) -> None:
+    """#1204: a Discord stage channel (type 13) is created as a Stoat Voice channel.
+
+    Kills the implementation that leaves type 13 on the ``case _`` Text default
+    (the create request would carry ``"type": "Text"``).
+    """
+    config = _make_config(tmp_path)
+    state = MigrationState(stoat_server_id="srv1")
+    exports = [
+        _make_export(channel_id="stage1", channel_name="town-hall", channel_type=13, category_id="")
+    ]
+
+    with aioresponses() as m:
+        m.post(
+            f"{STOAT_URL}/servers/srv1/channels",
+            payload={"_id": "stoat-stage1", "name": "town-hall"},
+        )
+        await run_channels(config, state, exports, lambda event: None)
+        posts = [
+            call.kwargs["json"]
+            for (method, _url), calls in m.requests.items()
+            if method == "POST"
+            for call in calls
+        ]
+
+    assert len(posts) == 1
+    assert posts[0]["type"] == "Voice"
+    assert state.channel_map["stage1"] == "stoat-stage1"
+
+
+@pytest.mark.usefixtures("structure_binding_collaborator")
 async def test_voice_fallback_skips_voice_patch(channel_attributes_only, tmp_path: Path) -> None:
     """A voice channel that falls back to text skips the voice PATCH.
 

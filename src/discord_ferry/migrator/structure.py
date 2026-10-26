@@ -121,11 +121,12 @@ def _generate_category_id() -> str:
 def _stoat_channel_type(channel_type: int) -> str:
     """Map a Discord channel type int to a Stoat channel type string.
 
-    Discord type 2 is a voice channel; everything else (text, announcement,
-    threads, forum, media) maps to a Stoat Text channel.
+    Discord type 2 (voice) and type 13 (stage) map to a Stoat Voice channel;
+    everything else (text, announcement, threads, forum, media) maps to a
+    Stoat Text channel.
     """
     match channel_type:
-        case 2:
+        case 2 | 13:
             return "Voice"
         case _:
             return "Text"

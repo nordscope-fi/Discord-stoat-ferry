@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Update the feedback service container to Python 3.14.8 and match its image assertion (#1344).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.3] - 2026-10-26
+
+### Fixed
+
+- Create Discord stage channels (type 13) as Stoat voice channels instead of text channels. The blueprint export and the documentation now agree with the migrator, and the invite channel picker skips them like any voice channel (#1204).
+
 ## [3.1.0] - 2026-10-26
 
 ### Added

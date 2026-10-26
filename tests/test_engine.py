@@ -5061,6 +5061,14 @@ def test_select_invite_channel_none_when_only_voice(tmp_path: Path) -> None:
     assert _select_invite_channel(config, state, exports) is None
 
 
+def test_select_invite_channel_none_when_only_stage(tmp_path: Path) -> None:
+    """#1204: a stage channel (type 13) is a Voice channel on Stoat, so no invite goes to it."""
+    config = _make_config(tmp_path)
+    state = MigrationState(channel_map={"d_stage": "s_stage"})
+    exports = [_text_channel_export("d_stage", ch_type=13)]
+    assert _select_invite_channel(config, state, exports) is None
+
+
 # ---------------------------------------------------------------------------
 # Batch 2 — S1: migration-lock marker plumbing (engine _acquire/_release)
 # ---------------------------------------------------------------------------

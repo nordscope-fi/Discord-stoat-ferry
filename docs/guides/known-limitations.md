@@ -23,7 +23,7 @@ is tracked in [#1217](https://github.com/nordscope-fi/Discord-stoat-ferry/issues
 |-----------------|----------------|------------|
 | Threads | Flattened to text channels by default, prefixed with parent channel name (e.g. `general-my-thread`) | Use `--thread-strategy merge` to append thread messages into the parent channel. Use `--thread-strategy archive` to write local markdown files under `<output directory>/threads/<parent channel>/<thread>.md`; archive mode posts nothing to Stoat. Both options are also available in the GUI's thread strategy setting. |
 | Forum posts | Normal DCE exports do not produce a supported generated forum index. Thread access must not be assumed to match its parent. | Exclude unprovable threads with `--skip-threads`; see #1217 above. |
-| Stage Channels | Not migrated (no Stoat equivalent) | None |
+| Stage Channels | Created as Stoat voice channels, with the same limits as any voice channel (see Voice channels below). Stage-only features such as speaker requests have no Stoat equivalent. | None |
 | Scheduled Events | Not migrated | None |
 | Channel ordering | Categories follow the original Discord order (since v2.3.0, requires a Discord token), but channels *inside* a category may appear in a different order | Manually reorder channels within categories in Stoat after migration |
 | Channel topic longer than 1,024 characters | Stoat and Discord both cap channel topics at 1,024. Ferry truncates a longer topic to 1,024 characters before sending; the tail is discarded silently as a defensive measure for hand-edited or corrupt exports. | None; a valid Discord export cannot exceed 1,024 to begin with; shorten the topic in Discord if you need it faithfully preserved |
