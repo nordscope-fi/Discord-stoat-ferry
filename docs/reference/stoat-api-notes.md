@@ -13,15 +13,15 @@ Stoat uses **fixed 10-second windows** (not sliding). Buckets are chosen by
 
 | Bucket | Limit | Keyed by | Covers |
 |--------|-------|----------|--------|
-| `servers` | 5 per 10s | the server id, so **shared** | Server create and edit, channel create, role create and edit, emoji create, category PATCH |
+| `servers` | 5 per 10s | the server id, so **shared** | Server create and edit, channel create, role create and edit, category PATCH |
 | `channels` | 15 per 10s | **the channel id** | Everything else on an existing channel: edit, delete, and reading messages |
 | `messaging` | 10 per 10s | **the channel id** | `POST /channels/:id/messages` |
-| Catch-all | 20 per 10s | the route | Everything else, including Autumn uploads |
+| Catch-all | 20 per 10s | the route | Everything else, including Autumn uploads and custom emoji creation |
 
 !!! warning "Two of these are per channel, and that changes what concurrency buys you"
     `channels` and `messaging` are keyed by channel id, so work spread across different channels
     does **not** share a budget. Parallelism genuinely helps there. The `servers` bucket is shared,
-    so creating a channel, a role and an emoji in quick succession all draw on the same 5-per-10s
+    so creating a channel or role in quick succession draws on the same 5-per-10s
     budget however they are scheduled, and parallelism buys nothing.
 
 !!! note "A read costs the same as a big read"
@@ -396,6 +396,9 @@ are sanitised (lowercased, invalid characters replaced with underscores) during 
 Custom emoji are created via `PUT /custom/emoji/{emoji_id}` with a `parent` object identifying the
 owning server — **not** via `POST /servers/{id}/emojis`. The emoji ID is client-generated. The
 `parent` object has `{"type": "Server", "id": "<server_id>"}`.
+
+Custom emoji creation uses the 20-per-10-second catch-all bucket. Ferry spaces creation attempts
+by 0.5 seconds. See ADR-046.
 
 ---
 

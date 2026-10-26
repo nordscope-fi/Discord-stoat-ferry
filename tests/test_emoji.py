@@ -458,6 +458,41 @@ async def test_run_emoji_full_happy_path(tmp_path: Path) -> None:
     assert completed
 
 
+async def test_run_emoji_spaces_creations_for_the_catch_all_bucket(tmp_path: Path) -> None:
+    """Emoji creation waits for the catch-all bucket's 20 requests per 10 seconds."""
+    emoji_file = tmp_path / "party.png"
+    emoji_file.write_bytes(b"PNG")
+    message = _make_message(
+        reactions=[
+            DCEReaction(
+                emoji=DCEEmoji(id="10", name="party", image_url="party.png"),
+                count=1,
+            )
+        ]
+    )
+    sleep = AsyncMock()
+
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_with_cache",
+            new=AsyncMock(return_value="autumn_id"),
+        ),
+        patch(
+            "discord_ferry.migrator.emoji.api_create_emoji",
+            new=AsyncMock(return_value={"_id": "stoat_id"}),
+        ),
+        patch("discord_ferry.migrator.emoji.asyncio.sleep", new=sleep),
+    ):
+        await run_emoji(
+            _make_config(tmp_path),
+            _make_state(),
+            [_make_export([message])],
+            lambda event: None,
+        )
+
+    sleep.assert_awaited_once_with(0.5)
+
+
 # ---------------------------------------------------------------------------
 # Animated emoji preservation
 # ---------------------------------------------------------------------------
