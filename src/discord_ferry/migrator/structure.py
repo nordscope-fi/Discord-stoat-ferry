@@ -1143,12 +1143,11 @@ async def run_roles(
                 )
 
             # Apply @everyone server default permissions exactly as the source
-            # had them. The migration floor is no longer merged here (#957): it
-            # belongs to the migration account's own grants, not to every member.
-            if discord_metadata.server_default_permissions:
-                await _apply_server_default_permissions(
-                    session, config, state, discord_metadata.server_default_permissions
-                )
+            # had them, including 0: skipping 0 left Stoat's stock default (#1174).
+            # The migration floor is not merged here (#957).
+            await _apply_server_default_permissions(
+                session, config, state, discord_metadata.server_default_permissions
+            )
 
     # Ordering is the last thing the phase does: the ranks route rejects any list
     # that does not name every role on the server, so it cannot run until every

@@ -329,6 +329,7 @@ def _permission_preflight_case(
     ordinary=None,
     source_ids=None,
     unsupported_source=None,
+    role_deny=0,
 ):
     from discord_ferry.discord import client
     from discord_ferry.discord.metadata import (
@@ -371,7 +372,7 @@ def _permission_preflight_case(
     channels = []
     translated = {}
     for sid in ids:
-        deny = (1 << 10) if mixed and sid == "333" else 0
+        deny = (1 << 10) if mixed and sid == "333" else role_deny
         overwrites = [{"id": "112", "type": 0, "allow": "0", "deny": str(deny)}]
         if sid == unsupported_source:
             overwrites.append({"id": "999", "type": 1, "allow": "1024", "deny": "0"})
@@ -809,12 +810,49 @@ async def test_permission_preflight_new_target_keeps_proposals_unready(tmp_path)
         layout = runtime.plan.target_layout
         assert not layout.server_id and layout.server_default is None
         assert layout.roles == layout.channels == ()
-        assert layout.planned_server_default == (translate_permissions(everyone) or 77014766592)
+        assert layout.planned_server_default == translate_permissions(everyone)
         assert layout.planned_roles == (("112", None),)
         assert layout.planned_channels == (("222", None),)
         assert layout.planned_role_facts[0].rank == 0
         assert dataclasses.asdict(state) == before
         assert remote.requests and all(method == "GET" for method, _ in remote.requests)
+
+
+def _drop_saved_server_default(tmp_path: Path) -> None:
+    path = tmp_path / "discord_metadata.json"
+    data = json.loads(path.read_text())
+    del data["server_default_permissions"]
+    path.write_text(json.dumps(data))
+
+
+async def test_permission_preflight_refuses_missing_default_key_for_nonzero_source(tmp_path):
+    from discord_ferry.errors import PermissionSafetyError
+
+    config, exports, _ = _permission_preflight_case(tmp_path, everyone=(1 << 10) | (1 << 11))
+    _drop_saved_server_default(tmp_path)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(PermissionSafetyError) as caught:
+                await _permission_preflight_operation()(
+                    config, MigrationState(), exports, session, mode="migration"
+                )
+    assert caught.value.outcome.reason == "unverified"
+    assert caught.value.outcome.effects == "none_confirmed"
+    assert all(method == "GET" for method, _ in remote.requests)
+
+
+async def test_permission_preflight_accepts_missing_default_key_for_zero_source(tmp_path):
+    config, exports, _ = _permission_preflight_case(tmp_path, everyone=0)
+    _drop_saved_server_default(tmp_path)
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        async with aiohttp.ClientSession() as session:
+            runtime = await _permission_preflight_operation()(
+                config, MigrationState(), exports, session, mode="migration"
+            )
+    assert not runtime.stopped
+    assert runtime.plan.target_layout.planned_server_default == 0
 
 
 async def test_permission_preflight_new_target_refuses_unknown_creation_contract(tmp_path):

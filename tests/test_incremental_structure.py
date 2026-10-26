@@ -7,6 +7,7 @@ SC-6, SC-7, SC-9.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -214,6 +215,8 @@ async def test_run_roles_skips_all_passes_for_already_migrated_roles(
     perm_calls: list[object] = []
 
     with aioresponses() as m:
+        # A run with metadata writes the @everyone default even when it is 0 (#1174).
+        m.put(re.compile(r".*/servers/srv1/permissions/default$"), payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             repeat=True,
@@ -348,6 +351,8 @@ async def test_run_roles_fresh_run_creates_and_attributes_all_roles(
     edit_calls: list[object] = []
 
     with aioresponses() as m:
+        # A run with metadata writes the @everyone default even when it is 0 (#1174).
+        m.put(re.compile(r".*/servers/srv1/permissions/default$"), payload={}, repeat=True)
         m.post(
             f"{STOAT_URL}/servers/srv1/roles",
             payload={"id": "stoat-r1", "name": "Admin"},

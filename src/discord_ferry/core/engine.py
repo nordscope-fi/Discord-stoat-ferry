@@ -1399,7 +1399,6 @@ def _permission_role_layout(
     observed: TargetLayout,
     *,
     change_roles: bool,
-    creation_default: int,
     role_limit: int,
     source_fingerprint: str,
     order_roles: bool = False,
@@ -1494,13 +1493,7 @@ def _permission_role_layout(
             proposed.append(expected)
         elif (old.permissions, old.rank) != (permissions, rank):
             updates.append(expected)
-    default = (
-        meta.server_default_permissions or creation_default
-        if not observed.server_id
-        else meta.server_default_permissions
-        if change_roles and meta.server_default_permissions
-        else None
-    )
+    default = meta.server_default_permissions if not observed.server_id or change_roles else None
     return dataclasses.replace(
         observed,
         planned_roles=tuple((sid, mapped.get(sid)) for sid in sorted(raw)),
@@ -1686,7 +1679,6 @@ async def _prepare_permission_operation(
         exports,
         layout,
         change_roles=change_roles,
-        creation_default=creation,
         role_limit=role_limit,
         source_fingerprint=meta.permission_source.fingerprint,
         order_roles=mode == "backfill",

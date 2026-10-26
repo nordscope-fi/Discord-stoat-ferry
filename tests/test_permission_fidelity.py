@@ -777,7 +777,12 @@ async def test_integration_incremental_reuse_and_stale_index_scope_refusal(
         assert {key: repeated.message_map[key] for key in before} == before
         assert len(repeated.message_map) == 3
         assert repeated.permission_runtime.outcome.verified
-        assert not any(method == "PUT" for method, _, _ in destination.requests)
+        # The roles phase rewrites the @everyone default on every run, 0 included
+        # (#1174); reuse adds no other write.
+        puts = [(path, body) for method, path, body in destination.requests if method == "PUT"]
+        assert puts == [
+            (f"/servers/{state.stoat_server_id}/permissions/default", {"permissions": 0})
+        ]
         assert not any(
             method == "POST" and path.startswith("/servers/")
             for method, path, _ in destination.requests

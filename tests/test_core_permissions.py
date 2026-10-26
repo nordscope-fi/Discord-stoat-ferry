@@ -787,8 +787,7 @@ def compiler_layout(source, *, new_server: bool = False):
         )
         if new_server
         else (),
-        # The existing role writer skips zero, preserving the captured creation default.
-        planned_server_default=(translate_permissions(source.roles[0].permissions) or 77014766592)
+        planned_server_default=translate_permissions(source.roles[0].permissions)
         if new_server
         else None,
     )
@@ -842,38 +841,14 @@ def test_creation_default_0162_is_finite_and_source_pinned() -> None:
         assert p.backend_creation_default(version) is None
 
 
-def test_creation_default_0162_zero_source_is_exact_without_new_grants() -> None:
-    p = compiler_functions()
-    source = source_evidence((0, (1 << 10) | (1 << 11)), ())
-    layout = replace(compiler_layout(source, new_server=True), planned_server_default=2276038022144)
-    plan = p.compile_permission_plan(source, layout)
-    assert not plan.problems and len(plan.channels) == 1
-    assert layout.server_default is None and not layout.server_id
-    for members in (frozenset(), frozenset({"112"})):
-        actual = compiled_target_value(plan.channels[0], layout, members)
-        assert bool(actual & (1 << 20)) == source_oracle(source, members, 10)
-        assert bool(actual & (1 << 22)) == (
-            source_oracle(source, members, 10) and source_oracle(source, members, 11)
-        )
-        # The extra backend default bit is preserved, not mapped into a new source grant.
-        if actual & (1 << 20):
-            assert actual & (1 << 41)
-    assert not (plan.channels[0].default.allow | plan.channels[0].default.deny) & (1 << 41)
-    assert not p.PermissionRuntime(plan).ready
-    for wrong in (0, 2276038022145):
-        assert p.compile_permission_plan(
-            source, replace(layout, planned_server_default=wrong)
-        ).problems
-
-
-def test_creation_default_zero_source_matches_independent_access() -> None:
+def test_zero_source_new_server_plans_exact_zero() -> None:
     p = compiler_functions()
     for grants in ((0, 0), (0, (1 << 10) | (1 << 11)), (1 << 100, 1 << 10)):
         source = source_evidence(grants, ())
         layout = compiler_layout(source, new_server=True)
         plan = p.compile_permission_plan(source, layout)
         assert not plan.problems and len(plan.channels) == 1
-        assert layout.planned_server_default == 77014766592
+        assert layout.planned_server_default == 0
         assert layout.server_default is None and not layout.server_id
         assert layout.roles == layout.channels == ()
         for members in (frozenset(), frozenset({"112"})):
@@ -885,13 +860,24 @@ def test_creation_default_zero_source_matches_independent_access() -> None:
         assert not p.PermissionRuntime(plan).ready
 
 
-def test_creation_default_rejects_hypothetical_zero_missing_and_arbitrary_values() -> None:
+def test_zero_source_new_server_refuses_stock_missing_and_arbitrary_defaults() -> None:
     p = compiler_functions()
     source = source_evidence((0,), ())
     layout = compiler_layout(source, new_server=True)
-    for value in (0, None, 1, 77014766593):
+    for value in (77014766592, 2276038022144, None, 1):
         plan = p.compile_permission_plan(source, replace(layout, planned_server_default=value))
         assert not plan.channels and plan.problems[0].reason == "unverified"
+
+
+def test_planned_zero_refused_for_nonzero_source() -> None:
+    p = compiler_functions()
+    source = source_evidence((1 << 10,), ())
+    new = replace(compiler_layout(source, new_server=True), planned_server_default=0)
+    existing = replace(
+        compiler_layout(source), server_default=77014766592, planned_server_default=0
+    )
+    for layout in (new, existing):
+        assert p.compile_permission_plan(source, layout).problems
 
 
 def test_creation_default_preserves_nonzero_writer_and_existing_target_rules() -> None:
@@ -953,25 +939,22 @@ def test_creation_default_requires_fresh_decoded_access_and_exact_server_default
         bound_runtime().verify(cid, initial)
     cell = plan.channels[0].default
     corrected = {**channel, "default_permissions": {"a": cell.allow, "d": cell.deny}}
+    # The zero source plans a zero server default, so the stock creation default
+    # left in place is a mismatch even with the channel cell corrected (#1174).
+    zero_server = {**server, "default_permissions": 0}
     observed = decode_permission_readback(
-        server, (corrected,), server, state, service=layout.service, channel_ids=(cid,)
+        zero_server, (corrected,), zero_server, state, service=layout.service, channel_ids=(cid,)
     )
     assert not observed.problems and observed.layout.planned_server_default is None
     runtime = bound_runtime()
     runtime.verify(cid, observed)
     assert runtime.require(cid) is observed
-    changed_server = {**server, "default_permissions": 0}
-    changed = decode_permission_readback(
-        changed_server,
-        (corrected,),
-        changed_server,
-        state,
-        service=layout.service,
-        channel_ids=(cid,),
+    stock = decode_permission_readback(
+        server, (corrected,), server, state, service=layout.service, channel_ids=(cid,)
     )
-    assert not changed.problems
+    assert not stock.problems
     with pytest.raises(PermissionSafetyError):
-        bound_runtime().verify(cid, changed)
+        bound_runtime().verify(cid, stock)
     assert layout.server_default is None and layout.channels == ()
 
 
