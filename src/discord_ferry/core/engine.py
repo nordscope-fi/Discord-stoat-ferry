@@ -1683,13 +1683,18 @@ async def _prepare_permission_operation(
         source_fingerprint=meta.permission_source.fingerprint,
         order_roles=mode == "backfill",
     )
+    everyone_mask = meta.server_default_permissions
+    # Only a default Ferry itself caused is reset: the #957 floor product, or for a zero
+    # mask the stock creation default the old writer left in place (#1174).
+    ferry_caused = {everyone_mask | FERRY_MIN_PERMISSIONS}
+    if everyone_mask == 0:
+        ferry_caused.add(creation)
     if (
         mode == "repair"
-        and meta.server_default_permissions
-        and layout.server_default != meta.server_default_permissions
-        and layout.server_default == meta.server_default_permissions | FERRY_MIN_PERMISSIONS
+        and layout.server_default != everyone_mask
+        and layout.server_default in ferry_caused
     ):
-        layout = dataclasses.replace(layout, planned_server_default=meta.server_default_permissions)
+        layout = dataclasses.replace(layout, planned_server_default=everyone_mask)
     base = dataclasses.replace(
         layout, planned_channels=tuple((sid, tid) for sid, tid in bindings if sid in source_ids)
     )
@@ -4187,6 +4192,8 @@ async def _run_repair(
                     else 0
                 )
                 floor = FERRY_MIN_PERMISSIONS
+                planned_layout = state.permission_runtime.plan.target_layout
+                planned = planned_layout.planned_server_default
                 if stored is None:
                     state.warnings.append(
                         {
@@ -4197,9 +4204,10 @@ async def _run_repair(
                     )
                 elif stored == mask:
                     pass
-                elif mask and stored == mask | floor:
+                elif planned is not None and stored == planned_layout.server_default:
+                    issue = "#957" if stored & floor == floor else "#1174"
                     runtime = state.permission_runtime
-                    runtime.authorize_default_write(mask)
+                    runtime.authorize_default_write(planned)
                     runtime.note_write()
                     try:
                         await api_set_server_default_permissions(
@@ -4207,7 +4215,7 @@ async def _run_repair(
                             config.stoat_url,
                             config.token,
                             state.stoat_server_id,
-                            permissions=mask,
+                            permissions=planned,
                         )
                     except Exception as exc:  # noqa: BLE001
                         raise runtime.stop("write_uncertain", stage="application") from exc
@@ -4220,6 +4228,10 @@ async def _run_repair(
                             "message": (
                                 f"Removed the migration floor from server "
                                 f"{state.stoat_server_id} default permissions (#957)."
+                                if issue == "#957"
+                                else f"Replaced Stoat's stock default on server "
+                                f"{state.stoat_server_id} with the recorded Discord "
+                                "@everyone permissions (#1174)."
                             ),
                         }
                     )
@@ -4227,7 +4239,7 @@ async def _run_repair(
                         MigrationEvent(
                             phase="repair",
                             status="warning",
-                            message="Server default permissions converged (#957).",
+                            message=f"Server default permissions converged ({issue}).",
                         )
                     )
                 elif stored & floor == floor:
@@ -4247,6 +4259,25 @@ async def _run_repair(
                             phase="repair",
                             status="warning",
                             message="Server default permissions need manual review (#957).",
+                        )
+                    )
+                elif convergence_metadata is not None and mask == 0:
+                    state.warnings.append(
+                        {
+                            "phase": "repair",
+                            "type": "server_default_manual",
+                            "message": (
+                                f"Server {state.stoat_server_id} default permissions differ "
+                                "from the recorded Discord @everyone permissions, which grant "
+                                "nothing; review and edit them in Stoat server settings."
+                            ),
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="repair",
+                            status="warning",
+                            message="Server default permissions need manual review (#1174).",
                         )
                     )
             except PermissionSafetyError:

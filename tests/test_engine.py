@@ -9799,18 +9799,22 @@ async def test_repair_convergence_resets_exact_prefix_default(
     assert len(gets) == 1
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_noop_when_stored_equals_mask(tmp_path: Path) -> None:
     mask = 4_194_304
-    state, _, puts, _ = await _repair_with_server_default(tmp_path, stored=mask, mask=mask)
+    state, gets, puts, _ = await _repair_with_server_default(tmp_path, stored=mask, mask=mask)
+    assert len(gets) == 1
     assert puts == []
     assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
 
 
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
 async def test_repair_convergence_noop_for_administrator_mask(tmp_path: Path) -> None:
     from discord_ferry.discord.permissions import translate_permissions
 
     mask = translate_permissions(1 << 3)
-    state, _, puts, _ = await _repair_with_server_default(tmp_path, stored=mask, mask=mask)
+    state, gets, puts, _ = await _repair_with_server_default(tmp_path, stored=mask, mask=mask)
+    assert len(gets) == 1
     assert puts == []
     assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
 
@@ -9835,18 +9839,11 @@ async def test_repair_convergence_warns_without_metadata(tmp_path: Path) -> None
 
 
 @pytest.mark.usefixtures("repair_permission_unit_boundary")
-async def test_repair_convergence_warns_on_zero_mask(tmp_path: Path) -> None:
-    state, _, puts, _ = await _repair_with_server_default(
-        tmp_path, stored=FERRY_MIN_PERMISSIONS, mask=0
-    )
-    assert puts == []
-    assert len(_warnings_of(state, "server_default_manual")) == 1
-
-
 async def test_repair_convergence_ignores_stock_default(tmp_path: Path) -> None:
-    state, _, puts, _ = await _repair_with_server_default(
+    state, gets, puts, _ = await _repair_with_server_default(
         tmp_path, stored=1_048_576, mask=4_194_304
     )
+    assert len(gets) == 1
     assert puts == []
     assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
 
@@ -9874,6 +9871,167 @@ async def test_repair_convergence_put_failure_nonfatal(
         observed=mask | FERRY_MIN_PERMISSIONS,
     )
     assert len(_warnings_of(state, "server_default_check_failed")) == 1
+
+
+@pytest.mark.parametrize(
+    ("version", "everyone", "stored", "expected"),
+    [
+        ("0.15.7", 0, 77014766592, 0),
+        ("0.16.2", 0, 2276038022144, 0),
+        ("0.16.2", 0, 77014766592, None),
+        ("0.15.7", 0, FERRY_MIN_PERMISSIONS, 0),
+        ("0.15.7", 0, 0, None),
+        ("0.15.7", 0, 77014766592 | (1 << 34), None),
+        ("0.15.7", 1 << 11, "mask|floor", "mask"),
+        ("0.15.7", 1 << 11, 77014766592, None),
+    ],
+)
+async def test_repair_plan_marks_only_ferry_caused_defaults(
+    tmp_path, version, everyone, stored, expected
+):
+    from discord_ferry.discord.permissions import translate_permissions
+
+    mask = translate_permissions(everyone)
+    config, exports, state, server, channel = _explicit_channel_repair_case(
+        tmp_path, everyone=everyone
+    )
+    server["default_permissions"] = (
+        mask | FERRY_MIN_PERMISSIONS if stored == "mask|floor" else stored
+    )
+    with aioresponses() as remote:
+        _register_explicit_repair_reads(remote, config, server, channel, version=version)
+        async with aiohttp.ClientSession() as session:
+            runtime = await engine_module._prepare_permission_operation(
+                config, state, exports, session, mode="repair"
+            )
+        assert all(method == "GET" for method, _ in remote.requests)
+    assert not runtime.stopped
+    assert runtime.plan.target_layout.planned_server_default == (
+        mask if expected == "mask" else expected
+    )
+
+
+async def test_repair_convergence_resets_stock_default_for_zero_mask(
+    tmp_path: Path, repair_permission_unit_boundary
+) -> None:
+    runtime = repair_permission_unit_boundary
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=77014766592, mask=0, runtime=runtime, planned=0, observed=77014766592
+    )
+    assert puts == [{"permissions": 0}]
+    runtime.authorize_default_write.assert_called_once_with(0)
+    runtime.note_write_confirmed.assert_called()
+    resets = _warnings_of(state, "server_default_reset")
+    assert len(resets) == 1 and "#1174" in resets[0]["message"]
+    assert _warnings_of(state, "server_default_manual") == []
+
+
+async def test_repair_convergence_resets_floor_for_zero_mask(
+    tmp_path: Path, repair_permission_unit_boundary
+) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path,
+        stored=FERRY_MIN_PERMISSIONS,
+        mask=0,
+        runtime=repair_permission_unit_boundary,
+        planned=0,
+        observed=FERRY_MIN_PERMISSIONS,
+    )
+    assert puts == [{"permissions": 0}]
+    resets = _warnings_of(state, "server_default_reset")
+    assert len(resets) == 1 and "#957" in resets[0]["message"]
+    assert _warnings_of(state, "server_default_manual") == []
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_convergence_noop_for_converged_zero(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(tmp_path, stored=0, mask=0)
+    assert puts == []
+    assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_convergence_warns_on_other_value_for_zero_mask(tmp_path: Path) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=77014766592 | (1 << 34), mask=0
+    )
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_manual")) == 1
+
+
+async def test_repair_convergence_skips_write_when_value_moved(
+    tmp_path: Path, repair_permission_unit_boundary
+) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path,
+        stored=77014766592 | (1 << 34),
+        mask=0,
+        runtime=repair_permission_unit_boundary,
+        planned=0,
+        observed=77014766592,
+    )
+    assert puts == []
+    assert len(_warnings_of(state, "server_default_manual")) == 1
+
+
+async def test_repair_convergence_zero_mask_put_failure_nonfatal(
+    tmp_path: Path, repair_permission_unit_boundary
+) -> None:
+    state, _, _, _ = await _repair_with_server_default(
+        tmp_path,
+        stored=77014766592,
+        mask=0,
+        runtime=repair_permission_unit_boundary,
+        planned=0,
+        observed=77014766592,
+        put_status=500,
+    )
+    assert len(_warnings_of(state, "server_default_check_failed")) == 1
+    assert _warnings_of(state, "server_default_reset") == []
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_convergence_silent_without_metadata_for_stock_default(
+    tmp_path: Path,
+) -> None:
+    state, _, puts, _ = await _repair_with_server_default(
+        tmp_path, stored=77014766592, write_metadata=False
+    )
+    assert puts == []
+    assert _warnings_of(state, "server_default_reset", "server_default_manual") == []
+
+
+async def test_repair_resets_stock_default_end_to_end(tmp_path, monkeypatch):
+    config, exports, state, server, channel = _explicit_channel_repair_case(tmp_path, everyone=0)
+    server["default_permissions"] = 77014766592
+    monkeypatch.setattr(
+        "discord_ferry.migrator.verify.run_check", AsyncMock(return_value=CheckReport())
+    )
+    monkeypatch.setattr(engine_module, "_initialize_upload_limits", AsyncMock())
+    monkeypatch.setattr(engine_module, "_repair_duplicate_forum_indexes", AsyncMock())
+    bodies = []
+
+    def write_default(url, **kwargs):
+        bodies.append(kwargs.get("json", {}))
+        server["default_permissions"] = kwargs["json"]["permissions"]
+        return CallbackResult(payload={})
+
+    base = f"{config.stoat_url}/servers/{server['_id']}"
+    with aioresponses() as remote:
+        remote.get(f"{config.stoat_url}/", payload={"revolt": "0.15.7"}, repeat=True)
+        remote.get(base, callback=lambda url, **kw: CallbackResult(payload=server), repeat=True)
+        remote.get(
+            f"{base}?include_channels=true",
+            callback=lambda url, **kw: CallbackResult(payload={**server, "channels": [channel]}),
+            repeat=True,
+        )
+        remote.get(f"{config.stoat_url}/channels/{channel['_id']}", payload=channel, repeat=True)
+        remote.put(f"{base}/permissions/default", callback=write_default)
+        await run_repair(config, state, exports, lambda event: None)
+    assert bodies == [{"permissions": 0}]
+    assert server["default_permissions"] == 0
+    resets = _warnings_of(state, "server_default_reset")
+    assert len(resets) == 1 and "#1174" in resets[0]["message"]
 
 
 @pytest.mark.usefixtures("repair_permission_unit_boundary")
