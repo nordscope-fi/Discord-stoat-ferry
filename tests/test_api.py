@@ -38,6 +38,7 @@ from discord_ferry.migrator.api import (
     api_delete_emoji,
     api_delete_role,
     api_delete_webhook,
+    api_edit_channel,
     api_edit_role,
     api_edit_role_ranks,
     api_edit_server,
@@ -423,7 +424,7 @@ async def test_api_execute_webhook_sends_no_session_token(mock_aiohttp: aiorespo
 
 
 async def test_api_send_message_still_authenticated(mock_aiohttp: aioresponses) -> None:
-    """Auth regression: ordinary sends MUST still carry x-session-token."""
+    """Ordinary sends keep their session token but carry no structural audit label."""
     captured: dict[str, str] = {}
 
     def cap(url: object, **kwargs: object) -> None:
@@ -433,6 +434,7 @@ async def test_api_send_message_still_authenticated(mock_aiohttp: aioresponses) 
     async with aiohttp.ClientSession() as session:
         await api_send_message(session, BASE_URL, TOKEN, "ch1", content="hi")
     assert captured.get("x-session-token") == TOKEN
+    assert "X-Audit-Log-Reason" not in captured
 
 
 async def test_api_execute_webhook_retries_429(mock_aiohttp: aioresponses) -> None:
@@ -476,14 +478,21 @@ async def test_api_create_server_wrapped_response(mock_aiohttp: aioresponses) ->
 async def test_api_create_server_sends_nsfw_in_create_body(mock_aiohttp: aioresponses) -> None:
     """POST /servers/create carries the NSFW flag, which edits cannot apply (#1168)."""
     bodies: list[dict[str, object]] = []
+    headers: list[dict[str, str]] = []
+
+    def capture_request(url: object, **kwargs: object) -> None:
+        bodies.append(kwargs.get("json", {}))  # type: ignore[arg-type]
+        headers.append(kwargs.get("headers", {}))  # type: ignore[arg-type]
+
     mock_aiohttp.post(
         f"{BASE_URL}/servers/create",
         payload={"server": {"_id": "srv123", "name": "Test"}, "channels": []},
-        callback=lambda url, **kwargs: bodies.append(kwargs.get("json", {})),  # type: ignore[misc]
+        callback=capture_request,
     )
     async with aiohttp.ClientSession() as session:
         await api_create_server(session, BASE_URL, TOKEN, "Test", nsfw=True)
     assert bodies == [{"name": "Test", "nsfw": True}]
+    assert "X-Audit-Log-Reason" not in headers[0]
 
 
 async def test_api_create_server_array_body(mock_aiohttp: aioresponses) -> None:
@@ -847,6 +856,53 @@ async def test_api_edit_server(mock_aiohttp: aioresponses) -> None:
     async with aiohttp.ClientSession() as session:
         result = await api_edit_server(session, BASE_URL, TOKEN, "srv1", name="Renamed Server")
     assert result["name"] == "Renamed Server"
+
+
+async def test_structural_writes_include_ferry_audit_reason(mock_aiohttp: aioresponses) -> None:
+    """Structural changes identify Ferry in Stoat's audit log (#1248)."""
+    mock_aiohttp.patch(f"{BASE_URL}/servers/srv1", payload={"_id": "srv1"}, repeat=True)
+    mock_aiohttp.post(f"{BASE_URL}/channels/channel1/invites", payload={"code": "invite1"})
+    mock_aiohttp.post(f"{BASE_URL}/servers/srv1/roles", payload={"id": "role1"})
+    mock_aiohttp.patch(f"{BASE_URL}/servers/srv1/roles/role1", payload={"id": "role1"})
+    mock_aiohttp.patch(f"{BASE_URL}/servers/srv1/roles/ranks", payload={"_id": "srv1"})
+    mock_aiohttp.delete(f"{BASE_URL}/servers/srv1/roles/role1", status=204)
+    mock_aiohttp.post(f"{BASE_URL}/servers/srv1/channels", payload={"_id": "channel1"})
+    mock_aiohttp.patch(f"{BASE_URL}/channels/channel1", payload={"_id": "channel1"})
+    mock_aiohttp.delete(f"{BASE_URL}/channels/channel1", status=204)
+    mock_aiohttp.put(f"{BASE_URL}/custom/emoji/emoji1", payload={"_id": "emoji1", "name": "party"})
+    mock_aiohttp.delete(f"{BASE_URL}/custom/emoji/emoji1", status=204)
+    mock_aiohttp.put(f"{BASE_URL}/servers/srv1/permissions/role1", payload={})
+    mock_aiohttp.put(f"{BASE_URL}/servers/srv1/permissions/default", payload={})
+    mock_aiohttp.put(f"{BASE_URL}/channels/channel1/permissions/role1", payload={})
+    mock_aiohttp.put(f"{BASE_URL}/channels/channel1/permissions/default", payload={})
+
+    async with aiohttp.ClientSession() as session:
+        await api_edit_server(session, BASE_URL, TOKEN, "srv1", name="server")
+        await api_upsert_categories(session, BASE_URL, TOKEN, "srv1", [])
+        await api_create_invite(session, BASE_URL, TOKEN, "channel1")
+        await api_create_role(session, BASE_URL, TOKEN, "srv1", "role")
+        await api_edit_role(session, BASE_URL, TOKEN, "srv1", "role1", name="role")
+        await api_edit_role_ranks(session, BASE_URL, TOKEN, "srv1", ["role1"])
+        await api_delete_role(session, BASE_URL, TOKEN, "srv1", "role1")
+        await api_create_channel(session, BASE_URL, TOKEN, "srv1", name="channel")
+        await api_edit_channel(session, BASE_URL, TOKEN, "channel1", name="channel")
+        await api_delete_channel(session, BASE_URL, TOKEN, "channel1")
+        await api_create_emoji(session, BASE_URL, TOKEN, "emoji1", "party", "srv1")
+        await api_delete_emoji(session, BASE_URL, TOKEN, "emoji1")
+        await api_set_role_permissions(session, BASE_URL, TOKEN, "srv1", "role1", allow=1, deny=0)
+        await api_set_server_default_permissions(session, BASE_URL, TOKEN, "srv1", permissions=1)
+        await api_set_channel_role_permissions(
+            session, BASE_URL, TOKEN, "channel1", "role1", allow=1, deny=0
+        )
+        await api_set_channel_default_permissions(
+            session, BASE_URL, TOKEN, "channel1", allow=1, deny=0
+        )
+
+    requests = [request for calls in mock_aiohttp.requests.values() for request in calls]
+    assert len(requests) == 16
+    assert {request.kwargs["headers"].get("X-Audit-Log-Reason") for request in requests} == {
+        "Discord Ferry migration"
+    }
 
 
 # ---------------------------------------------------------------------------
