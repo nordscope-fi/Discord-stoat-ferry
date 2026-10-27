@@ -8,7 +8,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from aiohttp import ClientTimeout
@@ -37,6 +37,7 @@ from discord_ferry.feedback import (
     feedback_content_hash,
     normalize_text,
     render_diagnostics,
+    render_public_feedback_body,
     solve_challenge,
 )
 
@@ -1063,3 +1064,61 @@ def test_home_rule_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     once = _error_after_cleaning("read /Users/someone/Acme/x.json")
     assert once is not None
     assert _error_after_cleaning(once) == once
+
+
+@pytest.fixture
+def _no_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(feedback_module, "_home_text", lambda: None)
+
+
+@pytest.mark.usefixtures("_no_home")
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("D:\\Exports\\Acme\\general.json", "[path]"),
+        ("/Volumes/USB/Acme/general.json", "[path]"),
+        ("\\\\nas\\share\\Acme\\x.json", "[path]"),
+        ("in /tmp/x.json: permission denied", "in [path]: permission denied"),
+        ("error in /opt/app/data.json:42", "error in [path]:42"),
+        ("(see /var/log/x.log)", "(see [path])"),
+        ("read /srv/a.json, then /srv/b.json; stopped", "read [path], then [path]; stopped"),
+        ("wrote /srv/out.json.", "wrote [path]."),
+        ("content-type: application/json", "content-type: application/json"),
+        ("progress 3/4 and/or done", "progress 3/4 and/or done"),
+        (
+            "GET https://api.stoat.chat/servers/01ABC/channels failed",
+            "GET https://api.stoat.chat/servers/01ABC/channels failed",
+        ),
+        ("see http://localhost:8080/health", "see http://localhost:8080/health"),
+        ("INFO discord_ferry.migrator.api: ok", "INFO discord_ferry.migrator.api: ok"),
+    ],
+)
+def test_clean_diagnostics_removes_full_paths(text: str, expected: str) -> None:
+    once = _error_after_cleaning(text)
+    assert once == expected
+    assert _error_after_cleaning(once) == once
+
+
+def test_pasted_home_path_does_not_reach_public_body() -> None:
+    # Moved from the brainstorm prototype that rejected collection-only cleaning:
+    # text pasted into the edited last error must be cleaned at send time.
+    home = str(Path.home())
+    diagnostics = FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": "3.1.4",
+            "operating_system": "macos",
+            "architecture": "arm64",
+            "interface": "cli",
+            "stage": "setup",
+            "last_error": f"FileNotFoundError: '{home}/Acme/general.json'",
+        }
+    )
+    body = render_public_feedback_body(
+        request_id=uuid4(),
+        description="Report",
+        expected=None,
+        reproduction=None,
+        diagnostics=diagnostics,
+        contact_available=False,
+    )
+    assert home not in body
