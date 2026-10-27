@@ -1139,3 +1139,24 @@ def test_clean_diagnostics_removes_quoted_paths(text: str, expected: str) -> Non
     once = _error_after_cleaning(text)
     assert once == expected
     assert _error_after_cleaning(once) == once
+
+
+@pytest.mark.usefixtures("_no_home")
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("read D:\\My Exports\\Acme\\x.json now", "read [path] now"),
+        ("read /Volumes/My Drive/Acme/x.json now", "read [path] now"),
+        ("read /tmp/x.json https://example.com/a", "read [path] https://example.com/a"),
+        (
+            'File "/opt/homebrew/lib/python3.11/site-packages/aiohttp/client.py", line 5',
+            'File "[path]/client.py", line 5',
+        ),
+        ("error in /opt/app/mod.py:42", "error in [path]/mod.py:42"),
+        ("at C:\\Ferry\\_internal\\api.py:9", "at [path]\\api.py:9"),
+    ],
+)
+def test_clean_diagnostics_handles_spaced_paths_and_code_files(text: str, expected: str) -> None:
+    once = _error_after_cleaning(text)
+    assert once == expected
+    assert _error_after_cleaning(once) == once

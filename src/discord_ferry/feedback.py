@@ -46,6 +46,9 @@ _UNQUOTED_PATH = re.compile(
     r"(?:(?<![\w.~/:\]\\])/" + _PATH_CHARACTERS + "+"
     r"|(?<!\w)[A-Za-z]:[\\/]" + _PATH_CHARACTERS + "*"
     r"|(?<![\w\\])\\\\" + _PATH_CHARACTERS + "+)"
+    # A folder name with a space continues the path when the next word holds a
+    # separator. A web address is never swallowed.
+    r"(?: (?!\S*://)" + _PATH_CHARACTERS + r"*[\\/]" + _PATH_CHARACTERS + "*)*"
 )
 _PATH_TRAILER = re.compile(r"(?::\d*|\.)+$")
 _QUOTED_PATH = re.compile(
@@ -429,6 +432,12 @@ def _shorten_home(text: str) -> str:
 
 
 def _path_placeholder(path: str) -> str:
+    """Return ``[path]``, keeping a Python file name so tracebacks still name the module."""
+
+    name = re.split(r"[\\/]", path)[-1]
+    if name.endswith(".py") and name != ".py":
+        separator = "\\" if "\\" in path and "/" not in path else "/"
+        return f"[path]{separator}{name}"
     return "[path]"
 
 
