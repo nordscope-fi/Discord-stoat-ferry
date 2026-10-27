@@ -1575,6 +1575,35 @@ async def test_feedback_route_cleans_diagnostics_again_before_github(
     assert credential not in str(sent.diagnostics.to_mapping())
 
 
+async def test_feedback_route_keeps_client_cleaned_paths_unchanged(tmp_path: object) -> None:
+    from discord_ferry.feedback_service.app import create_app
+
+    raw = FeedbackDiagnostics(
+        ferry_version="3.1.4",
+        operating_system=OperatingSystem.WINDOWS,
+        architecture=Architecture.X86_64,
+        interface=FeedbackInterface.GUI,
+        stage=FeedbackStage.CHANNELS,
+        last_error="failed reading D:\\Exports\\Acme\\general.json: denied",
+        log_excerpt="wrote /Volumes/USB/Acme/out.json.",
+    )
+    client_request = _feedback_request(diagnostics=raw).cleaned_for_send()
+    github = _FeedbackGitHub()
+    client = TestClient(
+        TestServer(create_app(_service_config(tmp_path), github=github, now=lambda: NOW))
+    )
+    await client.start_server()
+    try:
+        response = await client.post("/v1/feedback", json=client_request.to_mapping())
+        assert response.status == 200
+    finally:
+        await client.close()
+
+    sent = github.issue_requests[0]
+    assert sent.diagnostics == client_request.diagnostics
+    assert "Acme" not in str(sent.diagnostics)
+
+
 def test_startup_serve_loads_config_and_runs_only_public_routes(tmp_path: Path) -> None:
     from discord_ferry.feedback_service.__main__ import serve
 

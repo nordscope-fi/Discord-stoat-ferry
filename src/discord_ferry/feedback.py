@@ -41,6 +41,13 @@ _PEM_PRIVATE_KEY = re.compile(
     r".*?(?:-----END (?P=label)-----|\Z)",
     re.DOTALL,
 )
+_PATH_CHARACTERS = r"""[^\s'"(),;]"""
+_UNQUOTED_PATH = re.compile(
+    r"(?:(?<![\w.~/:\]\\])/" + _PATH_CHARACTERS + "+"
+    r"|(?<!\w)[A-Za-z]:[\\/]" + _PATH_CHARACTERS + "*"
+    r"|(?<![\w\\])\\\\" + _PATH_CHARACTERS + "+)"
+)
+_PATH_TRAILER = re.compile(r"(?::\d*|\.)+$")
 EnumT = TypeVar("EnumT", bound=StrEnum)
 
 
@@ -418,10 +425,22 @@ def _shorten_home(text: str) -> str:
     return pattern.sub("~", text)
 
 
+def _path_placeholder(path: str) -> str:
+    return "[path]"
+
+
+def _replace_unquoted_path(match: re.Match[str]) -> str:
+    path = match.group(0)
+    trailer = _PATH_TRAILER.search(path)
+    suffix = "" if trailer is None else trailer.group(0)
+    return _path_placeholder(path[: len(path) - len(suffix)]) + suffix
+
+
 def _remove_paths(text: str) -> str:
     """Replace private file paths. Applying it twice gives the same result."""
 
-    return _shorten_home(text)
+    text = _shorten_home(text)
+    return _UNQUOTED_PATH.sub(_replace_unquoted_path, text)
 
 
 def _clean_diagnostic_text(text: str) -> str:

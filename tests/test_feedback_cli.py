@@ -523,3 +523,35 @@ def test_failure_hint_is_absent_from_help_and_usage_errors(tmp_path: Path) -> No
 
     assert "ferry feedback" not in help_result.output
     assert "ferry feedback" not in usage_result.output
+
+
+def test_feedback_flow_cleans_a_pasted_path_from_the_edited_error() -> None:
+    client = _FakeFeedbackClient(_receipt())
+    user_input = "\n".join(
+        (
+            "Bug",
+            "Report",
+            "",
+            "",
+            "",
+            "y",
+            "y",
+            "Edit",
+            "failed reading D:\\Exports\\Acme\\general.json",
+            "",
+            "Include",
+            "y",
+            "Continue",
+            "y",
+            "y",
+            "",
+        )
+    )
+    with (
+        patch("discord_ferry.feedback_cli.FeedbackClient", return_value=client),
+        patch("discord_ferry.feedback_cli.build_diagnostics", return_value=_diagnostics()),
+    ):
+        result = CliRunner().invoke(main, ["feedback"], input=user_input)
+
+    assert result.exit_code == 0, result.output
+    assert "Acme" not in str(client.submissions[0]["public_body"])
