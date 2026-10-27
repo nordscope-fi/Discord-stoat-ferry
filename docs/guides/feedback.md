@@ -22,7 +22,7 @@ Neither route needs a GitHub account. A short description is the only report fie
 
 Ferry shows the exact public preview before it sends anything. Read it, edit any field that needs work, then confirm that the report may be public on GitHub.
 
-Diagnostics are optional and need a separate confirmation. They can include your Ferry version, operating system, processor type, interface, current stage, last visible error, and up to 100 recent log lines. Ferry removes known credential patterns, but names or message content may remain. Edit the diagnostic preview or leave it out if it contains anything you do not want to publish.
+Diagnostics are optional and need a separate confirmation. They can include your Ferry version, operating system, processor type, interface, current stage, last visible error, and up to 100 recent log lines. Before you see the public preview, Ferry removes known credential patterns, shortens your home folder to `~`, and replaces other file paths with `[path]`. In the app, it also replaces the server, category and channel names from your export with `[server]`, `[category]` and `[channel]`, and the export's file names with `[file]`. The `ferry feedback` command does not know which export you used, so names stay in its reports. Long text can be shortened to fit the size limits. Names or message content may still remain, so edit the diagnostic preview or leave it out if it contains anything you do not want to publish.
 
 Ferry does not send raw Discord exports or file attachments through this feedback route.
 
