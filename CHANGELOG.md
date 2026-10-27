@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the `--checkpoint-interval` docs, which promised a replay of at most N messages though a save also needs 5 seconds since the last one, and the dotenv docs, which said the working folder is searched when Ferry searches from its install directory (#1299, #1245).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.3] - 2026-10-27
+
+### Fixed
+
+- Stop the GUI feedback dialog from refilling a "Last error" or recent-log excerpt the user cleared, so a cleared box is no longer sent (#1241).
+
 ## [3.1.2] - 2026-10-27
 
 ### Fixed

@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
@@ -616,3 +616,92 @@ async def test_feedback_reconnect_keeps_failed_draft_without_automatic_retry(
         await user.should_see("Feedback shared")
 
     assert client.submissions[0]["request_id"] == client.submissions[1]["request_id"]
+
+
+async def test_feedback_dialog_cleared_log_excerpt_is_not_sent(user: User, tmp_path: Path) -> None:
+    # Kills an implementation that refills an empty excerpt from the log on every
+    # preview, so "cleared" and "never filled" look the same (issue 1241).
+    from discord_ferry import feedback_gui
+
+    log_file = tmp_path / "ferry.log"
+    log_file.write_text("INFO export /Users/someone/Acme\n", encoding="utf-8")
+    real_build = feedback_gui.build_diagnostics
+
+    def build_with_log(context: object, *, include_logs: bool, log_path: object) -> object:
+        return real_build(context, include_logs=include_logs, log_path=log_file)
+
+    client = _FakeFeedbackClient(_receipt())
+    with (
+        patch("discord_ferry.feedback_gui.FeedbackClient", return_value=client),
+        patch("discord_ferry.feedback_gui.build_diagnostics", build_with_log),
+    ):
+        await user.open("/")
+        await _open_feedback_report(user)
+        _set_value(user, "Description", "A short report")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        assert "Acme" in user.find("Recent log text").elements.pop().value
+
+        _set_value(user, "Include diagnostics", True)
+        _set_value(user, "Recent log text", "")
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        await user.should_see("3. Public review")
+
+        _set_value(user, "I understand this report will be public on GitHub", True)
+        user.find("Send feedback").click()
+        await user.should_see("Feedback shared")
+
+    assert "Acme" not in str(client.submissions[0]["public_body"])
+    diagnostics = client.submissions[0]["diagnostics"]
+    assert diagnostics is not None
+    assert diagnostics["log_excerpt"] is None
+
+
+def _last_error_box(user: User, ui: object) -> Any:
+    # The diagnostics preview text also mentions "Last error", so pick the textarea.
+    return next(e for e in user.find("Last error").elements if isinstance(e, ui.textarea))
+
+
+async def test_feedback_dialog_cleared_last_error_is_not_sent(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    from nicegui import ui
+
+    # Kills an implementation that refills an empty "Last error" from the runtime
+    # context on every preview, so a cleared box is sent anyway (issue 1241).
+    _seed_migrate_page(user_store, tab_store, tmp_path)
+
+    async def fake_run_migration(config: object, *, on_event: object) -> None:
+        raise MigrationError("Visible failure")
+
+    client = _FakeFeedbackClient(_receipt())
+    with (
+        patch("discord_ferry.gui.run_migration", fake_run_migration),
+        patch("discord_ferry.gui.load_state", side_effect=FileNotFoundError),
+        patch("discord_ferry.feedback_gui.FeedbackClient", return_value=client),
+    ):
+        await user.open("/migrate")
+        await user.should_see("Migration failed: Visible failure")
+        await _open_feedback_report(user)
+        _set_value(user, "Description", "The migration stopped")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        assert "Visible failure" in _last_error_box(user, ui).value
+
+        _last_error_box(user, ui).set_value("")
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        await user.should_see("3. Public review")
+
+        _set_value(user, "I understand this report will be public on GitHub", True)
+        user.find("Send feedback").click()
+        await user.should_see("Feedback shared")
+
+    assert "Visible failure" not in str(client.submissions[0]["public_body"])
+    diagnostics = client.submissions[0]["diagnostics"]
+    assert diagnostics is not None
+    assert diagnostics["last_error"] is None
