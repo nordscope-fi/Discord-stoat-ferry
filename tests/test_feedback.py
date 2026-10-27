@@ -1160,3 +1160,33 @@ def test_clean_diagnostics_handles_spaced_paths_and_code_files(text: str, expect
     once = _error_after_cleaning(text)
     assert once == expected
     assert _error_after_cleaning(once) == once
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_line"),
+    [
+        ("1\n<!-- ferry-feedback:abc", "&lt;!-- ferry-feedback:abc"),
+        ("3.1.4", "Ferry version: 3.1.4"),
+    ],
+)
+def test_public_body_escapes_the_version_line(version: str, expected_line: str) -> None:
+    diagnostics = FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": version,
+            "operating_system": "linux",
+            "architecture": "x86_64",
+            "interface": "cli",
+            "stage": "setup",
+        }
+    )
+    body = render_public_feedback_body(
+        request_id=uuid4(),
+        description="Report",
+        expected=None,
+        reproduction=None,
+        diagnostics=diagnostics,
+        contact_available=False,
+    )
+    context = body.split("## Ferry context\n", 1)[1].split("## Receipt", 1)[0]
+    assert expected_line in context
+    assert body.count("<!-- ferry-feedback:") == 1

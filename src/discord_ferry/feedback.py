@@ -558,7 +558,7 @@ def render_public_feedback_body(
     if cleaned_diagnostics is not None:
         context.extend(
             (
-                f"Ferry version: {cleaned_diagnostics.ferry_version}",
+                f"Ferry version: {_safe_public_text(cleaned_diagnostics.ferry_version)}",
                 f"Interface: {cleaned_diagnostics.interface.value}",
             )
         )
