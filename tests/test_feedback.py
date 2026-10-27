@@ -937,3 +937,46 @@ def test_feedback_draft_save_goes_through_the_retrying_replace(
     FeedbackDraft(FeedbackKind.BUG, "Saved report").save(path)
 
     assert calls == [path]
+
+
+def test_keep_start_cuts_at_the_last_whitespace_within_the_byte_limit() -> None:
+    assert feedback_module._keep_start("alpha beta gamma", 12) == "alpha beta"
+    assert feedback_module._keep_start("alpha beta gamma", 100) == "alpha beta gamma"
+    assert len(feedback_module._keep_start("é" * 3, 3).encode("utf-8")) <= 3
+
+
+def test_keep_end_drops_the_partial_first_line() -> None:
+    text = "first line [path]/client.py\nsecond\nthird"
+    assert feedback_module._keep_end(text, 16) == "second\nthird"
+
+
+def test_keep_end_falls_back_to_a_word_boundary_on_one_long_line() -> None:
+    assert feedback_module._keep_end("aaaa [path]/client.py tail", 12) == "tail"
+
+
+def test_clean_diagnostics_for_send_trims_text_that_cleaning_lengthened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        feedback_module, "_clean_diagnostic_text", lambda text: text + " grown" * 3_000
+    )
+    diagnostics = FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": "3.1.4",
+            "operating_system": "macos",
+            "architecture": "arm64",
+            "interface": "gui",
+            "stage": "setup",
+            "last_error": "first words",
+            "log_excerpt": "line one\nline two",
+        }
+    )
+
+    cleaned = clean_diagnostics_for_send(diagnostics)
+
+    assert cleaned.last_error is not None
+    assert cleaned.last_error.startswith("first words")
+    assert len(cleaned.last_error.encode("utf-8")) <= 2_000
+    assert cleaned.log_excerpt is not None
+    assert cleaned.log_excerpt.endswith("grown")
+    assert len(cleaned.log_excerpt.encode("utf-8")) <= 12_000
