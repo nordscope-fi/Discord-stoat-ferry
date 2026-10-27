@@ -47,6 +47,7 @@ class FeedbackGuiContext:
     stage: str
     last_error: str | None
     log_path: Path | None
+    export_dir: Path | None = None
 
 
 def read_private_names(export_dir: Path) -> tuple[tuple[str, str], ...]:
@@ -84,6 +85,18 @@ def read_private_names(export_dir: Path) -> tuple[tuple[str, str], ...]:
         placeholders.setdefault(export.channel.name, "[channel]")
     kept = [(name, label) for name, label in placeholders.items() if len(name) >= 3]
     return tuple(sorted(kept, key=lambda pair: len(pair[0]), reverse=True))
+
+
+def gui_feedback_context(stage: str, export_dir: object = None) -> FeedbackGuiContext:
+    """Build a page's feedback context, carrying the export folder when one is stored."""
+
+    return FeedbackGuiContext(
+        interface=FeedbackInterface.GUI,
+        stage=stage,
+        last_error=None,
+        log_path=Path.home() / ".discord-ferry" / "logs" / "ferry.log",
+        export_dir=Path(export_dir) if isinstance(export_dir, str) and export_dir else None,
+    )
 
 
 async def _pick_save_path() -> Path | None:
