@@ -117,7 +117,7 @@ users hold old exports.
 | `GuildNewsThread` | 10 | TextChannel (flatten) | Becomes a standalone text channel |
 | `GuildPublicThread` | 11 | TextChannel (flatten) | Becomes a standalone text channel |
 | `GuildPrivateThread` | 12 | TextChannel (flatten) | Becomes a standalone text channel |
-| `GuildStageVoice` | 13 | Not migrated | Stoat has no stage channel |
+| `GuildStageVoice` | 13 | VoiceChannel | Treated like `GuildVoiceChat`. Stoat has no stage channel, so stage-only features are lost. |
 | `GuildDirectory` | 14 | Not migrated | No Stoat equivalent |
 | `GuildForum` | 15 | Parser compatibility only | DCE 2.48 removes forum containers before export. Their posts arrive as `GuildPublicThread` (11), so normal 2.48 exports do not reach Ferry's type-15 delivery path. |
 | `GuildMedia` | 16 | Parser compatibility only | DCE 2.48's `ChannelKind` enum does not define this value. Ferry can parse it if present, but normal 2.48 output does not produce it. |

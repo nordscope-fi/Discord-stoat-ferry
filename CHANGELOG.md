@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.4] - 2026-10-27
+
+### Fixed
+
+- Create Discord stage channels (type 13) as Stoat voice channels instead of text channels. The blueprint export and the documentation now agree with the migrator, and the invite channel picker skips them like any voice channel (#1204).
+
 ## [3.1.3] - 2026-10-27
 
 ### Fixed

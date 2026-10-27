@@ -52,6 +52,16 @@ def test_blueprint_from_exports_maps_channels_and_categories() -> None:
     assert "a-category" not in all_names  # the type-4 channel was skipped
 
 
+def test_blueprint_from_exports_maps_stage_channel_to_voice() -> None:
+    """#1204: a stage channel (type 13) is a Voice channel in the blueprint too.
+
+    Kills a blueprint mapping that tests only ``type == 2`` and sends type 13 to Text.
+    """
+    bp = blueprint_from_exports([_export("town-hall", 13)])
+
+    assert [(c.name, c.type) for c in bp.uncategorized_channels] == [("town-hall", "Voice")]
+
+
 def test_blueprint_from_exports_name_override() -> None:
     """An explicit name overrides the guild name."""
     bp = blueprint_from_exports([_export("general", 0)], name="Renamed")
