@@ -695,7 +695,9 @@ async def test_feedback_dialog_cleared_last_error_is_not_sent(
         _last_error_box(user, ui).set_value("")
         _set_value(user, "I understand the diagnostics will be public", True)
         user.find("Continue to public review").click()
-        await user.should_see("3. Public review")
+        # The step badges show on every step, so wait for the review heading:
+        # this screen knows the export folder and reads its names first.
+        await user.should_see("Review the exact public report")
 
         _set_value(user, "I understand this report will be public on GitHub", True)
         user.find("Send feedback").click()
@@ -758,6 +760,96 @@ def test_gui_feedback_context_with_an_export_folder(tmp_path: Path) -> None:
     assert context.export_dir == tmp_path
     assert context.stage == "review"
     assert context.last_error is None
+
+
+def _plain_diagnostics() -> object:
+    from discord_ferry.feedback import FeedbackDiagnostics
+
+    return FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": "3.1.4",
+            "operating_system": "macos",
+            "architecture": "arm64",
+            "interface": "gui",
+            "stage": "review",
+        }
+    )
+
+
+async def test_feedback_dialog_replaces_export_names_in_the_public_review(
+    user: User,
+    user_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    _seed_validate_page(user_store, tmp_path)
+    client = _FakeFeedbackClient(_receipt())
+    with (
+        patch("discord_ferry.feedback_gui.FeedbackClient", return_value=client),
+        patch(
+            "discord_ferry.feedback_gui.build_diagnostics",
+            side_effect=lambda context, **_: _plain_diagnostics(),
+        ),
+    ):
+        await user.open("/validate")
+        await _open_feedback_report(user)
+        _set_value(user, "Description", "A short report")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        _set_value(user, "Include diagnostics", True)
+        _set_value(user, "Last error", "channel general failed in Test Server")
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        await user.should_see("3. Public review")
+        await user.should_see("channel [channel] failed in [server]")
+        _set_value(user, "I understand this report will be public on GitHub", True)
+        user.find("Send feedback").click()
+        await user.should_see("Feedback shared")
+
+    assert "Test Server" not in str(client.submissions[0]["public_body"])
+
+
+async def test_feedback_dialog_reads_names_only_with_diagnostics_and_once(
+    user: User,
+    user_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    _seed_validate_page(user_store, tmp_path)
+    calls: list[Path] = []
+
+    def counting_reader(export_dir: Path) -> tuple[tuple[str, str], ...]:
+        calls.append(export_dir)
+        return ()
+
+    with (
+        patch("discord_ferry.feedback_gui.read_private_names", counting_reader),
+        patch(
+            "discord_ferry.feedback_gui.build_diagnostics",
+            side_effect=lambda context, **_: _plain_diagnostics(),
+        ),
+    ):
+        await user.open("/validate")
+        await _open_feedback_report(user)
+        await _fill_short_report(user)
+        assert calls == []
+
+        user.find("Edit report").click()
+        await user.should_see("1. Report")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        _set_value(user, "Include diagnostics", True)
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        await user.should_see("Review the exact public report")
+        assert len(calls) == 1
+
+        user.find("Edit report").click()
+        await user.should_see("1. Report")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        await user.should_see("Review the exact public report")
+        assert len(calls) == 1
 
 
 def test_read_private_names_keeps_good_files_and_file_names_when_one_is_broken(
