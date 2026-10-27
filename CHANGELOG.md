@@ -16,6 +16,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.5] - 2026-10-27
+
+### Fixed
+
+- Remove file paths from public feedback diagnostics before the preview: the home folder becomes `~` and other full paths, including `file://` addresses, become `[path]`, keeping a Python file name so tracebacks still point at a module. Cleaned text is trimmed back to its size limits between words (#1241).
+- Replace the server, category and channel names and the file names from the export with placeholders in feedback sent from the app with diagnostics. A damaged export file no longer stops the names in the other files from being found (#1241).
+- Escape the version line in the public feedback context section, like every other user-influenced line (#1479). The feedback service needs a redeploy for this to reach published issues.
+
 ## [3.1.4] - 2026-10-27
 
 ### Fixed
