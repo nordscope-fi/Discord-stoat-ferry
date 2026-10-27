@@ -401,22 +401,56 @@ def _clean_diagnostic_text(text: str) -> str:
     return cleaned
 
 
+_VERSION_LIMIT = 32
+_LAST_ERROR_LIMIT = 2_000
+_LOG_EXCERPT_LIMIT = 12_000
+
+
+def _keep_start(text: str, limit: int) -> str:
+    """Keep the start of *text* within *limit* UTF-8 bytes, cut between words."""
+
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    kept = encoded[:limit].decode("utf-8", errors="ignore")
+    boundary = max(kept.rfind(" "), kept.rfind("\n"), kept.rfind("\t"))
+    return kept[:boundary].rstrip() if boundary > 0 else kept
+
+
+def _keep_end(text: str, limit: int) -> str:
+    """Keep the end of *text* within *limit* UTF-8 bytes, starting on a whole line."""
+
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    kept = encoded[-limit:].decode("utf-8", errors="ignore")
+    newline = kept.find("\n")
+    if newline >= 0:
+        return kept[newline + 1 :]
+    space = kept.find(" ")
+    return kept[space + 1 :] if space >= 0 else kept
+
+
 def clean_diagnostics_for_send(diagnostics: FeedbackDiagnostics) -> FeedbackDiagnostics:
     """Apply the final credential cleaner to every editable diagnostic string."""
 
     return FeedbackDiagnostics.from_mapping(
         {
             **diagnostics.to_mapping(),
-            "ferry_version": _clean_diagnostic_text(diagnostics.ferry_version),
+            "ferry_version": _keep_start(
+                _clean_diagnostic_text(diagnostics.ferry_version), _VERSION_LIMIT
+            ),
             "last_error": (
                 None
                 if diagnostics.last_error is None
-                else _clean_diagnostic_text(diagnostics.last_error)
+                else _keep_start(_clean_diagnostic_text(diagnostics.last_error), _LAST_ERROR_LIMIT)
+                or None
             ),
             "log_excerpt": (
                 None
                 if diagnostics.log_excerpt is None
-                else _clean_diagnostic_text(diagnostics.log_excerpt)
+                else _keep_end(_clean_diagnostic_text(diagnostics.log_excerpt), _LOG_EXCERPT_LIMIT)
+                or None
             ),
         }
     )
