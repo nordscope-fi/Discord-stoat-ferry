@@ -8,13 +8,14 @@ import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
-from nicegui import app, ui
+from nicegui import app, run, ui
 
 from discord_ferry import __version__
-from discord_ferry.core.security import sanitize_secrets_for_public_output
 from discord_ferry.core.boundedjson import JsonLoadRefusedError
+from discord_ferry.core.security import sanitize_secrets_for_public_output
 from discord_ferry.feedback import (
     FeedbackClient,
     FeedbackDiagnostics,
@@ -29,6 +30,9 @@ from discord_ferry.feedback import (
     render_diagnostics,
 )
 from discord_ferry.parser.dce_parser import parse_single_export
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
 
 _SUBMISSION_ERRORS = (
     aiohttp.ClientError,
@@ -143,6 +147,8 @@ class _FeedbackDialogController:
         self.last_error_prefilled = False
         self.log_excerpt_prefilled = False
         self.draft: FeedbackDraft | None = None
+        # Read once, the first time diagnostics are included; None until then.
+        self.private_names: tuple[tuple[str, str], ...] | None = None
         self.submission_task: asyncio.Task[None] | None = None
         self.result_url: str | None = None
         self.result_error: str | None = None
@@ -402,13 +408,32 @@ class _FeedbackDialogController:
         self.stage = 0
         self._render()
 
+    async def _read_names_then_review(self, export_dir: Path) -> None:
+        # The export is streamed file by file, so read it in a worker thread.
+        # run.io_bound returns None when the app shuts down mid-read.
+        names = await run.io_bound(read_private_names, export_dir)
+        self.private_names = names or ()
+        self._show_review()
+
+    def _show_review(self) -> None:
+        assert self.draft is not None
+        if self.include_diagnostics:
+            self.draft.set_private_names(self.private_names or ())
+        self.stage = 2
+        self._render()
+
     def _continue_diagnostics(
         self,
         include: object,
         last_error: object,
         log_excerpt: object,
         acknowledged: object,
-    ) -> None:
+    ) -> Coroutine[Any, Any, None] | None:
+        """Move to public review, first reading export names once if they are needed.
+
+        Returns the name-reading coroutine for NiceGUI to await, or None when the
+        review is shown at once. Most reports never read the export.
+        """
         assert self.draft is not None
         self.include_diagnostics = bool(include)
         self.last_error_value = str(last_error or "")
@@ -426,9 +451,12 @@ class _FeedbackDialogController:
                 self.draft.edit_diagnostics(None)
         except FeedbackValidationError as exc:
             ui.notify(str(exc), type="negative")
-            return
-        self.stage = 2
-        self._render()
+            return None
+        export_dir = self.context.export_dir
+        if self.include_diagnostics and export_dir is not None and self.private_names is None:
+            return self._read_names_then_review(export_dir)
+        self._show_review()
+        return None
 
     def _render_review(self) -> None:
         assert self.draft is not None
