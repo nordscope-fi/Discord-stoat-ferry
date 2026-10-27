@@ -743,6 +743,23 @@ def test_read_private_names_is_empty_for_an_unreadable_folder(tmp_path: Path) ->
     assert read_private_names(tmp_path) == (("broken.json", "[file]"),)
 
 
+@pytest.mark.parametrize("stored", [None, "", 7])
+def test_gui_feedback_context_without_an_export_folder(stored: object) -> None:
+    from discord_ferry.feedback_gui import gui_feedback_context
+
+    assert gui_feedback_context("setup", stored).export_dir is None
+
+
+def test_gui_feedback_context_with_an_export_folder(tmp_path: Path) -> None:
+    from discord_ferry.feedback_gui import gui_feedback_context
+
+    context = gui_feedback_context("review", str(tmp_path))
+
+    assert context.export_dir == tmp_path
+    assert context.stage == "review"
+    assert context.last_error is None
+
+
 def test_read_private_names_keeps_good_files_and_file_names_when_one_is_broken(
     tmp_path: Path,
 ) -> None:

@@ -30,7 +30,11 @@ from discord_ferry.core.security import register_secret, sanitize_secrets
 from discord_ferry.discord import refresh_permission_metadata
 from discord_ferry.errors import MigrationError, PermissionSafetyError, StateError
 from discord_ferry.feedback import FeedbackInterface
-from discord_ferry.feedback_gui import FeedbackGuiContext, render_feedback_action
+from discord_ferry.feedback_gui import (
+    FeedbackGuiContext,
+    gui_feedback_context,
+    render_feedback_action,
+)
 from discord_ferry.gui_native import BrowserFallback, ScopedNativeLauncher
 from discord_ferry.parser.dce_parser import (
     _ACKNOWLEDGEABLE_TYPES,
@@ -1382,14 +1386,7 @@ def validate_page() -> None:
                     # disabled without an explicit disable() call.
                     start_btn.bind_enabled_from(ack, "value")
 
-        render_feedback_action(
-            FeedbackGuiContext(
-                interface=FeedbackInterface.GUI,
-                stage="review",
-                last_error=None,
-                log_path=Path.home() / ".discord-ferry" / "logs" / "ferry.log",
-            )
-        )
+        render_feedback_action(gui_feedback_context("review", storage.get("export_dir")))
 
 
 # ---------------------------------------------------------------------------
@@ -1549,12 +1546,7 @@ async def migrate_page() -> None:
     total_messages = 0
     report_completed = False
     report_path: list[Path] = []  # mutable container so the closure can write to it
-    feedback_context = FeedbackGuiContext(
-        interface=FeedbackInterface.GUI,
-        stage="setup",
-        last_error=None,
-        log_path=Path.home() / ".discord-ferry" / "logs" / "ferry.log",
-    )
+    feedback_context = gui_feedback_context("setup", storage.get("export_dir"))
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):  # noqa: SIM117
         with ui.card().classes("w-full max-w-xl shadow-md") as migration_conflict_card:
