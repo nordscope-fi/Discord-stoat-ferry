@@ -9,11 +9,13 @@ import hashlib
 import json
 import os
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
+from pathlib import Path
+from typing import Literal, Protocol, TypeVar, cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -25,9 +27,6 @@ from discord_ferry.core.security import (
     contains_registered_secret,
     sanitize_secrets_for_public_output,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 MAX_COUNTER = 9_007_199_254_740_991
 _MAX_FEEDBACK_REQUEST_BYTES = 32 * 1024
@@ -388,12 +387,50 @@ def render_diagnostics(diagnostics: FeedbackDiagnostics) -> str:
     return "\n".join(lines)
 
 
+def _home_text() -> str | None:
+    """Return the home folder as text, or None when it is unknown or a filesystem root."""
+
+    try:
+        home = str(Path.home())
+    except (RuntimeError, KeyError):
+        return None
+    home = home.rstrip("/\\")
+    if not home or re.fullmatch(r"[A-Za-z]:", home):
+        return None
+    return home
+
+
+def _paths_ignore_case() -> bool:
+    return sys.platform in {"win32", "darwin"}
+
+
+def _shorten_home(text: str) -> str:
+    home = _home_text()
+    if home is None:
+        return text
+    variants = sorted({home, home.replace("\\", "/")}, key=len, reverse=True)
+    pattern = re.compile(
+        r"(?<![\w.~/\\:])(?:"
+        + "|".join(re.escape(variant) for variant in variants)
+        + r""")(?=[\\/'"\s]|$)""",
+        re.IGNORECASE if _paths_ignore_case() else 0,
+    )
+    return pattern.sub("~", text)
+
+
+def _remove_paths(text: str) -> str:
+    """Replace private file paths. Applying it twice gives the same result."""
+
+    return _shorten_home(text)
+
+
 def _clean_diagnostic_text(text: str) -> str:
     cleaned = sanitize_secrets_for_public_output(text)
     cleaned = _DISCORD_TOKEN.sub("****", cleaned)
     cleaned = _AUTHORIZATION_HEADER.sub(lambda match: f"{match.group('prefix')}****", cleaned)
     cleaned = _CREDENTIAL_URL.sub(lambda match: match.group("scheme"), cleaned)
     cleaned = _PEM_PRIVATE_KEY.sub("****", cleaned)
+    cleaned = _remove_paths(cleaned)
     if contains_registered_secret(cleaned):
         raise FeedbackValidationError("diagnostics contain a registered credential")
     if _DISCORD_TOKEN.search(cleaned) or _CREDENTIAL_URL.search(cleaned):

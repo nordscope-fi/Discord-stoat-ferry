@@ -980,3 +980,86 @@ def test_clean_diagnostics_for_send_trims_text_that_cleaning_lengthened(
     assert cleaned.log_excerpt is not None
     assert cleaned.log_excerpt.endswith("grown")
     assert len(cleaned.log_excerpt.encode("utf-8")) <= 12_000
+
+
+def _error_after_cleaning(text: str) -> str | None:
+    diagnostics = FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": "3.1.4",
+            "operating_system": "macos",
+            "architecture": "arm64",
+            "interface": "gui",
+            "stage": "setup",
+            "last_error": text,
+        }
+    )
+    return clean_diagnostics_for_send(diagnostics).last_error
+
+
+@pytest.mark.parametrize(
+    ("home", "ignore_case", "text", "expected"),
+    [
+        (
+            "/Users/someone",
+            True,
+            "No such file: '/Users/someone/Acme/x.json'",
+            "No such file: '~/Acme/x.json'",
+        ),
+        ("C:\\Users\\someone", True, "C:\\Users\\someone\\Acme\\x.json", "~\\Acme\\x.json"),
+        ("C:\\Users\\someone", True, "C:/Users/someone/Acme/x.json", "~/Acme/x.json"),
+        ("C:\\Users\\Someone", True, "c:\\users\\someone\\x.json", "~\\x.json"),
+        ("/Users/someone", True, "/users/SOMEONE/x.json", "~/x.json"),
+        ("/home/someone", True, "read /home/someone", "read ~"),
+        (
+            "/Users/someone",
+            True,
+            "Stoat returned 429, retrying in 2.5 s",
+            "Stoat returned 429, retrying in 2.5 s",
+        ),
+    ],
+)
+def test_clean_diagnostics_shortens_the_home_folder(
+    monkeypatch: pytest.MonkeyPatch, home: str, ignore_case: bool, text: str, expected: str
+) -> None:
+    monkeypatch.setattr(feedback_module, "_home_text", lambda: home)
+    monkeypatch.setattr(feedback_module, "_paths_ignore_case", lambda: ignore_case)
+    assert _error_after_cleaning(text) == expected
+
+
+def test_home_rule_matches_case_exactly_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(feedback_module, "_home_text", lambda: "/home/someone")
+    monkeypatch.setattr(feedback_module, "_paths_ignore_case", lambda: False)
+    assert "~" not in (_error_after_cleaning("read /home/Someone/x.json") or "")
+
+
+def test_home_rule_leaves_a_look_alike_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(feedback_module, "_home_text", lambda: "/Users/someone")
+    monkeypatch.setattr(feedback_module, "_paths_ignore_case", lambda: True)
+    assert "~2" not in (_error_after_cleaning("open /Users/someone2/x.json") or "")
+
+
+@pytest.mark.parametrize("error", [RuntimeError("no home"), KeyError("HOME")])
+def test_home_text_is_none_when_the_home_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    def raise_error() -> Path:
+        raise error
+
+    monkeypatch.setattr(feedback_module.Path, "home", raise_error)
+    assert feedback_module._home_text() is None
+
+
+@pytest.mark.parametrize("home", ["/", "C:\\", ""])
+def test_home_text_is_none_for_a_filesystem_root(
+    monkeypatch: pytest.MonkeyPatch, home: str
+) -> None:
+    monkeypatch.setattr(feedback_module.Path, "home", lambda: home)
+    assert feedback_module._home_text() is None
+
+
+def test_home_rule_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(feedback_module, "_home_text", lambda: "/Users/someone")
+    monkeypatch.setattr(feedback_module, "_paths_ignore_case", lambda: True)
+    once = _error_after_cleaning("read /Users/someone/Acme/x.json")
+    assert once is not None
+    assert _error_after_cleaning(once) == once
