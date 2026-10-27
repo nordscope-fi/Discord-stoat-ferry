@@ -149,6 +149,8 @@ class _FeedbackDialogController:
         self.draft: FeedbackDraft | None = None
         # Read once, the first time diagnostics are included; None until then.
         self.private_names: tuple[tuple[str, str], ...] | None = None
+        # True while that read runs, so a second click does not start another.
+        self.names_loading = False
         self.submission_task: asyncio.Task[None] | None = None
         self.result_url: str | None = None
         self.result_error: str | None = None
@@ -392,7 +394,9 @@ class _FeedbackDialogController:
             "I understand the diagnostics will be public", value=False
         ).props("color=amber-8")
         with ui.row().classes("w-full justify-between gap-2"):
-            ui.button("Back", on_click=self._back_to_report).props("flat no-caps")
+            ui.button("Back", on_click=self._back_to_report).props("flat no-caps").mark(
+                "feedback-back"
+            )
             ui.button(
                 "Continue to public review",
                 icon="arrow_forward",
@@ -411,9 +415,15 @@ class _FeedbackDialogController:
     async def _read_names_then_review(self, export_dir: Path) -> None:
         # The export is streamed file by file, so read it in a worker thread.
         # run.io_bound returns None when the app shuts down mid-read.
-        names = await run.io_bound(read_private_names, export_dir)
+        try:
+            names = await run.io_bound(read_private_names, export_dir)
+        finally:
+            self.names_loading = False
         self.private_names = names or ()
-        self._show_review()
+        # Keep the names, but only move on if the user is still on this step:
+        # pressing Back or closing during the read must not open the review.
+        if self.stage == 1:
+            self._show_review()
 
     def _show_review(self) -> None:
         assert self.draft is not None
@@ -454,6 +464,9 @@ class _FeedbackDialogController:
             return None
         export_dir = self.context.export_dir
         if self.include_diagnostics and export_dir is not None and self.private_names is None:
+            if self.names_loading:
+                return None
+            self.names_loading = True
             return self._read_names_then_review(export_dir)
         self._show_review()
         return None

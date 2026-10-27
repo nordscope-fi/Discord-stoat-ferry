@@ -867,3 +867,70 @@ def test_read_private_names_keeps_good_files_and_file_names_when_one_is_broken(
     assert names["general"] == "[channel]"
     assert names["Test Server - broken [3].json"] == "[file]"
     assert names["Test Server - general [1].json"] == "[file]"
+
+
+async def test_feedback_dialog_ignores_a_second_click_while_names_load(
+    user: User,
+    user_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    # Kills an implementation that starts a second name read, and a second
+    # review render that clears a ticked box, on a double click.
+    _seed_validate_page(user_store, tmp_path)
+    calls: list[Path] = []
+
+    def counting_reader(export_dir: Path) -> tuple[tuple[str, str], ...]:
+        calls.append(export_dir)
+        return ()
+
+    with (
+        patch("discord_ferry.feedback_gui.read_private_names", counting_reader),
+        patch(
+            "discord_ferry.feedback_gui.build_diagnostics",
+            side_effect=lambda context, **_: _plain_diagnostics(),
+        ),
+    ):
+        await user.open("/validate")
+        await _open_feedback_report(user)
+        _set_value(user, "Description", "A short report")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        _set_value(user, "Include diagnostics", True)
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        user.find("Continue to public review").click()
+        await user.should_see("Review the exact public report")
+
+    assert len(calls) == 1
+
+
+async def test_feedback_dialog_stays_on_report_after_back_while_names_load(
+    user: User,
+    user_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    # Kills an implementation that shows the review once the name read ends,
+    # even though the user pressed Back while it was still running.
+    _seed_validate_page(user_store, tmp_path)
+
+    with (
+        patch("discord_ferry.feedback_gui.read_private_names", lambda export_dir: ()),
+        patch(
+            "discord_ferry.feedback_gui.build_diagnostics",
+            side_effect=lambda context, **_: _plain_diagnostics(),
+        ),
+    ):
+        await user.open("/validate")
+        await _open_feedback_report(user)
+        _set_value(user, "Description", "A short report")
+        user.find("Continue to diagnostics").click()
+        await user.should_see("2. Diagnostics")
+        _set_value(user, "Include diagnostics", True)
+        _set_value(user, "I understand the diagnostics will be public", True)
+        user.find("Continue to public review").click()
+        # The validate page has its own "Back" button, so pick the dialog's.
+        user.find(marker="feedback-back").click()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        await user.should_see("What should we know?")
+        await user.should_not_see("Review the exact public report")
