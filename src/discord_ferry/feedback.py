@@ -48,6 +48,9 @@ _UNQUOTED_PATH = re.compile(
     r"|(?<![\w\\])\\\\" + _PATH_CHARACTERS + "+)"
 )
 _PATH_TRAILER = re.compile(r"(?::\d*|\.)+$")
+_QUOTED_PATH = re.compile(
+    r"""(?P<quote>['"])(?P<path>(?:/|[A-Za-z]:[\\/]|\\\\)[^'"\n]*)(?P=quote)"""
+)
 EnumT = TypeVar("EnumT", bound=StrEnum)
 
 
@@ -436,10 +439,16 @@ def _replace_unquoted_path(match: re.Match[str]) -> str:
     return _path_placeholder(path[: len(path) - len(suffix)]) + suffix
 
 
+def _replace_quoted_path(match: re.Match[str]) -> str:
+    quote = match.group("quote")
+    return f"{quote}{_path_placeholder(match.group('path'))}{quote}"
+
+
 def _remove_paths(text: str) -> str:
     """Replace private file paths. Applying it twice gives the same result."""
 
     text = _shorten_home(text)
+    text = _QUOTED_PATH.sub(_replace_quoted_path, text)
     return _UNQUOTED_PATH.sub(_replace_unquoted_path, text)
 
 
