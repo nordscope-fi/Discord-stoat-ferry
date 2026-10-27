@@ -705,3 +705,56 @@ async def test_feedback_dialog_cleared_last_error_is_not_sent(
     diagnostics = client.submissions[0]["diagnostics"]
     assert diagnostics is not None
     assert diagnostics["last_error"] is None
+
+
+def test_read_private_names_lists_server_category_and_channel(tmp_path: Path) -> None:
+    from discord_ferry.feedback_gui import read_private_names
+
+    shutil.copy(FIXTURES_DIR / "simple_channel.json", tmp_path / "channel.json")
+
+    names = read_private_names(tmp_path)
+
+    assert ("Test Server", "[server]") in names
+    assert ("Text Channels", "[category]") in names
+    assert ("general", "[channel]") in names
+    lengths = [len(name) for name, _ in names]
+    assert lengths == sorted(lengths, reverse=True)
+
+
+def test_read_private_names_skips_names_shorter_than_three_characters(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from discord_ferry.feedback_gui import read_private_names
+
+    data = json.loads((FIXTURES_DIR / "simple_channel.json").read_text(encoding="utf-8"))
+    data["channel"]["name"] = "ab"
+    (tmp_path / "channel.json").write_text(json.dumps(data), encoding="utf-8")
+
+    assert all(name != "ab" for name, _ in read_private_names(tmp_path))
+
+
+def test_read_private_names_is_empty_for_an_unreadable_folder(tmp_path: Path) -> None:
+    from discord_ferry.feedback_gui import read_private_names
+
+    assert read_private_names(tmp_path / "missing") == ()
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+    assert read_private_names(tmp_path) == (("broken.json", "[file]"),)
+
+
+def test_read_private_names_keeps_good_files_and_file_names_when_one_is_broken(
+    tmp_path: Path,
+) -> None:
+    from discord_ferry.feedback_gui import read_private_names
+
+    shutil.copy(FIXTURES_DIR / "simple_channel.json", tmp_path / "Test Server - general [1].json")
+    shutil.copy(FIXTURES_DIR / "simple_channel.json", tmp_path / "Test Server - general [2].json")
+    (tmp_path / "Test Server - broken [3].json").write_text("{not json", encoding="utf-8")
+
+    names = dict(read_private_names(tmp_path))
+
+    assert names["Test Server"] == "[server]"
+    assert names["general"] == "[channel]"
+    assert names["Test Server - broken [3].json"] == "[file]"
+    assert names["Test Server - general [1].json"] == "[file]"
