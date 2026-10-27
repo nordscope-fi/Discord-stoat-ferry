@@ -41,14 +41,16 @@ _PEM_PRIVATE_KEY = re.compile(
     r".*?(?:-----END (?P=label)-----|\Z)",
     re.DOTALL,
 )
-_PATH_CHARACTERS = r"""[^\s'"(),;]"""
+_PATH_CHARACTERS = r"""[^\s'"(),;`]"""
 _UNQUOTED_PATH = re.compile(
-    r"(?:(?<![\w.~/:\]\\])/" + _PATH_CHARACTERS + "+"
+    # A slash after a colon starts a path unless it opens a web address, so
+    # "cwd:/Users/x" and "file:///Users/x" are caught and "https://host" is not.
+    r"(?:(?:(?<![\w.~/:\]\\])|(?<=:)(?!//)|(?<=[Ff][Ii][Ll][Ee]://))/" + _PATH_CHARACTERS + "+"
     r"|(?<!\w)[A-Za-z]:[\\/]" + _PATH_CHARACTERS + "*"
     r"|(?<![\w\\])\\\\" + _PATH_CHARACTERS + "+)"
     # A folder name with a space continues the path when the next word holds a
-    # separator. A web address is never swallowed.
-    r"(?: (?!\S*://)" + _PATH_CHARACTERS + r"*[\\/]" + _PATH_CHARACTERS + "*)*"
+    # separator. A web address or a count such as 3/10 is never swallowed.
+    r"(?: (?!\S*://)(?!\d)" + _PATH_CHARACTERS + r"*[\\/]" + _PATH_CHARACTERS + "*)*"
 )
 _PATH_TRAILER = re.compile(r"(?::\d*|\.)+$")
 _QUOTED_PATH = re.compile(
@@ -1022,7 +1024,7 @@ class FeedbackDraft:
             description=self.description,
             expected=self.expected,
             reproduction=self.reproduction,
-            diagnostics=self.diagnostics,
+            diagnostics=self._public_diagnostics(),
             contact_available=self.contact_email is not None,
         )
 
@@ -1043,8 +1045,9 @@ class FeedbackDraft:
             data["expected"] = self.expected
         if self.reproduction is not None:
             data["reproduction"] = self.reproduction
-        if self.diagnostics is not None:
-            data["diagnostics"] = self.diagnostics.to_mapping()
+        public_diagnostics = self._public_diagnostics()
+        if public_diagnostics is not None:
+            data["diagnostics"] = public_diagnostics.to_mapping()
         if self.contact_email is not None:
             data["contact_email"] = self.contact_email
         return FeedbackRequest.from_mapping(data)

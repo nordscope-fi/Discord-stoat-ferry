@@ -1247,3 +1247,26 @@ def test_set_private_names_replaces_the_request_id_only_on_change() -> None:
     assert draft.request_id == first
     draft.set_private_names((("Acme Guild", "[server]"),))
     assert draft.request_id != first
+
+
+@pytest.mark.usefixtures("_no_home")
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "opened file:///Users/bob/Acme/general.json and cwd:/Users/bob/Acme",
+            "opened file://[path] and cwd:[path]",
+        ),
+        ("FILE:///C:/Users/bob/Acme/x.json", "FILE://[path]"),
+        ("Uploaded /tmp/a.png 3/10 files", "Uploaded [path] 3/10 files"),
+        ("see `/a/b` now", "see `[path]` now"),
+        (
+            "GET https://api.stoat.chat/servers/01ABC failed",
+            "GET https://api.stoat.chat/servers/01ABC failed",
+        ),
+    ],
+)
+def test_clean_diagnostics_handles_uri_and_labelled_paths(text: str, expected: str) -> None:
+    once = _error_after_cleaning(text)
+    assert once == expected
+    assert _error_after_cleaning(once) == once

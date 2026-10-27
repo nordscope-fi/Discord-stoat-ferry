@@ -655,6 +655,30 @@ def test_draft_preview_equals_the_cleaned_github_body() -> None:
     assert private_value not in draft.render_public_body()
 
 
+def test_draft_preview_with_names_and_paths_equals_the_github_body() -> None:
+    diagnostics = replace(
+        _diagnostics(),
+        last_error="Failed to create general in Acme Guild from D:\\Exports\\Acme Guild\\x.json",
+        log_excerpt='File "/opt/app/site-packages/discord_ferry/api.py", line 9',
+    )
+    draft = FeedbackDraft(
+        FeedbackKind.BUG,
+        "Ferry stops during channel import",
+        diagnostics=diagnostics,
+        request_id=REQUEST_ID,
+        private_names=(("Acme Guild", "[server]"), ("general", "[channel]")),
+    )
+    draft.acknowledge_diagnostics()
+    draft.acknowledge_public()
+    request = draft.to_request(_request().challenge).cleaned_for_send()
+
+    preview = draft.render_public_body()
+    assert preview == render_github_body(request)
+    assert "Acme" not in preview
+    assert "general" not in preview
+    assert "[path]/api.py" in preview
+
+
 def test_issue_body_omits_optional_sections_cleanly() -> None:
     body = render_github_body(
         _request(expected=None, reproduction=None, diagnostics=None, contact_email=None)
