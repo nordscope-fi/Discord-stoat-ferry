@@ -910,6 +910,11 @@ class _DraftForSubmission(Protocol):
     def to_request(self, challenge: Challenge) -> FeedbackRequest: ...
 
 
+def _private_name_pattern(names: tuple[tuple[str, str], ...]) -> re.Pattern[str]:
+    ordered = sorted({name for name, _ in names}, key=len, reverse=True)
+    return re.compile(r"(?<!\w)(?:" + "|".join(re.escape(name) for name in ordered) + r")(?!\w)")
+
+
 @dataclass
 class FeedbackDraft:
     """Editable in-memory report retained across an explicit retry."""
@@ -921,6 +926,9 @@ class FeedbackDraft:
     diagnostics: FeedbackDiagnostics | None = None
     contact_email: str | None = None
     request_id: UUID = field(default_factory=uuid4)
+    # Server, category and channel names the GUI read from the export, each with
+    # its placeholder. Never serialised; applied to the preview and the request.
+    private_names: tuple[tuple[str, str], ...] = ()
     public_acknowledged: bool = field(default=False, init=False)
     diagnostics_acknowledged: bool = field(default=False, init=False)
 
@@ -975,6 +983,38 @@ class FeedbackDraft:
         normalized = _contact_email(contact_email)
         self._replace_request_id_if_content_changed(self.contact_email, normalized)
         self.contact_email = normalized
+
+    def set_private_names(self, names: tuple[tuple[str, str], ...]) -> None:
+        self._replace_request_id_if_content_changed(self.private_names, names)
+        self.private_names = names
+        self.public_acknowledged = False
+
+    def _public_diagnostics(self) -> FeedbackDiagnostics | None:
+        if self.diagnostics is None or not self.private_names:
+            return self.diagnostics
+        pattern = _private_name_pattern(self.private_names)
+        placeholders = dict(self.private_names)
+
+        def replace_names(text: str) -> str:
+            return pattern.sub(lambda match: placeholders[match.group(0)], text)
+
+        last_error = self.diagnostics.last_error
+        log_excerpt = self.diagnostics.log_excerpt
+        return FeedbackDiagnostics.from_mapping(
+            {
+                **self.diagnostics.to_mapping(),
+                "last_error": (
+                    None
+                    if last_error is None
+                    else _keep_start(replace_names(last_error), _LAST_ERROR_LIMIT) or None
+                ),
+                "log_excerpt": (
+                    None
+                    if log_excerpt is None
+                    else _keep_end(replace_names(log_excerpt), _LOG_EXCERPT_LIMIT) or None
+                ),
+            }
+        )
 
     def render_public_body(self) -> str:
         return render_public_feedback_body(

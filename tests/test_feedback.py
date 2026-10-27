@@ -1190,3 +1190,60 @@ def test_public_body_escapes_the_version_line(version: str, expected_line: str) 
     context = body.split("## Ferry context\n", 1)[1].split("## Receipt", 1)[0]
     assert expected_line in context
     assert body.count("<!-- ferry-feedback:") == 1
+
+
+def _draft_with_error(last_error: str) -> FeedbackDraft:
+    return FeedbackDraft(
+        FeedbackKind.BUG,
+        "Report",
+        diagnostics=FeedbackDiagnostics.from_mapping(
+            {
+                "ferry_version": "3.1.4",
+                "operating_system": "macos",
+                "architecture": "arm64",
+                "interface": "gui",
+                "stage": "channels",
+                "last_error": last_error,
+            }
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("names", "text", "expected"),
+    [
+        (
+            (("Acme Guild", "[server]"), ("general", "[channel]")),
+            "Failed to create channel general in Acme Guild",
+            "Failed to create channel [channel] in [server]",
+        ),
+        (
+            (("general", "[channel]"), ("info", "[channel]")),
+            "generally fine; #general failed; INFO line; general.",
+            "generally fine; #[channel] failed; INFO line; [channel].",
+        ),
+        (
+            (("game-night", "[channel]"), ("game", "[channel]"), ("channel", "[channel]")),
+            "game-night and game; channel",
+            "[channel] and [channel]; [channel]",
+        ),
+        ((), "Failed in Acme Guild", "Failed in Acme Guild"),
+    ],
+)
+def test_draft_replaces_private_names_in_diagnostics(
+    names: tuple[tuple[str, str], ...], text: str, expected: str
+) -> None:
+    draft = _draft_with_error(text)
+    draft.set_private_names(names)
+    public = draft._public_diagnostics()
+    assert public is not None
+    assert public.last_error == expected
+
+
+def test_set_private_names_replaces_the_request_id_only_on_change() -> None:
+    draft = _draft_with_error("x")
+    first = draft.request_id
+    draft.set_private_names(())
+    assert draft.request_id == first
+    draft.set_private_names((("Acme Guild", "[server]"),))
+    assert draft.request_id != first
