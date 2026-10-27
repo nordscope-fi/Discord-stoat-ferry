@@ -1122,3 +1122,20 @@ def test_pasted_home_path_does_not_reach_public_body() -> None:
         contact_available=False,
     )
     assert home not in body
+
+
+@pytest.mark.usefixtures("_no_home")
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("No such file: '/Volumes/My Drive/Acme/x.json'", "No such file: '[path]'"),
+        ('open "C:\\Program Files\\Acme\\x.json" failed', 'open "[path]" failed'),
+        ("'\\\\nas\\my share\\Acme' gone", "'[path]' gone"),
+        ("can't open it, don't retry", "can't open it, don't retry"),
+        ("a '/x'\nb' tail", "a '[path]'\nb' tail"),
+    ],
+)
+def test_clean_diagnostics_removes_quoted_paths(text: str, expected: str) -> None:
+    once = _error_after_cleaning(text)
+    assert once == expected
+    assert _error_after_cleaning(once) == once
