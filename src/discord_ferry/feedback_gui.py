@@ -14,6 +14,7 @@ from nicegui import app, ui
 
 from discord_ferry import __version__
 from discord_ferry.core.security import sanitize_secrets_for_public_output
+from discord_ferry.core.boundedjson import JsonLoadRefusedError
 from discord_ferry.feedback import (
     FeedbackClient,
     FeedbackDiagnostics,
@@ -27,6 +28,7 @@ from discord_ferry.feedback import (
     feedback_submission_error_message,
     render_diagnostics,
 )
+from discord_ferry.parser.dce_parser import parse_single_export
 
 _SUBMISSION_ERRORS = (
     aiohttp.ClientError,
@@ -45,6 +47,43 @@ class FeedbackGuiContext:
     stage: str
     last_error: str | None
     log_path: Path | None
+
+
+def read_private_names(export_dir: Path) -> tuple[tuple[str, str], ...]:
+    """Return the export's file, server, category and channel names with placeholders.
+
+    Reads each file's metadata on its own, so one damaged file still leaves the
+    names in the others, and its file name (which an export error quotes) is
+    still hidden. Metadata reading still streams every file, so callers run it
+    in a worker thread. Returns no names when the folder cannot be listed.
+    """
+
+    try:
+        json_paths = sorted(export_dir.glob("*.json"))
+    except OSError:
+        return ()
+    placeholders: dict[str, str] = {}
+    for json_path in json_paths:
+        placeholders.setdefault(json_path.name, "[file]")
+        try:
+            export = parse_single_export(json_path, metadata_only=True)
+        # The errors parse_export_directory treats as an unreadable export file.
+        except (
+            JsonLoadRefusedError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+        ):
+            continue
+        placeholders.setdefault(export.guild.name, "[server]")
+        if export.channel.category:
+            placeholders.setdefault(export.channel.category, "[category]")
+        placeholders.setdefault(export.channel.name, "[channel]")
+    kept = [(name, label) for name, label in placeholders.items() if len(name) >= 3]
+    return tuple(sorted(kept, key=lambda pair: len(pair[0]), reverse=True))
 
 
 async def _pick_save_path() -> Path | None:
