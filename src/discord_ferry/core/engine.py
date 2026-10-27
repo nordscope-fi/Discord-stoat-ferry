@@ -4766,13 +4766,13 @@ def _select_invite_channel(
 ) -> str | None:
     """Pick a Stoat Text channel to invite to.
 
-    Excludes voice (Discord type 2), threads, and synthetic forum-index channels.
+    Excludes voice and stage (Discord types 2 and 13), threads, and synthetic forum-index channels.
     Forums (15/16 → Stoat Text) are valid. Prefers ``config.invite_channel_id``
     when it maps to an eligible channel. Returns a Stoat channel id, or None.
     """
 
     def _eligible(discord_id: str, ch_type: int, is_thread: bool) -> str | None:
-        if ch_type == 2 or is_thread or discord_id.startswith("forum-index-"):
+        if ch_type in (2, 13) or is_thread or discord_id.startswith("forum-index-"):
             return None
         return state.channel_map.get(discord_id)
 

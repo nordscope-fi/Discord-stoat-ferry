@@ -82,8 +82,9 @@ def blueprint_from_exports(
 
     The single home for the channel-mapping rule both shells depend on: a
     category-type channel (DCE ``type == 4``) is skipped, a voice channel
-    (``type == 2``) maps to a Stoat ``"Voice"`` channel and everything else to
-    ``"Text"``, and a channel with no category lands in
+    (``type == 2``) or stage channel (``type == 13``) maps to a Stoat
+    ``"Voice"`` channel and everything else to ``"Text"``, and a channel
+    with no category lands in
     ``uncategorized_channels``. Keeping it here, rather than a copy in each
     shell, is why the CLI and GUI cannot diverge on the mapping.
     """
@@ -108,7 +109,7 @@ def blueprint_from_exports(
         ch = export.channel
         if ch.type == 4:  # category-type channel, not a real channel
             continue
-        stoat_type = "Voice" if ch.type == 2 else "Text"
+        stoat_type = "Voice" if ch.type in (2, 13) else "Text"
         ch_meta = metadata.channel_metadata.get(ch.id) if metadata else None
         bp_channel = BlueprintChannel(
             name=ch.name,

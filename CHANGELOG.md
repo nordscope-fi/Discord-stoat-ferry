@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the `--checkpoint-interval` docs, which promised a replay of at most N messages though a save also needs 5 seconds since the last one, and the dotenv docs, which said the working folder is searched when Ferry searches from its install directory (#1299, #1245).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 
+## [3.1.4] - 2026-10-27
+
+### Fixed
+
+- Create Discord stage channels (type 13) as Stoat voice channels instead of text channels. The blueprint export and the documentation now agree with the migrator, and the invite channel picker skips them like any voice channel (#1204).
+
 ## [3.1.3] - 2026-10-27
 
 ### Fixed
