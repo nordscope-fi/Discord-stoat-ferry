@@ -16,6 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.6] - 2026-10-27
+
+### Fixed
+
+- Ignore a second click on "Continue to public review" in the app's feedback dialog while export names are still loading, so it no longer starts a second read or redraws the review and clears a ticked box.
+- Stay on the report step when "Back" is pressed in the app's feedback dialog while export names are loading, instead of jumping to the review when the read finishes.
+
 ## [3.1.5] - 2026-10-27
 
 ### Fixed
