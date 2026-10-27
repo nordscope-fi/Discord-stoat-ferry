@@ -774,12 +774,13 @@ def test_claude_policy_and_decision_select_sonnet_5() -> None:
     decision = decision_path.read_text()
     index = index_path.read_text()
 
-    assert settings["model"] == "claude-sonnet-5"
+    assert "model" not in settings
     assert settings["effortLevel"] == "medium"
     assert 'latest Sonnet (model: "sonnet")' in agents
     assert 'latest Sonnet (`model: "sonnet"`)' in claude
     assert "**Status:** Accepted" in decision
     assert "**Supersedes:** ADR-017's model choice" in decision
+    assert "Local settings pin no session model" in decision
     assert "[033](033-sonnet-5-df-workflow.md)" in index
 
     live_policy = "\n".join([agents, claude, settings_path.read_text()])
