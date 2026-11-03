@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Align the Context7 launcher pin and integrity comment with the updated 4.4.4 package lock (#1455).
 - Document the extra pinning capability inherited from Stoat's combined `ManageMessages` permission (#1228).
 - Correct the documented Autumn `FileTooLarge` field to `max` in ADR-014 (#1358).
 - Verify shipped HTML-conflict recovery and nonce-based message bookkeeping, including recovered-parent merge suppression after restart (#1243, #1250).
