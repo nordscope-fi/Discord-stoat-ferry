@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.9] - 2026-11-03
+
+### Fixed
+
+- Remove executable terminal controls from direct human CLI output while preserving multiline text, tabs, Unicode, literal Rich markup, JSON output, and report data (#1181).
+
 ## [3.1.8] - 2026-11-03
 
 ### Fixed
