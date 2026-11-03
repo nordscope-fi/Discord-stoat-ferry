@@ -31,8 +31,8 @@ def test_feedback_container_has_a_locked_non_root_runtime() -> None:
     assert source.count("FROM python:3.14.8-slim-bookworm") == 2
     assert "pip install --require-hashes" in source
     assert "uv-requirements.txt" in source
-    assert uv_requirements.startswith("uv==0.12.18 \\\n")
-    assert uv_requirements.count("--hash=sha256:") == 3
+    assert uv_requirements.startswith("uv==0.13.4 \\\n")
+    assert uv_requirements.count("--hash=sha256:") == 19
     assert "uv sync --frozen --no-dev --no-editable --extra feedback-service" in source
     assert "apt-get install --yes --no-install-recommends curl" in source
     assert "USER 10001:10001" in source
