@@ -377,6 +377,14 @@ async def test_auth_mints_rs256_app_jwt_and_uses_installation_identifiers(
 
     assert token == INSTALLATION_TOKEN
     request = mock_github.requests[("POST", URL(INSTALLATION_URL))][0]
+    assert request.kwargs["json"] == {
+        "repositories": ["Discord-stoat-ferry"],
+        "permissions": {
+            "metadata": "read",
+            "issues": "write",
+            "discussions": "write",
+        },
+    }
     headers = request.kwargs["headers"]
     assert headers["Accept"] == "application/vnd.github+json"
     assert headers["X-GitHub-Api-Version"] == "2026-03-10"

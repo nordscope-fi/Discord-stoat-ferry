@@ -370,10 +370,19 @@ class FeedbackGitHub:
         now: datetime,
     ) -> _InstallationCredential:
         url = f"{_API_ROOT}/app/installations/{self._config.github_installation_id}/access_tokens"
+        _, repository = self._config.repository.split("/", 1)
         try:
             async with self.session.post(
                 url,
                 headers=self._authorization(self._app_jwt(now)),
+                json={
+                    "repositories": [repository],
+                    "permissions": {
+                        "metadata": "read",
+                        "issues": "write",
+                        "discussions": "write",
+                    },
+                },
             ) as response:
                 if not 200 <= response.status < 300:
                     _log_github_failure("GitHubAuthenticationError", response.status)
