@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.8] - 2026-11-03
+
+### Fixed
+
+- Treat selected proxy settings without a usable authority as malformed before request construction, connect direct, and keep their userinfo out of notices and diagnostics (#1193).
+
 ## [3.1.7] - 2026-11-03
 
 ### Fixed

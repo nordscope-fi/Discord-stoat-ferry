@@ -660,6 +660,64 @@ def test_a_malformed_proxy_never_raises(proxy_env, os_proxy, bad: str) -> None:
         assert http.resolve_proxy(TARGET) is None
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "proxy.invalid:3128",
+        "//proxy.invalid:3128",
+        "ferryuser:SUPERSECRET@proxy.invalid:3128",
+    ],
+)
+@pytest.mark.parametrize(
+    ("variable", "target", "notice_scheme"),
+    [
+        ("HTTPS_PROXY", TARGET, "https"),
+        ("HTTP_PROXY", "http://api.stoat.test/x", "http"),
+        ("ALL_PROXY", TARGET, "all"),
+    ],
+)
+async def test_scheme_less_proxy_stays_direct_and_redacted(
+    proxy_env, os_proxy, raw: str, variable: str, target: str, notice_scheme: str
+) -> None:
+    """A selected parseable-but-unusable setting stays direct at every reader."""
+    user = "ferryuser"
+    password = "SUPERSECRET"
+    with os_proxy({}), proxy_env(**{variable: raw}):
+        choice = http.resolve_proxy_or_raise(target)
+        request = http._FerryRequest("GET", URL(target), loop=asyncio.get_running_loop())
+        notices = http.proxy_notices()
+        rendered = "\n".join(http.format_proxy_notices())
+        diagnostic = "\n".join(http.describe_proxy().values())
+
+    assert choice is None
+    assert request.proxy is None
+    assert request.proxy_headers is None
+    assert [(notice.kind, notice.scheme, notice.display) for notice in notices] == [
+        ("malformed", notice_scheme, "<unusable>")
+    ]
+    assert "Connected direct." in rendered
+    assert user not in rendered + diagnostic
+    assert password not in rendered + diagnostic
+
+
+@pytest.mark.parametrize(
+    ("variable", "target"),
+    [
+        ("HTTPS_PROXY", TARGET),
+        ("HTTP_PROXY", "http://api.stoat.test/x"),
+    ],
+)
+def test_scheme_less_specific_proxy_does_not_fall_through_to_all_proxy(
+    proxy_env, os_proxy, variable: str, target: str
+) -> None:
+    """A selected malformed scheme proxy cannot select ALL_PROXY instead."""
+    with (
+        os_proxy({}),
+        proxy_env(**{variable: "proxy.invalid:3128", "ALL_PROXY": "http://fallback.invalid:8080"}),
+    ):
+        assert http.resolve_proxy_or_raise(target) is None
+
+
 def test_the_choice_carries_the_stripped_url_and_the_credential(proxy_env, os_proxy) -> None:
     """Killing: `ProxyChoice(url=raw, authorization=None, source=source)`.
 

@@ -486,6 +486,11 @@ def _is_bypassed(host: str, authority: str, source: str, env: dict[str, str]) ->
     return _bypass_memo[key]
 
 
+def _is_usable_proxy_url(url: URL) -> bool:
+    """Whether a parsed proxy URL has the authority Ferry needs to use it."""
+    return bool(url.scheme and url.host)
+
+
 def resolve_proxy_or_raise(url: str | URL) -> ProxyChoice | None:
     """The proxy for `url`, or None. RAISES whatever the platform raises.
 
@@ -535,6 +540,8 @@ def resolve_proxy_or_raise(url: str | URL) -> ProxyChoice | None:
     try:
         parsed = URL(raw)
         if parsed.scheme.startswith("socks"):
+            return None
+        if not _is_usable_proxy_url(parsed):
             return None
         stripped, authorization = _strip_userinfo(parsed)
     except (ValueError, TypeError):
@@ -670,6 +677,8 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
             parsed_all = URL(raw_all)
             socks_all = parsed_all.scheme.startswith("socks")
             if not socks_all:
+                if not _is_usable_proxy_url(parsed_all):
+                    raise ValueError("Proxy URL must include a scheme and host")
                 _strip_userinfo(parsed_all)
         except (ValueError, TypeError):
             found.append(
@@ -698,6 +707,8 @@ def _scan_notices() -> tuple[ProxyNotice, ...]:
             parsed = URL(raw)
             socks = parsed.scheme.startswith("socks")
             if not socks:
+                if not _is_usable_proxy_url(parsed):
+                    raise ValueError("Proxy URL must include a scheme and host")
                 _strip_userinfo(parsed)
         except (ValueError, TypeError):
             found.append(
@@ -732,7 +743,10 @@ def _safe_display(raw: str) -> str:
     resolve_proxy returns at the socks guard one line before it would strip.
     """
     try:
-        return str(_strip_userinfo(URL(raw))[0])
+        parsed = URL(raw)
+        if not _is_usable_proxy_url(parsed):
+            return "<unusable>"
+        return str(_strip_userinfo(parsed)[0])
     except (ValueError, TypeError):
         return "<unparseable>"
 
