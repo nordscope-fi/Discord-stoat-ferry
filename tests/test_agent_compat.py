@@ -7220,6 +7220,46 @@ def test_committed_context7_lock_pins_every_package_with_an_integrity_hash() -> 
         assert not entry.get("link"), name
 
 
+_CONTEXT7_MINIMUM_VERSIONS = {
+    "@hono/node-server": (2, 1, 3),
+    "body-parser": (2, 4, 0),
+    "qs": (6, 16, 1),
+    "undici": (7, 30, 1),
+}
+
+
+def _assert_context7_transitive_versions(packages: dict[str, dict[str, Any]]) -> None:
+    found: set[str] = set()
+    for name, entry in packages.items():
+        package = name.rsplit("node_modules/", 1)[-1]
+        minimum = _CONTEXT7_MINIMUM_VERSIONS.get(package)
+        if minimum is None:
+            continue
+        found.add(package)
+        actual = tuple(int(part) for part in entry["version"].split("."))
+        assert actual >= minimum, name
+    assert found == _CONTEXT7_MINIMUM_VERSIONS.keys()
+
+
+def test_committed_context7_lock_uses_patched_transitive_versions() -> None:
+    manifest = json.loads((REPO / "config/agent-compat/context7/package.json").read_text())
+    lock = json.loads((REPO / "config/agent-compat/context7/package-lock.json").read_text())
+
+    _assert_context7_transitive_versions(lock["packages"])
+    assert manifest.get("overrides") == {"@hono/node-server": "2.1.6"}
+
+
+def test_context7_transitive_check_rejects_a_vulnerable_nested_copy() -> None:
+    packages = {
+        f"node_modules/{package}": {"version": ".".join(str(part) for part in minimum)}
+        for package, minimum in _CONTEXT7_MINIMUM_VERSIONS.items()
+    }
+    packages["node_modules/future-dependency/node_modules/undici"] = {"version": "7.30.0"}
+
+    with pytest.raises(AssertionError, match="future-dependency"):
+        _assert_context7_transitive_versions(packages)
+
+
 @pytest.mark.skipif(NODE is None, reason="Node.js is required")
 def test_reviewer_runtime_install_failure_keeps_the_previous_release(tmp_path: Path) -> None:
     home = tmp_path / "home"

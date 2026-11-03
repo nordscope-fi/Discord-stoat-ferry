@@ -5,5 +5,8 @@
   "description": "Pinned Context7 helper for the Discord Ferry reviewer runtime (issue 995)",
   "dependencies": {
     "@upstash/context7-mcp": "4.4.4"
+  },
+  "overrides": {
+    "@hono/node-server": "2.1.6"
   }
 }

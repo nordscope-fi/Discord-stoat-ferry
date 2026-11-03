@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.7] - 2026-11-03
+
+### Fixed
+
+- Update the Context7 helper's HTTP and request-parsing dependencies to versions that resolve its 11 open Dependabot alerts.
+
 ## [3.1.6] - 2026-10-27
 
 ### Fixed
