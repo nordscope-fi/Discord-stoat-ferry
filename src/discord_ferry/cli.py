@@ -33,7 +33,7 @@ from discord_ferry.core.engine import (
 )
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
-from discord_ferry.core.security import register_secret, sanitize_secrets
+from discord_ferry.core.security import register_secret, sanitize_secrets, strip_control
 from discord_ferry.discord import (
     load_bound_discord_metadata,
     read_cached_metadata,
@@ -256,16 +256,22 @@ def _build_rollback_table(summary: StateSummary) -> Table | None:
     return table
 
 
+def _plain_safe(value: object) -> str:
+    """Remove terminal controls while retaining CLI line and tab formatting."""
+    return "\n".join(strip_control(segment) for segment in str(value).split("\n"))
+
+
 def _safe(value: object) -> str:
-    """Escape a user-controlled value for safe Rich-markup interpolation.
+    """Filter terminal controls and escape user-controlled Rich markup.
 
     Discord/blueprint names can contain Rich markup metacharacters (``[``, ``]``,
     ``[/]``). Interpolating them raw into a markup string either corrupts the
     rendered output or raises ``rich.errors.MarkupError`` — and since CLI event
     handlers run synchronously inside the engine's ``emit``, that exception would
-    abort the whole migration. Escaping neutralises the metacharacters.
+    abort the whole migration. Escaping neutralises the metacharacters after the
+    terminal-control filter has preserved legitimate line and tab formatting.
     """
-    return escape(str(value))
+    return escape(_plain_safe(value))
 
 
 def _masked(value: object) -> str:
@@ -1401,7 +1407,7 @@ def probe_cmd(
     table.add_column("Detail")
     for c in report.checks:
         colour = {"ok": "green", "warn": "yellow", "fail": "red"}.get(c.status, "white")
-        table.add_row(escape(c.name), f"[{colour}]{c.status}[/]", escape(c.detail))
+        table.add_row(_safe(c.name), f"[{colour}]{c.status}[/]", _safe(c.detail))
     console.print(table)
     if any(check.status == "fail" for check in report.checks):
         _print_feedback_hint()
@@ -1438,7 +1444,10 @@ def refresh_permissions_cmd(output_dir: str, export_dir: str, discord_server_id:
         _print_permission_outcome(exc.outcome, Console(stderr=True))
         sys.exit(1)
     except (MigrationError, OSError) as exc:
-        click.echo("Cannot refresh source permissions: " + sanitize_secrets(str(exc)), err=True)
+        click.echo(
+            _plain_safe(sanitize_secrets(f"Cannot refresh source permissions: {exc}")),
+            err=True,
+        )
         sys.exit(1)
     except (asyncio.CancelledError, KeyboardInterrupt) as exc:
         raise click.Abort() from exc
@@ -1543,18 +1552,8 @@ def _render_check_report(report: CheckReport, thread_strategy: str = "") -> None
     beside three green ones reads like approval of something never examined.
     """
     # `detail` can embed a server-supplied error body, which this project treats
-    # as attacker-influenced in the general case. escape() neutralises Rich
-    # markup in it, and that is ALL it does: it leaves an ESC byte untouched.
-    #
-    # A raw ANSI sequence in that text is defanged anyway, but by the rendering
-    # rather than by escape(). Rich interleaves its own style codes between the
-    # ESC and the following '[', so "\x1b[2J" never reaches the terminal as one
-    # contiguous sequence. Measured, not assumed.
-    #
-    # That protection is incidental, so it disappears the moment this text is
-    # emitted any other way. If a --json mode is added (spec P1 S6), it must go
-    # through click.echo per the recorded rule, and click.echo would print the
-    # ESC verbatim. Strip control characters there rather than relying on this.
+    # as attacker-influenced in the general case. _safe applies the direct CLI
+    # terminal-control policy before neutralising Rich markup.
     colours = {"ok": "green", "warn": "yellow", "fail": "red", "unverifiable": "cyan"}
     table = Table(title="Migration Check")
     table.add_column("Check")
@@ -1563,9 +1562,9 @@ def _render_check_report(report: CheckReport, thread_strategy: str = "") -> None
     for result in report.results:
         colour = colours.get(result.status, "white")
         table.add_row(
-            escape(result.name),
+            _safe(result.name),
             f"[{colour}]{result.status}[/]",
-            escape(result.detail),
+            _safe(result.detail),
         )
     console.print(table)
 
@@ -1679,18 +1678,24 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     # for a long temp path lands INSIDE the path and hands the user something
     # they cannot copy. Same mechanism as issue #145, which was about JSON.
     if not export_path.exists():
-        click.echo(f"Error: export directory not found: {export_path}", err=True)
+        click.echo(
+            _plain_safe(sanitize_secrets(f"Error: export directory not found: {export_path}")),
+            err=True,
+        )
         _print_feedback_hint(to_stderr=True)
         sys.exit(2)
     try:
         exports = parse_export_directory(export_path)
     except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome here
-        # Plain str(exc), NOT _safe(exc). _safe is Rich-markup escaping, and
-        # click.echo does not interpret markup, so escaping here would print a
-        # literal backslash in front of every bracket the error contains. It is
-        # not a redaction step and never was: the export holds no Stoat token,
-        # and documents are redacted at their writer.
-        click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        # click.echo does not interpret Rich markup, so use _plain_safe rather
+        # than _safe: literal brackets remain copyable while terminal controls
+        # in the path or parser error are removed. Secret masking occurs first.
+        click.echo(
+            _plain_safe(
+                sanitize_secrets(f"Error: could not read the export at {export_path}: {exc}")
+            ),
+            err=True,
+        )
         _print_feedback_hint(to_stderr=True)
         sys.exit(2)
 
@@ -1832,13 +1837,21 @@ def repair_cmd(
     # click.echo for anything carrying a path: the module Console wraps at 80
     # columns off a terminal and would break the path across lines (#145).
     if not export_path.exists():
-        click.echo(f"Error: export directory not found: {export_path}", err=True)
+        click.echo(
+            _plain_safe(sanitize_secrets(f"Error: export directory not found: {export_path}")),
+            err=True,
+        )
         _print_feedback_hint(to_stderr=True)
         sys.exit(2)
     try:
         exports = parse_export_directory(export_path)
     except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome
-        click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        click.echo(
+            _plain_safe(
+                sanitize_secrets(f"Error: could not read the export at {export_path}: {exc}")
+            ),
+            err=True,
+        )
         _print_feedback_hint(to_stderr=True)
         sys.exit(2)
 
@@ -1983,13 +1996,21 @@ def backfill_roles_cmd(
     # click.echo for anything carrying a path: the module Console wraps at 80
     # columns off a terminal and would break the path across lines (#145).
     if not export_path.exists():
-        click.echo(f"Error: export directory not found: {export_path}", err=True)
+        click.echo(
+            _plain_safe(sanitize_secrets(f"Error: export directory not found: {export_path}")),
+            err=True,
+        )
         _print_feedback_hint(to_stderr=True)
         sys.exit(2)
     try:
         exports = parse_export_directory(export_path)
     except Exception as exc:  # noqa: BLE001 — any parse failure is the same outcome
-        click.echo(f"Error: could not read the export at {export_path}: {exc}", err=True)
+        click.echo(
+            _plain_safe(
+                sanitize_secrets(f"Error: could not read the export at {export_path}: {exc}")
+            ),
+            err=True,
+        )
         _print_feedback_hint(to_stderr=True)
         sys.exit(2)
 

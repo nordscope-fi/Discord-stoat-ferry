@@ -4587,6 +4587,177 @@ def test_backfill_masks_the_token_in_what_it_prints(runner: CliRunner, tmp_path:
     assert _CMD_TOKEN not in result.output
 
 
+# ---------------------------------------------------------------------------
+# Terminal controls in direct human CLI rendering (#1181)
+# ---------------------------------------------------------------------------
+
+
+_TERMINAL_CONTROL_TEXT = "Å\t[plain]\x1b[2J\n🚀\r\x9b2J\x1b[8m\x1b]8;;https://example.test\x1b\\"
+
+
+@pytest.mark.parametrize("argv_builder", [_retry_argv, _repair_argv, _backfill_argv])
+def test_unreadable_export_errors_filter_complete_existing_path_message(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv_builder: Any,
+) -> None:
+    """A parser error and an existing hostile path both reach this human branch."""
+    import importlib
+
+    cli_module = importlib.import_module("discord_ferry.cli")
+    output_dir = _write_state_with_one_failure(tmp_path / "out")
+    export_dir = tmp_path / "export\x1b[2J[plain]"
+    original_exists = Path.exists
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: True if path == export_dir else original_exists(path),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "parse_export_directory",
+        lambda _path: (_ for _ in ()).throw(OSError("boom\x1b[8m")),
+    )
+
+    result = runner.invoke(main, argv_builder(output_dir, export_dir), color=True)
+
+    assert result.exit_code == 2, result.output
+    assert "\x1b[2J" not in result.output
+    assert "\x1b[8m" not in result.output
+    assert "[plain]" in result.output
+    assert "boom[8m" in result.output
+
+
+@pytest.mark.parametrize("argv_builder", [_retry_argv, _repair_argv, _backfill_argv])
+def test_missing_export_errors_filter_complete_human_message(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv_builder: Any
+) -> None:
+    """A hostile missing directory name must not control the user's terminal."""
+    output_dir = _write_state_with_one_failure(tmp_path / "out")
+    missing = tmp_path / "missing\x1b[2J[plain]"
+    original_exists = Path.exists
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: False if path == missing else original_exists(path),
+    )
+
+    result = runner.invoke(main, argv_builder(output_dir, missing), color=True)
+
+    assert result.exit_code == 2, result.output
+    assert "Error: export directory not found:" in result.output
+    assert "[plain]" in result.output
+    assert "\x1b[2J" not in result.output
+
+
+def test_plain_and_rich_cli_boundaries_preserve_approved_text() -> None:
+    """LF, tabs, Unicode, and literal brackets survive while controls do not."""
+    import importlib
+
+    cli_module = importlib.import_module("discord_ferry.cli")
+
+    plain = cli_module._plain_safe(_TERMINAL_CONTROL_TEXT)
+    rich = cli_module._safe(_TERMINAL_CONTROL_TEXT)
+
+    assert plain == "Å\t[plain][2J\n🚀2J[8m]8;;https://example.test\\"
+    assert "\\[plain]" not in plain
+    assert "\\[plain]" in rich
+    assert "\x1b" not in plain and "\x9b" not in plain
+
+
+def test_probe_table_filters_server_control_sequences(runner: CliRunner) -> None:
+    """The human Rich probe table must not rely on incidental renderer behaviour."""
+    from discord_ferry.migrator.probe import ProbeCheck, ProbeReport
+
+    report = ProbeReport(
+        checks=[ProbeCheck(name="name\x1b[2J", status="ok", detail=_TERMINAL_CONTROL_TEXT)]
+    )
+    with patch("discord_ferry.migrator.probe.run_probe", AsyncMock(return_value=report)):
+        result = runner.invoke(
+            main,
+            [
+                "probe",
+                "--stoat-url",
+                "https://api.test",
+                "--token",
+                "t",
+                "--test-server-id",
+                "srv1",
+            ],
+            color=True,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "\x1b[2J" not in result.output
+    assert "\x1b[8m" not in result.output
+    assert "[plain]" in result.output
+
+
+def test_check_table_filters_server_control_sequences(runner: CliRunner, tmp_path: Path) -> None:
+    """The human check table applies the same explicit policy as probe."""
+    report = CheckReport()
+    report.add(
+        name="check\x1b[2J",
+        status="ok",
+        kind="channel_present",
+        detail=_TERMINAL_CONTROL_TEXT,
+    )
+    order: list[str] = []
+    a, b, c, d = _patched(order, report)
+    with a, b, c, d:
+        result = runner.invoke(
+            main,
+            ["check", str(tmp_path), "--stoat-url", "https://api.test", "--token", "t"],
+            color=True,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "\x1b[2J" not in result.output
+    assert "\x1b[8m" not in result.output
+    assert "\x9b" not in result.output
+    assert "[plain]" in result.output
+
+
+def test_refresh_permissions_error_filters_controls_after_masking(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plain refresh error path masks tokens before terminal filtering."""
+    import importlib
+
+    cli_module = importlib.import_module("discord_ferry.cli")
+    token = "refresh-secret-1181"
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    monkeypatch.setenv("DISCORD_TOKEN", token)
+    monkeypatch.setattr(cli_module, "parse_export_directory", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        cli_module,
+        "refresh_permission_metadata",
+        AsyncMock(side_effect=MigrationError(f"refused {token}\x1b[2J[plain]")),
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "refresh-permissions",
+            str(output_dir),
+            "--export-dir",
+            str(export_dir),
+            "--discord-server-id",
+            "1",
+        ],
+        color=True,
+    )
+
+    assert result.exit_code == 1, result.output
+    assert token not in result.output
+    assert "\x1b[2J" not in result.output
+    assert "[plain]" in result.output
+
+
 @pytest.mark.parametrize("command", ["validate", "export-blueprint"])
 def test_a_refused_export_file_is_reported_without_a_traceback(
     runner: CliRunner, tmp_path: Path, command: str
