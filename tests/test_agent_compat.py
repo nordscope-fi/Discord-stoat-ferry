@@ -6988,7 +6988,7 @@ try {{
 
 
 def _context7_dummy_files(
-    tmp_path: Path, *, version: str = "4.1.1", integrity: str | None = None
+    tmp_path: Path, *, version: str = "4.4.4", integrity: str | None = None
 ) -> dict[str, str]:
     """A one-package tree: the real package name, a local tarball, a lock that pins its hash."""
     npm = shutil.which("npm")
@@ -7172,7 +7172,7 @@ def test_context7_install_rejects_a_tarball_that_does_not_match_its_lock(
 def test_context7_install_refuses_a_lock_for_another_version_of_the_package(
     tmp_path: Path,
 ) -> None:
-    # A consistent lock for 4.1.0: npm would install it, but the launcher is pinned to 4.1.1.
+    # A consistent lock for 4.1.0: npm would install it, but the launcher is pinned to 4.4.4.
     files = _context7_dummy_files(tmp_path, version="4.1.0")
     runtime_root = tmp_path / "runtime"
     installed = _context7_install(tmp_path, runtime_root, files)

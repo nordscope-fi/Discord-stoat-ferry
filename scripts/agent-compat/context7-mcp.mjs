@@ -17,13 +17,13 @@ const PASSTHROUGH_ENVIRONMENT = [
   'NODE_EXTRA_CA_CERTS',
 ];
 
-// Reviewed 2026-10-10: 4.1.1, published 2026-09-14, registry integrity
-// sha512-fUARTIZGVKzlzQKDhKUg4aIQ3yEU/12STdfxJDDnLMSN7yyHiPvNHI05iFwxkv3vC8G76Wp27MwK6Jucl/C5pA==
+// Reviewed 2026-11-03: 4.4.4, committed lock integrity
+// sha512-T2DkjhweDnC2mRAclDiTrPG3KI1zYKhhjgY2SMKD9PVrbEaGD8x35VsIOqpwwDc2qiKBvfYCF/jqr+jQMu5PUA==
 // Raising it is a deliberate edit of this line and of config/agent-compat/context7/ together.
 // The installer runs `npm ci` against that committed lock, which records an integrity hash for
 // this package and for every package it depends on (#995). This launcher never fetches anything:
 // it starts the package that `npm ci` verified.
-export const CONTEXT7_PACKAGE = '@upstash/context7-mcp@4.1.1';
+export const CONTEXT7_PACKAGE = '@upstash/context7-mcp@4.4.4';
 const PACKAGE_NAME = CONTEXT7_PACKAGE.slice(0, CONTEXT7_PACKAGE.lastIndexOf('@'));
 const PACKAGE_VERSION = CONTEXT7_PACKAGE.slice(CONTEXT7_PACKAGE.lastIndexOf('@') + 1);
 const REINSTALL = 'run node scripts/agent-compat/codex-bootstrap.mjs to install it';
