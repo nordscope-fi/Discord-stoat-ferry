@@ -3286,6 +3286,402 @@ async def test_pacer_429_publishes_state_before_its_delay(
     assert events[:2] == ["state", "sleep"]
 
 
+async def test_pacer_429_retry_uses_one_matching_window_sleep(
+    mock_aiohttp: aioresponses,
+) -> None:
+    url = f"{BASE_URL}/servers/srv1"
+    headers = {
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={**headers, "Retry-After": "10"},
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    calls, sleep = _sleep_capture()
+    with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+    assert calls == [10.0]
+
+
+async def test_pacer_429_retry_keeps_later_request_waiting(
+    mock_aiohttp: aioresponses,
+) -> None:
+    url = f"{BASE_URL}/servers/srv1"
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={**headers, "X-RateLimit-Remaining": "0", "Retry-After": "3"},
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={
+            **headers,
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset-After": "7000",
+        },
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    now = [0.0]
+    calls: list[float] = []
+
+    async def advance(delay: float) -> None:
+        calls.append(delay)
+        now[0] += delay
+
+    with (
+        patch("discord_ferry.migrator.api.time.monotonic", side_effect=lambda: now[0]),
+        patch("discord_ferry.migrator.api.asyncio.sleep", side_effect=advance),
+    ):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+    assert calls == [3.0, 7.0]
+
+
+async def test_pacer_429_retry_does_not_bypass_replacement_state(
+    mock_aiohttp: aioresponses,
+) -> None:
+    limited_url = f"{BASE_URL}/servers/srv1"
+    replacement_url = f"{BASE_URL}/servers/srv2"
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        limited_url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        limited_url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={**headers, "X-RateLimit-Remaining": "0", "Retry-After": "3"},
+    )
+    mock_aiohttp.get(
+        limited_url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    mock_aiohttp.get(
+        replacement_url,
+        payload={"_id": "srv2"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    mock_aiohttp.get(
+        replacement_url,
+        payload={"_id": "srv2"},
+        headers={
+            **headers,
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset-After": "2000",
+        },
+    )
+    limited_sleeping = asyncio.Event()
+    release_limited = asyncio.Event()
+    calls: list[tuple[str, float]] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        calls.append((task.get_name(), delay))
+        if task.get_name() == "limited" and delay == pytest.approx(3.0):
+            limited_sleeping.set()
+            await release_limited.wait()
+
+    with patch("discord_ferry.migrator.api.asyncio.sleep", side_effect=controlled_sleep):
+        async with new_session() as session:
+            await _api_request(session, "GET", limited_url, TOKEN)
+            await _api_request(session, "GET", replacement_url, TOKEN)
+            limited = asyncio.create_task(
+                _api_request(session, "GET", limited_url, TOKEN),
+                name="limited",
+            )
+            await limited_sleeping.wait()
+            replacement = asyncio.create_task(
+                _api_request(session, "GET", replacement_url, TOKEN),
+                name="replacement",
+            )
+            await replacement
+            release_limited.set()
+            await limited
+
+    limited_waits = [delay for name, delay in calls if name == "limited"]
+    replacement_waits = [delay for name, delay in calls if name == "replacement"]
+    assert limited_waits == pytest.approx([3.0, 2.0], abs=0.1)
+    assert replacement_waits == pytest.approx([10.0], abs=0.1)
+
+
+async def test_pacer_429_retry_still_charges_matching_state(
+    mock_aiohttp: aioresponses,
+) -> None:
+    from discord_ferry.migrator.api import _bucket_state
+
+    url = f"{BASE_URL}/servers/srv1"
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={**headers, "X-RateLimit-Remaining": "1", "Retry-After": "10"},
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5", "X-Test-Retry": "1"},
+    )
+    remaining_before_refresh: list[int] = []
+    real_update = api_module._update_pacer_state
+
+    def capture_retry_charge(
+        request_url: str,
+        response_headers: Mapping[str, str],
+    ) -> _BucketState | None:
+        if response_headers.get("X-Test-Retry") == "1":
+            remaining_before_refresh.append(_bucket_state["b1"].remaining)
+        return real_update(request_url, response_headers)
+
+    with (
+        patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock),
+        patch(
+            "discord_ferry.migrator.api._update_pacer_state",
+            side_effect=capture_retry_charge,
+        ),
+    ):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+    assert remaining_before_refresh == [0]
+
+
+async def test_pacer_429_incomplete_headers_bypass_only_the_charged_state(
+    mock_aiohttp: aioresponses,
+) -> None:
+    from discord_ferry.migrator.api import _bucket_state, _url_to_bucket
+
+    url = f"{BASE_URL}/servers/srv1"
+    unprimed_url = f"{BASE_URL}/servers/srv2"
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={"Retry-After": "3"},
+    )
+    mock_aiohttp.get(url, payload={"_id": "srv1"})
+    mock_aiohttp.get(
+        unprimed_url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={"Retry-After": "3"},
+    )
+    mock_aiohttp.get(unprimed_url, payload={"_id": "srv2"})
+    now = [0.0]
+    calls: list[float] = []
+
+    async def advance(delay: float) -> None:
+        calls.append(delay)
+        now[0] += delay
+
+    with (
+        patch("discord_ferry.migrator.api.time.monotonic", side_effect=lambda: now[0]),
+        patch("discord_ferry.migrator.api.asyncio.sleep", side_effect=advance),
+    ):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", url, TOKEN)
+            await _api_request(session, "GET", unprimed_url, TOKEN)
+    assert calls == [3.0, 3.0]
+    assert unprimed_url not in _url_to_bucket
+    assert _bucket_state["b1"].remaining == 0
+
+
+async def test_pacer_429_cancellation_preserves_shared_state(
+    mock_aiohttp: aioresponses,
+) -> None:
+    url = f"{BASE_URL}/servers/srv1"
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={**headers, "X-RateLimit-Remaining": "0", "Retry-After": "3"},
+    )
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    async with new_session() as session:
+        await _api_request(session, "GET", url, TOKEN)
+        with (
+            patch(
+                "discord_ferry.migrator.api.asyncio.sleep",
+                side_effect=asyncio.CancelledError(),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await _api_request(session, "GET", url, TOKEN)
+        calls, sleep = _sleep_capture()
+        with patch("discord_ferry.migrator.api.asyncio.sleep", sleep):
+            await _api_request(session, "GET", url, TOKEN)
+    assert calls[0] == pytest.approx(10.0, abs=0.1)
+
+
+async def test_pacer_429_repeated_limits_keep_recovery_rules(
+    mock_aiohttp: aioresponses,
+) -> None:
+    normal_url = f"{BASE_URL}/servers/srv1"
+    recovery_url = f"{BASE_URL}/channels/ch1/messages"
+    mock_aiohttp.get(normal_url, status=429, headers={"Retry-After": "0"}, repeat=True)
+    mock_aiohttp.post(recovery_url, status=429, headers={"Retry-After": "0"}, repeat=True)
+    hook = AsyncMock()
+    async with new_session() as session:
+        with patch("discord_ferry.migrator.api.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(MigrationError, match="after 3 retries"):
+                await _api_request(session, "GET", normal_url, TOKEN)
+            with pytest.raises(MigrationError) as caught:
+                await api_send_message(
+                    session,
+                    BASE_URL,
+                    TOKEN,
+                    "ch1",
+                    idempotency_key="test-key",
+                    message_recovery=hook,
+                )
+    assert caught.value.disposition == "confirmed_rejected"
+    assert caught.value.http_status == 429
+    assert api_module._circuit_state.consecutive_failures == 0
+    assert get_rate_multiplier() > 1.0
+    hook.assert_not_awaited()
+
+
+async def test_pacer_two_live_requests_do_not_share_the_bypass(
+    mock_aiohttp: aioresponses,
+) -> None:
+    from discord_ferry.migrator.api import _url_to_bucket
+
+    limited_url = f"{BASE_URL}/servers/srv1"
+    later_url = f"{BASE_URL}/servers/srv2"
+    headers = {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        limited_url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(
+        limited_url,
+        status=429,
+        payload={"retry_after": 0},
+        headers={**headers, "X-RateLimit-Remaining": "0", "Retry-After": "3"},
+    )
+    mock_aiohttp.get(
+        limited_url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    mock_aiohttp.get(later_url, payload={"_id": "srv2"})
+    limited_sleeping = asyncio.Event()
+    release_limited = asyncio.Event()
+    calls: list[tuple[str, float]] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        calls.append((task.get_name(), delay))
+        if task.get_name() == "limited" and delay == 3.0:
+            limited_sleeping.set()
+            await release_limited.wait()
+
+    with patch("discord_ferry.migrator.api.asyncio.sleep", side_effect=controlled_sleep):
+        async with new_session() as session:
+            await _api_request(session, "GET", limited_url, TOKEN)
+            limited = asyncio.create_task(
+                _api_request(session, "GET", limited_url, TOKEN),
+                name="limited",
+            )
+            await limited_sleeping.wait()
+            _url_to_bucket[later_url] = "b1"
+            later = asyncio.create_task(
+                _api_request(session, "GET", later_url, TOKEN),
+                name="later",
+            )
+            await later
+            release_limited.set()
+            await limited
+
+    limited_waits = [delay for name, delay in calls if name == "limited"]
+    later_waits = [delay for name, delay in calls if name == "later"]
+    assert limited_waits == [3.0]
+    assert later_waits == pytest.approx([10.0], abs=0.1)
+
+
 async def test_pacer_shadow_clamps_negative(mock_aiohttp: aioresponses) -> None:
     """Shadow counter going negative clamps to 0, not left negative."""
     from discord_ferry.migrator.api import _bucket_state, _url_to_bucket

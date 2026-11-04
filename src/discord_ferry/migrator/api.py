@@ -369,8 +369,9 @@ async def _api_request_inner(
     # Without this, each retry attempt burns a rate-limit unit that the 429 path
     # refreshes via _update_pacer_state but the 5xx/network paths do not, leaving
     # the shadow counter too low until a headered response resets it.
-    charged_state = None
+    charged_state: _BucketState | None = None
     prev_remaining: int | None = None
+    bypass_state: _BucketState | None = None
 
     for attempt in range(MAX_API_RETRIES):
         # Proactive pacer: if we have seen this URL's bucket and the shadow
@@ -378,21 +379,22 @@ async def _api_request_inner(
         # The shadow counter is decremented before the request, not after, so
         # two concurrent requests to the same bucket do not both fire.
         bucket_hash = _url_to_bucket.get(url)
-        if bucket_hash is not None:
-            state = _bucket_state.get(bucket_hash)
-            if state is not None:
-                if state.remaining <= 0:
-                    wait = state.reset_at - time.monotonic()
-                    if wait > 0:
-                        logger.debug(
-                            "Pacer: bucket %s exhausted, waiting %.1fs",
-                            bucket_hash,
-                            wait,
-                        )
-                        await asyncio.sleep(wait)
-                charged_state = state
-                prev_remaining = state.remaining
-                state.remaining = max(state.remaining - 1, 0)
+        state = _bucket_state.get(bucket_hash) if bucket_hash is not None else None
+        skip_pacer_wait = state is bypass_state
+        bypass_state = None
+        if state is not None:
+            if state.remaining <= 0 and not skip_pacer_wait:
+                wait = state.reset_at - time.monotonic()
+                if wait > 0:
+                    logger.debug(
+                        "Pacer: bucket %s exhausted, waiting %.1fs",
+                        bucket_hash,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+            charged_state = state
+            prev_remaining = state.remaining
+            state.remaining = max(state.remaining - 1, 0)
 
         try:
             async with _request_attempt(
@@ -502,8 +504,9 @@ async def _api_request_inner(
                         # content-type-guarded so a non-JSON 429 can't escape into the network
                         # path and prime the breaker; honour Retry-After over the body delay.
                         delay = await _resolve_429_delay_seconds(resp)
-                        _update_pacer_state(url, resp.headers)
+                        published_state = _update_pacer_state(url, resp.headers)
                         await asyncio.sleep(delay)
+                        bypass_state = published_state or charged_state
                         # Track 429 frequency and ramp up the rate multiplier.
                         _rate_429_window.append(time.monotonic())
                         recent = sum(1 for t in _rate_429_window if time.monotonic() - t < 60)
