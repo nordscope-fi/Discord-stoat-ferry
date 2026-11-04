@@ -106,7 +106,7 @@ def test_adr_030_records_feedback_service_defaults() -> None:
         "32 kibibytes",
         "18 zero bits",
         "15 minutes",
-        "three accepted reports per rolling hour",
+        "three quota-bearing feedback delivery attempts per rolling hour",
         "ten per rolling day",
         "30 challenges per hour",
         "5 seconds",

@@ -426,25 +426,24 @@ async def _feedback(request: web.Request) -> web.Response:
     )
     contact_key = request.app[CONFIG_KEY].contact_key
     content_hash = keyed_content_hash(cleaned, contact_key)
-    existing = await store.get_receipt(cleaned.request_id)
-    if existing is None:
-        quota = await store.claim_report_quota_hash(source_hash, now=now)
-        if not quota.allowed:
-            _log_feedback(cleaned.request_id, "throttled", destination_kind, 429, started)
-            return _error_response(
-                FeedbackErrorCode.THROTTLED.value,
-                "Too many feedback requests. Try again later.",
-                status=429,
-                retry_at=quota.retry_at,
-            )
-
-    claim = await store.claim_receipt(
+    admission = await store.admit_feedback_delivery(
         cleaned.request_id,
         content_hash,
         destination_kind,
+        source_hash,
         now=now,
         legacy_content_hash=feedback_content_hash(cleaned),
     )
+    if admission.quota is not None:
+        _log_feedback(cleaned.request_id, "throttled", destination_kind, 429, started)
+        return _error_response(
+            FeedbackErrorCode.THROTTLED.value,
+            "Too many feedback requests. Try again later.",
+            status=429,
+            retry_at=admission.quota.retry_at,
+        )
+    assert admission.claim is not None
+    claim = admission.claim
     if claim.outcome is ClaimOutcome.CONFLICT:
         _log_feedback(cleaned.request_id, "conflict", destination_kind, 409, started)
         return _error_response(
