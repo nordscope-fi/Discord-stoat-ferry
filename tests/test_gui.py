@@ -698,6 +698,14 @@ def test_scrub_unreadable_record_continues_without_raw_warning(
     assert "read-failure" not in caplog.text
 
 
+def test_architecture_describes_historical_gui_record_cleanup() -> None:
+    text = (Path(__file__).parents[1] / "docs/reference/architecture.md").read_text(
+        encoding="utf-8"
+    )
+    assert "storage-user-<uuid>.json" in text
+    assert "without deleting unrelated settings" in text
+
+
 # ---------------------------------------------------------------------------
 # Batch 8 — S1 cached-export gating
 # ---------------------------------------------------------------------------
