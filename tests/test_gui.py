@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -522,6 +523,179 @@ def test_warn_gui_record_uses_only_uuid_and_fixed_category(
     assert "outside-secret" not in caplog.text
     assert "storage-user-not-a-uuid.json" not in caplog.text
     assert "synthetic exception" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"token": "s"},
+        {"discord_token": "d"},
+        {"token": "s", "discord_token": "d"},
+    ],
+)
+def test_scrub_historical_records_removes_only_session_keys(
+    tmp_path: Path, stored: dict[str, Any]
+) -> None:
+    from discord_ferry import gui
+
+    record = tmp_path / "storage-user-11111111-1111-1111-1111-111111111111.json"
+    preserved = {
+        "scalar": "kept",
+        "items": [1, {"two": 2}],
+        "nested": {"kept": True},
+    }
+    record.write_text(json.dumps({**stored, **preserved}), encoding="utf-8")
+    gui._scrub_historical_gui_records(tmp_path)
+    assert json.loads(record.read_text(encoding="utf-8")) == preserved
+
+
+@pytest.mark.parametrize("raw", [b"{not-json", b"[]", b'"not-an-object"', b"17"])
+def test_scrub_historical_records_preserves_invalid_json_bytes(tmp_path: Path, raw: bytes) -> None:
+    from discord_ferry import gui
+
+    record = tmp_path / "storage-user-44444444-4444-4444-4444-444444444444.json"
+    record.write_bytes(raw)
+    gui._scrub_historical_gui_records(tmp_path)
+    assert record.read_bytes() == raw
+
+
+def test_scrub_continues_after_bad_record_and_hides_warning_data(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    bad = tmp_path / "storage-user-55555555-5555-5555-5555-555555555555.json"
+    bad.write_text('{"token": "warning-secret",', encoding="utf-8")
+    good = tmp_path / "storage-user-66666666-6666-6666-6666-666666666666.json"
+    good.write_text('{"token": "good-secret", "setting": "kept"}', encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._scrub_historical_gui_records(tmp_path)
+    assert bad.read_text(encoding="utf-8") == '{"token": "warning-secret",'
+    assert json.loads(good.read_text(encoding="utf-8")) == {"setting": "kept"}
+    assert "warning-secret" not in caplog.text
+    assert '{"token"' not in caplog.text
+
+
+def test_scrub_clean_and_repeat_records_do_not_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import gui
+
+    clean = tmp_path / "storage-user-77777777-7777-7777-7777-777777777777.json"
+    clean.write_text('{"setting": "kept"}', encoding="utf-8")
+    calls: list[Path] = []
+
+    def write_and_record(path: Path, text: str) -> None:
+        calls.append(path)
+        path.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(gui, "atomic_write_text", write_and_record)
+    gui._scrub_historical_gui_records(tmp_path)
+    assert calls == []
+
+    dirty = tmp_path / "storage-user-88888888-8888-8888-8888-888888888888.json"
+    dirty.write_text('{"token": "old", "setting": "kept"}', encoding="utf-8")
+    gui._scrub_historical_gui_records(tmp_path)
+    gui._scrub_historical_gui_records(tmp_path)
+    assert calls == [dirty]
+
+
+def test_scrub_changed_source_and_failed_replacement_preserve_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import gui
+
+    changed = tmp_path / "storage-user-99999999-9999-9999-9999-999999999999.json"
+    changed.write_text('{"token": "old", "setting": "before"}', encoding="utf-8")
+    original_read = type(changed).read_bytes
+    reads = 0
+
+    def read_bytes(path: Path) -> bytes:
+        nonlocal reads
+        reads += 1
+        if path == changed and reads == 2:
+            changed.write_text('{"setting": "newer"}', encoding="utf-8")
+        return original_read(path)
+
+    monkeypatch.setattr(type(changed), "read_bytes", read_bytes)
+    monkeypatch.setattr(gui, "atomic_write_text", pytest.fail)
+    gui._scrub_historical_gui_records(tmp_path)
+    assert json.loads(changed.read_text(encoding="utf-8")) == {"setting": "newer"}
+
+    replacement = tmp_path / "storage-user-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.json"
+    before = '{"token": "old", "setting": "kept"}'
+    replacement.write_text(before, encoding="utf-8")
+
+    def fail_replace(path: Path, text: str) -> None:
+        raise OSError("replace-failure")
+
+    monkeypatch.setattr(gui, "atomic_write_text", fail_replace)
+    gui._scrub_historical_gui_records(tmp_path)
+    assert replacement.read_text(encoding="utf-8") == before
+
+
+def test_main_port_conflict_stops_before_scrub(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry import gui
+
+    monkeypatch.setattr(gui.multiprocessing, "freeze_support", lambda: None)
+    monkeypatch.setattr(gui.entry, "should_run_cli", lambda argv: False)
+    monkeypatch.setattr(gui, "configure_logging", lambda: None)
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    monkeypatch.setattr(
+        gui,
+        "_ensure_gui_port_available",
+        lambda: (_ for _ in ()).throw(gui._GuiStorageLockError("port")),
+    )
+    monkeypatch.setattr(gui, "_scrub_historical_gui_records", pytest.fail)
+    with pytest.raises(gui._GuiStorageLockError, match="port"):
+        gui.main()
+
+
+def test_main_lock_conflict_stops_before_scrub_or_run_gui(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry import gui
+
+    monkeypatch.setattr(gui.multiprocessing, "freeze_support", lambda: None)
+    monkeypatch.setattr(gui.entry, "should_run_cli", lambda argv: False)
+    monkeypatch.setattr(gui, "configure_logging", lambda: None)
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    monkeypatch.setattr(gui, "_scrub_historical_gui_records", pytest.fail)
+    monkeypatch.setattr(gui, "_run_gui", pytest.fail)
+    first = gui._acquire_gui_storage_lock(tmp_path)
+    try:
+        with pytest.raises(gui._GuiStorageLockError):
+            gui.main()
+    finally:
+        gui._release_gui_storage_lock(first)
+
+
+def test_scrub_unreadable_record_continues_without_raw_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from discord_ferry import gui
+
+    unreadable = tmp_path / "storage-user-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.json"
+    unreadable.write_text('{"token": "unreadable-secret"}', encoding="utf-8")
+    valid = tmp_path / "storage-user-cccccccc-cccc-cccc-cccc-cccccccccccc.json"
+    valid.write_text('{"token": "old", "setting": "kept"}', encoding="utf-8")
+    original_read = type(unreadable).read_bytes
+
+    def read_bytes(path: Path) -> bytes:
+        if path == unreadable:
+            raise OSError("read-failure")
+        return original_read(path)
+
+    monkeypatch.setattr(type(unreadable), "read_bytes", read_bytes)
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._scrub_historical_gui_records(tmp_path)
+    assert json.loads(valid.read_text(encoding="utf-8")) == {"setting": "kept"}
+    assert "unreadable-secret" not in caplog.text
+    assert "read-failure" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

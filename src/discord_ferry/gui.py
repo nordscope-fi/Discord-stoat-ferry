@@ -26,6 +26,7 @@ from nicegui.storage import Storage
 from discord_ferry import gui_tools  # noqa: F401 -- registers the /tools routes as a side effect
 from discord_ferry.config import FerryConfig
 from discord_ferry.core import entry
+from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
 from discord_ferry.core.http import format_proxy_notices, new_session
 from discord_ferry.core.logging_setup import configure_logging
@@ -213,6 +214,34 @@ def _iter_historical_gui_records(storage_dir: Path) -> Iterable[tuple[UUID, Path
             _warn_gui_record(record_id, "metadata")
             continue
         yield record_id, record_path
+
+
+def _scrub_historical_gui_records(storage_dir: Path) -> None:
+    for record_id, record_path in _iter_historical_gui_records(storage_dir):
+        try:
+            original = record_path.read_bytes()
+            data = json.loads(original.decode("utf-8"))
+            if not isinstance(data, dict):
+                _warn_gui_record(record_id, "not-object")
+                continue
+            cleaned = dict(data)
+            _clear_tokens(cleaned, _SESSION_TOKEN_KEYS)
+            if cleaned == data:
+                continue
+            if (
+                not stat.S_ISREG(record_path.lstat().st_mode)
+                or record_path.read_bytes() != original
+            ):
+                _warn_gui_record(record_id, "changed")
+                continue
+            try:
+                atomic_write_text(record_path, json.dumps(cleaned, indent=2))
+            except OSError:
+                _warn_gui_record(record_id, "replace")
+        except (OSError, UnicodeDecodeError):
+            _warn_gui_record(record_id, "read")
+        except json.JSONDecodeError:
+            _warn_gui_record(record_id, "json")
 
 
 def _selected_output_dir(storage: Mapping[str, Any]) -> Path:
@@ -2574,6 +2603,7 @@ def main() -> None:
 
     try:
         _ensure_gui_port_available()
+        _scrub_historical_gui_records(storage_dir)
         _run_gui()
     except KeyboardInterrupt:
         # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
