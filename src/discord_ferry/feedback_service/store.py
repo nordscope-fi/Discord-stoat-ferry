@@ -77,6 +77,12 @@ class QuotaDecision:
     retry_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class ReceiptAdmission:
+    claim: ReceiptClaim | None = None
+    quota: QuotaDecision | None = None
+
+
 _RECEIPT_HASH_LABEL = b"ferry-feedback-receipt-hash-v2"
 
 
@@ -246,10 +252,7 @@ class FeedbackStore:
         written before the upgrade keeps working and sheds the email-bearing hash.
         """
 
-        if not _CONTENT_HASH.fullmatch(content_hash):
-            raise ValueError("content_hash must be a lowercase SHA-256 digest")
-        if legacy_content_hash is not None and not _CONTENT_HASH.fullmatch(legacy_content_hash):
-            raise ValueError("legacy_content_hash must be a lowercase SHA-256 digest")
+        self._validate_receipt_hashes(content_hash, legacy_content_hash)
         async with self._lock:
             return await asyncio.to_thread(
                 self._claim_receipt_sync,
@@ -323,6 +326,125 @@ class FeedbackStore:
             retried = self._select_receipt(connection, request_id)
             assert retried is not None
             return ReceiptClaim(ClaimOutcome.CREATED, self._record(retried))
+
+    @staticmethod
+    def _validate_receipt_hashes(content_hash: str, legacy_content_hash: str | None) -> None:
+        if not _CONTENT_HASH.fullmatch(content_hash):
+            raise ValueError("content_hash must be a lowercase SHA-256 digest")
+        if legacy_content_hash is not None and not _CONTENT_HASH.fullmatch(legacy_content_hash):
+            raise ValueError("legacy_content_hash must be a lowercase SHA-256 digest")
+
+    async def admit_feedback_delivery(
+        self,
+        request_id: UUID,
+        content_hash: str,
+        destination_kind: DestinationKind,
+        source_hash: str,
+        *,
+        now: datetime,
+        legacy_content_hash: str | None = None,
+    ) -> ReceiptAdmission:
+        self._validate_receipt_hashes(content_hash, legacy_content_hash)
+        if not _CONTENT_HASH.fullmatch(source_hash):
+            raise ValueError("source_hash must be a lowercase SHA-256 digest")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._admit_feedback_delivery_sync,
+                request_id,
+                content_hash,
+                destination_kind,
+                source_hash,
+                now,
+                legacy_content_hash,
+            )
+
+    def _admit_feedback_delivery_sync(
+        self,
+        request_id: UUID,
+        content_hash: str,
+        destination_kind: DestinationKind,
+        source_hash: str,
+        now: datetime,
+        legacy_content_hash: str | None,
+    ) -> ReceiptAdmission:
+        timestamp = _timestamp(now)
+        expires_at = _timestamp(now + _RECEIPT_RETENTION)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._cleanup_expired(connection, timestamp)
+            row = self._select_receipt(connection, request_id)
+            if row is None:
+                quota = self._claim_report_quota_in_transaction(connection, source_hash, timestamp)
+                if not quota.allowed:
+                    return ReceiptAdmission(quota=quota)
+                connection.execute(
+                    """
+                    INSERT INTO receipts (
+                        request_id, content_hash, state, destination_kind, destination_url,
+                        created_at, updated_at, expires_at, audit_at
+                    ) VALUES (?, ?, 'pending', ?, NULL, ?, ?, ?, NULL)
+                    """,
+                    (
+                        str(request_id),
+                        content_hash,
+                        destination_kind.value,
+                        timestamp,
+                        timestamp,
+                        expires_at,
+                    ),
+                )
+                created = self._select_receipt(connection, request_id)
+                assert created is not None
+                return ReceiptAdmission(
+                    claim=ReceiptClaim(ClaimOutcome.CREATED, self._record(created))
+                )
+
+            record = self._record(row)
+            legacy_match = (
+                record.content_hash != content_hash and record.content_hash == legacy_content_hash
+            )
+            if record.content_hash != content_hash and not legacy_match:
+                return ReceiptAdmission(claim=ReceiptClaim(ClaimOutcome.CONFLICT, record))
+            if record.state is ReceiptState.FAILED:
+                quota = self._claim_report_quota_in_transaction(connection, source_hash, timestamp)
+                if not quota.allowed:
+                    return ReceiptAdmission(quota=quota)
+            if record.state in {ReceiptState.DELIVERED, ReceiptState.PENDING}:
+                if legacy_match:
+                    connection.execute(
+                        "UPDATE receipts SET content_hash = ? WHERE request_id = ?",
+                        (content_hash, str(request_id)),
+                    )
+                    row = self._select_receipt(connection, request_id)
+                    assert row is not None
+                    record = self._record(row)
+                outcome = (
+                    ClaimOutcome.DELIVERED
+                    if record.state is ReceiptState.DELIVERED
+                    else ClaimOutcome.PENDING
+                )
+                return ReceiptAdmission(claim=ReceiptClaim(outcome, record))
+
+            connection.execute(
+                """
+                UPDATE receipts
+                SET content_hash = ?, state = 'pending', destination_kind = ?,
+                    destination_url = NULL,
+                    created_at = ?, updated_at = ?, expires_at = ?, audit_at = NULL
+                WHERE request_id = ?
+                """,
+                (
+                    content_hash,
+                    destination_kind.value,
+                    timestamp,
+                    timestamp,
+                    expires_at,
+                    str(request_id),
+                ),
+            )
+            retried = self._select_receipt(connection, request_id)
+            assert retried is not None
+            return ReceiptAdmission(claim=ReceiptClaim(ClaimOutcome.CREATED, self._record(retried)))
 
     async def get_receipt(self, request_id: UUID) -> ReceiptRecord | None:
         async with self._lock:
@@ -625,49 +747,61 @@ class FeedbackStore:
         now: datetime,
     ) -> QuotaDecision:
         timestamp = _timestamp(now)
-        hour = 60 * 60
-        day = 24 * hour
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._cleanup_expired(connection, timestamp)
-            retry_times: list[int] = []
-            if event_kind == "challenge":
-                retry = self._retry_for_window(
-                    connection,
-                    event_kind=event_kind,
-                    cutoff=timestamp - hour,
-                    limit=30,
-                    window_seconds=hour,
-                    source_hash=source_hash,
-                )
-                if retry is not None:
-                    retry_times.append(retry)
-            else:
-                for cutoff, limit, window_seconds, scoped_source in (
-                    (timestamp - hour, 3, hour, source_hash),
-                    (timestamp - day, 10, day, source_hash),
-                    (timestamp - hour, 60, hour, None),
-                ):
-                    retry = self._retry_for_window(
-                        connection,
-                        event_kind=event_kind,
-                        cutoff=cutoff,
-                        limit=limit,
-                        window_seconds=window_seconds,
-                        source_hash=scoped_source,
-                    )
-                    if retry is not None:
-                        retry_times.append(retry)
-            if retry_times:
-                return QuotaDecision(
-                    allowed=False,
-                    retry_at=datetime.fromtimestamp(max(retry_times), tz=UTC),
-                )
+            if event_kind == "report":
+                return self._claim_report_quota_in_transaction(connection, source_hash, timestamp)
+            retry = self._retry_for_window(
+                connection,
+                event_kind="challenge",
+                cutoff=timestamp - 60 * 60,
+                limit=30,
+                window_seconds=60 * 60,
+                source_hash=source_hash,
+            )
+            if retry is not None:
+                return QuotaDecision(False, datetime.fromtimestamp(retry, tz=UTC))
             connection.execute(
-                "INSERT INTO rate_events (source_hash, event_kind, created_at) VALUES (?, ?, ?)",
-                (source_hash, event_kind, timestamp),
+                "INSERT INTO rate_events (source_hash, event_kind, created_at) "
+                "VALUES (?, 'challenge', ?)",
+                (source_hash, timestamp),
             )
             return QuotaDecision(allowed=True)
+
+    def _claim_report_quota_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        source_hash: str,
+        timestamp: int,
+    ) -> QuotaDecision:
+        hour = 60 * 60
+        retry_times = [
+            retry
+            for cutoff, limit, window_seconds, scoped_source in (
+                (timestamp - hour, 3, hour, source_hash),
+                (timestamp - 24 * hour, 10, 24 * hour, source_hash),
+                (timestamp - hour, 60, hour, None),
+            )
+            if (
+                retry := self._retry_for_window(
+                    connection,
+                    event_kind="report",
+                    cutoff=cutoff,
+                    limit=limit,
+                    window_seconds=window_seconds,
+                    source_hash=scoped_source,
+                )
+            )
+            is not None
+        ]
+        if retry_times:
+            return QuotaDecision(False, datetime.fromtimestamp(max(retry_times), tz=UTC))
+        connection.execute(
+            "INSERT INTO rate_events (source_hash, event_kind, created_at) VALUES (?, 'report', ?)",
+            (source_hash, timestamp),
+        )
+        return QuotaDecision(True)
 
 
 __all__ = [
@@ -675,6 +809,7 @@ __all__ = [
     "ContactDecryptionError",
     "FeedbackStore",
     "QuotaDecision",
+    "ReceiptAdmission",
     "ReceiptClaim",
     "ReceiptRecord",
     "ReceiptState",

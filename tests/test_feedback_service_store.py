@@ -391,6 +391,376 @@ async def _quota_store(path: Path) -> FeedbackStore:
     return store
 
 
+async def test_failed_admission_charges_then_denies_without_mutating(tmp_path: Path) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source_hash = store.source_digest("198.51.100.20")
+    first = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW
+    )
+    assert first.claim is not None
+    await store.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+
+    for offset in (2, 3):
+        admitted = await store.admit_feedback_delivery(
+            REQUEST_ID,
+            CONTENT_HASH,
+            DestinationKind.ISSUE,
+            source_hash,
+            now=NOW + timedelta(seconds=offset),
+        )
+        assert admitted.claim is not None
+        await store.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=offset, milliseconds=1))
+
+    before = await store.get_receipt(REQUEST_ID)
+    denied = await store.admit_feedback_delivery(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        source_hash,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert denied.claim is None
+    assert denied.quota is not None and denied.quota.allowed is False
+    assert await store.get_receipt(REQUEST_ID) == before
+
+
+async def test_admission_keeps_pending_delivered_and_absent_replays_free(tmp_path: Path) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source_hash = store.source_digest("198.51.100.20")
+    first = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW
+    )
+    assert first.claim is not None
+    pending = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW
+    )
+    assert pending.claim is not None and pending.claim.outcome is ClaimOutcome.PENDING
+    await store.mark_absent(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    absent = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW + timedelta(seconds=2)
+    )
+    assert absent.claim is not None and absent.claim.outcome is ClaimOutcome.CREATED
+    await store.mark_delivered(
+        REQUEST_ID,
+        "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/999",
+        now=NOW + timedelta(seconds=3),
+    )
+    delivered = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW + timedelta(seconds=4)
+    )
+    assert delivered.claim is not None and delivered.claim.outcome is ClaimOutcome.DELIVERED
+    with sqlite3.connect(tmp_path / "feedback.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+async def test_independent_stores_admit_one_failed_retry_with_one_slot(tmp_path: Path) -> None:
+    path = tmp_path / "feedback.sqlite3"
+    first = await _quota_store(path)
+    second = FeedbackStore(path, source_hash_key=SOURCE_HASH_KEY)
+    await second.initialize(now=NOW)
+    source_hash = first.source_digest("198.51.100.20")
+    initial = await first.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW
+    )
+    assert initial.claim is not None
+    await first.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    assert (await first.claim_report_quota("198.51.100.20", now=NOW + timedelta(seconds=2))).allowed
+
+    barrier = asyncio.Barrier(2)
+
+    async def admit(store: FeedbackStore) -> object:
+        await barrier.wait()
+        return await store.admit_feedback_delivery(
+            REQUEST_ID,
+            CONTENT_HASH,
+            DestinationKind.ISSUE,
+            source_hash,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    admissions = await asyncio.gather(admit(first), admit(second))
+
+    assert sorted(item.claim.outcome for item in admissions if item.claim is not None) == [
+        ClaimOutcome.CREATED,
+        ClaimOutcome.PENDING,
+    ]
+    with sqlite3.connect(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == 3
+        )
+
+
+async def test_failed_admission_recovers_after_the_hour_boundary(tmp_path: Path) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source_hash = store.source_digest("198.51.100.20")
+    for offset in (0, 1, 2):
+        admission = await store.admit_feedback_delivery(
+            REQUEST_ID,
+            CONTENT_HASH,
+            DestinationKind.ISSUE,
+            source_hash,
+            now=NOW + timedelta(seconds=offset),
+        )
+        assert admission.claim is not None
+        await store.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=offset, milliseconds=1))
+
+    recovered = await store.admit_feedback_delivery(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        source_hash,
+        now=NOW + timedelta(hours=1),
+    )
+
+    assert recovered.claim is not None
+    assert recovered.claim.outcome is ClaimOutcome.CREATED
+
+
+async def test_independent_stores_deny_failed_retries_without_mutation(tmp_path: Path) -> None:
+    path = tmp_path / "feedback.sqlite3"
+    first = await _quota_store(path)
+    second = FeedbackStore(path, source_hash_key=SOURCE_HASH_KEY)
+    await second.initialize(now=NOW)
+    source = "198.51.100.20"
+    source_hash = first.source_digest(source)
+    await first.claim_receipt(REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, now=NOW)
+    await first.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    for offset in (2, 3, 4):
+        assert (await first.claim_report_quota(source, now=NOW + timedelta(seconds=offset))).allowed
+    before = await first.get_receipt(REQUEST_ID)
+    barrier = asyncio.Barrier(2)
+
+    async def admit(store: FeedbackStore) -> object:
+        await barrier.wait()
+        return await store.admit_feedback_delivery(
+            REQUEST_ID,
+            CONTENT_HASH,
+            DestinationKind.ISSUE,
+            source_hash,
+            now=NOW + timedelta(seconds=5),
+        )
+
+    admissions = await asyncio.gather(admit(first), admit(second))
+
+    assert all(item.claim is None and item.quota is not None for item in admissions)
+    assert await first.get_receipt(REQUEST_ID) == before
+
+
+@pytest.mark.parametrize("sweep_first", (False, True))
+async def test_expired_receipt_admission_is_new_with_or_without_sweep(
+    tmp_path: Path, sweep_first: bool
+) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source_hash = store.source_digest("198.51.100.20")
+    await store.claim_receipt(REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, now=NOW)
+    admission_time = NOW + timedelta(days=7)
+    if sweep_first:
+        await store.expire(now=admission_time)
+
+    admission = await store.admit_feedback_delivery(
+        REQUEST_ID,
+        "b" * 64,
+        DestinationKind.DISCUSSION,
+        source_hash,
+        now=admission_time,
+    )
+
+    assert admission.claim is not None
+    assert admission.claim.outcome is ClaimOutcome.CREATED
+    assert admission.claim.record.content_hash == "b" * 64
+    with sqlite3.connect(tmp_path / "feedback.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+async def test_absent_admission_resets_audit_without_quota_under_exhaustion(tmp_path: Path) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source = "198.51.100.20"
+    source_hash = store.source_digest(source)
+    await store.claim_receipt(REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, now=NOW)
+    await store.mark_absent(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    for offset in (2, 3, 4):
+        assert (await store.claim_report_quota(source, now=NOW + timedelta(seconds=offset))).allowed
+
+    admission = await store.admit_feedback_delivery(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        source_hash,
+        now=NOW + timedelta(seconds=5),
+    )
+
+    assert admission.claim is not None
+    assert admission.claim.outcome is ClaimOutcome.CREATED
+    assert admission.claim.record.audit_at is None
+    with sqlite3.connect(tmp_path / "feedback.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == 3
+        )
+
+
+@pytest.mark.parametrize("window", ("daily", "global"))
+async def test_failed_admission_enforces_each_non_hourly_report_window(
+    tmp_path: Path, window: str
+) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source = "198.51.100.20"
+    source_hash = store.source_digest(source)
+    await store.claim_receipt(REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, now=NOW)
+    await store.mark_failed(REQUEST_ID, now=NOW)
+    if window == "daily":
+        for hour in range(10, 0, -1):
+            assert (await store.claim_report_quota(source, now=NOW - timedelta(hours=hour))).allowed
+    else:
+        for source_number in range(20):
+            for offset in range(3):
+                assert (
+                    await store.claim_report_quota(
+                        f"203.0.113.{source_number + 1}",
+                        now=NOW - timedelta(seconds=offset),
+                    )
+                ).allowed
+
+    before = await store.get_receipt(REQUEST_ID)
+    with sqlite3.connect(tmp_path / "feedback.sqlite3") as connection:
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+        ).fetchone()[0]
+    denied = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW
+    )
+
+    assert denied.claim is None
+    assert denied.quota is not None and denied.quota.allowed is False
+    assert await store.get_receipt(REQUEST_ID) == before
+    with sqlite3.connect(tmp_path / "feedback.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == event_count
+        )
+
+
+async def test_conflict_admission_stays_free_and_immutable_under_full_quota(tmp_path: Path) -> None:
+    store = await _quota_store(tmp_path / "feedback.sqlite3")
+    source = "198.51.100.20"
+    source_hash = store.source_digest(source)
+    await store.claim_receipt(REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, now=NOW)
+    for offset in (1, 2, 3):
+        assert (await store.claim_report_quota(source, now=NOW + timedelta(seconds=offset))).allowed
+    before = await store.get_receipt(REQUEST_ID)
+
+    conflict = await store.admit_feedback_delivery(
+        REQUEST_ID,
+        "b" * 64,
+        DestinationKind.ISSUE,
+        source_hash,
+        now=NOW + timedelta(seconds=4),
+        legacy_content_hash="c" * 64,
+    )
+
+    assert conflict.claim is not None and conflict.claim.outcome is ClaimOutcome.CONFLICT
+    assert await store.get_receipt(REQUEST_ID) == before
+    with sqlite3.connect(tmp_path / "feedback.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == 3
+        )
+
+
+async def test_legacy_failed_admission_upgrades_only_when_quota_allows(tmp_path: Path) -> None:
+    allowed = await _quota_store(tmp_path / "allowed.sqlite3")
+    allowed_source = allowed.source_digest("198.51.100.20")
+    await allowed.claim_receipt(REQUEST_ID, "c" * 64, DestinationKind.ISSUE, now=NOW)
+    await allowed.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    upgraded = await allowed.admit_feedback_delivery(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        allowed_source,
+        now=NOW + timedelta(seconds=2),
+        legacy_content_hash="c" * 64,
+    )
+    assert upgraded.claim is not None
+    assert upgraded.claim.record.content_hash == CONTENT_HASH
+
+    denied = await _quota_store(tmp_path / "denied.sqlite3")
+    denied_source = denied.source_digest("198.51.100.20")
+    await denied.claim_receipt(REQUEST_ID, "c" * 64, DestinationKind.ISSUE, now=NOW)
+    await denied.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    for offset in (2, 3, 4):
+        assert (
+            await denied.claim_report_quota("198.51.100.20", now=NOW + timedelta(seconds=offset))
+        ).allowed
+    before = await denied.get_receipt(REQUEST_ID)
+    rejected = await denied.admit_feedback_delivery(
+        REQUEST_ID,
+        CONTENT_HASH,
+        DestinationKind.ISSUE,
+        denied_source,
+        now=NOW + timedelta(seconds=5),
+        legacy_content_hash="c" * 64,
+    )
+
+    assert rejected.claim is None
+    assert rejected.quota is not None and rejected.quota.allowed is False
+    assert await denied.get_receipt(REQUEST_ID) == before
+
+
+async def test_failed_admission_rolls_back_quota_when_receipt_reset_aborts(tmp_path: Path) -> None:
+    path = tmp_path / "feedback.sqlite3"
+    store = await _quota_store(path)
+    source_hash = store.source_digest("198.51.100.20")
+    initial = await store.admit_feedback_delivery(
+        REQUEST_ID, CONTENT_HASH, DestinationKind.ISSUE, source_hash, now=NOW
+    )
+    assert initial.claim is not None
+    await store.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+    before = await store.get_receipt(REQUEST_ID)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TRIGGER abort_pending_retry BEFORE UPDATE OF state ON receipts "
+            "WHEN NEW.state = 'pending' BEGIN SELECT RAISE(ABORT, 'rollback admission'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="rollback admission"):
+        await store.admit_feedback_delivery(
+            REQUEST_ID,
+            CONTENT_HASH,
+            DestinationKind.ISSUE,
+            source_hash,
+            now=NOW + timedelta(seconds=2),
+        )
+
+    assert await store.get_receipt(REQUEST_ID) == before
+    with sqlite3.connect(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM rate_events WHERE event_kind = 'report'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
 async def test_challenge_quota_allows_thirty_per_rolling_hour(tmp_path: Path) -> None:
     store = await _quota_store(tmp_path / "feedback.sqlite3")
 

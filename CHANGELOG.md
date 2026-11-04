@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Allow snapshot evidence for the feedback-service defaults decision record only, with primary-checkout ownership, separate instruction bytes, and exact scoped backup checks (#1179).
 - Align the Context7 launcher pin and integrity comment with the updated 4.4.4 package lock (#1455).
 - Match the feedback container check to the uv 0.13.4 pin and its 19 distribution hashes (#1456).
 - Document the extra pinning capability inherited from Stoat's combined `ManageMessages` permission (#1228).
@@ -17,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the `--checkpoint-interval` docs, which promised a replay of at most N messages though a save also needs 5 seconds since the last one, and the dotenv docs, which said the working folder is searched when Ferry searches from its install directory (#1299, #1245).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
+
+## [3.1.13] - 2026-11-04
+
+### Fixed
+
+- Charge feedback-service report quota for matching failed receipt retries (#1179).
 
 ## [3.1.12] - 2026-11-04
 

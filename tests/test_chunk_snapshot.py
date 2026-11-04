@@ -252,54 +252,82 @@ def test_approved_ignored_instructions_keep_separate_identity(tmp_path: Path) ->
     assert report["backup_required"] is True
 
 
-def test_permission_decision_record_round_trip(tmp_path: Path) -> None:
-    for variant in ("create", "edit", "worktree"):
-        report = assert_fixture_ok(tmp_path / variant, "permission-adr", variant)
-        assert report["instruction_path"] == (
-            "docs/architecture/adr/045-permission-preflight-safety.md"
-        )
-        assert report["domain"] == "instruction"
-        assert report["before_exists"] is (variant != "create")
-        assert report["after_exists"] is True
-        assert report["mode"] == "100644"
-        assert report["sha256"] == hashlib.sha256(b"after permission decision\n").hexdigest()
-        assert report["backup_destination"] == (
-            "projects/Discord-stoat-ferry/adr/045-permission-preflight-safety.md"
-        )
-        for field in (
-            "owner_matches_primary",
-            "active_index_unchanged",
-            "backup_valid",
-            "replay_valid",
-            "missing_backup_rejected",
-        ):
-            assert report[field] is True
-        assert report["tracked_tree_contains_instruction"] is False
+ADR_RECORDS = {
+    "030": (
+        "docs/architecture/adr/030-feedback-service-defaults.md",
+        b"after feedback defaults\n",
+        "projects/Discord-stoat-ferry/adr/030-feedback-service-defaults.md",
+    ),
+    "045": (
+        "docs/architecture/adr/045-permission-preflight-safety.md",
+        b"after permission decision\n",
+        "projects/Discord-stoat-ferry/adr/045-permission-preflight-safety.md",
+    ),
+}
 
 
+@pytest.mark.parametrize(("record_key", "expected"), ADR_RECORDS.items())
+@pytest.mark.parametrize("case_name", ("create", "edit", "worktree"))
+def test_permission_decision_record_round_trip(
+    tmp_path: Path,
+    record_key: str,
+    expected: tuple[str, bytes, str],
+    case_name: str,
+) -> None:
+    expected_path, after_bytes, expected_destination = expected
+    report = assert_fixture_ok(
+        tmp_path / record_key / case_name,
+        "permission-adr",
+        f"{record_key}:{case_name}",
+    )
+    assert report["instruction_path"] == expected_path
+    assert report["domain"] == "instruction"
+    assert report["before_exists"] is (case_name != "create")
+    assert report["after_exists"] is True
+    assert report["mode"] == "100644"
+    assert report["sha256"] == hashlib.sha256(after_bytes).hexdigest()
+    assert report["backup_destination"] == expected_destination
+    for field in (
+        "owner_matches_primary",
+        "active_index_unchanged",
+        "backup_valid",
+        "replay_valid",
+        "missing_backup_rejected",
+    ):
+        assert report[field] is True
+    assert report["tracked_tree_contains_instruction"] is False
+
+
+@pytest.mark.parametrize("record_key", ADR_RECORDS)
 @pytest.mark.parametrize(
-    ("variant", "message"),
+    ("case_name", "message"),
     [
-        ("other-record", "unapproved instruction path"),
+        ("missing", "scoped instruction backup evidence is required"),
+        ("unapproved", "unapproved instruction path"),
+        ("wrong-destination", "outside the Ferry scope"),
+        ("wrong-bytes", "backup bytes changed"),
+        ("wrong-mode", "backup mode changed"),
         ("suffix", "unapproved instruction path"),
         ("credential", "rejected before read"),
         ("absolute", "rejected before read"),
         ("traversal", "rejected before read"),
-        ("symlink", "rejected before read: docs/architecture/adr/045"),
-        ("wrong-destination", "outside the Ferry scope"),
-        ("wrong-bytes", "backup bytes changed"),
-        ("wrong-mode", "backup mode changed"),
+        ("symlink", "rejected before read: docs/architecture/adr"),
         ("changed", "instruction candidate changed"),
     ],
 )
 def test_permission_decision_record_refuses_unsafe_evidence(
-    tmp_path: Path, variant: str, message: str
+    tmp_path: Path, record_key: str, case_name: str, message: str
 ) -> None:
-    result = run_fixture(tmp_path, "permission-adr", variant)
+    result = run_fixture(
+        tmp_path / record_key / case_name,
+        "permission-adr",
+        f"{record_key}:{case_name}",
+    )
     assert result.returncode == 1
     assert message in result.stderr
-    if variant in {"other-record", "suffix", "credential", "absolute", "traversal", "symlink"}:
-        evidence = tmp_path / "repo/docs/plans/.review/chunk-snapshots/tasks/1002"
+    if case_name in {"unapproved", "suffix", "credential", "absolute", "traversal", "symlink"}:
+        fixture_root = tmp_path / record_key / case_name / "repo"
+        evidence = fixture_root / "docs/plans/.review/chunk-snapshots/tasks/1002"
         assert not (evidence / "baseline.json").exists()
         assert not (evidence / "patch.json").exists()
 

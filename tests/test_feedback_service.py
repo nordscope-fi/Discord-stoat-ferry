@@ -16,6 +16,7 @@ from functools import lru_cache
 from ipaddress import ip_network
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import aiohttp
@@ -53,12 +54,10 @@ from discord_ferry.feedback_service.github import (
     ReconciledDestination,
     ReconciliationRequiredError,
 )
-from discord_ferry.feedback_service.store import (
-    FeedbackStore,
-    ReceiptClaim,
-    ReceiptState,
-    keyed_content_hash,
-)
+from discord_ferry.feedback_service.store import FeedbackStore, ReceiptState, keyed_content_hash
+
+if TYPE_CHECKING:
+    from discord_ferry.feedback_service.store import ReceiptAdmission
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 REQUEST_ID = UUID("018f4c8c-3f52-7a89-a901-0123456789ac")
@@ -393,7 +392,10 @@ class _GitHubMustNotRun:
 async def test_health_returns_small_json_after_sqlite_query(tmp_path: object) -> None:
     from discord_ferry.feedback_service.app import create_app
 
-    config = _service_config(tmp_path)
+    config = replace(
+        _service_config(tmp_path),
+        trusted_proxy_networks=(ip_network("127.0.0.0/8"), ip_network("::1/128")),
+    )
     client = TestClient(TestServer(create_app(config, github=_GitHubMustNotRun())))
     await client.start_server()
     try:
@@ -1031,6 +1033,19 @@ class _FeedbackGitHub(_ReadyGitHub):
         return result
 
 
+class _HeldCreateGitHub(_FeedbackGitHub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def create_issue(self, request: FeedbackRequest) -> str:
+        self.issue_requests.append(request)
+        self.started.set()
+        await self.release.wait()
+        return self._create_result("https://github.com/nordscope-fi/Discord-stoat-ferry/issues/901")
+
+
 @pytest.mark.parametrize(
     ("kind", "destination_kind", "url_part"),
     [
@@ -1445,6 +1460,114 @@ async def test_feedback_route_marks_clear_github_failure_retryable(
         assert record is not None and record.state is ReceiptState.FAILED
     finally:
         await client.close()
+
+
+async def test_feedback_route_throttles_failed_retry_without_github_work(tmp_path: object) -> None:
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    github = _FeedbackGitHub(*(GitHubDeliveryError("expected failure") for _ in range(3)))
+    config = _service_config(tmp_path)
+    app = create_app(config, github=github, now=lambda: NOW)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        body = _feedback_request().to_mapping()
+        assert [(await client.post("/v1/feedback", json=body)).status for _ in range(3)] == [
+            502
+        ] * 3
+        before = await app[STORE_KEY].get_receipt(REQUEST_ID)
+        denied = await client.post("/v1/feedback", json=body)
+        error = FeedbackError.from_mapping(await denied.json())
+        assert denied.status == 429
+        assert error.code is FeedbackErrorCode.THROTTLED
+        assert error.retry_at == NOW + timedelta(hours=1)
+        assert await app[STORE_KEY].get_receipt(REQUEST_ID) == before
+        assert github.calls == 3
+        assert len(github.issue_requests) == 3
+        assert github.reconcile_calls == len(github.discussion_requests) == 0
+        assert _report_quota_events(config.database_path) == 3
+    finally:
+        await client.close()
+
+
+async def test_two_apps_share_admission_and_quota_boundaries(tmp_path: object) -> None:
+    from discord_ferry.feedback_service.app import STORE_KEY, create_app
+
+    config = _service_config(tmp_path)
+    request = _feedback_request()
+    first_github = _HeldCreateGitHub()
+    second_github = _FeedbackGitHub()
+    first_app = create_app(config, github=first_github, now=lambda: NOW)
+    second_app = create_app(config, github=second_github, now=lambda: NOW)
+    first = TestClient(TestServer(first_app))
+    second = TestClient(TestServer(second_app))
+    await first.start_server()
+    await second.start_server()
+    try:
+        seeded = first_app[STORE_KEY]
+        await seeded.claim_receipt(
+            REQUEST_ID,
+            keyed_content_hash(request.cleaned_for_send(), config.contact_key),
+            DestinationKind.ISSUE,
+            now=NOW,
+        )
+        await seeded.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+        for offset in (2, 3):
+            assert (
+                await seeded.claim_report_quota("127.0.0.1", now=NOW + timedelta(seconds=offset))
+            ).allowed
+        body = request.to_mapping()
+        created = asyncio.create_task(first.post("/v1/feedback", json=body))
+        await asyncio.wait_for(first_github.started.wait(), timeout=1)
+        pending = await second.post("/v1/feedback", json=body)
+        first_github.release.set()
+        delivered = await created
+
+        assert delivered.status == 200
+        assert pending.status == 503
+        assert len(first_github.issue_requests) == 1
+        assert second_github.issue_requests == []
+        assert _report_quota_events(config.database_path) == 3
+
+        quota_config = replace(
+            config,
+            database_path=config.database_path.with_name("denied-feedback.sqlite3"),
+        )
+        quota_first_github = _FeedbackGitHub()
+        quota_second_github = _FeedbackGitHub()
+        quota_first = TestClient(
+            TestServer(create_app(quota_config, github=quota_first_github, now=lambda: NOW))
+        )
+        quota_second = TestClient(
+            TestServer(create_app(quota_config, github=quota_second_github, now=lambda: NOW))
+        )
+        await quota_first.start_server()
+        await quota_second.start_server()
+        store = quota_first.server.app[STORE_KEY]
+        await store.claim_receipt(
+            REQUEST_ID,
+            keyed_content_hash(request.cleaned_for_send(), quota_config.contact_key),
+            DestinationKind.ISSUE,
+            now=NOW,
+        )
+        await store.mark_failed(REQUEST_ID, now=NOW + timedelta(seconds=1))
+        for offset in (-3, -2, -1):
+            assert (
+                await store.claim_report_quota("127.0.0.1", now=NOW + timedelta(seconds=offset))
+            ).allowed
+        assert not (await store.claim_report_quota("127.0.0.1", now=NOW)).allowed
+        denied = await asyncio.gather(
+            quota_first.post("/v1/feedback", json=body),
+            quota_second.post("/v1/feedback", json=body),
+        )
+        assert [response.status for response in denied] == [429, 429]
+        assert quota_first_github.calls == quota_second_github.calls == 0
+        assert quota_first_github.issue_requests == quota_second_github.issue_requests == []
+        await quota_first.close()
+        await quota_second.close()
+    finally:
+        await first.close()
+        await second.close()
 
 
 async def test_feedback_route_reconciles_uncertain_write_without_second_create(
@@ -1885,28 +2008,30 @@ _PENDING_DESTINATION = "https://github.com/nordscope-fi/Discord-stoat-ferry/issu
 
 
 class _ClaimCountingStore(FeedbackStore):
-    """Real store that counts finished receipt claims, so a test knows when requests arrived."""
+    """Real store that counts finished admissions, so a test knows when requests arrived."""
 
     claims_done = 0
 
-    async def claim_receipt(
+    async def admit_feedback_delivery(
         self,
         request_id: UUID,
         content_hash: str,
         destination_kind: DestinationKind,
+        source_hash: str,
         *,
         now: datetime,
         legacy_content_hash: str | None = None,
-    ) -> ReceiptClaim:
-        claim = await super().claim_receipt(
+    ) -> ReceiptAdmission:
+        admission = await super().admit_feedback_delivery(
             request_id,
             content_hash,
             destination_kind,
+            source_hash,
             now=now,
             legacy_content_hash=legacy_content_hash,
         )
         self.claims_done += 1
-        return claim
+        return admission
 
 
 class _HeldReconcileGitHub(_FeedbackGitHub):

@@ -41,6 +41,7 @@ const APPROVED_INSTRUCTION_PATHS = new Set([
   'AGENTS.md',
   '.claude/skills/df-chunk-review/SKILL.md',
   '.claude/skills/df-ship/SKILL.md',
+  'docs/architecture/adr/030-feedback-service-defaults.md',
   'docs/architecture/adr/040-review-chunk-snapshots-before-task-commits.md',
   'docs/architecture/adr/045-permission-preflight-safety.md',
   'docs/architecture/adr/README.md',
@@ -1337,6 +1338,9 @@ const BACKUP_DESTINATIONS = new Map([
   ['.claude/skills/df-ship/SKILL.md', [
     'projects/Discord-stoat-ferry/claude-dir/skills/df-ship/SKILL.md',
     'skills-library/discord-stoat-ferry/df-ship/SKILL.md',
+  ]],
+  ['docs/architecture/adr/030-feedback-service-defaults.md', [
+    'projects/Discord-stoat-ferry/adr/030-feedback-service-defaults.md',
   ]],
   ['docs/architecture/adr/040-review-chunk-snapshots-before-task-commits.md', [
     'projects/Discord-stoat-ferry/adr/040-review-chunk-snapshots-before-task-commits.md',
