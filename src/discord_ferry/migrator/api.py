@@ -293,14 +293,15 @@ async def _resolve_429_delay_seconds(resp: aiohttp.ClientResponse) -> float:
     return max(0.0, min(retry_ms / 1000, _MAX_RETRY_DELAY_SECONDS))
 
 
-def _update_pacer_state(url: str, headers: Mapping[str, str]) -> None:
-    """Refresh the pacer's per-bucket state from a response's headers."""
+def _update_pacer_state(url: str, headers: Mapping[str, str]) -> _BucketState | None:
+    """Refresh the pacer's per-bucket state and return the published state."""
     parsed = _parse_ratelimit_headers(headers)
     if parsed is None:
-        return
+        return None
     bucket_hash, new_state = parsed
     _bucket_state[bucket_hash] = new_state
     _url_to_bucket[url] = bucket_hash
+    return new_state
 
 
 @asynccontextmanager
@@ -500,8 +501,9 @@ async def _api_request_inner(
                         # Rate-limited — NOT a circuit-breaker failure. The body parse is
                         # content-type-guarded so a non-JSON 429 can't escape into the network
                         # path and prime the breaker; honour Retry-After over the body delay.
-                        await asyncio.sleep(await _resolve_429_delay_seconds(resp))
+                        delay = await _resolve_429_delay_seconds(resp)
                         _update_pacer_state(url, resp.headers)
+                        await asyncio.sleep(delay)
                         # Track 429 frequency and ramp up the rate multiplier.
                         _rate_429_window.append(time.monotonic())
                         recent = sum(1 for t in _rate_429_window if time.monotonic() - t < 60)
