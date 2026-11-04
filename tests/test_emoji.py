@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
+import pytest
+from aioresponses import aioresponses
+
 from discord_ferry.config import FerryConfig
+from discord_ferry.discord.metadata import DiscordMetadata, GuildEmojiMeta, save_discord_metadata
 from discord_ferry.migrator.emoji import (
     _extract_emoji_from_content,
     find_emoji_in_exports,
@@ -84,6 +89,25 @@ def _make_state() -> MigrationState:
     return state
 
 
+def _catalog_config(
+    tmp_path: Path, emojis: tuple[GuildEmojiMeta, ...], *, max_emoji: int = 100
+) -> FerryConfig:
+    guild_id = "111111111111111111"
+    config = dataclasses.replace(
+        _make_config(tmp_path), output_dir=tmp_path, discord_server_id=guild_id, max_emoji=max_emoji
+    )
+    save_discord_metadata(
+        DiscordMetadata(guild_id, "now", 0, {}, {}, guild_emojis=emojis), tmp_path
+    )
+    return config
+
+
+def _catalog_exports() -> list[DCEExport]:
+    exports = [_make_export()]
+    exports[0].guild.id = "111111111111111111"
+    return exports
+
+
 # ---------------------------------------------------------------------------
 # _extract_emoji_from_content
 # ---------------------------------------------------------------------------
@@ -138,6 +162,210 @@ async def test_run_emoji_empty_exports() -> None:
     statuses = [e.status for e in events]
     assert "completed" in statuses
     assert state.emoji_map == {}
+
+
+async def test_run_emoji_migrates_catalog_only_emoji(tmp_path: Path) -> None:
+    """A bound guild catalog fills an empty export without a message reference."""
+    config = _make_config(tmp_path)
+    guild_id = "111111111111111111"
+    config = dataclasses.replace(config, output_dir=tmp_path, discord_server_id=guild_id)
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id,
+            "now",
+            0,
+            {},
+            {},
+            guild_emojis=(GuildEmojiMeta("111", "still", False, True),),
+        ),
+        tmp_path,
+    )
+    state = _make_state()
+    exports = [_make_export()]
+    exports[0].guild.id = guild_id
+    with (
+        aioresponses() as mocked,
+        patch(
+            "discord_ferry.migrator.emoji.upload_and_create_emoji",
+            new=AsyncMock(return_value=("stoat_emoji", "still")),
+        ),
+    ):
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/111.webp",
+            body=b"image",
+            headers={"Content-Type": "image/webp"},
+        )
+        await run_emoji(config, state, exports, lambda event: None)
+
+    assert state.emoji_map == {"111": "stoat_emoji"}
+
+
+async def test_run_emoji_uses_animated_url_and_migrates_unavailable_catalog_emoji(
+    tmp_path: Path,
+) -> None:
+    config = _catalog_config(tmp_path, (GuildEmojiMeta("222", "spin", True, False),))
+    state = _make_state()
+    with (
+        aioresponses() as mocked,
+        patch(
+            "discord_ferry.migrator.emoji.upload_and_create_emoji",
+            new=AsyncMock(return_value=("new", "spin")),
+        ),
+    ):
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/222.webp?animated=true",
+            body=b"image",
+            headers={"Content-Type": "image/webp"},
+        )
+        await run_emoji(config, state, _catalog_exports(), lambda event: None)
+    assert state.emoji_map == {"222": "new"}
+
+
+async def test_run_emoji_catalog_fills_spare_capacity_without_displacing_export(
+    tmp_path: Path,
+) -> None:
+    local = tmp_path / "used.png"
+    local.write_bytes(b"image")
+    config = _catalog_config(
+        tmp_path, (GuildEmojiMeta("222", "catalog", False, True),), max_emoji=2
+    )
+    message = _make_message(
+        reactions=[
+            DCEReaction(emoji=DCEEmoji(id="111", name="used", image_url="used.png"), count=1)
+        ]
+    )
+    uploaded: list[str] = []
+
+    async def create(*args: Any, name: str, **kwargs: Any) -> tuple[str, str]:
+        uploaded.append(name)
+        return f"new-{name}", name
+
+    with (
+        patch(
+            "discord_ferry.migrator.emoji.upload_and_create_emoji",
+            new=AsyncMock(side_effect=create),
+        ),
+        aioresponses() as mocked,
+    ):
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/222.webp",
+            body=b"image",
+            headers={"Content-Type": "image/webp"},
+        )
+        exports = _catalog_exports()
+        exports[0].messages = [message]
+        await run_emoji(config, _make_state(), exports, lambda event: None)
+    assert uploaded == ["used", "catalog"]
+
+
+async def test_run_emoji_full_cap_keeps_export_selection_without_catalog_download(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "used.png").write_bytes(b"local")
+    config = _catalog_config(
+        tmp_path, (GuildEmojiMeta("223", "catalog", False, True),), max_emoji=1
+    )
+    exports = _catalog_exports()
+    exports[0].messages = [
+        _make_message(
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="112", name="used", image_url="used.png"), count=1)
+            ]
+        )
+    ]
+    with (
+        patch("discord_ferry.migrator.emoji._download_catalog_emoji", new=AsyncMock()) as download,
+        patch(
+            "discord_ferry.migrator.emoji.upload_and_create_emoji",
+            new=AsyncMock(return_value=("new", "used")),
+        ),
+    ):
+        state = _make_state()
+        await run_emoji(config, state, exports, lambda event: None)
+    download.assert_not_awaited()
+    assert state.emoji_map == {"112": "new"}
+
+
+@pytest.mark.parametrize(
+    "body,headers,exception",
+    [
+        (b"text", {"Content-Type": "text/plain"}, None),
+        (None, None, aiohttp.ClientConnectionError()),
+    ],
+)
+async def test_run_emoji_catalog_media_failure_does_not_map(
+    tmp_path: Path,
+    body: bytes | None,
+    headers: dict[str, str] | None,
+    exception: BaseException | None,
+) -> None:
+    config = _catalog_config(tmp_path, (GuildEmojiMeta("333", "bad", False, True),))
+    with aioresponses() as mocked:
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/333.webp",
+            body=body,
+            headers=headers,
+            exception=exception,
+        )
+        state = _make_state()
+        await run_emoji(config, state, _catalog_exports(), lambda event: None)
+    assert state.emoji_map == {}
+    assert state.warnings[-1]["type"] == "missing_media"
+
+
+async def test_run_emoji_catalog_oversized_media_does_not_map(tmp_path: Path) -> None:
+    config = _catalog_config(tmp_path, (GuildEmojiMeta("334", "large", False, True),))
+    state = _make_state()
+    with (
+        aioresponses() as mocked,
+        patch("discord_ferry.migrator.emoji.read_bounded", new=AsyncMock(return_value=None)),
+    ):
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/334.webp",
+            body=b"image",
+            headers={"Content-Type": "image/webp"},
+        )
+        await run_emoji(config, state, _catalog_exports(), lambda event: None)
+    assert state.emoji_map == {}
+    assert state.warnings[-1]["type"] == "missing_media"
+
+
+async def test_run_emoji_prefers_local_export_asset_over_shared_catalog_id(tmp_path: Path) -> None:
+    (tmp_path / "shared.png").write_bytes(b"local")
+    config = _catalog_config(tmp_path, (GuildEmojiMeta("555", "catalog", False, True),))
+    exports = _catalog_exports()
+    exports[0].messages = [
+        _make_message(
+            reactions=[
+                DCEReaction(emoji=DCEEmoji(id="555", name="local", image_url="shared.png"), count=1)
+            ]
+        )
+    ]
+    with (
+        patch("discord_ferry.migrator.emoji._download_catalog_emoji", new=AsyncMock()) as download,
+        patch(
+            "discord_ferry.migrator.emoji.upload_and_create_emoji",
+            new=AsyncMock(return_value=("new", "local")),
+        ),
+    ):
+        state = _make_state()
+        await run_emoji(config, state, exports, lambda event: None)
+    download.assert_not_awaited()
+    assert state.emoji_map == {"555": "new"}
+
+
+async def test_run_emoji_skips_catalog_id_already_mapped_and_wrong_guild(tmp_path: Path) -> None:
+    config = _catalog_config(tmp_path, (GuildEmojiMeta("444", "saved", False, True),))
+    state = _make_state()
+    state.emoji_map["444"] = "existing"
+    with patch("discord_ferry.migrator.emoji._download_catalog_emoji", new=AsyncMock()) as download:
+        await run_emoji(config, state, _catalog_exports(), lambda event: None)
+    download.assert_not_awaited()
+    assert state.emoji_map == {"444": "existing"}
+    mismatched = dataclasses.replace(config, discord_server_id="222222222222222222")
+    with patch("discord_ferry.migrator.emoji._download_catalog_emoji", new=AsyncMock()) as download:
+        await run_emoji(mismatched, _make_state(), _catalog_exports(), lambda event: None)
+    download.assert_not_awaited()
 
 
 async def test_run_emoji_deduplication(tmp_path: Path) -> None:
