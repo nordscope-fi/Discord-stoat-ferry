@@ -124,7 +124,13 @@ STOAT_TOKEN=your_stoat_token_here
 ```
 
 !!! note "`.env` files"
-    Ferry calls `load_dotenv()` with no path, which searches upward from Ferry's own install directory, not from the folder you run it in. A `.env` file in your working folder is not reliably picked up, so set real environment variables or pass the token flags. If you do keep a `.env` file somewhere, add it to your `.gitignore`.
+    Ferry never searches for `.env` files automatically. To load values from an operator-owned file, name it before the command:
+
+    ```bash
+    ferry --env-file /path/to/operator.env migrate --export-dir ./export
+    ```
+
+    Command flags take precedence over process environment variables, which take precedence over the selected file. Do not select a file received with an export.
 
 Ferry also reads a handful of environment variables beyond the credentials above:
 

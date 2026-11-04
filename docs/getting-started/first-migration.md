@@ -62,7 +62,7 @@ Before you start, confirm you have these ready:
       --stoat-url https://api.stoat.chat
     ```
 
-    Set `DISCORD_TOKEN` and `STOAT_TOKEN` as environment variables before you run Ferry. A `.env` file in your working folder is not reliably loaded, because Ferry searches from its own install directory. The `--discord-token` and `--token` flags still work, but a token typed on the command line is saved in your shell history. The required settings (`--stoat-url` and the Stoat token) can be passed as flags or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
+    Set `DISCORD_TOKEN` and `STOAT_TOKEN` as environment variables before you run Ferry. If you keep them in an operator-owned file, select it explicitly: `ferry --env-file /path/to/operator.env migrate ...`. Ferry never searches for `.env` files automatically, so do not select a file received with an export. The `--discord-token` and `--token` flags still work, but a token typed on the command line is saved in your shell history. The required settings (`--stoat-url` and the Stoat token) can be passed as flags or set as environment variables (`STOAT_URL`, `STOAT_TOKEN`). See Step 2 for full options.
 
 ---
 

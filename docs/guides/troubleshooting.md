@@ -333,8 +333,8 @@ string turns off one scheme at a time. `http_proxy=""` disables the HTTP proxy w
 | | |
 |---|---|
 | **Symptom** | `ferry tls-check` reports a proxy, but the desktop GUI seems to run without one, or an export from the GUI goes through unproxied |
-| **Cause** | Ferry loads a `.env` file only on the command line. `ferry tls-check` and `ferry migrate` both call that loader, so a `.env` file's `HTTPS_PROXY` reaches them when the file sits in a directory above Ferry's install location. The desktop GUI never calls it, so the same variable sitting only in `.env` never reaches the GUI. |
-| **Solution** | Set `HTTPS_PROXY` (and any other proxy variables) as real environment variables before launching the GUI, not only in `.env`. |
+| **Cause** | The CLI reads proxy variables from the process environment or an operator-selected environment file. Automatic `.env` discovery is disabled. The desktop GUI reads only the process environment. |
+| **Solution** | For the CLI, select an operator-owned file such as `ferry --env-file /path/to/operator.env tls-check`. For the GUI, set `HTTPS_PROXY` and other proxy variables before launching Ferry. Do not select a file received with an export. |
 
 ### An authenticating proxy breaks the export phase
 
