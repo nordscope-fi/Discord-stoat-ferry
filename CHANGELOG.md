@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.19] - 2026-11-04
+
+### Added
+
+- Migrate readable custom guild emoji that no selected export message uses, while preserving export candidate priority, resume, and repair (#1255).
+
 ## [3.1.18] - 2026-11-04
 
 ### Fixed
