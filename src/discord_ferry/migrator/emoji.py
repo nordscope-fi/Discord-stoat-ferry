@@ -241,6 +241,37 @@ def _catalog_emoji_url(emoji: GuildEmojiMeta) -> str:
     return f"{url}?animated=true" if emoji.animated else url
 
 
+def _catalog_record(
+    config: FerryConfig, exports: list[DCEExport], discord_emoji_id: str
+) -> tuple[_EmojiRecord, GuildEmojiMeta] | None:
+    metadata = load_bound_discord_metadata(config, exports)
+    if metadata is None:
+        return None
+    for emoji in metadata.guild_emojis:
+        if emoji.id == discord_emoji_id:
+            return (
+                {
+                    "id": emoji.id,
+                    "name": emoji.name,
+                    "is_animated": emoji.animated,
+                    "image_url": "",
+                    "uses": 0,
+                },
+                emoji,
+            )
+    return None
+
+
+def find_emoji_for_report(
+    config: FerryConfig, exports: list[DCEExport], discord_emoji_id: str
+) -> _EmojiRecord | None:
+    export_record = find_emoji_in_exports(exports, discord_emoji_id)
+    if export_record is not None:
+        return export_record
+    catalog_record = _catalog_record(config, exports, discord_emoji_id)
+    return catalog_record[0] if catalog_record is not None else None
+
+
 async def _download_catalog_emoji(
     session: aiohttp.ClientSession,
     output_dir: Path,
@@ -270,6 +301,26 @@ async def _download_catalog_emoji(
     except (aiohttp.ClientError, OSError, TimeoutError) as exc:
         return None, str(exc)
     return destination, ""
+
+
+async def resolve_emoji_record(
+    session: aiohttp.ClientSession,
+    config: FerryConfig,
+    exports: list[DCEExport],
+    discord_emoji_id: str,
+) -> _EmojiRecord | None:
+    export_record = find_emoji_in_exports(exports, discord_emoji_id)
+    if export_record is not None:
+        return export_record
+    catalog_record = _catalog_record(config, exports, discord_emoji_id)
+    if catalog_record is None:
+        return None
+    record, emoji = catalog_record
+    downloaded, _reason = await _download_catalog_emoji(session, config.export_dir, emoji)
+    if downloaded is None:
+        return None
+    record["image_url"] = str(downloaded.relative_to(config.export_dir))
+    return record
 
 
 async def upload_and_create_emoji(

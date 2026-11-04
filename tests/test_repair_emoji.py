@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
+from aioresponses import aioresponses
 
 from discord_ferry.config import FerryConfig
 from discord_ferry.core.engine import run_repair
+from discord_ferry.discord.metadata import DiscordMetadata, GuildEmojiMeta, save_discord_metadata
 from discord_ferry.migrator.verify import CheckReport
 from discord_ferry.parser.models import (
     DCEAuthor,
@@ -126,6 +130,106 @@ async def test_repair_acts_on_emoji_missing(tmp_path: Path) -> None:
     assert [r["discord_id"] for r in outcome.recreated_emoji] == [EMOJI_ID]
     assert outcome.recreated_emoji[0]["new_id"] == NEW_ID
     assert state.created_emoji_names[EMOJI_ID] == "smile"
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_uses_catalog_resolver_when_export_has_no_emoji(tmp_path: Path) -> None:
+    """A catalog-only mapped emoji can be recreated without message evidence."""
+    config, state = _config(tmp_path), _state()
+    guild_id = "111111111111111111"
+    config = dataclasses.replace(config, discord_server_id=guild_id)
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id,
+            "now",
+            0,
+            {},
+            {},
+            guild_emojis=(GuildEmojiMeta(EMOJI_ID, "smile", False, True),),
+        ),
+        tmp_path,
+    )
+    exports = [_export([])]
+    exports[0].guild.id = guild_id
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(_UPLOAD, new=AsyncMock(return_value=(NEW_ID, "smile"))) as upload,
+        aioresponses() as mocked,
+    ):
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/123.webp",
+            body=b"image",
+            headers={"Content-Type": "image/webp"},
+        )
+        outcome = await run_repair(config, state, exports, [].append)
+    upload.assert_awaited_once()
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 0
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_dry_run_reports_catalog_without_download_or_state_change(
+    tmp_path: Path,
+) -> None:
+    config, state = _config(tmp_path), _state()
+    guild_id = "111111111111111111"
+    config = dataclasses.replace(config, discord_server_id=guild_id, dry_run=True)
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id,
+            "now",
+            0,
+            {},
+            {},
+            guild_emojis=(GuildEmojiMeta(EMOJI_ID, "smile", False, True),),
+        ),
+        tmp_path,
+    )
+    exports = [_export([])]
+    exports[0].guild.id = guild_id
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        patch(f"{_ENGINE}.upload_and_create_emoji", new=AsyncMock()) as upload,
+        patch("discord_ferry.migrator.emoji._download_catalog_emoji", new=AsyncMock()) as download,
+    ):
+        outcome = await run_repair(config, state, exports, [].append)
+    upload.assert_not_awaited()
+    download.assert_not_awaited()
+    assert state.emoji_map == {EMOJI_ID: OLD_ID}
+    assert outcome.recreated_emoji[0]["name"] == "smile"
+    assert outcome.recreated_emoji[0]["messages_rewritten"] == 0
+
+
+@pytest.mark.usefixtures("repair_permission_unit_boundary")
+async def test_repair_failed_catalog_media_keeps_map_and_pending_rewrite_empty(
+    tmp_path: Path,
+) -> None:
+    config, state = _config(tmp_path), _state()
+    guild_id = "111111111111111111"
+    config = dataclasses.replace(config, discord_server_id=guild_id)
+    save_discord_metadata(
+        DiscordMetadata(
+            guild_id,
+            "now",
+            0,
+            {},
+            {},
+            guild_emojis=(GuildEmojiMeta(EMOJI_ID, "smile", False, True),),
+        ),
+        tmp_path,
+    )
+    exports = [_export([])]
+    exports[0].guild.id = guild_id
+    with (
+        patch(_CHECK, new=AsyncMock(return_value=_missing_report())),
+        aioresponses() as mocked,
+    ):
+        mocked.get(
+            "https://cdn.discordapp.com/emojis/123.webp", exception=aiohttp.ClientConnectionError()
+        )
+        outcome = await run_repair(config, state, exports, [].append)
+    assert state.emoji_map == {EMOJI_ID: OLD_ID}
+    assert state.pending_emoji_rewrites == {}
+    assert any(item.get("type") == "emoji_missing_media" for item in outcome.declined)
 
 
 @pytest.mark.usefixtures("repair_permission_unit_boundary")

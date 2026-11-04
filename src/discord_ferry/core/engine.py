@@ -91,8 +91,9 @@ from discord_ferry.migrator.avatars import run_avatars
 from discord_ferry.migrator.connect import run_connect
 from discord_ferry.migrator.delivery import deliver_part
 from discord_ferry.migrator.emoji import (
-    find_emoji_in_exports,
+    find_emoji_for_report,
     messages_using_emoji,
+    resolve_emoji_record,
     run_emoji,
     upload_and_create_emoji,
 )
@@ -3777,7 +3778,7 @@ async def _run_emoji_repair_pass(
         # leftover record still reports what it edited (RepairOutcome is "everything
         # one run_repair did"). The name is recovered from the export; the emoji
         # itself was recreated on a prior run.
-        record = find_emoji_in_exports(exports, pending_id)
+        record = find_emoji_for_report(config, exports, pending_id)
         outcome.recreated_emoji.append(
             {
                 "discord_id": pending_id,
@@ -3806,7 +3807,7 @@ async def _run_emoji_repair_pass(
     for result in emoji_work:
         discord_id = result.discord_id or ""
         old_id = result.stoat_id or ""
-        record = find_emoji_in_exports(exports, discord_id)
+        record = await resolve_emoji_record(session, config, exports, discord_id)
 
         if record is None or not record["image_url"] or record["image_url"].startswith("http"):
             reason = (
@@ -4094,7 +4095,7 @@ async def _run_repair(
     if config.dry_run:
         for result in emoji_work:
             discord_id = result.discord_id or ""
-            record = find_emoji_in_exports(exports, discord_id)
+            record = find_emoji_for_report(config, exports, discord_id)
             would_rewrite = (
                 sum(1 for _ in messages_using_emoji(exports, discord_id))
                 if record is not None
@@ -4116,7 +4117,7 @@ async def _run_repair(
         for notice in preview_declined:
             on_event(MigrationEvent(phase="repair", status="warning", message=notice))
         for pending_id, pending in preview_rewrites.items():
-            record = find_emoji_in_exports(exports, pending_id)
+            record = find_emoji_for_report(config, exports, pending_id)
             outcome.recreated_emoji.append(
                 {
                     "discord_id": pending_id,
