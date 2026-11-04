@@ -422,6 +422,38 @@ def test_configure_gui_storage_uses_the_user_data_directory(
     assert Storage.path == tmp_path / ".discord-ferry" / "nicegui"
 
 
+def test_gui_storage_lock_rejects_a_second_holder(tmp_path: Path) -> None:
+    from discord_ferry import gui
+
+    first = gui._acquire_gui_storage_lock(tmp_path)
+    try:
+        with pytest.raises(gui._GuiStorageLockError):
+            gui._acquire_gui_storage_lock(tmp_path)
+    finally:
+        gui._release_gui_storage_lock(first)
+
+
+def test_main_holds_storage_lock_until_run_gui_returns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from discord_ferry import gui
+
+    monkeypatch.setattr(gui.multiprocessing, "freeze_support", lambda: None)
+    monkeypatch.setattr(gui.entry, "should_run_cli", lambda argv: False)
+    monkeypatch.setattr(gui, "configure_logging", lambda: None)
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    monkeypatch.setattr(gui, "_ensure_gui_port_available", lambda: None, raising=False)
+
+    def run_gui() -> None:
+        with pytest.raises(gui._GuiStorageLockError):
+            gui._acquire_gui_storage_lock(tmp_path)
+
+    monkeypatch.setattr(gui, "_run_gui", run_gui)
+    gui.main()
+    released = gui._acquire_gui_storage_lock(tmp_path)
+    gui._release_gui_storage_lock(released)
+
+
 # ---------------------------------------------------------------------------
 # Batch 8 — S1 cached-export gating
 # ---------------------------------------------------------------------------

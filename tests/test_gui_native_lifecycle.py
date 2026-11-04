@@ -13,13 +13,23 @@ from __future__ import annotations
 
 import ast
 import inspect
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from discord_ferry import gui
 from discord_ferry.gui import _terminate_children
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def isolate_gui_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep entry-point lifecycle tests out of the real per-user storage directory."""
+    monkeypatch.setattr(gui, "_configure_gui_storage", lambda: tmp_path)
+    monkeypatch.setattr(gui, "_ensure_gui_port_available", lambda: None, raising=False)
 
 
 class FakeChild:
