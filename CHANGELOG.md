@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.15] - 2026-11-04
+
+### Fixed
+
+- Retry a 429 after one wait while later requests retain the shared bucket reset deadline (#1263).
+
 ## [3.1.14] - 2026-11-04
 
 ### Fixed
