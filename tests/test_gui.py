@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import pytest
 
@@ -467,6 +469,59 @@ def test_gui_port_probe_rejects_an_occupied_port(
 
         with pytest.raises(gui._GuiStorageLockError, match="port"):
             gui._ensure_gui_port_available()
+
+
+def test_historical_record_iterator_accepts_only_canonical_regular_user_records(
+    tmp_path: Path,
+) -> None:
+    from discord_ferry import gui
+
+    record_id = UUID("11111111-1111-1111-1111-111111111111")
+    allowed = tmp_path / f"storage-user-{record_id}.json"
+    allowed.write_text("{}", encoding="utf-8")
+    (tmp_path / "storage-user-not-a-uuid.json").write_text("{}", encoding="utf-8")
+    (tmp_path / f"storage-user-{str(record_id).upper()}.json").write_text("{}", encoding="utf-8")
+
+    assert list(gui._iter_historical_gui_records(tmp_path)) == [(record_id, allowed)]
+
+
+def test_historical_record_iterator_skips_directory_and_link_without_following(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    record_id = UUID("22222222-2222-2222-2222-222222222222")
+    directory = tmp_path / f"storage-user-{record_id}.json"
+    directory.mkdir()
+    target = tmp_path.parent / "outside-record.json"
+    target.write_text('{"token": "outside-secret"}', encoding="utf-8")
+    link_id = UUID("33333333-3333-3333-3333-333333333333")
+    link = tmp_path / f"storage-user-{link_id}.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symbolic links unavailable on this test host")
+
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        assert list(gui._iter_historical_gui_records(tmp_path)) == []
+    assert target.read_text(encoding="utf-8") == '{"token": "outside-secret"}'
+    assert "outside-secret" not in caplog.text
+    assert "metadata" in caplog.text
+
+
+def test_warn_gui_record_uses_only_uuid_and_fixed_category(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from discord_ferry import gui
+
+    record_id = UUID("33333333-3333-3333-3333-333333333333")
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._warn_gui_record(record_id, "metadata")
+    assert str(record_id) in caplog.text
+    assert "metadata" in caplog.text
+    assert "outside-secret" not in caplog.text
+    assert "storage-user-not-a-uuid.json" not in caplog.text
+    assert "synthetic exception" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
