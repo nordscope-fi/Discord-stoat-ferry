@@ -10,6 +10,7 @@ import logging
 import ssl
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -58,6 +59,9 @@ from discord_ferry.migrator.api import (
     get_rate_multiplier,
     init_request_semaphore,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 BASE_URL = "https://api.test"
 TOKEN = "test-session-token"
@@ -2985,6 +2989,22 @@ def test_pacer_missing_headers_returns_none() -> None:
     )
 
 
+def test_pacer_update_returns_the_published_state() -> None:
+    from discord_ferry.migrator.api import _bucket_state, _update_pacer_state
+
+    url = f"{BASE_URL}/servers/srv1"
+    headers = {
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    state = _update_pacer_state(url, headers)
+
+    assert state is _bucket_state["b1"]
+    assert _update_pacer_state(url, {}) is None
+
+
 # ---------------------------------------------------------------------------
 # Proactive pacer — pacing logic in _api_request_inner (Task 3)
 # ---------------------------------------------------------------------------
@@ -3216,6 +3236,54 @@ async def test_pacer_429_fires_when_stale(mock_aiohttp: aioresponses) -> None:
     async with new_session() as session:
         await _api_request(session, "GET", url, TOKEN)
         await _api_request(session, "GET", url, TOKEN)  # gets 429, retries, succeeds
+
+
+async def test_pacer_429_publishes_state_before_its_delay(
+    mock_aiohttp: aioresponses,
+) -> None:
+    url = f"{BASE_URL}/servers/srv1"
+    headers = {
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Bucket": "b1",
+        "X-RateLimit-Reset-After": "10000",
+    }
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "1"},
+    )
+    mock_aiohttp.get(url, status=429, payload={"retry_after": 0}, headers=headers)
+    mock_aiohttp.get(
+        url,
+        payload={"_id": "srv1"},
+        headers={**headers, "X-RateLimit-Remaining": "5"},
+    )
+    events: list[str] = []
+    real_update = api_module._update_pacer_state
+
+    def record_update(
+        request_url: str,
+        response_headers: Mapping[str, str],
+    ) -> _BucketState | None:
+        events.append("state")
+        return real_update(request_url, response_headers)
+
+    async def record_sleep(delay: float) -> None:
+        events.append("sleep")
+
+    with (
+        patch(
+            "discord_ferry.migrator.api._update_pacer_state",
+            side_effect=record_update,
+        ),
+        patch("discord_ferry.migrator.api.asyncio.sleep", side_effect=record_sleep),
+    ):
+        async with new_session() as session:
+            await _api_request(session, "GET", url, TOKEN)
+            events.clear()
+            await _api_request(session, "GET", url, TOKEN)
+    assert events[:2] == ["state", "sleep"]
 
 
 async def test_pacer_shadow_clamps_negative(mock_aiohttp: aioresponses) -> None:
