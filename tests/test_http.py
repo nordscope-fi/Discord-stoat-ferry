@@ -554,6 +554,56 @@ def test_unicode_no_proxy_host_matches_a_unicode_target(proxy_env, os_proxy) -> 
         assert http.resolve_proxy("https://пример.рф/x") is None
 
 
+def test_idna_no_proxy_host_does_not_change_unicode_matching(proxy_env, os_proxy) -> None:
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="xn--e1afmkfd.xn--p1ai"):
+        assert http.resolve_proxy("https://пример.рф/x") is not None
+
+
+@pytest.mark.parametrize(
+    ("entry", "target", "bypasses"),
+    [
+        ("10.0.0.0/8", "https://10.23.4.5/x", True),
+        ("10.0.0.0/8", "https://11.23.4.5/x", False),
+        ("2001:db8::/32", "https://[2001:db8::1]/x", True),
+        ("2001:db8::/32", "https://[2001:db9::1]/x", False),
+        ("10.0.0.0/8", "https://10.23.4.5:8443/x", True),
+        ("10.0.0.0/8", "https://10.23.4.5:9443/x", True),
+        ("*.internal", "https://api.internal/x", True),
+        ("*.internal", "https://a.b.internal/x", True),
+        ("*.internal", "https://internal/x", False),
+        ("*.internal", "https://.internal/x", False),
+        ("*.internal", "https://notinternal/x", False),
+        ("*.пример.рф", "https://api.пример.рф/x", False),
+        ("*.internal", "https://api.пример.internal/x", False),
+        ("*.internal", "https://api.internal:8443/x", True),
+        ("*.internal:8443", "https://api.internal:8443/x", False),
+        (" 10.0.0.0/8 , *.internal ", "https://api.internal/x", True),
+        ("10.0.0.0/not-a-prefix", "https://10.23.4.5/x", False),
+        ("10.0.0.0/8:8443", "https://10.23.4.5:8443/x", False),
+    ],
+)
+def test_extended_no_proxy_entries(
+    proxy_env, os_proxy, entry: str, target: str, bypasses: bool
+) -> None:
+    with os_proxy({}), proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY=entry):
+        assert (http.resolve_proxy(target) is None) is bypasses
+
+
+def test_no_proxy_range_never_resolves_a_name(proxy_env, os_proxy) -> None:
+    with (
+        os_proxy({}),
+        proxy_env(HTTPS_PROXY="http://env:3128", NO_PROXY="10.0.0.0/8"),
+        patch("socket.getaddrinfo", side_effect=AssertionError("DNS must not run")) as lookup,
+    ):
+        assert http.resolve_proxy("https://api.internal/x") is not None
+    lookup.assert_not_called()
+
+
+def test_extended_no_proxy_entry_exempts_an_os_proxy(proxy_env, os_proxy) -> None:
+    with os_proxy(CORP, bypass=set()), proxy_env(NO_PROXY="*.internal"):
+        assert http.resolve_proxy("https://api.internal/x") is None
+
+
 def test_emptied_scheme_stays_off(proxy_env, os_proxy) -> None:
     """SC-135-16. Killing: a merge that treats 'emptied' as 'unmentioned' and
     lets the OS half restore it, making the documented off switch do nothing."""
