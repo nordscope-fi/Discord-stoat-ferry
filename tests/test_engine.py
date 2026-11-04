@@ -2418,6 +2418,60 @@ async def test_discord_metadata_cached_on_resume(tmp_path: Path) -> None:
     assert saved["channel_metadata"]["333333333333333333"]["position"] == 0
 
 
+@pytest.mark.usefixtures("migration_preflight_unit_boundary")
+async def test_resume_reuses_guild_emoji_catalog_without_source_requests(tmp_path: Path) -> None:
+    from discord_ferry.discord.metadata import (
+        DiscordMetadata,
+        GuildEmojiMeta,
+        save_discord_metadata,
+    )
+    from discord_ferry.state import save_state
+
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    export = json.loads((FIXTURES_DIR / "simple_channel.json").read_text())
+    export["messages"] = []
+    export["messageCount"] = 0
+    (export_dir / "channel.json").write_text(json.dumps(export))
+    emoji_id = "444444444444444444"
+    prior = MigrationState(started_at="2024-01-01T00:00:00+00:00")
+    prior.emoji_map[emoji_id] = "existing-emoji"
+    save_state(prior, tmp_path)
+    save_discord_metadata(
+        DiscordMetadata(
+            _GUILD_ID,
+            "2024-01-01T00:00:00+00:00",
+            1024,
+            {},
+            {},
+            guild_emojis=(GuildEmojiMeta(emoji_id, "cached-catalog", False, True),),
+        ),
+        tmp_path,
+    )
+    config = _make_config(
+        tmp_path,
+        export_dir=export_dir,
+        discord_token="test-discord-token",
+        discord_server_id=_GUILD_ID,
+        resume=True,
+    )
+    events: list[MigrationEvent] = []
+    overrides = {name: phase for name, phase in _NOOP_OVERRIDES.items() if name != "emoji"}
+    with aioresponses() as mocked:
+        state = await run_migration(config, events.append, phase_overrides=overrides)
+        request_urls = [str(url) for _, url in mocked.requests]
+    assert not any(url.startswith(_DISCORD_API) for url in request_urls)
+    assert not any(url.startswith("https://cdn.discordapp.com/") for url in request_urls)
+    assert all(url == f"{config.stoat_url}/" for url in request_urls)
+    assert state.emoji_map == {emoji_id: "existing-emoji"}
+    assert any(
+        event.phase == "emoji" and "Skipping :cached-catalog: (already migrated)" in event.message
+        for event in events
+    )
+    saved = json.loads((tmp_path / "discord_metadata.json").read_text())
+    assert saved["guild_emojis"][0]["id"] == emoji_id
+
+
 # Fixture guild ids: simple_channel.json and friends are 111111111111111111, the
 # "Discord Ferry Test" exports are 1505988963628879902. This one is in neither.
 _OTHER_GUILD_ID = "999999999999999999"

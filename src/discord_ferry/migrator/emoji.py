@@ -7,20 +7,23 @@ import logging
 import re
 from typing import TYPE_CHECKING, TypedDict
 
+import aiohttp
+
+from discord_ferry.core.atomicio import ensure_output_subdir, write_bytes_no_follow
 from discord_ferry.core.events import MigrationEvent
+from discord_ferry.core.http import read_bounded, remote_media_refusal
 from discord_ferry.core.security import safe_sanitize
+from discord_ferry.discord.metadata import GuildEmojiMeta, load_bound_discord_metadata
 from discord_ferry.migrator.api import api_create_emoji, get_session
 from discord_ferry.migrator.sanitize import sanitize_emoji_name
 from discord_ferry.parser.dce_parser import stream_messages
 from discord_ferry.parser.media_paths import contained_media_path
 from discord_ferry.parser.models import DCEEmoji
-from discord_ferry.uploader.autumn import upload_with_cache
+from discord_ferry.uploader.autumn import get_tag_size_limit, upload_with_cache
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-    import aiohttp
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
@@ -233,6 +236,42 @@ def find_emoji_in_exports(exports: list[DCEExport], discord_emoji_id: str) -> _E
     return discovered.get(discord_emoji_id)
 
 
+def _catalog_emoji_url(emoji: GuildEmojiMeta) -> str:
+    url = f"https://cdn.discordapp.com/emojis/{emoji.id}.webp"
+    return f"{url}?animated=true" if emoji.animated else url
+
+
+async def _download_catalog_emoji(
+    session: aiohttp.ClientSession,
+    output_dir: Path,
+    emoji: GuildEmojiMeta,
+) -> tuple[Path | None, str]:
+    url = _catalog_emoji_url(emoji)
+    refusal = remote_media_refusal(url)
+    if refusal is not None:
+        return None, f"catalog URL refused ({refusal})"
+    try:
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False
+        ) as resp:
+            if resp.status != 200:
+                return None, f"HTTP {resp.status}"
+            if not resp.headers.get("Content-Type", "").startswith("image/"):
+                return None, "non-image Content-Type"
+            data = await read_bounded(resp, get_tag_size_limit("emojis"))
+            if data is None:
+                return None, "larger than the emoji size limit"
+        media_dir = output_dir / ".ferry-guild-emojis"
+        ensure_output_subdir(media_dir, output_dir)
+        destination = media_dir / f"{emoji.id}.webp"
+        if not destination.resolve().is_relative_to(media_dir.resolve()):
+            return None, "catalog destination escapes the media folder"
+        write_bytes_no_follow(destination, data)
+    except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+        return None, str(exc)
+    return destination, ""
+
+
 async def upload_and_create_emoji(
     session: aiohttp.ClientSession,
     config: FerryConfig,
@@ -308,7 +347,12 @@ async def run_emoji(
         for msg in msg_iter:
             _discover_message_emoji(discovered, msg)
 
-    if not discovered:
+    bound_metadata = load_bound_discord_metadata(config, exports)
+    catalog_by_id = {
+        emoji.id: emoji
+        for emoji in (bound_metadata.guild_emojis if bound_metadata is not None else ())
+    }
+    if not discovered and not catalog_by_id:
         on_event(MigrationEvent(phase="emoji", status="completed", message="No custom emoji found"))
         return
 
@@ -348,6 +392,19 @@ async def run_emoji(
             )
         )
         emoji_list = emoji_list[: config.max_emoji]
+    for emoji in catalog_by_id.values():
+        if len(emoji_list) >= config.max_emoji:
+            break
+        if emoji.id not in discovered:
+            emoji_list.append(
+                {
+                    "id": emoji.id,
+                    "name": emoji.name,
+                    "is_animated": emoji.animated,
+                    "image_url": "",
+                    "uses": 0,
+                }
+            )
 
     total = len(emoji_list)
     on_event(
@@ -396,6 +453,30 @@ async def run_emoji(
                 continue
 
             # Skip emoji with no local image.
+            catalog = catalog_by_id.get(discord_id)
+            if not image_url and catalog is not None:
+                downloaded, reason = await _download_catalog_emoji(
+                    session, config.export_dir, catalog
+                )
+                if downloaded is None:
+                    state.warnings.append(
+                        {
+                            "phase": "emoji",
+                            "type": "missing_media",
+                            "message": f"Skipping emoji :{name}: ({reason})",
+                        }
+                    )
+                    on_event(
+                        MigrationEvent(
+                            phase="emoji",
+                            status="warning",
+                            message=f"Skipping :{name}: ({reason})",
+                            current=idx,
+                            total=total,
+                        )
+                    )
+                    continue
+                image_url = str(downloaded.relative_to(config.export_dir))
             if not image_url or image_url.startswith("http"):
                 reason = "no local image path" if not image_url else "URL not downloaded"
                 state.warnings.append(
