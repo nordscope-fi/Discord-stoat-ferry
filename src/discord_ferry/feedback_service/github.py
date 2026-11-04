@@ -33,6 +33,22 @@ _APP_JWT_LIFETIME = timedelta(minutes=10)
 _APP_JWT_CLOCK_SKEW = timedelta(minutes=1)
 _INSTALLATION_REFRESH = timedelta(minutes=1)
 _TITLE_LIMIT = 200
+_TITLE_LITERAL_TRANSLATION = str.maketrans(
+    {
+        "@": "＠",
+        "#": "＃",
+        ":": "：",
+        "/": "／",
+        "<": "＜",
+        ">": "＞",
+        "[": "［",
+        "]": "］",
+        "(": "（",
+        ")": "）",
+        "&": "＆",
+        "-": "·",
+    }
+)
 _SPACE = re.compile(r"\s+")
 logger = logging.getLogger(__name__)
 
@@ -166,7 +182,7 @@ def render_title(description: str) -> str:
     title = next(
         (_SPACE.sub(" ", line).strip() for line in description.splitlines() if line.strip()),
         "Feedback submitted through Ferry",
-    )
+    ).translate(_TITLE_LITERAL_TRANSLATION)
     if len(title) <= _TITLE_LIMIT:
         return title
     return f"{title[: _TITLE_LIMIT - 1].rstrip()}…"

@@ -581,7 +581,7 @@ async def test_feedback_reconnect_cancels_inflight_send_and_requires_retry(
 
         await asyncio.wait_for(cancelled.wait(), timeout=1)
         await user.should_see("Feedback could not be sent")
-        await user.should_see("## Report\nInflight reconnect draft")
+        await user.should_see("## Report\n    Inflight reconnect draft")
         await asyncio.sleep(0.1)
         assert len(client.submissions) == 1
 
@@ -606,7 +606,7 @@ async def test_feedback_reconnect_keeps_failed_draft_without_automatic_retry(
 
         await _reconnect(user)
 
-        await user.should_see("## Report\nFailed reconnect draft")
+        await user.should_see("## Report\n    Failed reconnect draft")
         await user.should_see("Copy public draft")
         await user.should_see("Save draft")
         await asyncio.sleep(0.1)

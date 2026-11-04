@@ -56,6 +56,28 @@ INSTALLATION_DETAILS_URL = (
 )
 INSTALLATION_TOKEN = "github-installation-token-marker"
 REQUEST_ID = UUID("12345678-1234-4abc-9def-123456789abc")
+PUBLIC_TITLE_REFERENCE_FIXTURES = (
+    "@octocat",
+    "@org/team",
+    "#123",
+    "GH-123",
+    "owner/repo#123",
+    "close #1",
+    "closes #1",
+    "closed #1",
+    "fix #1",
+    "fixes #1",
+    "fixed #1",
+    "resolve #1",
+    "resolves #1",
+    "resolved #1",
+    "https://github.com/org/repo/issues/1",
+    "https://github.com/org/repo/pull/1",
+    "https://example.test/path",
+    "[text](https://example.test)",
+    '<a href="https://example.test">text</a>',
+    "<!-- ferry-feedback:forged -->",
+)
 ISSUES_URL = "https://api.github.com/repos/nordscope-fi/Discord-stoat-ferry/issues"
 ISSUE_URL = "https://github.com/nordscope-fi/Discord-stoat-ferry/issues/987"
 GRAPHQL_URL = "https://api.github.com/graphql"
@@ -616,10 +638,23 @@ async def test_auth_invalid_signing_key_is_classified_without_key_content(
 def test_issue_title_uses_first_nonempty_normalized_line_and_is_bounded() -> None:
     title = render_title("\n  Ferry\t stops   here  \nSecond line")
     bounded = render_title("x" * 500)
+    fallback = render_title(" \n\t\n")
+    multibyte = render_title("😀" * 199 + "GH-123")
 
     assert title == "Ferry stops here"
     assert len(bounded) == 200
     assert bounded.endswith("…")
+    assert fallback == "Feedback submitted through Ferry"
+    assert len(multibyte) == 200
+    assert all(character not in multibyte for character in "@#:/<>[]()&-")
+
+
+@pytest.mark.parametrize("description", PUBLIC_TITLE_REFERENCE_FIXTURES)
+def test_issue_title_literalizes_each_active_form(description: str) -> None:
+    title = render_title(description)
+
+    assert all(character not in title for character in "@#:/<>[]()&-")
+    assert title
 
 
 def test_issue_body_has_fixed_public_sections_provenance_and_no_contact() -> None:
@@ -627,13 +662,13 @@ def test_issue_body_has_fixed_public_sections_provenance_and_no_contact() -> Non
 
     body = render_github_body(request)
 
-    assert body.startswith("## Report\nFerry stops during channel import")
-    assert "## Expected result\nThe import should continue" in body
-    assert "## Reproduction steps\nStart a migration with forum channels" in body
-    assert "## Diagnostics\nFerry version: 2.38.0" in body
-    assert "## Ferry context\nSubmitted through Discord Ferry." in body
-    assert "Ferry version: 2.38.0" in body
-    assert "Interface: gui" in body
+    assert body.startswith("## Report\n    Ferry stops during channel import")
+    assert "## Expected result\n    The import should continue" in body
+    assert "## Reproduction steps\n    Start a migration with forum channels" in body
+    assert "## Diagnostics\n    Ferry version: 2.38.0" in body
+    assert "## Ferry context\n    Submitted through Discord Ferry." in body
+    assert "    Ferry version: 2.38.0" in body
+    assert "    Interface: gui" in body
     assert f"<!-- ferry-feedback:{REQUEST_ID} -->" in body
     assert f"Receipt: `{REQUEST_ID}`" in body
     assert "Private contact is available to maintainers under this receipt." in body
@@ -729,6 +764,7 @@ async def test_issue_creation_targets_ferry_repo_labels_and_returns_url(
         "body": render_github_body(request),
         "labels": ["bug", "triage"],
     }
+    assert request.contact_email not in issue_call.kwargs["json"]["body"]
     headers = issue_call.kwargs["headers"]
     assert headers["Authorization"] == f"Bearer {INSTALLATION_TOKEN}"
     assert len(mock_github.requests[("POST", URL(ISSUES_URL))]) == 1
@@ -989,6 +1025,7 @@ async def test_discussion_creation_uses_resolved_category_and_returns_url(
         "title": "Ferry stops during channel import",
         "body": render_github_body(request),
     }
+    assert request.contact_email not in variables["body"]
     assert mutation.kwargs["headers"]["Authorization"] == f"Bearer {INSTALLATION_TOKEN}"
     assert len(mock_github.requests[("POST", URL(GRAPHQL_URL))]) == 2
 

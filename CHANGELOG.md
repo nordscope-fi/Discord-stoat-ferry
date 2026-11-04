@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.12] - 2026-11-04
+
+### Fixed
+
+- Render public reporter text literally and neutralize mention and reference punctuation in feedback titles, preserving preview identity, privacy cleaning, and receipt markers (#1178).
+
 ## [3.1.11] - 2026-11-04
 
 ### Changed

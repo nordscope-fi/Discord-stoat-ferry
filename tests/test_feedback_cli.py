@@ -262,9 +262,9 @@ def test_feedback_failure_prints_the_complete_public_draft_then_cancels() -> Non
     )
 
     assert result.exit_code == 0, result.output
-    assert "## Report\nPrintable report" in result.output
-    assert "## Expected result\nExpected text" in result.output
-    assert "## Reproduction steps\nSteps text" in result.output
+    assert "## Report\n    Printable report" in result.output
+    assert "## Expected result\n    Expected text" in result.output
+    assert "## Reproduction steps\n    Steps text" in result.output
     assert len(client.submissions) == 1
 
 
