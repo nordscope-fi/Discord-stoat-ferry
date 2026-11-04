@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -20,7 +23,7 @@ from discord_ferry.state import FailedMessage, MigrationState
 from tests.stoat_ids import SERVER_ID, stoat_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from discord_ferry.config import FerryConfig
 
@@ -45,6 +48,180 @@ def test_cli_help(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "Migrate a Discord server" in result.output
+
+
+def _write_env_file(tmp_path: Path, url: str, token: str) -> Path:
+    env_file = tmp_path / "operator.env"
+    env_file.write_text(f"STOAT_URL={url}\nSTOAT_TOKEN={token}\n")
+    return env_file
+
+
+@contextmanager
+def _without_stoat_credentials() -> Iterator[None]:
+    names = ("STOAT_URL", "STOAT_TOKEN")
+    original = {name: os.environ.get(name) for name in names}
+    for name in names:
+        os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        for name, value in original.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_migrate_ignores_unselected_dotenv(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "STOAT_URL=https://received.invalid\nSTOAT_TOKEN=received-token\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            ["migrate", "--export-dir", FIXTURES_DIR],
+            env={"STOAT_URL": "", "STOAT_TOKEN": ""},
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 1
+    assert "--stoat-url is required" in result.output
+    mock_engine.assert_not_called()
+
+
+def test_migrate_loads_selected_env_file_before_option_resolution(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    env_file = _write_env_file(tmp_path, "https://selected.invalid", "selected-token")
+    mock_engine = _make_mock_engine()
+    with _without_stoat_credentials(), patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            ["--env-file", str(env_file), "migrate", "--export-dir", FIXTURES_DIR],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    config: FerryConfig = mock_engine.call_args.args[0]
+    assert config.stoat_url == "https://selected.invalid"
+    assert config.token == "selected-token"
+
+
+def test_selected_env_file_does_not_override_process_environment(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    env_file = _write_env_file(tmp_path, "https://selected.invalid", "selected-token")
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            ["--env-file", str(env_file), "migrate", "--export-dir", FIXTURES_DIR],
+            env={"STOAT_URL": "https://process.invalid", "STOAT_TOKEN": "process-token"},
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    config: FerryConfig = mock_engine.call_args.args[0]
+    assert config.stoat_url == "https://process.invalid"
+    assert config.token == "process-token"
+
+
+def test_selected_env_file_yields_to_command_line_options(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    env_file = _write_env_file(tmp_path, "https://selected.invalid", "selected-token")
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            [
+                "--env-file",
+                str(env_file),
+                "migrate",
+                "--export-dir",
+                FIXTURES_DIR,
+                "--stoat-url",
+                "https://flag.invalid",
+                "--token",
+                "flag-token",
+            ],
+            env={"STOAT_URL": "https://process.invalid", "STOAT_TOKEN": "process-token"},
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    config: FerryConfig = mock_engine.call_args.args[0]
+    assert config.stoat_url == "https://flag.invalid"
+    assert config.token == "flag-token"
+
+
+def test_env_file_missing_or_directory_fails_before_migration(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    mock_engine = _make_mock_engine()
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    for invalid_path in (tmp_path / "missing.env", directory):
+        with patch("discord_ferry.cli.run_migration", mock_engine):
+            result = runner.invoke(
+                main,
+                ["--env-file", str(invalid_path), "migrate", "--export-dir", FIXTURES_DIR],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "--env-file" in result.output
+    mock_engine.assert_not_called()
+
+
+def test_cli_help_does_not_load_env_file(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import cli
+
+    calls: list[Path] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda path: calls.append(Path(path)))
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "--env-file" in result.output
+    assert calls == []
+
+
+def test_env_file_without_subcommand_loads_once_then_prints_help(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from discord_ferry import cli
+
+    env_file = _write_env_file(tmp_path, "https://selected.invalid", "selected-token")
+    calls: list[Path] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda path: calls.append(Path(path)))
+    result = runner.invoke(main, ["--env-file", str(env_file)])
+    assert result.exit_code == 0
+    assert calls == [env_file]
+    assert "Usage:" in result.output
+
+
+def test_env_file_is_not_available_after_the_subcommand(runner: CliRunner, tmp_path: Path) -> None:
+    env_file = _write_env_file(tmp_path, "https://selected.invalid", "selected-token")
+    result = runner.invoke(
+        main,
+        ["migrate", "--env-file", str(env_file), "--export-dir", FIXTURES_DIR],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 2
+    assert "No such option '--env-file'" in result.output
+
+
+def test_check_loads_selected_env_file_before_option_resolution(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    env_file = _write_env_file(tmp_path, "https://selected.invalid", "selected-token")
+    order: list[str] = []
+    a, b, c, d = _patched(order, _check_report())
+    with _without_stoat_credentials(), a, b, c, d:
+        result = runner.invoke(main, ["--env-file", str(env_file), "check", str(tmp_path)])
+    assert result.exit_code == 0
+    assert order == ["register_secret", "semaphore", "request"]
 
 
 def test_migrate_help(runner: CliRunner) -> None:
@@ -648,13 +825,16 @@ def test_migrate_offline_ignores_discord_token_from_environment(runner: CliRunne
 
 
 def test_migrate_offline_ignores_discord_token_loaded_from_dotenv(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mock_engine = _make_mock_engine()
     discord_token = "discord-dotenv-token-AAAABBBBCCCC9876"
+    env_file = tmp_path / "operator.env"
+    env_file.write_text(f"DISCORD_TOKEN={discord_token}\n")
     monkeypatch.delenv("DISCORD_TOKEN", raising=False)
 
-    def load_test_dotenv() -> None:
+    def load_test_dotenv(path: Path) -> None:
+        assert path == env_file
         monkeypatch.setenv("DISCORD_TOKEN", discord_token)
 
     env = {
@@ -662,17 +842,18 @@ def test_migrate_offline_ignores_discord_token_loaded_from_dotenv(
         "STOAT_TOKEN": "stoat-env-token-AAAABBBBCCCC9876",
     }
     with (
-        patch("discord_ferry.cli.load_dotenv", side_effect=load_test_dotenv),
+        patch("discord_ferry.cli.load_dotenv", side_effect=load_test_dotenv) as load_dotenv,
         patch("discord_ferry.cli.run_migration", mock_engine),
     ):
         result = runner.invoke(
             main,
-            ["migrate", "--export-dir", FIXTURES_DIR],
+            ["--env-file", str(env_file), "migrate", "--export-dir", FIXTURES_DIR],
             env=env,
             catch_exceptions=False,
         )
 
     assert result.exit_code == 0
+    load_dotenv.assert_called_once_with(env_file)
     assert (
         result.output.count("Ignoring DISCORD_TOKEN because --export-dir uses existing exports.")
         == 1

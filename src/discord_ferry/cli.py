@@ -724,10 +724,17 @@ def _build_config(
 
 @click.group(invoke_without_command=True)
 @click.version_option(__version__, "--version", prog_name="ferry")
+@click.option(
+    "--env-file",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, readable=True, path_type=Path),
+    default=None,
+    help="Load environment variables from this operator-selected file",
+)
 @click.pass_context
-def main(ctx: click.Context) -> None:
+def main(ctx: click.Context, env_file: Path | None) -> None:
     """Migrate a Discord server export to Stoat."""
-    load_dotenv()
+    if env_file is not None:
+        load_dotenv(env_file)
     configure_logging()
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -1279,8 +1286,6 @@ def rollback_cmd(
     are clean no-ops. Autumn-hosted attachments are NOT removed (no public
     DELETE endpoint).
     """
-    load_dotenv()
-
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
         sys.exit(1)
@@ -1370,7 +1375,6 @@ def probe_cmd(
     verbose: bool,
 ) -> None:
     """Probe a live Stoat instance for Autumn limits, rate window, voice, and webhooks."""
-    load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
         sys.exit(1)
@@ -1486,7 +1490,6 @@ def check_cmd(output_dir: str, stoat_url: str | None, token: str | None, as_json
     Reads the state file in OUTPUT_DIR and asks the server whether everything it
     records is still there. Read-only: it creates, edits and deletes nothing.
     """
-    load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
         sys.exit(1)
@@ -1640,7 +1643,6 @@ def retry_cmd(output_dir: str, export_dir: str, stoat_url: str | None, token: st
     Exits 0 when nothing is left failed, 1 when something still is, and 2 when
     the state or the export cannot be read.
     """
-    load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
         sys.exit(1)
@@ -1813,7 +1815,6 @@ def repair_cmd(
     verify. Exits 0 when nothing is left failing, 1 when something is, and 2
     when the state or the export cannot be read.
     """
-    load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
         sys.exit(1)
@@ -1972,7 +1973,6 @@ def backfill_roles_cmd(
     when ordering was applied or already correct, 1 when it was refused, and 2
     when the state or export cannot be read.
     """
-    load_dotenv()
     if not stoat_url:
         console.print("[bold red]Error:[/] --stoat-url is required (or set STOAT_URL)")
         sys.exit(1)
