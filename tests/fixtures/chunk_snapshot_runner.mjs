@@ -1097,28 +1097,47 @@ async function main([fixture, directory, variant]) {
     return;
   }
   if (fixture === 'permission-adr') {
-    const instructionPath = 'docs/architecture/adr/045-permission-preflight-safety.md';
-    const backupPath = 'projects/Discord-stoat-ferry/adr/045-permission-preflight-safety.md';
-    const afterBytes = 'after permission decision\n';
+    const adrRecords = new Map([
+      ['030', {
+        instructionPath: 'docs/architecture/adr/030-feedback-service-defaults.md',
+        backupPath: 'projects/Discord-stoat-ferry/adr/030-feedback-service-defaults.md',
+        beforeBytes: 'before feedback defaults\n',
+        afterBytes: 'after feedback defaults\n',
+      }],
+      ['045', {
+        instructionPath: 'docs/architecture/adr/045-permission-preflight-safety.md',
+        backupPath: 'projects/Discord-stoat-ferry/adr/045-permission-preflight-safety.md',
+        beforeBytes: 'before permission decision\n',
+        afterBytes: 'after permission decision\n',
+      }],
+    ]);
+    const [recordKey, caseName] = (variant ?? '').split(':', 2);
+    const record = adrRecords.get(recordKey);
+    if (!record || !new Set([
+      'create', 'edit', 'worktree', 'missing', 'unapproved', 'suffix', 'credential',
+      'absolute', 'traversal', 'symlink', 'wrong-destination', 'wrong-bytes',
+      'wrong-mode', 'changed',
+    ]).has(caseName)) throw new Error('invalid fixed ADR fixture case');
+    const { instructionPath, backupPath, beforeBytes, afterBytes } = record;
     mkdirSync(join(root, 'docs/plans'), { recursive: true });
     mkdirSync(join(root, dirname(instructionPath)), { recursive: true });
     writeFileSync(join(root, 'docs/plans/fixture-plan.md'), SINGLE_CHUNK_PLAN);
     writeFileSync(join(root, '.gitignore'), 'docs/architecture/\n');
     writeFileSync(join(root, 'tracked.txt'), 'before\n');
-    if (variant !== 'create') {
-      writeFileSync(join(root, instructionPath), 'before permission decision\n');
+    if (caseName !== 'create') {
+      writeFileSync(join(root, instructionPath), beforeBytes);
     }
     git(root, 'add', 'docs/plans/fixture-plan.md', '.gitignore', 'tracked.txt');
     git(root, 'commit', '-qm', 'fixture baseline');
     let active = root;
-    if (variant === 'worktree') {
+    if (caseName === 'worktree') {
       active = resolve(directory, 'candidate');
       git(root, 'worktree', 'add', '-q', '-b', 'instruction-candidate', active);
       mkdirSync(join(active, dirname(instructionPath)), { recursive: true });
       writeFileSync(join(active, instructionPath), 'unapproved worktree shadow\n');
     }
     const refusedPaths = {
-      'other-record': 'docs/architecture/adr/046-unapproved-record.md',
+      unapproved: 'docs/architecture/adr/046-unapproved-record.md',
       suffix: `${instructionPath}.extra.md`,
       credential: '.mcp.json',
       absolute: join(root, instructionPath),
@@ -1126,9 +1145,9 @@ async function main([fixture, directory, variant]) {
     };
     const options = {
       ...optionsFor(active, ['tracked.txt']),
-      instructionPaths: [refusedPaths[variant] ?? instructionPath],
+      instructionPaths: [refusedPaths[caseName] ?? instructionPath],
     };
-    if (variant === 'symlink') {
+    if (caseName === 'symlink') {
       rmSync(join(root, instructionPath));
       writeFileSync(join(root, 'docs/architecture/dummy.txt'), 'not instruction evidence\n');
       symlinkSync(join(root, 'docs/architecture/dummy.txt'), join(root, instructionPath));
@@ -1152,6 +1171,7 @@ async function main([fixture, directory, variant]) {
       phase: 'review',
       evidenceRoot: options.evidenceRoot,
     };
+    if (caseName === 'missing') validateChain(validation);
     let missingBackupRejected = false;
     try { validateChain(validation); } catch (error) {
       missingBackupRejected = error.message === 'scoped instruction backup evidence is required';
@@ -1167,11 +1187,11 @@ async function main([fixture, directory, variant]) {
     writeFileSync(join(backupRoot, 'README.md'), 'backup fixture\n');
     git(backupRoot, 'add', 'README.md');
     git(backupRoot, 'commit', '-qm', 'backup baseline');
-    const destination = variant === 'wrong-destination'
+    const destination = caseName === 'wrong-destination'
       ? 'projects/Discord-stoat-ferry/adr/046-unapproved-record.md' : backupPath;
     mkdirSync(join(backupRoot, dirname(destination)), { recursive: true });
-    writeFileSync(join(backupRoot, destination), variant === 'wrong-bytes' ? 'wrong\n' : afterBytes);
-    chmodSync(join(backupRoot, destination), variant === 'wrong-mode' ? 0o755 : 0o644);
+    writeFileSync(join(backupRoot, destination), caseName === 'wrong-bytes' ? 'wrong\n' : afterBytes);
+    chmodSync(join(backupRoot, destination), caseName === 'wrong-mode' ? 0o755 : 0o644);
     git(backupRoot, 'add', destination);
     git(backupRoot, 'commit', '-qm', 'backup permission instruction');
     const backup = bindBackup({
@@ -1182,7 +1202,7 @@ async function main([fixture, directory, variant]) {
       backupCommitOid: git(backupRoot, 'rev-parse', 'HEAD'),
       evidenceRoot: options.evidenceRoot,
     });
-    if (variant === 'changed') {
+    if (caseName === 'changed') {
       writeFileSync(join(root, instructionPath), 'changed after capture\n');
     }
     validateChain({ ...validation, backupEvidencePath: backup.path });
