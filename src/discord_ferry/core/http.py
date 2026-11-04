@@ -933,7 +933,7 @@ class _FerryRequest(aiohttp.ClientRequest):
             # `"url" in kwargs`, not `kwargs.get("url") or ...`: yarl.URL defines
             # __bool__ (yarl/_url.py:566-567), so a falsy url= keyword would be
             # discarded and args[1] read instead.
-            url = kwargs["url"] if "url" in kwargs else (args[1] if len(args) > 1 else None)
+            url: Any = kwargs["url"] if "url" in kwargs else (args[1] if len(args) > 1 else None)
             choice = self._resolve_or_direct(url)
             if choice is not None:
                 kwargs["proxy"] = choice.url
@@ -943,10 +943,13 @@ class _FerryRequest(aiohttp.ClientRequest):
                     # header names are case-insensitive, and a plain dict's
                     # setdefault would not see a caller's `proxy-authorization`,
                     # insert a second entry, and send TWO credentials to the
-                    # proxy (connector.py:606-610 writes both).
-                    merged: CIMultiDict[str] = CIMultiDict(kwargs.get("proxy_headers") or {})
+                    # proxy. aiohttp reads
+                    # normal headers for plain HTTP proxies and proxy_headers
+                    # for HTTPS tunnel requests.
+                    header_argument = "headers" if url.scheme == "http" else "proxy_headers"
+                    merged: CIMultiDict[str] = CIMultiDict(kwargs.get(header_argument) or {})
                     merged.setdefault("Proxy-Authorization", choice.authorization)
-                    kwargs["proxy_headers"] = merged
+                    kwargs[header_argument] = merged
         super().__init__(*args, **kwargs)
 
     @staticmethod

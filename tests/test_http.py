@@ -13,6 +13,7 @@ import os
 import re
 import ssl
 import urllib.request
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1148,6 +1149,192 @@ async def test_one_requests_proxy_headers_do_not_leak_into_the_next(proxy_env, o
     assert second.proxy_headers is not None
     assert "X-Caller" in first.proxy_headers
     assert "X-Caller" not in second.proxy_headers
+
+
+def _proxy_authorizations(raw: bytes) -> list[str]:
+    prefix = b"proxy-authorization: "
+    return [
+        line[len(prefix) :].decode()
+        for line in raw.split(b"\r\n")
+        if line.lower().startswith(prefix)
+    ]
+
+
+async def _start_recording_origin(captured: list[bytes]) -> asyncio.Server:
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        captured.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    return await asyncio.start_server(handle, "127.0.0.1", 0)
+
+
+async def _start_scripted_proxy(
+    expected_authorization: str,
+    captured: list[bytes],
+    *,
+    redirect_url: str | None = None,
+    forward_port: int | None = None,
+) -> asyncio.Server:
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = await reader.readuntil(b"\r\n\r\n")
+        captured.append(request)
+        first_line = request.split(b"\r\n", 1)[0]
+        if first_line.startswith(b"CONNECT") or _proxy_authorizations(request) != [
+            expected_authorization
+        ]:
+            response = (
+                b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+        elif redirect_url is not None and b"/redirect " in first_line:
+            response = (
+                f"HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ).encode()
+        elif forward_port is not None and b"/forward " in first_line:
+            upstream_reader, upstream_writer = await asyncio.open_connection(
+                "127.0.0.1", forward_port
+            )
+            lines = request.split(b"\r\n")
+            lines[0] = b"GET /forward HTTP/1.1"
+            upstream_writer.write(
+                b"\r\n".join(
+                    line for line in lines if not line.lower().startswith(b"proxy-authorization:")
+                )
+            )
+            await upstream_writer.drain()
+            response = await upstream_reader.read()
+            upstream_writer.close()
+            await upstream_writer.wait_closed()
+        else:
+            response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    return await asyncio.start_server(handle, "127.0.0.1", 0)
+
+
+async def test_the_normal_factory_authenticates_a_plain_http_proxy(proxy_env, os_proxy) -> None:
+    captured: list[bytes] = []
+    expected = aiohttp.encode_basic_auth("ferryuser", "SUPERSECRET")
+    server = await _start_scripted_proxy(expected, captured)
+    port = server.sockets[0].getsockname()[1]
+    with os_proxy({}), proxy_env(HTTP_PROXY=f"http://ferryuser:SUPERSECRET@127.0.0.1:{port}"):
+        async with (
+            server,
+            http.new_session() as session,
+            session.get("http://example.invalid/plain") as response,
+        ):
+            assert response.status == 200
+
+    assert _proxy_authorizations(captured[0]) == [expected]
+    assert captured[0].startswith(b"GET http://")
+
+
+@pytest.mark.parametrize(
+    ("userinfo", "expected_wire"),
+    [("", None), ("wrong:credential@", aiohttp.encode_basic_auth("wrong", "credential"))],
+    ids=["missing", "rejected"],
+)
+async def test_plain_http_proxy_returns_407_without_accepted_credentials(
+    proxy_env, os_proxy, userinfo: str, expected_wire: str | None
+) -> None:
+    captured: list[bytes] = []
+    expected = aiohttp.encode_basic_auth("ferryuser", "SUPERSECRET")
+    server = await _start_scripted_proxy(expected, captured)
+    port = server.sockets[0].getsockname()[1]
+    with os_proxy({}), proxy_env(HTTP_PROXY=f"http://{userinfo}127.0.0.1:{port}"):
+        async with (
+            server,
+            http.new_session() as session,
+            session.get("http://example.invalid/plain") as response,
+        ):
+            assert response.status == 407
+
+    assert _proxy_authorizations(captured[0]) == ([] if expected_wire is None else [expected_wire])
+
+
+async def test_explicit_proxy_settings_and_maps_survive_ambient_proxy(proxy_env, os_proxy) -> None:
+    caller = aiohttp.encode_basic_auth("caller", "override")
+    captured: list[bytes] = []
+    server = await _start_scripted_proxy(caller, captured)
+    port = server.sockets[0].getsockname()[1]
+    normal_headers = {"X-Caller": "unchanged"}
+    proxy_headers = {"pRoXy-AuThOrIzAtIoN": caller}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        async with server:
+            with os_proxy({}), proxy_env(HTTP_PROXY="http://ambient:credential@127.0.0.1:9"):
+                async with http.new_session() as session:
+                    async with session.get(
+                        "http://example.invalid/plain",
+                        proxy=f"http://127.0.0.1:{port}",
+                        proxy_auth=aiohttp.BasicAuth("caller", "override"),
+                    ) as response:
+                        assert response.status == 200
+                    with pytest.raises(aiohttp.ClientHttpProxyError):
+                        await session.get(
+                            "https://example.invalid/",
+                            headers=normal_headers,
+                            proxy=f"http://127.0.0.1:{port}",
+                            proxy_headers=proxy_headers,
+                        )
+
+    assert _proxy_authorizations(captured[0]) == [caller]
+    assert _proxy_authorizations(captured[1]) == [caller]
+    assert normal_headers == {"X-Caller": "unchanged"}
+    assert proxy_headers == {"pRoXy-AuThOrIzAtIoN": caller}
+
+
+async def test_direct_and_forwarded_requests_never_receive_proxy_authorization(
+    proxy_env, os_proxy
+) -> None:
+    direct_requests: list[bytes] = []
+    origin = await _start_recording_origin(direct_requests)
+    origin_port = origin.sockets[0].getsockname()[1]
+    expected = aiohttp.encode_basic_auth("ferryuser", "SUPERSECRET")
+    proxy_requests: list[bytes] = []
+    proxy = await _start_scripted_proxy(
+        expected,
+        proxy_requests,
+        redirect_url=f"http://127.0.0.1:{origin_port}/direct",
+        forward_port=origin_port,
+    )
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    ignored_headers = {"pRoXy-AuThOrIzAtIoN": aiohttp.encode_basic_auth("caller", "override")}
+    async with origin, proxy:
+        with (
+            os_proxy({}),
+            proxy_env(
+                HTTP_PROXY=f"http://ferryuser:SUPERSECRET@127.0.0.1:{proxy_port}",
+                NO_PROXY=f"127.0.0.1:{origin_port}",
+            ),
+        ):
+            async with http.new_session() as session:
+                async with session.get("http://example.invalid/redirect") as response:
+                    assert response.status == 200
+                async with session.get(f"http://127.0.0.1:{origin_port}/direct") as response:
+                    assert response.status == 200
+                async with session.get("http://example.invalid/forward") as response:
+                    assert response.status == 200
+                async with session.get(
+                    f"http://127.0.0.1:{origin_port}/ignored", proxy_headers=ignored_headers
+                ) as response:
+                    assert response.status == 200
+
+    assert [_proxy_authorizations(request) for request in proxy_requests] == [
+        [expected],
+        [expected],
+    ]
+    assert [_proxy_authorizations(request) for request in direct_requests] == [[], [], [], []]
+    assert ignored_headers == {
+        "pRoXy-AuThOrIzAtIoN": aiohttp.encode_basic_auth("caller", "override")
+    }
 
 
 # --- End to end on a real socket (Task 4) ------------------------------------
