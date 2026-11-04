@@ -19,6 +19,7 @@ import os
 import ssl
 import urllib.request
 from dataclasses import dataclass, field
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any
 
@@ -457,6 +458,35 @@ def _scheme_map() -> tuple[dict[str, str], dict[str, str]]:
     return _proxy_scan
 
 
+def _matches_extended_no_proxy(host: str, env: dict[str, str]) -> bool:
+    """Match the network and wildcard forms Python's matcher does not handle."""
+    raw_list = env.get("no")
+    if not raw_list:
+        return False
+    for raw_token in raw_list.split(","):
+        token = raw_token.strip()
+        if "/" in token:
+            try:
+                if ip_address(host) in ip_network(token, strict=False):
+                    return True
+            except ValueError:
+                continue
+        if token.startswith("*."):
+            suffix = token[2:]
+            normalized_host = host.lower()
+            normalized_suffix = suffix.lower()
+            if (
+                suffix
+                and ":" not in suffix
+                and host.isascii()
+                and suffix.isascii()
+                and len(normalized_host) > len(normalized_suffix) + 1
+                and normalized_host.endswith(f".{normalized_suffix}")
+            ):
+                return True
+    return False
+
+
 def _is_bypassed(host: str, authority: str, source: str, env: dict[str, str]) -> bool:
     """The two bypass lists UNION, they do not alternate.
 
@@ -480,9 +510,14 @@ def _is_bypassed(host: str, authority: str, source: str, env: dict[str, str]) ->
         # CPython defines both at module level on every platform (verified at
         # urllib/request.py:2557 on 3.12.12), unlike the platform getters
         # _os_proxies reaches by getattr, so no fallback is needed here.
-        _bypass_memo[key] = bool(
+        standard_bypass = bool(
             urllib.request.proxy_bypass_environment(authority, env)  # type: ignore[attr-defined]
-        ) or (source == "os" and _os_proxy_bypass(host))
+        )
+        _bypass_memo[key] = (
+            standard_bypass
+            or _matches_extended_no_proxy(host, env)
+            or (source == "os" and _os_proxy_bypass(host))
+        )
     return _bypass_memo[key]
 
 
