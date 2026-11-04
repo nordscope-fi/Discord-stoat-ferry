@@ -365,11 +365,13 @@ def _token_source() -> _TokenSource:
 def check_page() -> None:
     """Verify a finished migration by loading its state and running run_check."""
     client = ui.context.client
-    stoat_url = str(app.storage.user.get("stoat_url", ""))
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Verify a finished migration").classes("text-2xl font-bold mb-4")
         token_src = _token_source()
+        stoat_url_input = ui.input(
+            "Stoat URL", value=str(app.storage.user.get("stoat_url", ""))
+        ).classes("w-96")
 
         default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
         dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
@@ -398,6 +400,7 @@ def check_page() -> None:
             if token is None:
                 ui.notify("Enter your Stoat token", type="warning")
                 return
+            stoat_url = stoat_url_input.value.strip()
             output_dir = Path(dir_input.value)
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
@@ -429,11 +432,13 @@ def check_page() -> None:
 def repair_page() -> None:
     """Verify a migration, then recreate what is missing and resend."""
     client = ui.context.client
-    stoat_url = str(app.storage.user.get("stoat_url", ""))
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Verify and fix a migration").classes("text-2xl font-bold mb-4")
         token_src = _token_source()
+        stoat_url_input = ui.input(
+            "Stoat URL", value=str(app.storage.user.get("stoat_url", ""))
+        ).classes("w-96")
 
         default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
         dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
@@ -479,6 +484,7 @@ def repair_page() -> None:
             if token is None:
                 ui.notify("Enter your Stoat token", type="warning")
                 return
+            stoat_url = stoat_url_input.value.strip()
             output_dir = Path(dir_input.value)
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
@@ -507,11 +513,13 @@ def repair_page() -> None:
 def retry_page() -> None:
     """Resend the messages that failed on a prior migration."""
     client = ui.context.client
-    stoat_url = str(app.storage.user.get("stoat_url", ""))
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Resend failed messages").classes("text-2xl font-bold mb-4")
         token_src = _token_source()
+        stoat_url_input = ui.input(
+            "Stoat URL", value=str(app.storage.user.get("stoat_url", ""))
+        ).classes("w-96")
 
         default_dir = str(app.storage.user.get("output_dir", "./ferry-output"))
         dir_input = ui.input("Output directory", value=default_dir).classes("w-96")
@@ -547,6 +555,7 @@ def retry_page() -> None:
             if token is None:
                 ui.notify("Enter your Stoat token", type="warning")
                 return
+            stoat_url = stoat_url_input.value.strip()
             output_dir = Path(dir_input.value)
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
@@ -580,17 +589,20 @@ def retry_page() -> None:
 def probe_page() -> None:
     """Preflight a live Stoat instance for Autumn limits, rate window, voice, webhooks.
 
-    Reads stoat_url from the user store and the token via _token_source: the
-    session token when present, otherwise a password field the user fills in
-    (#524, so a page reached with an empty session store still runs). Needs a
-    throwaway test server id and an optional deep toggle.
+    The Stoat URL field defaults from the user store but applies only to this
+    run. The token comes via _token_source: the session token when present,
+    otherwise a password field the user fills in (#524, so a page reached with
+    an empty session store still runs). Needs a throwaway test server id and an
+    optional deep toggle.
     """
     client = ui.context.client
-    stoat_url = str(app.storage.user.get("stoat_url", ""))
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Preflight a Stoat instance").classes("text-2xl font-bold mb-4")
         token_src = _token_source()
+        stoat_url_input = ui.input(
+            "Stoat URL", value=str(app.storage.user.get("stoat_url", ""))
+        ).classes("w-96")
 
         server_input = ui.input("Throwaway test server ID").classes("w-96")
         deep_cb = ui.checkbox("Deep probe (upload test files at each Autumn size boundary)")
@@ -637,6 +649,7 @@ def probe_page() -> None:
             if token is None:
                 ui.notify("Enter your Stoat token", type="warning")
                 return
+            stoat_url = stoat_url_input.value.strip()
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
 
@@ -738,17 +751,19 @@ def build_page() -> None:
     """Build a Stoat server from a preset template or a blueprint file.
 
     Makes live API calls, so it goes through the runner (register the token, init
-    the semaphore only when unset). Reads stoat_url from the user store and the
-    token via _token_source: the session token when present, otherwise a password
-    field the user fills in (#524). Exactly one source, a template or a blueprint
-    file, is required.
+    the semaphore only when unset). The Stoat URL field defaults from the user
+    store but applies only to this run. The token comes via _token_source: the
+    session token when present, otherwise a password field the user fills in
+    (#524). Exactly one source, a template or a blueprint file, is required.
     """
     client = ui.context.client
-    stoat_url = str(app.storage.user.get("stoat_url", ""))
 
     with ui.column().classes("w-full items-center min-h-screen bg-gray-50 py-10"):
         ui.label("Build a server").classes("text-2xl font-bold mb-4")
         token_src = _token_source()
+        stoat_url_input = ui.input(
+            "Stoat URL", value=str(app.storage.user.get("stoat_url", ""))
+        ).classes("w-96")
 
         ui.label(
             "A server built here writes no state.json, so the rollback tool cannot undo it: "
@@ -794,6 +809,7 @@ def build_page() -> None:
             if token is None:
                 ui.notify("Enter your Stoat token", type="warning")
                 return
+            stoat_url = stoat_url_input.value.strip()
             for line in prepare_tool_call(token):
                 _safe_push(log.push, line)
 

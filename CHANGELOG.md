@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Correct the CI dependency-install count in the project configuration comment (#1273).
 - Expect no pinned session model in local Claude settings, matching the owner's 2026-10-27 policy change (#1478).
 
+## [3.1.11] - 2026-11-04
+
+### Changed
+
+- Add editable Stoat URL fields to the Check, Repair, Retry, Probe, and Build GUI pages. Each field defaults to the saved URL, while an edit applies only to the current run (#1306).
+
 ## [3.1.10] - 2026-11-03
 
 ### Fixed
