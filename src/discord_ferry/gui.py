@@ -10,12 +10,14 @@ import multiprocessing
 import os
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 from urllib.parse import urlparse
+from uuid import UUID
 
 from nicegui import app, background_tasks, ui
 from nicegui.client import ClientConnectionTimeout
@@ -185,6 +187,32 @@ def _ensure_gui_port_available() -> None:
             probe.bind((_HOST, _PORT))
     except OSError as exc:
         raise _GuiStorageLockError("Ferry GUI port is already in use") from exc
+
+
+def _warn_gui_record(record_id: UUID, category: str) -> None:
+    logger.warning("GUI storage record %s skipped: %s", record_id, category)
+
+
+def _iter_historical_gui_records(storage_dir: Path) -> Iterable[tuple[UUID, Path]]:
+    for record_path in storage_dir.iterdir():
+        name = record_path.name
+        if not name.startswith("storage-user-") or not name.endswith(".json"):
+            continue
+        raw_id = name.removeprefix("storage-user-").removesuffix(".json")
+        try:
+            record_id = UUID(raw_id)
+        except ValueError:
+            continue
+        if name != f"storage-user-{record_id}.json":
+            continue
+        try:
+            if not stat.S_ISREG(record_path.lstat().st_mode):
+                _warn_gui_record(record_id, "metadata")
+                continue
+        except OSError:
+            _warn_gui_record(record_id, "metadata")
+            continue
+        yield record_id, record_path
 
 
 def _selected_output_dir(storage: Mapping[str, Any]) -> Path:
