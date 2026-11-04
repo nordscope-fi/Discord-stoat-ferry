@@ -13,7 +13,7 @@ import subprocess
 import sys
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 from urllib.parse import urlparse
 
 from nicegui import app, background_tasks, ui
@@ -135,6 +135,46 @@ def _configure_gui_storage() -> Path:
     storage_dir.mkdir(parents=True, exist_ok=True)
     Storage.path = storage_dir
     return storage_dir
+
+
+class _GuiStorageLockError(RuntimeError):
+    """The configured GUI storage directory is already owned by Ferry."""
+
+
+def _acquire_gui_storage_lock(storage_dir: Path) -> BinaryIO:
+    lock_path = storage_dir / ".ferry-gui.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.chmod(lock_path, 0o600)
+    handle = os.fdopen(descriptor, "r+b")
+    try:
+        handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise _GuiStorageLockError("Ferry GUI storage is already in use") from exc
+    return handle
+
+
+def _release_gui_storage_lock(handle: BinaryIO) -> None:
+    try:
+        handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _selected_output_dir(storage: Mapping[str, Any]) -> Path:
@@ -2491,7 +2531,8 @@ def main() -> None:
     # spawn child never reaches main() at all, so the ordering is merely inert
     # there, not wrong.)
     configure_logging()
-    _configure_gui_storage()
+    storage_dir = _configure_gui_storage()
+    lock = _acquire_gui_storage_lock(storage_dir)
 
     try:
         _run_gui()
@@ -2503,6 +2544,8 @@ def main() -> None:
         # surfaces as a KeyboardInterrupt (the app exits 0); this is the defensive path
         # for when one does, and 130 is the conventional SIGINT status.
         raise SystemExit(130) from None
+    finally:
+        _release_gui_storage_lock(lock)
 
 
 if __name__ == "__main__":
