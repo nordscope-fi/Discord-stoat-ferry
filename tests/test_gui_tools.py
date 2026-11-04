@@ -1539,3 +1539,169 @@ async def test_check_page_defaults_dir_from_stashed_output_dir(
     await user.open("/tools/check")
     await user.should_see("Stoat token")  # field shown, not a dead end
     await user.should_see(str(tmp_path))  # dir input defaulted from the stash
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["/tools/check", "/tools/repair", "/tools/retry", "/tools/probe", "/tools/build"],
+)
+async def test_token_pages_show_page_local_stoat_url(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    route: str,
+) -> None:
+    """Each live tool accepts a one-run Stoat URL without changing the saved value."""
+    saved_url = "https://saved.example"
+    user_store["stoat_url"] = saved_url
+    tab_store["token"] = _TOKEN
+
+    await user.open(route)
+
+    url_input = user.find("Stoat URL").elements.pop()
+    assert url_input.value == saved_url
+    url_input.set_value("https://one-run.example")
+    assert user_store["stoat_url"] == saved_url
+
+
+async def test_check_page_uses_entered_stoat_url(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """Check sends the URL entered for this run, not the saved default."""
+    from discord_ferry.migrator.verify import CheckReport
+
+    user_store.update({"stoat_url": "https://saved.example", "output_dir": str(tmp_path)})
+    tab_store["token"] = _TOKEN
+    seen: dict[str, str] = {}
+
+    async def fake_check(stoat_url, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["url"] = stoat_url
+        return CheckReport()
+
+    with (
+        patch("discord_ferry.gui_tools.load_state", return_value=object()),
+        patch("discord_ferry.gui_tools.run_check", new=fake_check),
+    ):
+        await user.open("/tools/check")
+        user.find("Stoat URL").elements.pop().set_value("https://one-run.example")
+        user.find("Run check").click()
+        await user.should_see("Check passed.")
+
+    assert seen["url"] == "https://one-run.example"
+
+
+async def test_repair_page_uses_entered_stoat_url(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """Repair carries the page-local URL into its run configuration."""
+    from discord_ferry.migrator.verify import RepairOutcome
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    user_store.update({"stoat_url": "https://saved.example", "output_dir": str(tmp_path)})
+    tab_store["token"] = _TOKEN
+    seen: dict[str, str] = {}
+
+    async def fake_repair(config, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["url"] = config.stoat_url
+        return RepairOutcome(dry_run=True)
+
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[]),
+        patch("discord_ferry.gui_tools.load_state", return_value=_StubState([])),
+        patch("discord_ferry.gui_tools.run_repair", new=fake_repair),
+    ):
+        await user.open("/tools/repair")
+        user.find("Stoat URL").elements.pop().set_value("https://one-run.example")
+        user.find("Export directory").elements.pop().set_value(str(export_dir))
+        user.find("Run repair").click()
+        await user.should_see("Repair preview.")
+
+    assert seen["url"] == "https://one-run.example"
+
+
+async def test_retry_page_uses_entered_stoat_url(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """Retry carries the page-local URL into its run configuration."""
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    user_store.update({"stoat_url": "https://saved.example", "output_dir": str(tmp_path)})
+    tab_store["token"] = _TOKEN
+    seen: dict[str, str] = {}
+
+    async def fake_retry(config, state, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["url"] = config.stoat_url
+        state.failed_messages.clear()
+
+    with (
+        patch("discord_ferry.gui_tools.parse_export_directory", return_value=[object()]),
+        patch("discord_ferry.gui_tools.load_state", return_value=_StubState([{"id": "1"}])),
+        patch("discord_ferry.gui_tools.run_retry_failed", new=fake_retry),
+    ):
+        await user.open("/tools/retry")
+        user.find("Stoat URL").elements.pop().set_value("https://one-run.example")
+        user.find("Export directory").elements.pop().set_value(str(export_dir))
+        user.find("Run retry").click()
+        await user.should_see("1 succeeded, 0 still failed")
+
+    assert seen["url"] == "https://one-run.example"
+
+
+async def test_probe_page_uses_entered_stoat_url(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Probe sends the URL entered for this run, not the saved default."""
+    from discord_ferry.migrator.probe import ProbeReport
+
+    user_store["stoat_url"] = "https://saved.example"
+    tab_store["token"] = _TOKEN
+    seen: dict[str, str] = {}
+
+    async def fake_probe(stoat_url, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["url"] = stoat_url
+        return ProbeReport()
+
+    with patch("discord_ferry.gui_tools.run_probe", new=fake_probe):
+        await user.open("/tools/probe")
+        user.find("Stoat URL").elements.pop().set_value("https://one-run.example")
+        user.find("Throwaway test server ID").elements.pop().set_value("srv-throwaway")
+        user.find("Run probe").click()
+        await user.should_see("0 ok, 0 warn, 0 fail")
+
+    assert seen["url"] == "https://one-run.example"
+
+
+async def test_build_page_uses_entered_stoat_url(
+    user: User,
+    user_store: dict[str, object],
+    tab_store: dict[str, object],
+) -> None:
+    """Build sends the URL entered for this run, not the saved default."""
+    user_store["stoat_url"] = "https://saved.example"
+    tab_store["token"] = _TOKEN
+    seen: dict[str, str] = {}
+
+    async def fake_build(stoat_url, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen["url"] = stoat_url
+        return "srv-123"
+
+    with patch("discord_ferry.gui_tools.run_build", new=fake_build):
+        await user.open("/tools/build")
+        user.find("Stoat URL").elements.pop().set_value("https://one-run.example")
+        user.find("Template").elements.pop().set_value("gaming")
+        user.find("Build server").click()
+        await user.should_see("Server built (srv-123)")
+
+    assert seen["url"] == "https://one-run.example"
