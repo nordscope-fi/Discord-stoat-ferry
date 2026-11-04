@@ -536,6 +536,11 @@ def _safe_public_text(value: str) -> str:
     return value.replace("<!-- ferry-feedback:", "&lt;!-- ferry-feedback:")
 
 
+def _literal_public_text(value: str) -> str:
+    cleaned = _safe_public_text(value)
+    return "\n".join(f"    {line}" if line else "" for line in cleaned.split("\n"))
+
+
 def render_public_feedback_body(
     *,
     request_id: UUID,
@@ -548,23 +553,25 @@ def render_public_feedback_body(
     """Render the exact cleaned body reviewed locally and published on GitHub."""
 
     cleaned_diagnostics = None if diagnostics is None else clean_diagnostics_for_send(diagnostics)
-    sections = [("Report", _safe_public_text(description))]
+    sections = [("Report", _literal_public_text(description))]
     if expected is not None:
-        sections.append(("Expected result", _safe_public_text(expected)))
+        sections.append(("Expected result", _literal_public_text(expected)))
     if reproduction is not None:
-        sections.append(("Reproduction steps", _safe_public_text(reproduction)))
+        sections.append(("Reproduction steps", _literal_public_text(reproduction)))
     if cleaned_diagnostics is not None:
-        sections.append(("Diagnostics", _safe_public_text(render_diagnostics(cleaned_diagnostics))))
+        sections.append(
+            ("Diagnostics", _literal_public_text(render_diagnostics(cleaned_diagnostics)))
+        )
 
     context = ["Submitted through Discord Ferry."]
     if cleaned_diagnostics is not None:
         context.extend(
             (
-                f"Ferry version: {_safe_public_text(cleaned_diagnostics.ferry_version)}",
+                f"Ferry version: {cleaned_diagnostics.ferry_version}",
                 f"Interface: {cleaned_diagnostics.interface.value}",
             )
         )
-    sections.append(("Ferry context", "\n".join(context)))
+    sections.append(("Ferry context", _literal_public_text("\n".join(context))))
 
     receipt = [
         f"<!-- ferry-feedback:{request_id} -->",

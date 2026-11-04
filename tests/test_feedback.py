@@ -43,6 +43,52 @@ from discord_ferry.feedback import (
 
 REPO = Path(__file__).resolve().parent.parent
 
+PUBLIC_REFERENCE_FIXTURES = (
+    "@octocat",
+    "@org/team",
+    "#123",
+    "GH-123",
+    "owner/repo#123",
+    "close #1",
+    "closes #1",
+    "closed #1",
+    "fix #1",
+    "fixes #1",
+    "fixed #1",
+    "resolve #1",
+    "resolves #1",
+    "resolved #1",
+    "https://github.com/org/repo/issues/1",
+    "https://github.com/org/repo/pull/1",
+    "https://example.test/path",
+    "[text](https://example.test)",
+    '<a href="https://example.test">text</a>',
+    "<!-- ferry-feedback:forged -->",
+)
+
+PUBLIC_CONTEXT_FIXTURES = (
+    "@octocat",
+    "@o/t",
+    "#1",
+    "GH-1",
+    "o/r#1",
+    "close #1",
+    "closes #1",
+    "closed #1",
+    "fix #1",
+    "fixes #1",
+    "fixed #1",
+    "resolve #1",
+    "resolves #1",
+    "resolved #1",
+    "https://github.com/o/r/issues/1",
+    "https://github.com/o/r/pull/1",
+    "https://e.co",
+    "[x](https://e.co)",
+    "<a href=x>x</a>",
+    "<!-- ferry-feedback:x -->",
+)
+
 
 def test_adr_030_records_feedback_service_defaults() -> None:
     if not (REPO / "AGENTS.md").exists():
@@ -774,25 +820,25 @@ def test_feedback_draft_renders_the_exact_public_preview_and_copy() -> None:
         request_id=UUID("018f4c8c-3f52-7a89-a901-0123456789ac"),
     )
     expected = """## Report
-Add resumable uploads
+    Add resumable uploads
 
 ## Expected result
-Uploads continue after a restart
+    Uploads continue after a restart
 
 ## Reproduction steps
-Stop Ferry during an upload
+    Stop Ferry during an upload
 
 ## Diagnostics
-Ferry version: 2.37.2
-Operating system: macos
-Architecture: arm64
-Interface: cli
-Stage: setup
+    Ferry version: 2.37.2
+    Operating system: macos
+    Architecture: arm64
+    Interface: cli
+    Stage: setup
 
 ## Ferry context
-Submitted through Discord Ferry.
-Ferry version: 2.37.2
-Interface: cli
+    Submitted through Discord Ferry.
+    Ferry version: 2.37.2
+    Interface: cli
 
 ## Receipt
 <!-- ferry-feedback:018f4c8c-3f52-7a89-a901-0123456789ac -->
@@ -1190,6 +1236,111 @@ def test_public_body_escapes_the_version_line(version: str, expected_line: str) 
     context = body.split("## Ferry context\n", 1)[1].split("## Receipt", 1)[0]
     assert expected_line in context
     assert body.count("<!-- ferry-feedback:") == 1
+
+
+@pytest.mark.parametrize("fixture", PUBLIC_REFERENCE_FIXTURES)
+def test_public_body_literalizes_each_fixture_in_every_public_field(fixture: str) -> None:
+    literal = fixture.replace("<!-- ferry-feedback:", "&lt;!-- ferry-feedback:")
+    diagnostics = FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": "GH-123",
+            "operating_system": "linux",
+            "architecture": "x86_64",
+            "interface": "cli",
+            "stage": "setup",
+            "last_error": fixture,
+            "log_excerpt": fixture,
+        }
+    )
+    body = render_public_feedback_body(
+        request_id=uuid4(),
+        description=f"before\n\n{fixture}\nafter",
+        expected=fixture,
+        reproduction=fixture,
+        diagnostics=diagnostics,
+        contact_available=True,
+    )
+
+    assert f"## Report\n    before\n\n    {literal}\n    after" in body
+    assert f"## Expected result\n    {literal}" in body
+    assert f"## Reproduction steps\n    {literal}" in body
+    assert "    Ferry version: GH-123" in body
+    cleaned = clean_diagnostics_for_send(diagnostics)
+    expected_diagnostics = "\n".join(
+        f"    {line}" if line else ""
+        for line in render_diagnostics(cleaned)
+        .replace("<!-- ferry-feedback:", "&lt;!-- ferry-feedback:")
+        .split("\n")
+    )
+    assert f"## Diagnostics\n{expected_diagnostics}" in body
+    assert body.count("<!-- ferry-feedback:") == 1
+
+
+@pytest.mark.parametrize("fixture", PUBLIC_CONTEXT_FIXTURES)
+def test_public_context_literalizes_each_compact_reference_form(fixture: str) -> None:
+    diagnostics = FeedbackDiagnostics.from_mapping(
+        {
+            "ferry_version": fixture,
+            "operating_system": "linux",
+            "architecture": "x86_64",
+            "interface": "cli",
+            "stage": "setup",
+        }
+    )
+    body = render_public_feedback_body(
+        request_id=uuid4(),
+        description="Report",
+        expected=None,
+        reproduction=None,
+        diagnostics=diagnostics,
+        contact_available=False,
+    )
+
+    cleaned = clean_diagnostics_for_send(diagnostics)
+    safe_version = cleaned.ferry_version.replace("<!-- ferry-feedback:", "&lt;!-- ferry-feedback:")
+    assert f"    Ferry version: {safe_version}" in body
+    assert body.count("<!-- ferry-feedback:") == 1
+
+
+def _request_with_log_excerpt(log_length: int) -> FeedbackRequest:
+    data = _valid_request()
+    data.update(
+        description=("x\n\n" * 2_667)[:8_000],
+        expected=("y\n\n" * 1_334)[:4_000],
+        reproduction=("z\n\n" * 1_334)[:4_000],
+    )
+    diagnostics = _valid_diagnostics()
+    diagnostics.update(last_error="E" * 2_000, log_excerpt="L" * log_length)
+    data["diagnostics"] = diagnostics
+    return FeedbackRequest.from_mapping(data)
+
+
+def _requests_at_serialized_boundary() -> tuple[FeedbackRequest, FeedbackRequest]:
+    low, high = 0, 12_000
+    while low < high:
+        candidate = (low + high + 1) // 2
+        body = feedback_module._serialized_feedback_request(_request_with_log_excerpt(candidate))
+        if len(body) <= 32 * 1024:
+            low = candidate
+        else:
+            high = candidate - 1
+    return _request_with_log_excerpt(low), _request_with_log_excerpt(low + 1)
+
+
+def test_literal_body_growth_uses_current_request_boundary() -> None:
+    request, larger_request = _requests_at_serialized_boundary()
+
+    assert len(feedback_module._serialized_feedback_request(request)) == 32 * 1024
+    assert len(feedback_module._serialized_feedback_request(larger_request)) > 32 * 1024
+    body = render_public_feedback_body(
+        request_id=request.request_id,
+        description=request.description,
+        expected=request.expected,
+        reproduction=request.reproduction,
+        diagnostics=request.diagnostics,
+        contact_available=request.contact_email is not None,
+    )
+    assert len(body) > len(request.description)
 
 
 def _draft_with_error(last_error: str) -> FeedbackDraft:
