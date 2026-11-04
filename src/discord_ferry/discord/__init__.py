@@ -15,6 +15,7 @@ from discord_ferry.discord.metadata import (
     RoleMeta,
     RoleOverride,
     _bad_id,
+    capture_guild_emojis,
     capture_permission_source,
     load_bound_discord_metadata,
     load_discord_metadata,
@@ -150,6 +151,7 @@ async def fetch_and_translate_guild_metadata(
         guild_description=guild_description,
         guild_nsfw=guild_nsfw,
         permission_source=permission_source,
+        guild_emojis=capture_guild_emojis(guild_data.get("emojis")),
     )
 
 

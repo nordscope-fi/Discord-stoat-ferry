@@ -70,6 +70,16 @@ class ChannelMeta:
     position: int | None = None
 
 
+@dataclass(frozen=True)
+class GuildEmojiMeta:
+    """One validated custom emoji from the source guild catalog."""
+
+    id: str
+    name: str
+    animated: bool
+    available: bool
+
+
 @dataclass
 class DiscordMetadata:
     """Translated Discord guild metadata, persisted to discord_metadata.json."""
@@ -86,6 +96,7 @@ class DiscordMetadata:
     guild_description: str = ""
     guild_nsfw: bool = False
     permission_source: PermissionSourceEvidence | None = None
+    guild_emojis: tuple[GuildEmojiMeta, ...] = ()
 
 
 _PERMISSION_TRANSLATION_VERSION = "discord-to-stoat-v1"
@@ -93,6 +104,31 @@ _PERMISSION_TRANSLATION_VERSION = "discord-to-stoat-v1"
 
 def _source_integer(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+def capture_guild_emojis(raw: object) -> tuple[GuildEmojiMeta, ...]:
+    """Keep valid custom-emoji facts from a Discord guild response."""
+    if not isinstance(raw, list):
+        return ()
+    captured: list[GuildEmojiMeta] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        emoji_id = entry.get("id")
+        name = entry.get("name")
+        animated = entry.get("animated", False)
+        available = entry.get("available", True)
+        if (
+            _bad_id("guild emoji id", emoji_id) is not None
+            or not isinstance(emoji_id, str)
+            or not isinstance(name, str)
+            or not name
+            or type(animated) is not bool
+            or type(available) is not bool
+        ):
+            continue
+        captured.append(GuildEmojiMeta(emoji_id, name, animated, available))
+    return tuple(captured)
 
 
 def _capture_source_channel(channel: DiscordChannel) -> SourceChannel:
@@ -412,6 +448,15 @@ def _meta_to_dict(meta: DiscordMetadata) -> dict[str, Any]:
         "category_positions": meta.category_positions,
         "guild_description": meta.guild_description,
         "guild_nsfw": meta.guild_nsfw,
+        "guild_emojis": [
+            {
+                "id": emoji.id,
+                "name": emoji.name,
+                "animated": emoji.animated,
+                "available": emoji.available,
+            }
+            for emoji in meta.guild_emojis
+        ],
     }
     if meta.permission_source is not None:
         data["permission_source"] = _permission_source_to_dict(meta.permission_source)
@@ -484,6 +529,7 @@ def _dict_to_meta(data: dict[str, Any]) -> DiscordMetadata:
         guild_description=data.get("guild_description", ""),
         guild_nsfw=data.get("guild_nsfw", False),
         permission_source=_dict_to_permission_source(data.get("permission_source")),
+        guild_emojis=capture_guild_emojis(data.get("guild_emojis", [])),
     )
 
 

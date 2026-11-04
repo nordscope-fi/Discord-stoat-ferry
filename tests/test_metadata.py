@@ -596,6 +596,52 @@ _DISCORD_API = "https://discord.com/api/v10"
 _GUILD_ID = "999000000000000001"
 
 
+async def test_guild_emoji_catalog_captures_valid_records_and_discards_malformed_ones() -> None:
+    """Guild metadata keeps only usable custom-emoji records for later phases."""
+    from aioresponses import aioresponses
+
+    with aioresponses() as mocked:
+        mocked.get(
+            f"{_DISCORD_API}/guilds/{_GUILD_ID}",
+            payload={
+                "id": _GUILD_ID,
+                "name": "Test",
+                "emojis": [
+                    {"id": "111", "name": "still", "animated": False, "available": True},
+                    {"id": "222", "name": "spin", "animated": True, "available": False},
+                    {"id": "not-an-id", "name": "bad", "animated": False, "available": True},
+                    {"id": "333", "name": "wrong-type", "animated": 0, "available": True},
+                ],
+            },
+        )
+        mocked.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/roles", payload=[])
+        mocked.get(f"{_DISCORD_API}/guilds/{_GUILD_ID}/channels", payload=[])
+        async with aiohttp.ClientSession() as session:
+            metadata = await fetch_and_translate_guild_metadata(session, "test-token", _GUILD_ID)
+
+    assert metadata.guild_emojis == (
+        metadata_module.GuildEmojiMeta("111", "still", False, True),
+        metadata_module.GuildEmojiMeta("222", "spin", True, False),
+    )
+
+
+def test_guild_emoji_catalog_round_trip_and_legacy_default(tmp_path: Path) -> None:
+    meta = DiscordMetadata(
+        _GUILD_ID,
+        "now",
+        0,
+        {},
+        {},
+        guild_emojis=(metadata_module.GuildEmojiMeta("111", "still", False, True),),
+    )
+    save_discord_metadata(meta, tmp_path)
+    loaded = load_discord_metadata(tmp_path)
+    assert loaded is not None and loaded.guild_emojis == meta.guild_emojis
+    payload = _meta_to_dict(meta)
+    payload.pop("guild_emojis")
+    assert _dict_to_meta(payload).guild_emojis == ()
+
+
 async def test_everyone_deny_view_channel_produces_stoat_deny_bit() -> None:
     """Discord @everyone VIEW_CHANNEL deny -> Stoat ViewChannel deny bit."""
     from aioresponses import aioresponses
