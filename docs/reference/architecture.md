@@ -1160,8 +1160,9 @@ it in native mode (pywebview window) if available, otherwise opens the default b
 **Event subscription**: Passes a callback to `run_migration()` that updates NiceGUI elements.
 Uses `ui.timer` for async event loop integration.
 
-**Storage**: `app.storage.user` writes to `.nicegui/storage-user.json`. Sensitive data
-(Discord tokens) is cleared in a `finally` block.
+**Storage**: The GUI framework writes each user mapping as `storage-user-<uuid>.json` in Ferry's GUI
+storage directory. At GUI startup Ferry holds that directory's process lock and removes old
+`token` and `discord_token` values from valid historical records without deleting unrelated settings.
 
 ### CLI (`cli.py`), Click + Rich
 
