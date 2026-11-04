@@ -454,6 +454,21 @@ def test_main_holds_storage_lock_until_run_gui_returns(
     gui._release_gui_storage_lock(released)
 
 
+def test_gui_port_probe_rejects_an_occupied_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import socket
+
+    from discord_ferry import gui
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind((gui._HOST, 0))
+        monkeypatch.setattr(gui, "_PORT", listener.getsockname()[1])
+
+        with pytest.raises(gui._GuiStorageLockError, match="port"):
+            gui._ensure_gui_port_available()
+
+
 # ---------------------------------------------------------------------------
 # Batch 8 — S1 cached-export gating
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import webbrowser
@@ -175,6 +176,15 @@ def _release_gui_storage_lock(handle: BinaryIO) -> None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
+
+
+def _ensure_gui_port_available() -> None:
+    """Check the fixed GUI address immediately before startup without retaining it."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind((_HOST, _PORT))
+    except OSError as exc:
+        raise _GuiStorageLockError("Ferry GUI port is already in use") from exc
 
 
 def _selected_output_dir(storage: Mapping[str, Any]) -> Path:
@@ -2535,6 +2545,7 @@ def main() -> None:
     lock = _acquire_gui_storage_lock(storage_dir)
 
     try:
+        _ensure_gui_port_available()
         _run_gui()
     except KeyboardInterrupt:
         # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
