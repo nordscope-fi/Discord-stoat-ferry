@@ -750,8 +750,8 @@ A block of `key: value` lines. The trust keys are always present; the proxy keys
 |------|-------------|
 | `ca-bundle` | Path to the certifi CA bundle Ferry carries |
 | `ca-bundle-readable` | `true` if that bundle exists on disk and could be read, `false` otherwise |
-| `trust-source` | `union` if Ferry loaded the bundle successfully on top of the operating system's trust store, `fallback` if it could not and is relying on the OS store alone |
-| `ca-visible` | Number of CA certificates the resulting SSL context reports |
+| `trust-source` | On macOS, `native-union` means native trust and bundled roots loaded, `native` means native trust without bundled roots, and `native-unavailable-*` means strict standard-library fallback. Linux and Windows report `union` or `fallback`. |
+| `ca-visible` | Number of CA certificates the standard context reports. `unavailable` is expected for a native macOS context. |
 | `proxy-http` | The `HTTP_PROXY` value Ferry resolved for plain-HTTP requests (credentials redacted), or `none` |
 | `proxy-https` | The `HTTPS_PROXY` value Ferry resolved for HTTPS requests (credentials redacted), or `none` |
 | `proxy-source` | Where the proxy came from: `env`, `system`, or `none` |
@@ -762,8 +762,8 @@ A block of `key: value` lines. The trust keys are always present; the proxy keys
 ```
 ca-bundle: /path/to/certifi/cacert.pem
 ca-bundle-readable: true
-trust-source: union
-ca-visible: 179
+trust-source: native-union
+ca-visible: unavailable
 proxy-http: none
 proxy-https: none
 proxy-source: none
@@ -771,13 +771,13 @@ proxy-disabled: false
 ```
 
 !!! info "A low ca-visible count is not necessarily a problem"
-    On Linux, trust often resolves through OpenSSL's hashed capath directory rather than a single readable bundle. `ca-visible` cannot enumerate certificates trusted that way, so it can read `0` on a machine where TLS handshakes work fine. Treat `ca-visible` as a diagnostic hint, not a health check. `trust-source: union` is the line that confirms Ferry's own bundle loaded.
+    Native macOS contexts cannot enumerate trusted certificates, so `ca-visible: unavailable` is healthy when `trust-source: native-union`. On Linux, trust can resolve through OpenSSL's hashed capath directory and report `0` while handshakes work. Treat the count as a diagnostic hint. The trust-source line confirms whether the bundled roots loaded.
 
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Always. A missing or unreadable bundle is reported as `trust-source: fallback`, not a nonzero exit. |
+| `0` | Always. A missing or unreadable bundle is reported by the trust-source value, not a nonzero exit. |
 
 ### Examples
 
@@ -785,4 +785,4 @@ proxy-disabled: false
 ferry tls-check
 ```
 
-Run this first when a migration fails with a certificate error, before changing proxy or antivirus settings. `trust-source: fallback` means Ferry's own bundle did not load and you are relying on the operating system's trust store alone.
+Run this first when a migration fails with a certificate error, before changing proxy or antivirus settings. On macOS, `native-unavailable-*` means native initialization failed and Ferry retained strict file-based verification.

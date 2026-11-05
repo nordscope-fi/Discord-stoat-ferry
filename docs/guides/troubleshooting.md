@@ -271,11 +271,16 @@ $env:SSL_CERT_FILE = "C:\path\to\your-ca-bundle.pem"
 ferry migrate --export-dir ...
 ```
 
-`SSL_CERT_FILE` is a standard variable used by the encryption library called OpenSSL, not a Ferry-specific
-one, so it works the same way on every platform. Ferry keeps the operating system certificate store
-and the roots it ships with, then adds the bundle's roots.
+Ferry's own Python HTTPS connections use native macOS system certificate trust.
+Configured certificate files and the bundled roots remain additive. Certificate
+and hostname checks stay enabled. The separate Discord export executable keeps
+its own certificate checks.
 
-Run `ferry tls-check` to see what Ferry can currently verify. See the [CLI reference](cli-reference.md#ferry-tls-check) for what each line means.
+Run `ferry tls-check`. On macOS, `native-union` means native trust and bundled
+roots loaded. `native` means the bundled roots did not load. Values beginning
+with `native-unavailable-` mean native initialization failed and a strict
+file-based context is in use. Reinstall a supported signed Ferry release if
+native initialization fails. Do not disable certificate or hostname checks.
 
 If the Discord server export tool, DiscordChatExporter, is the download that fails, you can place the binary yourself instead of letting Ferry download it:
 
