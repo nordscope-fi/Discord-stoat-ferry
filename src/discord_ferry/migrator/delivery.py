@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from discord_ferry.config import FerryConfig
     from discord_ferry.core.events import EventCallback
-    from discord_ferry.state import FailedMessage, MigrationState
+    from discord_ferry.state import AssociationStatus, FailedMessage, MigrationState
 
 _locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 # Only identities prepared by this live session may dispatch without lookup.
@@ -58,6 +58,7 @@ class DeliveryResult:
     token: DeliveryToken
     fully_resolved: bool
     recovered: bool
+    association_status: AssociationStatus | None = None
 
 
 def slowmode_wait_handler(
@@ -227,6 +228,26 @@ def _history_media(row: dict[str, Any]) -> list[str]:
     return result
 
 
+def _submitted_media(
+    attachments: list[str] | None, embeds: list[dict[str, Any]] | None
+) -> list[str]:
+    result = list(attachments or [])
+    for embed in embeds or []:
+        media = embed.get("media")
+        if isinstance(media, str) and is_stoat_file_id(media):
+            result.append(media)
+    return result
+
+
+def _record_observed_media(
+    part: DeliveryPart, expected: list[str] | None, observed: list[str]
+) -> None:
+    part.autumn_ids = observed
+    part.association_status = (
+        "observed_only" if expected is None else "matched" if expected == observed else "mismatch"
+    )
+
+
 def _result(
     state: MigrationState,
     config: FerryConfig,
@@ -237,12 +258,20 @@ def _result(
 ) -> DeliveryResult:
     token = write_delivery_receipt(state, config.output_dir, receipt)
     part = receipt.parts[part_index]
+    confirmed_ids = tuple(part.autumn_ids)
+    if config.verify_uploads and part.association_status not in {
+        "matched",
+        "mismatch",
+        "observed_only",
+    }:
+        confirmed_ids = ()
     return DeliveryResult(
         part.message_id,
-        tuple(part.autumn_ids),
+        confirmed_ids,
         token,
         all(item.status == "acknowledged" for item in receipt.parts),
         recovered,
+        part.association_status,
     )
 
 
@@ -357,13 +386,16 @@ async def deliver_part(
                 write_delivery_receipt(state, config.output_dir, receipt)
                 fresh.update((output, state.delivery_namespace, item.key) for item in receipt.parts)
         if legacy_rows is not None:
-            legacy_media_by_part = [_history_media(row) for row in legacy_rows]
-            for part, row, original_media in zip(
-                receipt.parts, legacy_rows, legacy_media_by_part, strict=True
-            ):
+            for part, row in zip(receipt.parts, legacy_rows, strict=True):
                 part.status = "acknowledged"
                 part.message_id = row["_id"]
-                part.autumn_ids = original_media
+                if not config.verify_uploads:
+                    part.autumn_ids = _history_media(row)
+                    continue
+                try:
+                    _record_observed_media(part, None, _history_media(row))
+                except DeliveryUnresolvedError:
+                    part.association_status = "unavailable"
             return _result(state, config, receipt, part_index, recovered=True)
         if receipt.render_digest != render_digest or len(receipt.parts) != part_count:
             if (
@@ -386,6 +418,8 @@ async def deliver_part(
             fresh.update((output, state.delivery_namespace, item.key) for item in receipt.parts)
         part = receipt.parts[part_index]
         if part.status == "acknowledged":
+            if config.verify_uploads and part.association_status is None and part.autumn_ids:
+                part.association_status = "unavailable"
             return _result(state, config, receipt, part_index, recovered=True)
         if part.status == "confirmed_rejected":
             if not allow_rejected_retry or recover_only:
@@ -411,8 +445,15 @@ async def deliver_part(
             )
             for item in receipt.parts:
                 if item.status in {"uncertain", "prepared"} and item.key in matches:
-                    item.message_id = matches[item.key]["_id"]
+                    row = matches[item.key]
+                    expected = list(item.autumn_ids) if item.status == "uncertain" else None
+                    item.message_id = row["_id"]
                     item.status = "acknowledged"
+                    if config.verify_uploads:
+                        try:
+                            _record_observed_media(item, expected, _history_media(row))
+                        except DeliveryUnresolvedError:
+                            item.association_status = "unavailable"
             write_delivery_receipt(state, config.output_dir, receipt)
             if part.status != "acknowledged":
                 raise DeliveryUnresolvedError("Message delivery has no unique history match")
@@ -428,11 +469,8 @@ async def deliver_part(
         runtime = require_permission_runtime(state, service=config.stoat_url)
         runtime.require(ref.destination_channel_id)
         part.status = "uncertain"
-        part.autumn_ids = list(attachments or [])
-        for embed in embeds or []:
-            media = embed.get("media")
-            if isinstance(media, str) and is_stoat_file_id(media):
-                part.autumn_ids.append(media)
+        part.autumn_ids = _submitted_media(attachments, embeds)
+        part.association_status = None
         write_delivery_receipt(state, config.output_dir, receipt)
         fresh.discard(capability)
         recovered = False
@@ -466,6 +504,12 @@ async def deliver_part(
             raise
         part.message_id = result["_id"]
         part.status = "acknowledged"
+        if config.verify_uploads and not recovered:
+            expected = list(part.autumn_ids)
+            try:
+                _record_observed_media(part, expected, _history_media(result))
+            except DeliveryUnresolvedError:
+                part.association_status = "unavailable"
         delivered = _result(state, config, receipt, part_index, recovered=recovered)
         if not recovered:
             runtime.note_write_confirmed()
