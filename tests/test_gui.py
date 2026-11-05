@@ -566,6 +566,107 @@ def test_warn_gui_record_uses_only_uuid_and_fixed_category(
     assert "synthetic exception" not in caplog.text
 
 
+def test_default_session_cleanup_removes_only_owned_regular_records(tmp_path: Path) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record_id = UUID("12345678-1234-1234-1234-123456789abc")
+    record = default_dir / f"storage-user-{record_id}.json"
+    temporary = record.with_name(record.name + ".tmp")
+    record.write_text('{"token": "residue"}', encoding="utf-8")
+    temporary.write_text('{"token": "residue"}', encoding="utf-8")
+    unrelated = default_dir / "storage-general.json"
+    unrelated.write_text("{}", encoding="utf-8")
+    malformed = default_dir / "storage-user-not-a-uuid.json"
+    malformed.write_text("{}", encoding="utf-8")
+
+    gui._cleanup_default_gui_storage(default_dir)
+
+    assert not record.exists()
+    assert not temporary.exists()
+    assert unrelated.exists()
+    assert malformed.exists()
+
+
+def test_default_session_cleanup_preserves_linked_records(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record_id = UUID("abcdefab-cdef-cdef-cdef-abcdefabcdef")
+    record = default_dir / f"storage-user-{record_id}.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"token": "outside"}', encoding="utf-8")
+    try:
+        record.symlink_to(outside)
+    except OSError:
+        pytest.skip("symbolic links unavailable on this test host")
+
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._cleanup_default_gui_storage(default_dir)
+
+    assert record.is_symlink()
+    assert outside.read_text(encoding="utf-8") == '{"token": "outside"}'
+    assert "outside" not in caplog.text
+
+
+def test_default_session_cleanup_handles_descriptor_enumeration_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record = default_dir / "storage-user-12345678-1234-1234-1234-123456789abc.json"
+    record.write_text('{"token": "descriptor-secret"}', encoding="utf-8")
+    closed: list[int] = []
+    original_close = gui.os.close
+
+    def close(descriptor: int) -> None:
+        closed.append(descriptor)
+        original_close(descriptor)
+
+    monkeypatch.setattr(
+        gui.os, "listdir", lambda _descriptor: (_ for _ in ()).throw(OSError("probe"))
+    )
+    monkeypatch.setattr(gui.os, "close", close)
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._cleanup_default_gui_storage(default_dir)
+
+    assert record.exists()
+    assert closed
+    assert "descriptor-secret" not in caplog.text
+    assert "probe" not in caplog.text
+    assert "directory" in caplog.text
+
+
+def test_default_session_cleanup_handles_fallback_enumeration_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from discord_ferry import gui
+
+    default_dir = tmp_path / "default-session"
+    default_dir.mkdir()
+    record = default_dir / "storage-user-12345678-1234-1234-1234-123456789abc.json"
+    record.write_text('{"token": "fallback-secret"}', encoding="utf-8")
+
+    def fail_iterdir(_path: Path) -> object:
+        raise OSError("probe")
+
+    monkeypatch.setattr(gui.os, "supports_dir_fd", set())
+    monkeypatch.setattr(type(default_dir), "iterdir", fail_iterdir)
+    with caplog.at_level(logging.WARNING, logger=gui.__name__):
+        gui._cleanup_default_gui_storage(default_dir)
+
+    assert record.exists()
+    assert "fallback-secret" not in caplog.text
+    assert "probe" not in caplog.text
+    assert "directory" in caplog.text
+
+
 @pytest.mark.parametrize(
     "stored",
     [
