@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary, WeakValueDictionary
 
+from discord_ferry.core.events import MigrationEvent
 from discord_ferry.core.permissions import require_permission_runtime
 from discord_ferry.errors import (
     DeliveryUnresolvedError,
@@ -17,7 +18,7 @@ from discord_ferry.errors import (
     MigrationError,
     StateError,
 )
-from discord_ferry.migrator.api import api_fetch_messages, api_send_message
+from discord_ferry.migrator.api import SlowmodeWait, api_fetch_messages, api_send_message
 from discord_ferry.state import (
     DeliveryPart,
     DeliveryReceipt,
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     import aiohttp
 
     from discord_ferry.config import FerryConfig
+    from discord_ferry.core.events import EventCallback
     from discord_ferry.state import FailedMessage, MigrationState
 
 _locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -56,6 +58,45 @@ class DeliveryResult:
     token: DeliveryToken
     fully_resolved: bool
     recovered: bool
+
+
+def slowmode_wait_handler(
+    config: FerryConfig,
+    on_event: EventCallback,
+    *,
+    phase: str,
+    channel_name: str,
+) -> SlowmodeWait:
+    """Report and wait for one typed slowmode cooldown, stopping on cancellation."""
+
+    async def wait(seconds: int) -> None:
+        on_event(
+            MigrationEvent(
+                phase=phase,
+                status="notice",
+                message=f"Slowmode in {channel_name!r}; retrying in {seconds}s.",
+                channel_name=channel_name,
+                detail={"kind": "slowmode_wait", "retry_after_seconds": seconds},
+            )
+        )
+        if config.cancel_event is None:
+            await asyncio.sleep(seconds)
+            return
+        if config.cancel_event.is_set():
+            raise asyncio.CancelledError("Migration cancelled by user")
+        delay = asyncio.create_task(asyncio.sleep(seconds))
+        cancelled = asyncio.create_task(config.cancel_event.wait())
+        try:
+            done, _ = await asyncio.wait({delay, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (delay, cancelled):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(delay, cancelled, return_exceptions=True)
+        if cancelled in done:
+            raise asyncio.CancelledError("Migration cancelled by user")
+
+    return wait
 
 
 def delivery_key(namespace: str, ref: DeliveryRef, attempt: int, part_index: int) -> str:
@@ -221,6 +262,7 @@ async def deliver_part(
     replies: list[dict[str, Any]] | None = None,
     allow_rejected_retry: bool = False,
     legacy_keys: tuple[str, ...] = (),
+    on_slowmode_wait: SlowmodeWait | None = None,
     recover_only: bool = False,
 ) -> DeliveryResult:
     """Deliver one already-selected part or return its verified saved identifier."""
@@ -414,6 +456,7 @@ async def deliver_part(
                 replies=replies,
                 idempotency_key=part.key,
                 message_recovery=recover_dispatch,
+                on_slowmode_wait=on_slowmode_wait,
             )
         except MessageSendFailure as failure:
             if failure.disposition == "confirmed_rejected":
