@@ -351,33 +351,33 @@ jobs:
             exit 1
           fi
 
-          # --- TLS trust (issue #134) ---
-          # Run the EXTRACTED bundle, not dist/, so this also proves the ditto
-          # round-trip kept certifi's cacert.pem. Windows has had this check since
-          # v2.13.0; without it here a macOS-only bundling regression ships unseen.
-          # Reads the app's own verdict rather than stat-ing a path: onedir keeps
-          # its resources inside the bundle, but the app is the only thing that
-          # knows whether load_verify_locations actually parsed them.
-          TLS_OUT=$("$APP/Contents/MacOS/Ferry" tls-check 2>&1) || {
-            echo "::error::tls-check failed to run from the extracted bundle"
-            echo "$TLS_OUT"
-            exit 1
+          # The built and extracted applications must both use native macOS trust.
+          # This checks the bundled Python wrapper without packaging Apple frameworks.
+          assert_healthy_native_tls() {
+            local LABEL="$1"
+            local OUT
+            OUT=$("$2" tls-check 2>&1) || {
+              echo "::error::tls-check failed for $LABEL"
+              echo "$OUT"
+              exit 1
+            }
+            echo "$LABEL: $OUT"
+            case "$OUT" in
+              *"trust-source: native-union"*) ;;
+              *) echo "::error::$LABEL did not initialize native trust with certifi"; exit 1 ;;
+            esac
+            case "$OUT" in
+              *"ca-visible: unavailable"*) ;;
+              *) echo "::error::$LABEL did not report capability-safe native diagnostics"; exit 1 ;;
+            esac
+            # CI runners have no controlled OS proxy state, so only the key is stable.
+            case "$OUT" in
+              *"proxy-source: "*) ;;
+              *) echo "::error::$LABEL did not report proxy state"; exit 1 ;;
+            esac
           }
-          echo "$TLS_OUT"
-          case "$TLS_OUT" in
-            *"trust-source: union"*) echo "tls-check OK: union trust store built" ;;
-            *) echo "::error::the macOS bundle did not build the union trust store"
-               exit 1 ;;
-          esac
-
-          # --- Proxy state (issue #135, Task 11) ---
-          # Pins only the KEY, not a value: CI runners have no controlled OS
-          # proxy state, so the resolved value varies and only the key's
-          # presence is assertable, unlike trust-source's fixed 'union'.
-          case "$TLS_OUT" in
-            *"proxy-source: "*) echo "tls-check OK: proxy state reported" ;;
-            *) echo "::error::tls-check did not report proxy state"; exit 1 ;;
-          esac
+          assert_healthy_native_tls "built app" "dist/Ferry.app/Contents/MacOS/Ferry"
+          assert_healthy_native_tls "extracted app" "$APP/Contents/MacOS/Ferry"
           codesign --verify --deep --strict "$APP"
           # -print -quit rather than `| grep -q .`: under pipefail a SIGPIPE'd find
           # would surface as a bogus "missing" failure.
