@@ -238,6 +238,98 @@ def _warn_gui_record(record_id: UUID, category: str) -> None:
     logger.warning("GUI storage record %s skipped: %s", record_id, category)
 
 
+def _default_session_record_id(name: str) -> UUID | None:
+    suffix = ".json.tmp" if name.endswith(".json.tmp") else ".json"
+    if not name.startswith("storage-user-") or not name.endswith(suffix):
+        return None
+    try:
+        record_id = UUID(name.removeprefix("storage-user-").removesuffix(suffix))
+    except ValueError:
+        return None
+    if name not in {f"storage-user-{record_id}.json", f"storage-user-{record_id}.json.tmp"}:
+        return None
+    return record_id
+
+
+def _record_identity(metadata: os.stat_result) -> tuple[int, int, int, int] | None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        return None
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink
+
+
+def _cleanup_default_gui_storage(default_dir: Path) -> None:
+    """Remove only stale, canonical NiceGUI records from Ferry's owned namespace."""
+    try:
+        directory_metadata = default_dir.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("GUI default-session cleanup skipped: directory")
+        return
+    if not _is_safe_gui_storage_directory(directory_metadata):
+        logger.warning("GUI default-session cleanup skipped: directory")
+        return
+    if os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(default_dir, flags)
+        except OSError:
+            logger.warning("GUI default-session cleanup skipped: directory")
+            return
+        try:
+            if not _is_safe_gui_storage_directory(os.fstat(descriptor)):
+                logger.warning("GUI default-session cleanup skipped: directory")
+                return
+            try:
+                names = os.listdir(descriptor)
+            except OSError:
+                logger.warning("GUI default-session cleanup skipped: directory")
+                return
+            for name in names:
+                record_id = _default_session_record_id(name)
+                if record_id is None:
+                    continue
+                try:
+                    first = _record_identity(
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    )
+                    if first is None:
+                        _warn_gui_record(record_id, "metadata")
+                        continue
+                    current = _record_identity(
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    )
+                    if current != first:
+                        _warn_gui_record(record_id, "changed")
+                        continue
+                    os.unlink(name, dir_fd=descriptor)
+                except OSError:
+                    _warn_gui_record(record_id, "remove")
+        finally:
+            os.close(descriptor)
+        return
+    try:
+        candidates = list(default_dir.iterdir())
+    except OSError:
+        logger.warning("GUI default-session cleanup skipped: directory")
+        return
+    for candidate in candidates:
+        record_id = _default_session_record_id(candidate.name)
+        if record_id is None:
+            continue
+        try:
+            first = _record_identity(candidate.lstat())
+            if first is None or not _is_safe_gui_storage_directory(default_dir.lstat()):
+                _warn_gui_record(record_id, "metadata")
+                continue
+            if _record_identity(candidate.lstat()) != first:
+                _warn_gui_record(record_id, "changed")
+                continue
+            candidate.unlink()
+        except OSError:
+            _warn_gui_record(record_id, "remove")
+
+
 def _iter_historical_gui_records(storage_dir: Path) -> Iterable[tuple[UUID, Path]]:
     for record_path in storage_dir.iterdir():
         name = record_path.name
@@ -2650,6 +2742,7 @@ def main() -> None:
     try:
         _ensure_gui_port_available()
         _scrub_historical_gui_records(layout.root)
+        _cleanup_default_gui_storage(layout.root / "default-session")
         _run_gui(layout.secret)
     except KeyboardInterrupt:
         # Two routine sources, not just a stray Ctrl-C: uvicorn re-raises a captured
