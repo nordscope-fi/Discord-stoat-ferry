@@ -63,8 +63,8 @@ class FerryConfig:
     # Skip SHA-256 verification of DCE binary downloads
     skip_dce_verify: bool = False
 
-    # Post-upload verification: compare returned file metadata against local size.
-    # Best-effort — not all Autumn responses include a size field.
+    # Check requested media IDs against media on a delivered message.
+    # This does not compare file bytes or retrieve files.
     verify_uploads: bool = False
 
     # S16: Detect and log orphaned Autumn uploads after migration.

@@ -2459,6 +2459,7 @@ _EXPOSED_FIELDS = (
     "dce_parallel",
     "skip_avatars",
     "validate_after",
+    "verify_uploads",
 )
 
 
@@ -2498,6 +2499,25 @@ def test_migrate_exposed_settings_land_on_config(runner: CliRunner) -> None:
     assert config.skip_export is True
     assert config.skip_avatars is True
     assert config.validate_after is True
+
+
+def test_migrate_verify_uploads_reaches_config(runner: CliRunner) -> None:
+    mock_engine = _make_mock_engine()
+    with patch("discord_ferry.cli.run_migration", mock_engine):
+        result = runner.invoke(
+            main,
+            [*_BASE_MIGRATE_ARGS, "--verify-uploads"],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+    assert mock_engine.call_args[0][0].verify_uploads is True
+
+
+def test_migrate_help_describes_message_association(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["migrate", "--help"], terminal_width=140)
+    assert result.exit_code == 0
+    assert "--verify-uploads" in result.output
+    assert "delivered-message attachment, sticker, and embed-media association" in result.output
 
 
 def test_migrate_no_flags_preserves_defaults(runner: CliRunner) -> None:

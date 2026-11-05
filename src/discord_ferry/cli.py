@@ -557,7 +557,7 @@ _common_options = [
         "--verify-uploads",
         is_flag=True,
         default=False,
-        help="Verify uploaded file size against Autumn response (best-effort)",
+        help="Check delivered-message attachment, sticker, and embed-media association",
     ),
     click.option(
         "--cleanup-orphans",
