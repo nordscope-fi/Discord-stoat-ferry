@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import secrets
@@ -24,7 +25,7 @@ from nicegui.client import ClientConnectionTimeout
 from nicegui.storage import Storage
 
 from discord_ferry import gui_tools  # noqa: F401 -- registers the /tools routes as a side effect
-from discord_ferry.config import FerryConfig
+from discord_ferry.config import DCE_PARALLEL_MAX, DCE_PARALLEL_MIN, FerryConfig
 from discord_ferry.core import entry
 from discord_ferry.core.atomicio import atomic_write_text
 from discord_ferry.core.engine import PHASE_ORDER, run_migration, run_rollback
@@ -532,7 +533,7 @@ _CLIENT_CONNECT_TIMEOUT = 30.0
 
 
 def _coerce_advanced_settings(storage: Mapping[str, Any]) -> dict[str, Any]:
-    """Read the seven exposed settings from storage, defaulting and clamping.
+    """Read the eight exposed settings from storage, defaulting and clamping.
 
     ``app.storage.user`` is disk-backed: a stale or hand-edited file can hold
     None / out-of-range / wrong-type values that the UI controls never produced,
@@ -548,6 +549,17 @@ def _coerce_advanced_settings(storage: Mapping[str, Any]) -> dict[str, Any]:
             value = default
         return max(value, floor)
 
+    def _as_dce_parallel() -> int:
+        raw = storage.get("dce_parallel", DCE_PARALLEL_MIN)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return DCE_PARALLEL_MIN
+        if isinstance(raw, float) and (not math.isfinite(raw) or not raw.is_integer()):
+            return DCE_PARALLEL_MIN
+        value = int(raw)
+        if not DCE_PARALLEL_MIN <= value <= DCE_PARALLEL_MAX:
+            return DCE_PARALLEL_MIN
+        return value
+
     mode = str(storage.get("reaction_mode") or "text")
     if mode not in _EXPOSED_REACTION_MODES:
         mode = "text"
@@ -557,6 +569,7 @@ def _coerce_advanced_settings(storage: Mapping[str, Any]) -> dict[str, Any]:
         "checkpoint_interval": _as_int("checkpoint_interval", 50, 1),
         "max_concurrent_channels": _as_int("max_concurrent_channels", 3, 1),
         "max_concurrent_requests": _as_int("max_concurrent_requests", 5, 1),
+        "dce_parallel": _as_dce_parallel(),
         "skip_avatars": bool(storage.get("skip_avatars", False)),
         "validate_after": bool(storage.get("validate_after", False)),
         "incremental": bool(storage.get("incremental", False)),
@@ -1004,6 +1017,14 @@ def setup_page() -> None:
                         step=1,
                         precision=0,
                     ).classes("w-48")
+                    dce_parallel_num = ui.number(
+                        label="Discord export workers",
+                        value=adv_stored["dce_parallel"],
+                        min=DCE_PARALLEL_MIN,
+                        max=DCE_PARALLEL_MAX,
+                        step=1,
+                        precision=0,
+                    ).classes("w-48")
 
                     ui.label("Content").classes("text-xs font-bold text-gray-500 mt-4")
                     reaction_mode_select = ui.select(
@@ -1109,6 +1130,7 @@ def setup_page() -> None:
                     storage["checkpoint_interval"] = checkpoint_num.value
                     storage["max_concurrent_channels"] = max_channels_num.value
                     storage["max_concurrent_requests"] = max_requests_num.value
+                    storage["dce_parallel"] = dce_parallel_num.value
                     storage["skip_avatars"] = skip_avatars_cb.value
                     storage["validate_after"] = validate_after_cb.value
                     storage["incremental"] = incremental_cb.value
@@ -1464,6 +1486,7 @@ async def export_page() -> None:
                     token=str(app.storage.tab.get("token", "")),
                     discord_token=discord_token,
                     discord_server_id=discord_server,
+                    dce_parallel=_coerce_advanced_settings(storage)["dce_parallel"],
                     cancel_event=cancel_event,
                 )
 
